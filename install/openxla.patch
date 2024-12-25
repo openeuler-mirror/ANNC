@@ -1,0 +1,24 @@
+diff --git a/xla/hlo/ir/BUILD b/xla/hlo/ir/BUILD
+index 2ffa2da72e..394018fd94 100644
+--- a/xla/hlo/ir/BUILD
++++ b/xla/hlo/ir/BUILD
+@@ -54,6 +54,7 @@ cc_library(
+         "hlo_sharding.h",
+         "hlo_sharding_metadata.h",
+     ],
++    visibility = ["//visibility:public"],
+     deps = [
+         ":tile_assignment",
+         "//xla:array",
+diff --git a/xla/service/BUILD b/xla/service/BUILD
+index 1a0836c9f3..f56fa541bd 100644
+--- a/xla/service/BUILD
++++ b/xla/service/BUILD
+@@ -5866,6 +5866,7 @@ cc_library(
+     name = "hlo_parser",
+     srcs = ["hlo_parser.cc"],
+     hdrs = ["hlo_parser.h"],
++    visibility = ["//visibility:public"],
+     deps = [
+         ":computation_layout",
+         ":hlo_lexer",

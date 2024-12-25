@@ -1,0 +1,9 @@
+.vscode
+.venv
+
+bazel-*
+output
+
+github
+
+proxy
