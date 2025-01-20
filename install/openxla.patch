@@ -1,5 +1,5 @@
 diff --git a/xla/hlo/ir/BUILD b/xla/hlo/ir/BUILD
-index 2ffa2da72e..394018fd94 100644
+index 2ffa2da..394018f 100644
 --- a/xla/hlo/ir/BUILD
 +++ b/xla/hlo/ir/BUILD
 @@ -54,6 +54,7 @@ cc_library(
@@ -11,10 +11,26 @@ index 2ffa2da72e..394018fd94 100644
          ":tile_assignment",
          "//xla:array",
 diff --git a/xla/service/BUILD b/xla/service/BUILD
-index 1a0836c9f3..f56fa541bd 100644
+index 1a0836c..5b774ce 100644
 --- a/xla/service/BUILD
 +++ b/xla/service/BUILD
-@@ -5866,6 +5866,7 @@ cc_library(
+@@ -784,6 +784,7 @@ xla_cc_test(
+ cc_library(
+     name = "pattern_matcher",
+     hdrs = ["pattern_matcher.h"],
++    visibility = ["//visibility:public"],
+     deps = [
+         ":hlo_parser",
+         "//xla:literal_util",
+@@ -4830,6 +4831,7 @@ cc_library(
+         "hlo_pass_fix.h",
+         "hlo_pass_interface.h",
+     ],
++    visibility = ["//visibility:public"],
+     deps = [
+         "//xla:status_macros",
+         "//xla:statusor",
+@@ -5866,6 +5868,7 @@ cc_library(
      name = "hlo_parser",
      srcs = ["hlo_parser.cc"],
      hdrs = ["hlo_parser.h"],

@@ -6,6 +6,11 @@ package(
 )
 
 cc_library(
+    name = "hlo_util",
+    hdrs = ["hlo_util.h"]
+)
+
+cc_library(
     name = "kdnn_util",
     hdrs = ["kdnn_util.h"]
 )
