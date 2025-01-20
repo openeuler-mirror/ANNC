@@ -48,7 +48,7 @@ bool KDnnRewriter::execute(HloInstruction* instr) {
 
   HloComputation* parent = instr->parent();
   HloInstruction* fusion = parent->CreateFusionInstruction(
-      fused_instrs, HloInstruction::FusionKind::kLoop);
+      fused_instrs, HloInstruction::FusionKind::kInput);
 
   if (type_ == RewriterType::DNN_CUSTOM_CALL) {
     std::vector<HloInstruction*> operands(fusion->operands().begin(),
