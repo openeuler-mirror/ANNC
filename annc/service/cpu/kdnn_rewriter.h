@@ -107,8 +107,16 @@ CREATE_KDNN_FUSION_PASS(KDnnFusionAfterRunBackend,
   pipeline.AddPass<KDnnFusionAfterRunBackend>();
 
 /* register kernel function */
-void register_gemm_kernels();
-void register_concat_kernels();
+void __matmul(void* out, const void** in);
+void __batch_matmul(void* out, const void** in);
+void __matmul_add(void* out, const void** in);
+void __matmul_add_relu(void* out, const void** in);
+
+#define REGISTER_ALL_GEMM_KERNELS()                    \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);       \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__batch_matmul); \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);   \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu);
 
 }  // namespace cpu
 }  // namespace xla

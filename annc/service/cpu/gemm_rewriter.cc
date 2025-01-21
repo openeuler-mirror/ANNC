@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cmath>
+
 #include "annc/service/kdnn_util.h"
 #include "kdnn_rewriter.h"
 
@@ -36,7 +39,7 @@ void register_matmul_add(std::vector<KDnnRewriter>& rewriters,
 
 void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
                               RewriterType rewrite_type, int benefit = 1) {
-  RewritePattern pattern("__matmul_relu_relu", HloOpcode::kDot);
+  RewritePattern pattern("__matmul_add_relu", HloOpcode::kDot);
   pattern.dtypes = {PrimitiveType::F32, PrimitiveType::F32};
   pattern.dims = {2, 2};
 
@@ -56,8 +59,8 @@ void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
   register_matmul(rewriters, RewriterType::FUSED_OPERATION);
   register_batch_matmul(rewriters, RewriterType::FUSED_OPERATION);
-  register_matmul_add(rewriters, RewriterType::FUSED_OPERATION, 2);
-  register_matmul_add_relu(rewriters, RewriterType::FUSED_OPERATION, 3);
+  register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
+  register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
 
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
 }
@@ -121,12 +124,56 @@ void __batch_matmul(void* out, const void** in) {
 #endif
 }
 
-void __matmul_add(void* out, const void** in) {}
+void __matmul_add(void* out, void** in) {
+  float* out_buf = reinterpret_cast<float*>(out);
+  float* elem_val = reinterpret_cast<float*>(in[0]);
+  float* lhs = reinterpret_cast<float*>(in[1]);
+  float* rhs = reinterpret_cast<float*>(in[2]);
+  
+  int64_t* lhs_shape = reinterpret_cast<int64_t*>(in[4]);
+  int64_t* rhs_shape = reinterpret_cast<int64_t*>(in[5]);
 
-void register_gemm_kernels() {
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__batch_matmul);
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);
+  // lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  int64_t m = lhs_shape[0];
+  int64_t k = lhs_shape[1];
+  int64_t n = rhs_shape[1];
+
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      float sum = 0.0f;
+      for (int p = 0; p < k; ++p) {
+        sum += lhs[i * k + p] * rhs[p * n + j];
+      }
+      sum += elem_val[i * n + j];
+    }
+  }
+}
+
+void __matmul_add_relu(void* out, const void** in) {
+  float* out_buf = reinterpret_cast<float*>(out);
+  const float* max_val = reinterpret_cast<const float*>(in[0]);
+  const float* elem_val = reinterpret_cast<const float*>(in[1]);
+  const float* lhs = reinterpret_cast<const float*>(in[2]);
+  const float* rhs = reinterpret_cast<const float*>(in[3]);
+  
+  const int64_t* lhs_shape = reinterpret_cast<const int64_t*>(in[6]);
+  const int64_t* rhs_shape = reinterpret_cast<const int64_t*>(in[7]);
+
+  // lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  int64_t m = lhs_shape[0];
+  int64_t k = lhs_shape[1];
+  int64_t n = rhs_shape[1];
+
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      float sum = 0.0f;
+      for (int p = 0; p < k; ++p) {
+        sum += lhs[i * k + p] * rhs[p * n + j];
+      }
+      sum += elem_val[i * n + j];
+      out_buf[i * n + j] = std::max(max_val[i * n + j], sum);
+    }
+  }
 }
 
 }  // namespace cpu
