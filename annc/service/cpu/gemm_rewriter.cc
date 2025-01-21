@@ -124,14 +124,14 @@ void __batch_matmul(void* out, const void** in) {
 #endif
 }
 
-void __matmul_add(void* out, void** in) {
-  float* out_buf = reinterpret_cast<float*>(out);
-  float* elem_val = reinterpret_cast<float*>(in[0]);
-  float* lhs = reinterpret_cast<float*>(in[1]);
-  float* rhs = reinterpret_cast<float*>(in[2]);
+void __matmul_add(void* out, const void** in) {
+  const float* out_buf = reinterpret_cast<const float*>(out);
+  const float* elem_val = reinterpret_cast<const float*>(in[0]);
+  const float* lhs = reinterpret_cast<const float*>(in[1]);
+  const float* rhs = reinterpret_cast<const float*>(in[2]);
   
-  int64_t* lhs_shape = reinterpret_cast<int64_t*>(in[4]);
-  int64_t* rhs_shape = reinterpret_cast<int64_t*>(in[5]);
+  const int64_t* lhs_shape = reinterpret_cast<const int64_t*>(in[4]);
+  const int64_t* rhs_shape = reinterpret_cast<const int64_t*>(in[5]);
 
   // lhs_contracting_dims={1}, rhs_contracting_dims={0}
   int64_t m = lhs_shape[0];
