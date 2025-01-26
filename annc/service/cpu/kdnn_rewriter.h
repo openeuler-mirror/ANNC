@@ -28,6 +28,7 @@ struct RewritePattern {
   bool valid;
   std::vector<PrimitiveType> dtypes{};
   std::vector<int64_t> dims{};
+  std::vector<int64_t> layouts{};
   std::vector<RewritePattern> next_patterns{};
 };
 
@@ -53,25 +54,32 @@ class KDnnRewriter {
   RewritePattern pattern_;
 };
 
-static bool compare_rewriter(const KDnnRewriter& a, const KDnnRewriter& b) {
-  return a.benefit() > b.benefit();
-}
+bool compare_rewriter(const KDnnRewriter& a, const KDnnRewriter& b);
 
 /* register rewriters */
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters);
+void register_reduce_rewriters(std::vector<KDnnRewriter>& rewriters);
 
 /* rewriter vistors */
-#define CREATE_KDNN_REWRITER(rewriter_name)             \
-  class rewriter_name : public DfsHloRewriteVisitor {   \
-   public:                                              \
-    Status HandleDot(HloInstruction* instr) override {  \
-      std::vector<KDnnRewriter> rewriters;              \
-      register_gemm_rewriters(rewriters);               \
-      for (auto& rewriter : rewriters) {                \
-        if (rewriter.execute(instr)) return OkStatus(); \
-      }                                                 \
-      return OkStatus();                                \
-    }                                                   \
+#define CREATE_KDNN_REWRITER(rewriter_name)                     \
+  class rewriter_name : public DfsHloRewriteVisitor {           \
+   public:                                                      \
+    Status HandleDot(HloInstruction* instr) override {          \
+      std::vector<KDnnRewriter> rewriters;                      \
+      register_gemm_rewriters(rewriters);                       \
+      for (auto& rewriter : rewriters) {                        \
+        if (rewriter.execute(instr)) return OkStatus();         \
+      }                                                         \
+      return OkStatus();                                        \
+    }                                                           \
+    Status HandleReduceWindow(HloInstruction* instr) override { \
+      std::vector<KDnnRewriter> rewriters;                      \
+      register_reduce_rewriters(rewriters);                     \
+      for (auto& rewriter : rewriters) {                        \
+        if (rewriter.execute(instr)) return OkStatus();         \
+      }                                                         \
+      return OkStatus();                                        \
+    }                                                           \
   };
 
 CREATE_KDNN_REWRITER(KDnnBeforeHloLayoutAssignRewriterVisitor);
@@ -111,12 +119,14 @@ void __matmul(void* out, const void** in);
 void __batch_matmul(void* out, const void** in);
 void __matmul_add(void* out, const void** in);
 void __matmul_add_relu(void* out, const void** in);
+void __reduce_mean(void* out, const void** in);
 
-#define REGISTER_ALL_GEMM_KERNELS()                    \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);       \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__batch_matmul); \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);   \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu);
+#define REGISTER_ALL_GEMM_KERNELS()                       \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);          \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__batch_matmul);    \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);      \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu); \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);
 
 }  // namespace cpu
 }  // namespace xla

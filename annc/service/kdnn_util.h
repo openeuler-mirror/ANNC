@@ -4,10 +4,6 @@
 #include <string>
 #include <vector>
 
-#if defined(ANNC_ENABLED_KDNN)
-#include "kblas.h"
-#endif
-
 namespace xla {
 
 inline void set_tensor_shape(std::vector<int64_t>& shape) {}

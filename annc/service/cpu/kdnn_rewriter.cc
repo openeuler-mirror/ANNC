@@ -62,6 +62,10 @@ bool KDnnRewriter::execute(HloInstruction* instr) {
   return true;
 }
 
+bool compare_rewriter(const KDnnRewriter& a, const KDnnRewriter& b) {
+  return a.benefit() > b.benefit();
+}
+
 #define RUN_KDNN_FUSION_PASS(pass_class, rewriter_visiter)               \
   StatusOr<bool> pass_class::Run(                                        \
       HloModule* module,                                                 \

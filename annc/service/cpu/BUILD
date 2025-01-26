@@ -22,24 +22,6 @@ cc_library(
     ],
 )
 
-# cc_import(
-#     name = "annc",
-#     hdrs = [
-#         "kdnn_rewriter.h",
-#         "auto_tiling.h",
-#         "mix_precsions.h",
-#         "quantize.h",
-#     ],
-#     shared_library = ":libannc.so",
-#     visibility = ["//visibility:public"],
-#     deps = [
-#         "@xla//xla/hlo/ir:hlo",
-#         "@xla//xla/service:hlo_pass",
-#         "@xla//xla/service:custom_call_target_registry",
-#         "@xla//xla/service:pattern_matcher",
-#     ],
-# )
-
 cc_binary(
     name = "libannc.so",
     srcs = glob(["*.cc", "*.h"]),
