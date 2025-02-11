@@ -1,18 +1,8 @@
 diff --git a/tensorflow/core/grappler/optimizers/remapper.cc b/tensorflow/core/grappler/optimizers/remapper.cc
-index 3c37150f..3fa204be 100644
+index 3c37150f..7b9bf4f0 100644
 --- a/tensorflow/core/grappler/optimizers/remapper.cc
 +++ b/tensorflow/core/grappler/optimizers/remapper.cc
-@@ -52,6 +52,9 @@ limitations under the License.
- #include "third_party/gpus/cudnn/cudnn.h"
- #endif  // GOOGLE_CUDA
- 
-+// Disable TensorFlow MatMul operator fusion
-+#define DISABLE_TF_MATMUL_FUSION  1
-+
- namespace tensorflow {
- namespace grappler {
- 
-@@ -3102,6 +3105,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+@@ -3102,6 +3102,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
            << " bias_add=" << bias_add.name()
            << " contraction=" << contraction.name();
  
@@ -26,7 +16,7 @@ index 3c37150f..3fa204be 100644
    NodeDef fused_op;
    fused_op.set_name(bias_add.name());
    fused_op.set_device(contraction.device());
-@@ -3200,6 +3210,13 @@ Status AddFusedContractionNode(
+@@ -3200,6 +3207,13 @@ Status AddFusedContractionNode(
    const NodeDef& bias_add = graph->node(matched.bias_add);
    const NodeDef& activation = graph->node(matched.activation);
  
@@ -40,7 +30,7 @@ index 3c37150f..3fa204be 100644
    VLOG(2) << "Fuse " << contraction.op() << " with BiasAdd and "
            << activation.op() << ":"
            << " activation=" << activation.name()
-@@ -3396,6 +3413,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+@@ -3396,6 +3410,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
    DCHECK(IsConv2D(contraction) || IsMatMul(contraction) ||
           IsConv3D(contraction));
  
@@ -54,7 +44,7 @@ index 3c37150f..3fa204be 100644
    NodeDef contraction_node;
    const NodeDef& add = graph->node(matched.add);
    contraction_node.set_name(add.name());
-@@ -3600,6 +3624,13 @@ Status AddFusedMatMulBiasAddAndGelu(
+@@ -3600,6 +3621,13 @@ Status AddFusedMatMulBiasAddAndGelu(
    auto* matmul_node =
        ctx->graph_view.GetNode(matched_nodes_map.at("matmul"))->node();
  
@@ -80,3 +70,42 @@ index 6e0ea613..28550bcd 100644
      visibility = ["//visibility:public"],
      deps = [
          ":buffer_info_util",
+diff --git a/third_party/xla/xla/service/cpu/cpu_compiler.cc b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+index e519cf05..388af2b0 100644
+--- a/third_party/xla/xla/service/cpu/cpu_compiler.cc
++++ b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+@@ -238,6 +238,10 @@ limitations under the License.
+ #include "xla/service/cpu/onednn_rewriter.h"
+ #endif
+ 
++#if defined(ANNC_ENABLED_KDNN)
++#include <annc/kdnn_rewriter.h>
++#endif
++
+ namespace {
+ 
+ // We need to explicitly load all the dialects we will involved in emitting the
+@@ -617,6 +621,10 @@ void AddHloVerifier(HloPassPipeline* pipeline, bool allow_sparse_shapes,
+ 
+ }  // namespace
+ 
++#if defined(ANNC_ENABLED_KDNN)
++REGISTER_ALL_GEMM_KERNELS()
++#endif
++
+ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+     HloModule* module, bool is_aot_compile,
+     LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
+@@ -934,6 +942,12 @@ Status CpuCompiler::RunHloPasses(HloModule* module, bool is_aot_compile,
+   TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(
+       module, is_aot_compile, &target_machine_features, is_mlir_compile));
+ 
++
++#if defined(ANNC_ENABLED_KDNN)
++  KDnnFusionAfterHloLayoutAssign kdnn_fusion;
++  kdnn_fusion.Run(module, {});
++#endif
++
+   return RunHloPassesAfterLayoutAssn(module, is_aot_compile,
+                                      &target_machine_features, is_mlir_compile);
+ }
