@@ -113,13 +113,13 @@ void __batch_matmul(void* out, const void** in) {
   int n = rhs_shape[2];
 
 #if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  CBLAS_LAYOUT clayout = CblasColMajor;
+  CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
 
-  int lda = m;
-  int ldb = k;
-  int ldc = m;
+  int lda = k;
+  int ldb = n;
+  int ldc = n;
 
   float alpha = 1.0f;
   float beta = 0.0f;
@@ -148,13 +148,13 @@ void __matmul_add(void* out, const void** in) {
   int64_t n = rhs_shape[1];
 
 #if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  CBLAS_LAYOUT clayout = CblasColMajor;
+  CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
 
-  int lda = m;
-  int ldb = k;
-  int ldc = m;
+  int lda = k;
+  int ldb = n;
+  int ldc = n;
 
   float alpha = 1.0f;
   float beta = 1.0f;
@@ -181,13 +181,13 @@ void __matmul_add_relu(void* out, const void** in) {
   int64_t n = rhs_shape[1];
 
 #if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  CBLAS_LAYOUT clayout = CblasColMajor;
+  CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
 
-  int lda = m;
-  int ldb = k;
-  int ldc = m;
+  int lda = k;
+  int ldb = n;
+  int ldc = n;
 
   float alpha = 1.0f;
   float beta = 1.0f;
