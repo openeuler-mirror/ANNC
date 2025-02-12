@@ -84,13 +84,13 @@ void __matmul(void* out, const void** in) {
   int n = rhs_shape[1];
 
 #if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  CBLAS_LAYOUT clayout = CblasColMajor;
+  CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
 
-  int lda = m;
-  int ldb = k;
-  int ldc = m;
+  int lda = k;
+  int ldb = n;
+  int ldc = n;
 
   float alpha = 1.0f;
   float beta = 0.0f;
