@@ -65,11 +65,12 @@ void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
 }
 
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
+#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   // register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
   // register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
-
+#endif
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
 }
 

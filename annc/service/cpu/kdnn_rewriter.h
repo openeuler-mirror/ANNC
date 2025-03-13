@@ -20,12 +20,15 @@ static std::string g_kdnn_fusion_after_hlo_layout_assign =
 static std::string g_kdnn_fusion_after_run_backend =
     "kdnn-fusion-aftr-run-backend";
 
+typedef bool (*CustomRewriter)(HloInstruction*);
+
 struct RewritePattern {
   RewritePattern(std::string name, HloOpcode opcode, bool valid = true)
       : name(name), opcode(opcode), valid(valid) {}
   std::string name;
   HloOpcode opcode;
   bool valid;
+  CustomRewriter custom_rewriter{nullptr};
   std::vector<PrimitiveType> dtypes{};
   std::vector<int64_t> dims{};
   std::vector<int64_t> layouts{};
@@ -59,6 +62,7 @@ bool compare_rewriter(const KDnnRewriter& a, const KDnnRewriter& b);
 /* register rewriters */
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters);
 void register_reduce_rewriters(std::vector<KDnnRewriter>& rewriters);
+void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters);
 
 /* rewriter vistors */
 #define CREATE_KDNN_REWRITER(rewriter_name)                     \
@@ -75,6 +79,14 @@ void register_reduce_rewriters(std::vector<KDnnRewriter>& rewriters);
     Status HandleReduceWindow(HloInstruction* instr) override { \
       std::vector<KDnnRewriter> rewriters;                      \
       register_reduce_rewriters(rewriters);                     \
+      for (auto& rewriter : rewriters) {                        \
+        if (rewriter.execute(instr)) return OkStatus();         \
+      }                                                         \
+      return OkStatus();                                        \
+    }                                                           \
+    Status HandleMultiply(HloInstruction* instr) override {     \
+      std::vector<KDnnRewriter> rewriters;                      \
+      register_graph_opt_rewriters(rewriters);                  \
       for (auto& rewriter : rewriters) {                        \
         if (rewriter.execute(instr)) return OkStatus();         \
       }                                                         \

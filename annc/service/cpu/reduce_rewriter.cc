@@ -4,7 +4,7 @@
 #include "annc/service/kdnn_util.h"
 #include "kdnn_rewriter.h"
 
-#if defined(ANNC_ENABLED_KDNN)
+#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
 #include <openblas/cblas.h>
 #endif
 
@@ -25,8 +25,9 @@ void register_reduce_mean(std::vector<KDnnRewriter>& rewriters,
 }
 
 void register_reduce_rewriters(std::vector<KDnnRewriter>& rewriters) {
+#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   register_reduce_mean(rewriters, RewriterType::DNN_CUSTOM_CALL);
-
+#endif
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
 }
 
@@ -39,7 +40,7 @@ void __reduce_mean(void* out, const void** in) {
   int m = shape[0];
   int n = shape[1];
 
-#if defined(ANNC_ENABLED_KDNN)
+#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   for (int i = 0; i < n; ++i) {
     out_buf[i] = cblas_sasum(m, value, 1) / m;
     value += m;

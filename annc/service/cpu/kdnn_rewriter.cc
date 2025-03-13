@@ -42,6 +42,9 @@ void add_extra_operands(HloInstruction* fusion,
 
 bool KDnnRewriter::execute(HloInstruction* instr) {
   if (instr->HasControlDependencies()) return false;
+  if (pattern_.custom_rewriter != nullptr) {
+    return pattern_.custom_rewriter(instr);
+  }
 
   std::vector<HloInstruction*> fused_instrs;
   if (!match_op_pattern(instr, pattern_, fused_instrs)) return false;
