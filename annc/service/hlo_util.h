@@ -4,8 +4,11 @@
 #include <vector>
 
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/literal_util.h"
 
 namespace xla {
+
+#define IS_VALID(condition) if (!(condition)) return false;
 
 static Literal get_param_info(const HloInstruction* arg_param) {
   const Shape& shape = arg_param->shape();

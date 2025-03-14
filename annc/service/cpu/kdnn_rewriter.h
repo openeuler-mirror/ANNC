@@ -70,6 +70,7 @@ void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters);
    public:                                                      \
     Status HandleDot(HloInstruction* instr) override {          \
       std::vector<KDnnRewriter> rewriters;                      \
+      register_graph_opt_rewriters(rewriters);                  \
       register_gemm_rewriters(rewriters);                       \
       for (auto& rewriter : rewriters) {                        \
         if (rewriter.execute(instr)) return OkStatus();         \
