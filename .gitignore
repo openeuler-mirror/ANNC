@@ -7,3 +7,5 @@ output
 github
 
 proxy
+
+__pycache__
