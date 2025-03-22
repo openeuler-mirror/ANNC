@@ -10,12 +10,12 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
   if (!pattern.valid) return true;
   if (instr->opcode() != pattern.opcode) return false;
 
-  bool should_rewrite = true;
   if (instr->operand_count() < pattern.dims.size()) return false;
+  bool should_rewrite = true;
   for (size_t i = 0; i < pattern.dims.size(); i++) {
     const Shape& shape = instr->operand(i)->shape();
     should_rewrite &= LayoutUtil::IsMonotonicWithDim0Major(shape.layout());
-    should_rewrite &= (shape.rank() <= pattern.dims[i]);
+    should_rewrite &= (shape.rank() == pattern.dims[i]);
     should_rewrite &= (shape.element_type() == pattern.dtypes[i]);
     if (!should_rewrite) return false;
   }
@@ -25,19 +25,7 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
       return false;
   }
   fused_instrs.push_back(instr);
-  return should_rewrite;
-}
-
-void add_extra_operands(HloInstruction* fusion,
-                        std::vector<HloInstruction*>& operands) {
-  // insert constant operations here is not safe
-  // create dummy root instruction outside for safety
-  HloInstruction* root_instr = fusion->parent()->root_instruction();
-  for (const HloInstruction* arg_param : fusion->fused_parameters()) {
-    HloInstruction* constant = root_instr->AddInstruction(
-        HloInstruction::CreateConstant(get_param_info(arg_param)));
-    operands.push_back(constant);
-  }
+  return true;
 }
 
 bool KDnnRewriter::execute(HloInstruction* instr) {
