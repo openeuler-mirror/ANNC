@@ -5,6 +5,10 @@ load("//tools:version_check.bzl", "check_bazel_version_at_least")
 
 check_bazel_version_at_least("6.1.0")
 
+load("//third_party:repo.bzl", "load_openblas")
+
+load_openblas()
+
 http_archive(
     name = "xla",
     patch_args = ["-p1"],
