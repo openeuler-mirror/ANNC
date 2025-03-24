@@ -34,5 +34,6 @@ cc_binary(
         "@xla//xla/service:hlo_pass",
         "@xla//xla/service:custom_call_target_registry",
         "@xla//xla/service:pattern_matcher",
+        "@openblas//:openblas",
     ],
 )
