@@ -19,6 +19,15 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
     should_rewrite &= (shape.element_type() == pattern.dtypes[i]);
     if (!should_rewrite) return false;
   }
+  if (pattern.dim_range.size() == 2) {
+    std::vector<int64_t>& min_dims = pattern.dim_range[0];
+    std::vector<int64_t>& max_dims = pattern.dim_range[1];
+    for (size_t i = 0; i < instr->shape().rank(); i++) {
+      if (instr->shape().dimensions(i) < min_dims[i] ||
+          instr->shape().dimensions(i) > max_dims[i])
+        return false;
+    }
+  }
   auto& users = instr->users();
   for (size_t i = 0; i < pattern.next_patterns.size(); i++) {
     if (!match_op_pattern(users[i], pattern.next_patterns[i], fused_instrs))

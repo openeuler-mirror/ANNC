@@ -31,6 +31,7 @@ struct RewritePattern {
   CustomRewriter custom_rewriter{nullptr};
   std::vector<PrimitiveType> dtypes{};
   std::vector<int64_t> dims{};
+  std::vector<std::vector<int64_t>> dim_range{};
   std::vector<int64_t> layouts{};
   std::vector<RewritePattern> next_patterns{};
 };
@@ -93,6 +94,14 @@ void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters);
       }                                                         \
       return OkStatus();                                        \
     }                                                           \
+    Status HandleSelect(HloInstruction* instr) override {       \
+      std::vector<KDnnRewriter> rewriters;                      \
+      register_graph_opt_rewriters(rewriters);                  \
+      for (auto& rewriter : rewriters) {                        \
+        if (rewriter.execute(instr)) return OkStatus();         \
+      }                                                         \
+      return OkStatus();                                        \
+    }                                                           \
   };
 
 CREATE_KDNN_REWRITER(KDnnBeforeHloLayoutAssignRewriterVisitor);
@@ -133,13 +142,15 @@ void __batch_matmul(void* out, const void** in);
 void __matmul_add(void* out, const void** in);
 void __matmul_add_relu(void* out, const void** in);
 void __reduce_mean(void* out, const void** in);
+void __pooling(void* out, void** in);
 
 #define REGISTER_ALL_GEMM_KERNELS()                       \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);          \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__batch_matmul);    \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);      \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu); \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);     \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);
 
 }  // namespace cpu
 }  // namespace xla

@@ -20,6 +20,7 @@ void register_matmul(std::vector<KDnnRewriter>& rewriters,
   RewritePattern pattern("__matmul", HloOpcode::kDot);
   pattern.dtypes = {PrimitiveType::F32, PrimitiveType::F32};
   pattern.dims = {2, 2};
+  pattern.dim_range = {{8, 8}, {INT64_MAX, INT64_MAX}};
   auto rewriter = KDnnRewriter(benefit, pattern, rewrite_type);
   rewriters.push_back(rewriter);
 }
@@ -29,6 +30,7 @@ void register_batch_matmul(std::vector<KDnnRewriter>& rewriters,
   RewritePattern pattern("__batch_matmul", HloOpcode::kDot);
   pattern.dtypes = {PrimitiveType::F32, PrimitiveType::F32};
   pattern.dims = {3, 3};
+  pattern.dim_range = {{1, 8, 8}, {INT64_MAX, INT64_MAX, INT64_MAX}};
   auto rewriter = KDnnRewriter(benefit, pattern, rewrite_type);
   rewriters.push_back(rewriter);
 }
