@@ -20,7 +20,7 @@ void register_matmul(std::vector<KDnnRewriter>& rewriters,
   RewritePattern pattern("__matmul", HloOpcode::kDot);
   pattern.dtypes = {PrimitiveType::F32, PrimitiveType::F32};
   pattern.dims = {2, 2};
-  pattern.dim_range = {{8, 8}, {INT64_MAX, INT64_MAX}};
+  pattern.dim_range = {{12, 12}, {INT64_MAX, INT64_MAX}};
   auto rewriter = KDnnRewriter(benefit, pattern, rewrite_type);
   rewriters.push_back(rewriter);
 }
@@ -69,7 +69,7 @@ void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
 #if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
-  register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
+  // register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   // register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
   // register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
 #endif
