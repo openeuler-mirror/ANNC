@@ -1,0 +1,27 @@
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+index fc2c13fb1c..2636faaa41 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+@@ -42,6 +42,7 @@ limitations under the License.
+ #include "mlir/Dialect/SparseTensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/SparseTensor/Transforms/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
++#include "mlir/Dialect/Tensor/Transforms/Passes.h" // from @llvm-project
+ #include "mlir/Dialect/Vector/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Pass/PassManager.h"  // from @llvm-project
+ #include "mlir/Transforms/Passes.h"  // from @llvm-project
+@@ -198,9 +199,10 @@ static Status CreateHloXlaPipeline(
+   pm.addPass(mlir::mhlo::createConvertToSignlessPass());
+ 
+   // Tile tHLO ops to 1.
+-  if (!options.enable_tiling_and_fusion) {
+-    pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
+-  }
++  //if (!options.enable_tiling_and_fusion) {
++  //  pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
++  //}
++  pm.addNestedPass<mlir::func::FuncOp>(mlir::thlo::createLegalizeConcatPass());
+ 
+   // Lower shape dialect to standard to enable linalg canonicalizations (e.g.
+   // use linalg inputs instead of outputs for memref.dim operations).
+
