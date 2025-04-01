@@ -37,6 +37,9 @@ cc_binary(
         "@xla//xla/service:hlo_pass",
         "@xla//xla/service:custom_call_target_registry",
         "@xla//xla/service:pattern_matcher",
+        "@xla//xla/mlir_hlo:mlir_hlo",
+        "@xla//xla/mlir_hlo:thlo_passes",
+        "@xla//xla/mlir_hlo:transforms_passes",
         "@openblas//:openblas",
     ],
 )
