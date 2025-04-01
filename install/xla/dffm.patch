@@ -1,0 +1,1258 @@
+diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
+index 9f595d74d8..d070de671d 100644
+--- a/xla/debug_options_flags.cc
++++ b/xla/debug_options_flags.cc
+@@ -162,6 +162,9 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+ 
+   opts.set_xla_cpu_enable_mlir_tiling_and_fusion(true);
+   opts.set_xla_cpu_enable_concat_optimization(false);
++  opts.set_xla_cpu_enable_concat_removal(false);
++  opts.set_xla_cpu_enable_concat_canonicalization(false);
++  opts.set_xla_cpu_use_matmul_library(false);
+   opts.set_xla_cpu_enable_custom_matmul_tiling(false);
+   opts.set_xla_cpu_matmul_tiling_m_dim(8);
+   opts.set_xla_cpu_matmul_tiling_n_dim(8);
+@@ -1073,6 +1076,28 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+       bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_optimization),
+       debug_options->xla_cpu_enable_concat_optimization(),
+       "Enable concat optimization."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_concat_removal",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_removal),
++      debug_options->xla_cpu_enable_concat_removal(),
++      "Enable concat removal."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_concat_canonicalization",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_canonicalization),
++      debug_options->xla_cpu_enable_concat_canonicalization(),
++      "Enable concat canonicalization."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_use_matmul_library",
++      bool_setter_for(&DebugOptions::set_xla_cpu_use_matmul_library),
++      debug_options->xla_cpu_use_matmul_library(),
++      "Replace mhlo.dot and mhlo.dot_general with library calls to "
++      "an external library."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_output_tensor_reuse",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_output_tensor_reuse),
++      debug_options->xla_cpu_enable_output_tensor_reuse(),
++      "Replace the output tensor of gml.st_fusion ops with the "
++      "input tensor when shape matches and it is legal to do so."));
+   flag_list->push_back(tsl::Flag(
+       "xla_cpu_enable_mlir_fusion_outlining",
+       bool_setter_for(&DebugOptions::set_xla_cpu_enable_mlir_fusion_outlining),
+diff --git a/xla/mlir_hlo/BUILD b/xla/mlir_hlo/BUILD
+index adcccbb0f5..ad44a3a668 100644
+--- a/xla/mlir_hlo/BUILD
++++ b/xla/mlir_hlo/BUILD
+@@ -1294,6 +1294,7 @@ cc_library(
+         "transforms/tile_loops_pass.cc",
+         "transforms/tile_linalg_copy_pass.cc",
+         "transforms/linalg_copy_to_memref_pass.cc",
++        "transforms/dot_to_func_call_pass.cc",
+         "transforms/unbufferize_pass.cc",
+         "transforms/unroll_loops.cc",
+     ],
+@@ -1557,6 +1558,7 @@ cc_library(
+         "gml_st/transforms/compose_extract_insert_slice/compose_extract_insert_slice.cc",
+         "gml_st/transforms/copy_removal/copy_removal.cc",
+         "gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc",
++        "gml_st/transforms/cpu_tiling/reuse_output_tensor.cc",
+         "gml_st/transforms/cpu_tiling/fusion_outlining.cc",
+         "gml_st/transforms/cpu_tiling/fusion_planning_for_cpu.cc",
+         "gml_st/transforms/cpu_tiling/pack_matmul.cc",
+diff --git a/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc b/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
+index 3c9d735e6b..7543ccb788 100644
+--- a/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
++++ b/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
+@@ -513,6 +513,12 @@ void promoteBuffers(Block& block) {
+ 
+ struct BufferReusePass : public impl::BufferReusePassBase<BufferReusePass> {
+   void runOnOperation() override {
++    func::FuncOp func = dyn_cast<func::FuncOp>(getOperation());
++    assert(func);
++    // Do not run the pass on bodiless functions
++    if (func.isDeclaration())
++      return;
++
+     bool result;
+     auto& block = getOperation().getBody().front();
+     // Copy elimination requires small live-ranges to work well. We only extend
+diff --git a/xla/mlir_hlo/deallocation/transforms/deallocate.cc b/xla/mlir_hlo/deallocation/transforms/deallocate.cc
+index 90a1ed051f..10079818d1 100644
+--- a/xla/mlir_hlo/deallocation/transforms/deallocate.cc
++++ b/xla/mlir_hlo/deallocation/transforms/deallocate.cc
+@@ -127,6 +127,9 @@ Value Deallocator::findOwnershipIndicator(Value v) {
+ LogicalResult Deallocator::transformModuleOp(ModuleOp op) {
+   LogicalResult result = success();
+   op.walk([&](func::FuncOp funcOp) {
++    if (funcOp.isDeclaration())
++      return WalkResult::advance();
++
+     if (failed(transformFuncOp(funcOp))) {
+       result = failure();
+       return WalkResult::interrupt();
+@@ -212,6 +215,15 @@ FailureOr<TransformResult> Deallocator::transformBlock(Block& block,
+ 
+   TransformResult blockResult;
+   for (auto& op : llvm::make_early_inc_range(block.without_terminator())) {
++    if (auto callOp = llvm::dyn_cast<func::CallOp>(op)) {
++      auto callee = llvm::cast<func::FuncOp>(
++        callOp->getParentOfType<ModuleOp>().lookupSymbol(callOp.getCallee()));
++      // If the op is a call op to a bodiless function, skip it, since we will
++      // not be able to transform the function body (since it is not present).
++      if (callee.isDeclaration())
++        continue;
++    }
++
+     auto opResult = transformOp(&op, ownedMemrefs);
+     if (failed(opResult)) return failure();
+     // Remove released memrefs.
+diff --git a/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc b/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
+index 0d0bf7a6a7..ed73303b9b 100644
+--- a/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
++++ b/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
+@@ -55,7 +55,12 @@ void splitAllocTensors(Block& block) {
+ struct SplitAllocTensorsPass
+     : public impl::SplitAllocTensorsPassBase<SplitAllocTensorsPass> {
+   void runOnOperation() override {
+-    splitAllocTensors(getOperation().getBody().front());
++    func::FuncOp func = dyn_cast<func::FuncOp>(getOperation());
++    assert(func);
++
++    // Do not run the pass on bodiless functions
++    if (!func.isDeclaration())
++      splitAllocTensors(getOperation().getBody().front());
+   }
+ };
+ 
+diff --git a/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc b/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
+index 398d78c9cd..4c424aad79 100644
+--- a/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
++++ b/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
+@@ -29,6 +29,10 @@ namespace mlir {
+ namespace gml_st {
+ namespace {
+ 
++// TODO: Use the hasLabel and kElementwiseLabel from the original place rather than copy/pasting it.
++bool hasLabel(Operation *op, StringRef name) { return op->hasAttr(name); }
++constexpr llvm::StringRef kElementwiseLabel = "__elementwise_label__";
++
+ using mlir::bufferization::AliasingOpOperandList;
+ using mlir::bufferization::AliasingValueList;
+ using mlir::bufferization::AnalysisState;
+@@ -77,6 +81,16 @@ struct FusionOpBufferizationInterface
+     return true;
+   }
+ 
++  bool isNotConflicting(Operation *op, OpOperand *uRead,
++                        OpOperand *uConflictingWrite,
++                        const AnalysisState &state) const {
++    // There are no conflicts in element-wise operations.
++    // This idea is already implemented upstream, see:
++    // https://github.com/llvm/llvm-project/commit/5468340
++    FusionOp fusionOp = cast<FusionOp>(op);
++    return hasLabel(fusionOp, kElementwiseLabel);
++  }
++
+   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                           const BufferizationOptions &options) const {
+     // Take a guard before anything else.
+diff --git a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+index 5e2649621f..09f1c0e8a7 100644
+--- a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
++++ b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+@@ -43,6 +43,7 @@ GmlStCPUTilingOptions getDefaultCPUPipelineOptions(StringRef cpuName,
+   opts.statsDetailLevel = statsDetailLevel;
+   opts.fuseDegenerateReshapes = false;
+   opts.inlineFusionClusters = true;
++  opts.outputTensorReuse = false;
+   return opts;
+ }
+ 
+@@ -97,6 +98,9 @@ void addCPUTilingPipeline(OpPassManager& pm,
+   pm.addNestedPass<FuncOp>(createScalarizationPass());
+   pm.addNestedPass<FuncOp>(createComposeExtractInsertSlicePass());
+ 
++  if (options.outputTensorReuse)
++    pm.addPass(createReuseOutputTensorPass());
++
+   pm.addPass(createCanonicalizerPass());
+ 
+   // Remove transformed labels after tiling all ops.
+diff --git a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/reuse_output_tensor.cc b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/reuse_output_tensor.cc
+new file mode 100644
+index 0000000000..2a9340ea61
+--- /dev/null
++++ b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/reuse_output_tensor.cc
+@@ -0,0 +1,201 @@
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "gml_st/IR/gml_st_ops.h"
++#include "gml_st/transforms/passes.h"
++#include "gml_st/transforms/transforms.h"
++#include "llvm/ADT/STLExtras.h"
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/Support/FormatVariadic.h"
++#include "mlir/Dialect/Func/IR/FuncOps.h"
++#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
++#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
++#include "mlir/Transforms/RegionUtils.h"
++
++using namespace mlir;
++using namespace mlir::bufferization;
++
++namespace mlir {
++namespace gml_st {
++namespace {
++
++constexpr llvm::StringRef kElementwiseLabel = "__elementwise_label__";  
++
++#define GEN_PASS_DEF_REUSEOUTPUTTENSORPASS
++#include "gml_st/transforms/passes.h.inc"
++
++struct ReuseOutputTensorPass
++    : public impl::ReuseOutputTensorPassBase<ReuseOutputTensorPass> {
++
++  bool hasLabel(Operation *op, StringRef name) { return op->hasAttr(name); }
++
++  // Check if the input of the fusion op is only read before the fusion op
++  // is executed. If it is read after the fusion op is executed, or if it is
++  // written to before the fusion op is executed, then it is not safe to use
++  // as output of the fusion.
++  bool isSafeToReuse1(gml_st::FusionOp op, Value fusionInput) {
++    auto dstStyleOp = dyn_cast<DestinationStyleOpInterface>(op.getOperation());
++    bool safeToReuse = true;
++
++    for (auto &inputUse : fusionInput.getUses()) {
++      Operation* inputUser = inputUse.getOwner();
++
++      if (op == inputUser) {
++        // This is the fusion op itself, skip this comparaison.
++        safeToReuse = true;
++      }
++      else if (inputUser->isBeforeInBlock(op)) {
++        // User is before the fusion op, check if this is a read or a write op.
++        if (auto effect = dyn_cast<MemoryEffectOpInterface>(inputUser)) {
++          safeToReuse = !effect.getEffectOnValue<MemoryEffects::Write>(inputUse.get()).has_value();
++        }
++        else if (auto fusionOpUser = dyn_cast<FusionOp>(inputUser)) {
++          // FusionOp do not implement this interface, manually check if the use is an input or an output.
++          for (auto userOut : dstStyleOp.getDpsInits())
++            if (userOut == inputUse.get()) safeToReuse = false;
++        }
++        else {
++          // We dont know if the user will write or not, so we assume it does (conservative choice).
++          safeToReuse = false;
++        }
++      }
++      else {
++        // User is after the fusion op so its not safe to reuse
++        safeToReuse = false;
++      }
++
++      if (!safeToReuse) break;
++    }
++
++    return safeToReuse;
++  }
++
++  // If there are fusion ops that read from a SSA value that is being
++  // considered as a reuse candidate (like in this example, where the
++  // candidate is %o1):
++  //
++  // %0 = tensor.empty()
++  // %o1 = gml.st_fusion(in=%1, inits=%2)
++  // %o2 = gml.st_fusion(in=%o1, inits=%0)
++  // %o3 = gml.st_fusion(in=%o1, inits=%0)
++  //
++  // The bufferization creates a new buffer for the output of %o2 and
++  // %o3, because they should be stored in 2 separate buffers. However,
++  // if we reuse the input buffer, like this:
++  //
++  // %o2 = gml.st_fusion(in=%o1, inits=%o1)
++  // %o3 = gml.st_fusion(in=%o1, inits=%o1)
++  //
++  // then the bufferization does not reuse the buffer (not sure why),
++  // so we must avoid reusing in that kind of situations.
++  bool isSafeToReuse2(gml_st::FusionOp op, Value fusionInput) {
++    auto dstStyleOp = dyn_cast<DestinationStyleOpInterface>(op.getOperation());
++    bool safeToReuse = true;
++
++    for (auto &inputUse : fusionInput.getUses()) {
++      Operation* inputUser = inputUse.getOwner();
++
++      if (op != inputUser && !inputUser->isBeforeInBlock(op)) {
++        if (auto fusionOpUser = dyn_cast<FusionOp>(inputUser)) {
++          for (auto userOut : dstStyleOp.getDpsInputOperands())
++            if (userOut->get() == fusionInput) safeToReuse = false;
++        }
++      }
++
++      if (!safeToReuse) break;
++    }
++    return safeToReuse;
++  }
++
++  // Returns the index of the input tensor of the fusion op that is safe to reuse as
++  // output tensor. The criteria to determine if its safe to do so is:
++  // 1. The fusion op has only 1 output
++  // 2. There is exactly one input tensor in the fusion op with the same shape as
++  //    the output.
++  // 3. The input tensor candidate for replacement is not a function argument with the
++  //    bufferization.writable = false
++  // 4. The input tensor candidate for replacement is not used after the fusion op, and
++  //    in the case that is used before the fusion op, it is only read.
++  int getTensorIndexToReuse(gml_st::FusionOp op) {
++    auto dstStyleOp = dyn_cast<DestinationStyleOpInterface>(op.getOperation());
++    if (!dstStyleOp) return -1;
++
++    auto outputs = dstStyleOp.getDpsInitsMutable();
++    if (outputs.size() != 1) return -1;
++
++    Type outputTy = outputs[0].get().getType();
++    int index = -1;
++    int i = 0;
++    for (auto use : dstStyleOp.getDpsInputOperands()) {
++      Type inputTy = use->get().getType();
++      Value fusionInput = use->get();
++
++      if (outputTy == inputTy) {
++        bool bufferizationWritable = true;
++        // Check if the input of the fusion op is a function argument with the
++        // bufferization.writable = false attr, in which case we cannot reuse as
++        // output buffer.
++        mlir::func::FuncOp funcOp = op->getParentOfType<mlir::func::FuncOp>();
++        BlockArgument bbArg = dyn_cast<BlockArgument>(use->get());
++        if (bbArg) {
++          if (BoolAttr writable = funcOp.getArgAttrOfType<BoolAttr>(
++            bbArg.getArgNumber(), BufferizationDialect::kWritableAttrName)) {
++              bufferizationWritable = writable.getValue();
++          }
++        }
++
++        // We can use 2 different heuristics here to determine when it is safe
++        // to reuse.
++        bool safeToReuse = isSafeToReuse2(op, fusionInput);
++
++        if (bufferizationWritable && safeToReuse)
++          return i;
++      }
++
++      i++;
++    }
++
++    return index;
++  }
++
++  void runOnOperation() override {
++    MLIRContext *context = &getContext();
++    IRRewriter rewriter(context);
++    Builder builder(context);    
++
++    getOperation()->walk([&](gml_st::FusionOp fusionOp) {      
++      if (hasLabel(fusionOp, kElementwiseLabel)) {
++        Location loc = fusionOp->getLoc();
++        int reuse_idx = getTensorIndexToReuse(fusionOp);
++
++        if (reuse_idx != -1) {
++          rewriter.setInsertionPoint(fusionOp.getOperation());
++
++          // Generate new fusion op and steal body.
++          SmallVector<Value> operands;
++          for (unsigned int i = 0; i < fusionOp->getNumOperands() - 1; i++)
++            operands.push_back(fusionOp->getOperand(i));
++          operands.push_back(fusionOp->getOperand(reuse_idx));
++
++          TypeRange funcResultTypes = fusionOp.getResultTypes();
++          auto newFusionOp = rewriter.create<gml_st::FusionOp>(
++            loc, funcResultTypes, operands, fusionOp->getAttrs());
++          newFusionOp.getRegion().takeBody(fusionOp.getRegion());
++
++          fusionOp.getOperation()->getResult(0).replaceAllUsesWith(newFusionOp->getResult(0));
++          fusionOp.getOperation()->erase();
++        }
++      }
++    });          
++  }
++};
++
++}  // namespace
++
++std::unique_ptr<OperationPass<ModuleOp>> createReuseOutputTensorPass() {
++  return std::make_unique<gml_st::ReuseOutputTensorPass>();
++}
++
++}  // namespace gml_st
++}  // namespace mlir
+diff --git a/xla/mlir_hlo/gml_st/transforms/passes.h b/xla/mlir_hlo/gml_st/transforms/passes.h
+index 12b02debc7..ef3c2aa671 100644
+--- a/xla/mlir_hlo/gml_st/transforms/passes.h
++++ b/xla/mlir_hlo/gml_st/transforms/passes.h
+@@ -111,6 +111,9 @@ createFusionPlanningForCpuPass(int64_t vectorSize = 8);
+ /// Pass to outline fusion regions into functions.
+ std::unique_ptr<OperationPass<mlir::ModuleOp>> createFusionOutliningPass();
+ 
++/// Pass to reuse output tensors in gml.st_fusion ops.
++std::unique_ptr<OperationPass<mlir::ModuleOp>> createReuseOutputTensorPass();
++
+ /// Pass to inline fusion clusters.
+ std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>
+ createInlineFusionClustersPass();
+@@ -156,6 +159,7 @@ struct GmlStCPUTilingOptions
+     this->statsDetailLevel = opts.statsDetailLevel;
+     this->cpuName = opts.cpuName;
+     this->inlineFusionClusters = opts.inlineFusionClusters;
++    this->outputTensorReuse = opts.outputTensorReuse;
+   }
+ 
+   Option<int64_t> vectorSize{*this, "vector-size",
+@@ -228,6 +232,11 @@ struct GmlStCPUTilingOptions
+       *this, "inline-fusion-clusters",
+       llvm::cl::desc("Inline fusion clusters at the end of the pipeline."),
+       llvm::cl::init(true)};
++
++  Option<bool> outputTensorReuse{
++      *this, "output-tensor-reuse",
++      llvm::cl::desc("Reuse output tensors in gml.st_fusion ops."),
++      llvm::cl::init(false)};
+ };
+ 
+ // Returns default "optimized" tiling parameters.
+diff --git a/xla/mlir_hlo/gml_st/transforms/passes.td b/xla/mlir_hlo/gml_st/transforms/passes.td
+index ce462a3adc..b84492bdca 100644
+--- a/xla/mlir_hlo/gml_st/transforms/passes.td
++++ b/xla/mlir_hlo/gml_st/transforms/passes.td
+@@ -242,6 +242,12 @@ def FusionOutliningPass : Pass<"gml-fusion-outlining", "mlir::ModuleOp"> {
+   let constructor = "createFusionOutliningPass()";
+ }
+ 
++def ReuseOutputTensorPass : Pass<"gml-st-reuse-output-tensor", "mlir::ModuleOp"> {
++  let summary = "Replace the output tensor of gml.st_fusion ops with the"
++                " input tensor when shape matches and it is legal to do so.";
++  let constructor = "createReuseOutputTensorPass()";
++}
++
+ def InlineFusionClustersPass :
+     Pass<"gml-st-inline-fusion-clusters", "mlir::func::FuncOp"> {
+   let summary = "Replaces all gml_st.fusion op with ops from the region.";
+diff --git a/xla/mlir_hlo/transforms/dot_to_func_call_pass.cc b/xla/mlir_hlo/transforms/dot_to_func_call_pass.cc
+new file mode 100644
+index 0000000000..aedcb49f40
+--- /dev/null
++++ b/xla/mlir_hlo/transforms/dot_to_func_call_pass.cc
+@@ -0,0 +1,650 @@
++#include <cstdint>
++
++#include "mlir/Dialect/Tensor/IR/Tensor.h" 
++#include "mlir/Dialect/Func/IR/FuncOps.h"
++#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
++#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
++#include "mlir/Dialect/MemRef/IR/MemRef.h"
++#include "mhlo/IR/hlo_ops.h"
++#include "transforms/passes.h"
++
++namespace mlir {
++
++#define GEN_PASS_DEF_DOTTOFUNCTIONCALLPASS
++#include "transforms/passes.h.inc"
++
++namespace {
++
++class DotToFunctionCallPass
++    : public impl::DotToFunctionCallPassBase<DotToFunctionCallPass> {
++
++public:
++  using DotToFunctionCallPassBase<DotToFunctionCallPass>::DotToFunctionCallPassBase;
++  DotToFunctionCallPass() { 
++    sgemv_nn_callee_initialized = false;
++    matmul_idx = 0; 
++  }
++ 
++private:
++  int matmul_idx;
++  func::FuncOp sgemv_nn_callee;
++  bool sgemv_nn_callee_initialized;
++  void runOnOperation() override;
++
++  enum MatmulType {
++    // GEMM
++    SGEMM_MLIRLIB_DEFAULT,          // 0
++    SGEMM_MLIRLIB_LIBSHALOM_PACK,   // 1
++    SGEMM_BLASKERNEL,               // 2
++
++    // BatchMatmul
++    BATCH_SGEMM_NN,                 // 3
++    BATCH_SGEMM_NT,                 // 4
++    BATCH_SGEMM_NT_FUSED_MUL_C,     // 5
++    BATCH_SGEMM_NT_FUSED_MUL_C_CST, // 6
++    // Currently not supported, so commenting this for now:
++    // BATCH_SGEMM_TN,
++    // BATCH_SGEMM_TT,
++
++    BATCH_SGEMM_NN_BLASKERNEL,      // 7
++    BATCH_SGEMM_NT_BLASKERNEL,      // 8
++
++    BATCH_SGEMM_INVALID,            // 9
++    SGEMM_INVALID                   // 10
++  };
++
++  struct MatmulMeta {
++    std::string funcName;
++    bool initialized;
++    func::FuncOp callee;
++  };
++
++  std::map<int, MatmulMeta> BatchMatmulToMeta =
++  {
++    {BATCH_SGEMM_NN,                 MatmulMeta { "batch_matmul_nn",                 false, nullptr } },
++    {BATCH_SGEMM_NT,                 MatmulMeta { "batch_matmul_nt",                 false, nullptr } },
++    {BATCH_SGEMM_NT_FUSED_MUL_C,     MatmulMeta { "batch_matmul_nt_fused_mul_c",     false, nullptr } },
++    {BATCH_SGEMM_NT_FUSED_MUL_C_CST, MatmulMeta { "batch_matmul_nt_fused_mul_c_cst", false, nullptr } },
++    // Currently not supported, so commenting this for now:
++    // {BATCH_SGEMM_TN, MatmulMeta { "batch_matmul_tn", false, nullptr } },
++    // {BATCH_SGEMM_TT, MatmulMeta { "batch_matmul_tt", false, nullptr } },
++
++    {BATCH_SGEMM_NN_BLASKERNEL,      MatmulMeta { "batch_matmul_nn_blaskernel",      false, nullptr } },
++    {BATCH_SGEMM_NT_BLASKERNEL,      MatmulMeta { "batch_matmul_nt_blaskernel",      false, nullptr } },
++  };
++
++  std::map<int, MatmulMeta> MatmulToMeta =
++  {
++    {SGEMM_MLIRLIB_DEFAULT,        MatmulMeta { "sgemm_mlirlib",                false, nullptr } },
++    {SGEMM_MLIRLIB_LIBSHALOM_PACK, MatmulMeta { "sgemm_mlirlib_libshalom_pack", false, nullptr } },
++    {SGEMM_BLASKERNEL,             MatmulMeta { "sgemm_blaskernel",             false, nullptr } },
++  };
++
++  std::map<std::tuple<int, int , int> , int> MatmulSizesToMatmulType =
++  {
++    // DFFM
++    { {6656,   8,    8}, SGEMM_MLIRLIB_LIBSHALOM_PACK},
++    { {128, 1024,  416}, SGEMM_BLASKERNEL},
++    { {128,  512, 1024}, SGEMM_BLASKERNEL},
++    { {128,  256,  512}, SGEMM_BLASKERNEL}
++  };
++
++  std::map<std::tuple<int, int, int , int> , int> BatchMatmulSizesToBatchMatmulType =
++  {
++    // DFFM
++    { {512, 26,   4,    4}, BATCH_SGEMM_NT_BLASKERNEL},
++    { {512, 26,   4,   26}, BATCH_SGEMM_NN_BLASKERNEL}
++  };
++
++  bool isFusedMatmulType(int matmulType) {
++    return matmulType == BATCH_SGEMM_NT_FUSED_MUL_C;
++  }
++
++  // These implementations are designed to be called from C/C++.
++  // Because we are calling from MLIR (i.e., using memrefs instead
++  // of plain pointers), we need to write a wrapper to convert
++  // memrefs into C pointers.
++  bool needsWrapper(int matmulType) {
++    return matmulType == SGEMM_BLASKERNEL ||
++           matmulType == BATCH_SGEMM_NN_BLASKERNEL ||
++           matmulType == BATCH_SGEMM_NT_BLASKERNEL;
++  }
++
++  // Allow users override default kernel selector. This function
++  // parses the env variable (passed by as "selector") and returns
++  // the matmulType for the current matmul being processed.
++  int getMatmulTypeFromSelector(std::string selector) {
++    std::vector<int> result;
++    std::stringstream ss(selector);
++    std::string temp;
++
++    while (std::getline(ss, temp, ','))
++        result.push_back(std::stoi(temp));
++
++    if (matmul_idx >= result.size()) {
++      llvm::errs() << "FATAL: Kernel selector does not have enough values!\n";
++      llvm::errs() << "Should have at least " << matmul_idx+1 << "but has " << result.size() << "\n";
++    }
++
++    int res = result[matmul_idx];
++    llvm::errs() << "[Kernel Selector] Using MatmulType:" << res << " for matmul with index: " << matmul_idx << "\n";
++    matmul_idx++;
++    return res;
++  }
++
++  // Declare GEMM function if not already declared
++  FailureOr<func::FuncOp> getOrInsertMatVecMulFunction(
++    Operation *op, IRRewriter *rewriter, Builder builder, int matmulType,
++    MemRefType matrixTypeMemref, MemRefType vectorTypeMemref) {
++
++    Location loc = op->getLoc();
++    func::FuncOp parentFuncOp = op->getParentOfType<func::FuncOp>();
++
++    if (!sgemv_nn_callee_initialized) {
++      rewriter->setInsertionPoint(parentFuncOp);
++      SmallVector<Type> operandTypes(
++          {matrixTypeMemref.getElementType(), vectorTypeMemref.getElementType(),
++          matrixTypeMemref, vectorTypeMemref, vectorTypeMemref});
++
++      FunctionType funcType = FunctionType::get(rewriter->getContext(),
++                                                operandTypes, vectorTypeMemref);
++      sgemv_nn_callee = rewriter->create<func::FuncOp>(loc, "sgemv", funcType);
++      sgemv_nn_callee.setSymVisibilityAttr(builder.getStringAttr("private"));
++      sgemv_nn_callee_initialized = true;
++    }
++
++    return sgemv_nn_callee;
++  }
++
++  // Declare GEMM function if not already declared
++  FailureOr<func::FuncOp> getOrInsertMatmulFunction(Operation *op, IRRewriter *rewriter, Builder builder, int matmulType, MemRefType matrixTypeMemref) {
++    Location loc = op->getLoc();
++    func::FuncOp parentFuncOp = op->getParentOfType<func::FuncOp>();
++
++    if (dyn_cast<mhlo::DotOp>(op)) {
++      if (!MatmulToMeta[matmulType].initialized) {
++        // AFAIK, mhlo::DotOp only represents non-transposed GEMM, so we do not check trA/trB
++        rewriter->setInsertionPoint(parentFuncOp);
++
++        SmallVector<Type> operandTypes({matrixTypeMemref.getElementType(), matrixTypeMemref.getElementType(), matrixTypeMemref, matrixTypeMemref, matrixTypeMemref});
++
++        FunctionType funcType =
++          FunctionType::get(rewriter->getContext(), operandTypes, matrixTypeMemref);
++        MatmulToMeta[matmulType].callee = rewriter->create<func::FuncOp>(loc, MatmulToMeta[matmulType].funcName, funcType);
++        MatmulToMeta[matmulType].callee.setSymVisibilityAttr(builder.getStringAttr("private"));
++
++        if (needsWrapper(matmulType)) {
++          // These implementations are written in C, so we need to call a C wrapper instead.
++          // Generate the attribute to indicate this to MLIR.
++          MatmulToMeta[matmulType].callee->setAttr(LLVM::LLVMDialect::getEmitCWrapperAttrName(), UnitAttr::get(rewriter->getContext()));
++        }
++
++        MatmulToMeta[matmulType].initialized = true;
++      }
++
++      return MatmulToMeta[matmulType].callee;
++    }
++    else if (dyn_cast<mhlo::DotGeneralOp>(op)) {
++      assert(matmulType != BATCH_SGEMM_INVALID);
++
++      if (!BatchMatmulToMeta[matmulType].initialized) {
++        rewriter->setInsertionPoint(parentFuncOp);
++
++        SmallVector<Type> operandTypes({matrixTypeMemref, matrixTypeMemref, matrixTypeMemref});
++        if (isFusedMatmulType(matmulType))
++          operandTypes.push_back(matrixTypeMemref);
++        else if (matmulType == BATCH_SGEMM_NT_FUSED_MUL_C_CST)
++          operandTypes.push_back(matrixTypeMemref.getElementType());
++
++        FunctionType funcType = FunctionType::get(rewriter->getContext(), operandTypes, matrixTypeMemref);
++        BatchMatmulToMeta[matmulType].callee = rewriter->create<func::FuncOp>(loc, BatchMatmulToMeta[matmulType].funcName, funcType);
++        BatchMatmulToMeta[matmulType].callee.setSymVisibilityAttr(builder.getStringAttr("private"));
++
++        if (needsWrapper(matmulType)) {
++          BatchMatmulToMeta[matmulType].callee->setAttr(LLVM::LLVMDialect::getEmitCWrapperAttrName(), UnitAttr::get(rewriter->getContext()));
++        }
++
++        BatchMatmulToMeta[matmulType].initialized = true;
++      }
++
++      return BatchMatmulToMeta[matmulType].callee;
++    }
++
++    op->emitOpError("invalid mhlo op to get the matmul function for");
++    return failure();
++  }
++
++  int getMamtulType(mhlo::DotOp op) {
++    // Copied from getMatmulOperandType (TODO: Refactor)
++    if (op->getNumOperands() != 2) {
++      // VLOG(1) << "expected to find an op with exactly 2 operands";
++      return SGEMM_INVALID;
++    }
++
++    RankedTensorType matATy = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
++    RankedTensorType matBTy = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
++
++    if (!matATy || !matBTy) {
++      // VLOG(1) << "expected to find an input operand of ranked tensor type";
++      return SGEMM_INVALID;
++    }
++
++    if (matATy.getElementType() != matBTy.getElementType()) {
++      // VLOG(1) << "expected to find the same element type on both input operands";
++      return SGEMM_INVALID;
++    }
++    // end copy-pasta
++
++    char * matmulSelector;
++    if ((matmulSelector = getenv("XLA_MLIR_MATMUL_SELECTOR")) != NULL) {
++      return getMatmulTypeFromSelector(matmulSelector);
++    }
++
++    int M = matATy.getShape()[0];
++    int K = matATy.getShape()[1];
++    int N = matBTy.getShape()[1];
++
++    auto sizesMap = std::make_tuple(M, N, K);
++    if (MatmulSizesToMatmulType.find(sizesMap) == MatmulSizesToMatmulType.end()) {
++      // Our map does not have a value for this input size, report to the user and return the default implementation.
++      llvm::errs() << "WARNING: getMamtulType: Input size not found: M=" << M << " N=" << N << " K=" << K << "\n";
++      llvm::errs() << "         Please consider adding this size to the LUT. This will surely improve performance!\n";
++      return SGEMM_BLASKERNEL;
++    }
++    return MatmulSizesToMatmulType[sizesMap];
++  }
++
++  int getBatchMamtulType(mhlo::DotGeneralOp op, Operation* toFuse, bool foldTensorConstant) {
++    // From DotGeneralBatchMatMulOpConversion in:
++    // xla/xla/mlir_hlo/mhlo/transforms/legalize_to_linalg/legalize_to_linalg.cc
++    mhlo::DotDimensionNumbersAttr dimNumbers = op.getDotDimensionNumbers();
++    auto lhsBatchingDims = dimNumbers.getLhsBatchingDimensions();
++    auto rhsBatchingDims = dimNumbers.getRhsBatchingDimensions();
++    auto lhsContractingDims = dimNumbers.getLhsContractingDimensions();
++    auto rhsContractingDims = dimNumbers.getRhsContractingDimensions();
++
++    // Copied from getMatmulOperandType (TODO: Refactor)
++    if (op->getNumOperands() != 2) {
++      // VLOG(1) << "expected to find an op with exactly 2 operands";
++      return BATCH_SGEMM_INVALID;
++    }
++
++    RankedTensorType matATy = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
++    RankedTensorType matBTy = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
++
++    if (!matATy || !matBTy) {
++      // VLOG(1) << "expected to find an input operand of ranked tensor type";
++      return BATCH_SGEMM_INVALID;
++    }
++
++    if (matATy.getElementType() != matBTy.getElementType()) {
++      // VLOG(1) << "expected to find the same element type on both input operands";
++      return BATCH_SGEMM_INVALID;
++    }
++    // end copy-pasta
++
++    char * matmulSelector;
++    if ((matmulSelector = getenv("XLA_MLIR_MATMUL_SELECTOR")) != NULL) {
++      return getMatmulTypeFromSelector(matmulSelector);
++    }
++
++    int B = matATy.getShape()[0];
++    int M = matATy.getShape()[1];
++    int K = matATy.getShape()[2];
++    int N = matBTy.getShape()[2];
++
++    // Detect the type of batch matmul.
++    // We currently only support canonical batch matmul and trB.
++    if (lhsBatchingDims.size() != 1 || lhsBatchingDims[0] != 0) {
++      return BATCH_SGEMM_INVALID;
++    }
++    if (rhsBatchingDims.size() != 1 || rhsBatchingDims[0] != 0) {
++      return BATCH_SGEMM_INVALID;
++    }
++    if (lhsContractingDims.size() != 1 || lhsContractingDims[0] != 2) {
++      return BATCH_SGEMM_INVALID;
++    }
++    if (rhsContractingDims.size() != 1 || rhsContractingDims[0] != 1) {
++      if (toFuse && dyn_cast<mhlo::MulOp>(toFuse)) {
++        // If we fuse, we must call a custom function specifically generated for this.
++        if (foldTensorConstant)
++          return BATCH_SGEMM_NT_FUSED_MUL_C_CST;
++        return BATCH_SGEMM_NT_FUSED_MUL_C;
++      }
++    }
++
++    auto sizesMap = std::make_tuple(B, M, N, K);
++    if (BatchMatmulSizesToBatchMatmulType.find(sizesMap) == BatchMatmulSizesToBatchMatmulType.end()) {
++      // Our map does not have a value for this input size, report to the user and return the default implementation.
++      llvm::errs() << "WARNING: getBatchMamtulType: Input size not found: B=" << B << " M=" << M << " N=" << N << " K=" << K << "\n";
++      llvm::errs() << "         Please consider adding this size to the LUT. This will surely improve performance!\n";
++      return BATCH_SGEMM_NN;
++    }
++    return BatchMatmulSizesToBatchMatmulType[sizesMap];
++  }
++
++  FailureOr<std::vector<RankedTensorType>> getOperandsType(Operation *op) {
++    if (op->getNumOperands() != 2)
++      return failure();
++
++    Type operand0Type = op->getOperand(0).getType();
++    Type operand1Type = op->getOperand(1).getType();
++    RankedTensorType operand0 = dyn_cast<RankedTensorType>(operand0Type);
++    RankedTensorType operand1 = dyn_cast<RankedTensorType>(operand1Type);
++    if (!operand0 || !operand1)
++      return failure();
++
++    if (operand0.getElementType() != operand1.getElementType())
++      return failure();
++
++    std::vector<RankedTensorType> operandTypes{operand0, operand1};
++    return operandTypes;
++  }
++
++  Value castRankedTensorToUnrankedMemref(Location loc, IRRewriter *rewriter, Value rankedTensor, MemRefType matrixTypeMemref, RankedTensorType matrixTypeTensor) {
++    // readOnly indicates that the to_memref op will only be read and never writen to. We can be sure of this
++    // since nobody else will use this value. Not setting this to true makes the bufferization much less
++    // efficient since it inserts unnecesary memory allocations and copies.
++    bool readOnly = true;
++    Value dynTsr = rewriter->create<tensor::CastOp>(loc, matrixTypeTensor, rankedTensor);
++    return rewriter->create<bufferization::ToMemrefOp>(loc, matrixTypeMemref, dynTsr, readOnly);
++  }
++
++  LogicalResult castMatVecMulInputs(Operation *op, IRRewriter *rewriter,
++                                    Value &matA, Value &vec,
++                                    MemRefType matrixTypeMemref,
++                                    RankedTensorType matrixTypeTensor,
++                                    MemRefType vectorTypeMemref,
++                                    RankedTensorType vectorTypeTensor) {
++    Location loc = op->getLoc();
++    Value matAStaticTsr = op->getOperand(0);
++    Value vecStaticTsr = op->getOperand(1);
++    if (!dyn_cast<RankedTensorType>(matAStaticTsr.getType()) ||
++        !dyn_cast<RankedTensorType>(vecStaticTsr.getType())) {
++      op->emitOpError(
++      "expected to find an input operand of ranked tensor type");
++      return failure();
++    }
++
++    matA = castRankedTensorToUnrankedMemref(loc, rewriter, matAStaticTsr,
++                matrixTypeMemref, matrixTypeTensor);
++    vec = castRankedTensorToUnrankedMemref(loc, rewriter, vecStaticTsr,
++              vectorTypeMemref, vectorTypeTensor);
++    return success();
++  }
++
++
++  LogicalResult castMatmulInputs(Operation *op, IRRewriter *rewriter, Value &matA, Value &matB, MemRefType matrixTypeMemref, RankedTensorType matrixTypeTensor) {
++    Location loc = op->getLoc();
++
++    if (op->getNumOperands() != 2) {
++      op->emitOpError("expected to find an op with exactly 2 operands");
++      return failure();
++    }
++
++    Value matAStaticTsr = op->getOperand(0);
++    Value matBStaticTsr = op->getOperand(1);
++
++    if (!dyn_cast<RankedTensorType>(matAStaticTsr.getType()) ||
++        !dyn_cast<RankedTensorType>(matBStaticTsr.getType())) {
++      op->emitOpError("expected to find an input operand of ranked tensor type");
++      return failure();
++    }
++
++    matA = castRankedTensorToUnrankedMemref(loc, rewriter, matAStaticTsr, matrixTypeMemref, matrixTypeTensor);
++    matB = castRankedTensorToUnrankedMemref(loc, rewriter, matBStaticTsr, matrixTypeMemref, matrixTypeTensor);
++
++    return success();
++  }
++};
++
++FailureOr<SmallVector<Value>> getOutputDynamicShape(Operation *op, IRRewriter *rewriter, Builder builder) {
++  Type opResultType = op->getResult(0).getType();
++  if (!dyn_cast<RankedTensorType>(opResultType)) {
++    op->emitOpError("expected to find a result of RankedTensorType");
++    return failure();
++  }
++
++  Location loc = op->getLoc();
++  SmallVector<Value> dynamicSizes;
++  for (auto dim : dyn_cast<RankedTensorType>(opResultType).getShape())
++    dynamicSizes.push_back(rewriter->create<arith::ConstantOp>(loc, builder.getIndexAttr(dim)));
++
++  return dynamicSizes;
++}
++
++} // namespace
++
++void DotToFunctionCallPass::runOnOperation() {
++  MLIRContext *context = &getContext();
++  IRRewriter rewriter(context);
++  Builder builder(context);
++
++  // A list of ops that must be erased after the walk
++  // has taken place.
++  llvm::SmallVector<Operation*> opsToErase;
++  bool enableFusion = false;
++
++  getOperation()->walk([&](mhlo::DotOp op) {
++    // 1. Get the element type of the input operands and create the matrix types
++    // If the input op is not supported by this pass, return silently.
++    auto maybeOperandTypes = getOperandsType(op);
++    std::vector<RankedTensorType> operandTypes = *maybeOperandTypes;
++
++    Type elemTy = operandTypes[0].getElementType();
++    Location loc = op->getLoc();
++    auto matrixTypeMemref =
++        MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic}, elemTy);
++    RankedTensorType matrixTypeTensor = RankedTensorType::get({ShapedType::kDynamic, ShapedType::kDynamic}, elemTy);
++
++    auto vectorTypeMemref = MemRefType::get({ShapedType::kDynamic}, elemTy);
++    RankedTensorType vectorTypeTensor =
++        RankedTensorType::get({ShapedType::kDynamic}, elemTy);
++
++    // Get the best matmul implementation for the input size.
++    int matmulType = getMamtulType(op);
++    if (matmulType == SGEMM_INVALID)
++      return;
++
++    // 2. Get the GEMM callee
++    if ((operandTypes[0].getRank() != 2))
++      return;
++
++    int64_t operand1Rank = operandTypes[1].getRank();
++    if ((operand1Rank != 2) && (operand1Rank != 1))
++      return;
++
++    bool isGemm = (operand1Rank == 2);
++    FailureOr<func::FuncOp> maybeCallee =
++        isGemm
++            ? this->getOrInsertMatmulFunction(op.getOperation(), &rewriter,
++                                              builder, matmulType, matrixTypeMemref)
++            : this->getOrInsertMatVecMulFunction(op.getOperation(), &rewriter,
++                                                 builder, -1, matrixTypeMemref,
++                                                 vectorTypeMemref);
++    if (failed(maybeCallee)) {
++      emitError(op.getLoc(), "unable to find the right function call to replace the op");
++      signalPassFailure();
++    }
++    func::FuncOp sgemCallee = *maybeCallee;
++
++    rewriter.setInsertionPoint(op.getOperation());
++
++    // 3. Create the alpha and beta constants
++    Value alpha, beta;
++    if (elemTy.isF32()) {
++      alpha = rewriter.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(1.0f));
++      beta = rewriter.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(0.0f));
++    }
++    else if (elemTy.isF64()) {
++      alpha = rewriter.create<arith::ConstantOp>(loc, builder.getF64FloatAttr(1.0f));
++      beta = rewriter.create<arith::ConstantOp>(loc, builder.getF64FloatAttr(0.0f));
++    }
++    else {
++      emitError(op.getLoc(), "expected to find a matmul with either F32/F64 element type");
++      signalPassFailure();
++    }
++
++    // 4. Cast A and B (from static tensors to dynamic shape memrefs)
++    Value matA;
++    Value matBOrVector;
++    LogicalResult castOperands =
++        isGemm ? castMatmulInputs(op, &rewriter, matA, matBOrVector,
++                                  matrixTypeMemref, matrixTypeTensor)
++               : castMatVecMulInputs(op, &rewriter, matA, matBOrVector,
++                                     matrixTypeMemref, matrixTypeTensor,
++                                     vectorTypeMemref, vectorTypeTensor);
++    if (failed(castOperands))
++      signalPassFailure();
++
++    // 5. Create the buffer for C matrix (the shape must be the same as the output from the mhlo op)
++    FailureOr<SmallVector<Value>> maybeDynSizes = getOutputDynamicShape(op, &rewriter, builder);
++    if (failed(maybeDynSizes))
++      signalPassFailure();
++    SmallVector<Value> dynamicSizes = *maybeDynSizes;
++    auto resultTypeMemref = isGemm ? matrixTypeMemref : vectorTypeMemref;
++    Value matC = rewriter.create<memref::AllocOp>(loc, resultTypeMemref, dynamicSizes); // , builder.getI32IntegerAttr(64));
++
++    // 6. Call the GEMM function
++    ValueRange funcOperands({alpha, beta, matA, matBOrVector, matC});
++    Operation *funcCall = rewriter.create<func::CallOp>(loc, sgemCallee, funcOperands);
++    assert(funcCall->getNumResults() == 1);
++    Value funcOutput = funcCall->getResult(0);
++
++    // 7. Replace the dot operation and its result with the result from the library
++    // call, which needs to be casted (from dynamic memref to static tensor)
++    if (op->getNumResults() != 1) {
++      emitError(op.getLoc(), "expected to find an op with exactly one result");
++      signalPassFailure();
++    }
++
++    auto resultTypeTensor = isGemm ? matrixTypeTensor : vectorTypeTensor;
++    Value dotResultMemref = rewriter.create<bufferization::ToTensorOp>(loc, resultTypeTensor, funcOutput, /*restrict*/ true);
++    Value dotResult = rewriter.create<tensor::CastOp>(loc, op->getResult(0).getType(), dotResultMemref);
++
++    op->getResult(0).replaceAllUsesWith(dotResult);
++    op->erase();
++  });
++
++  getOperation()->walk([&](mhlo::DotGeneralOp op) {
++    Location loc = op->getLoc();
++
++    // Check if we can easily fuse this matmul with something before/after it.
++    // The pattern matching is currently limited to a single MulOp after matmul.
++    mhlo::MulOp mul;
++    bool foldTensorConstant = false;
++    Value operandToFuse;
++    if (enableFusion && op->hasOneUse()) {
++      Operation *matmulConsumer = *op->getResult(0).getUsers().begin();
++      if (mul = dyn_cast<mhlo::MulOp>(matmulConsumer)) {
++        mul->getResult(0).replaceAllUsesWith(op);
++        Value operand = mul->getOperand(1);
++
++        if (auto cst = dyn_cast<mhlo::ConstantOp>(operand.getDefiningOp())) {
++          // If its coming from a tensor with a constant value, we can
++          // simply use a constant instead of the whole tensor. This can
++          // be really beneficial for performance as it will reduce the
++          // memory loads.
++          if (DenseElementsAttr attr = dyn_cast<DenseElementsAttr>(cst.getValue().cast<DenseElementsAttr>())) {
++            if (attr.isSplat()) {
++              foldTensorConstant = true;
++              rewriter.setInsertionPoint(op.getOperation());
++              // TODO: Support f64 as well.
++              float cstVal = attr.getSplatValue<APFloat>().convertToFloat();
++              operandToFuse = rewriter.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(cstVal));
++            }
++          }
++        }
++
++        if (!foldTensorConstant) {
++          operandToFuse = operand;
++        }
++        opsToErase.push_back(mul);
++      }
++    }
++
++    int batchMatmulType = getBatchMamtulType(op, mul, foldTensorConstant);
++
++    // Not a batch matmul we support, skip it
++    if (batchMatmulType == BATCH_SGEMM_INVALID)
++      return;
++
++    auto maybeOperandTypes = getOperandsType(op);
++    if (failed(maybeOperandTypes))
++      signalPassFailure();
++
++    std::vector<RankedTensorType> operandTypes = *maybeOperandTypes;
++    if ((operandTypes[0].getRank() != 3) || (operandTypes[1].getRank() != 3))
++      return;
++
++    Type elemTy = operandTypes[0].getElementType();
++    auto matrixTypeMemref =
++        MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic, ShapedType::kDynamic}, elemTy);
++    RankedTensorType matrixTypeTensor = RankedTensorType::get({ShapedType::kDynamic, ShapedType::kDynamic, ShapedType::kDynamic}, elemTy);
++
++    // 1. Get the batch matmul callee
++    FailureOr<func::FuncOp> maybeCallee = this->getOrInsertMatmulFunction(op, &rewriter, builder, batchMatmulType, matrixTypeMemref);
++    if (failed(maybeCallee)) {
++      emitError(op.getLoc(), "unable to find the right function call to replace the op");
++      signalPassFailure();
++    }
++
++    func::FuncOp callee = *maybeCallee;
++
++    rewriter.setInsertionPoint(op.getOperation());
++
++    // 2. Cast A and B (from static tensors to dynamic shape memrefs)
++    Value matA;
++    Value matB;
++    if (failed(castMatmulInputs(op, &rewriter, matA, matB, matrixTypeMemref, matrixTypeTensor)))
++      signalPassFailure();
++
++    // Cast ops to fuse, if any
++    Value operandToFuseMemref;
++    if (isFusedMatmulType(batchMatmulType)) {
++      assert(dyn_cast<RankedTensorType>(operandToFuse.getType()) != nullptr);
++      operandToFuseMemref = castRankedTensorToUnrankedMemref(loc, &rewriter, operandToFuse, matrixTypeMemref, matrixTypeTensor);
++    }
++
++    // 3. Create the buffer for C matrix (the shape must be the same as the output from the mhlo op)
++    FailureOr<SmallVector<Value>> maybeDynSizes = getOutputDynamicShape(op, &rewriter, builder);
++    if (failed(maybeDynSizes))
++      signalPassFailure();
++    SmallVector<Value> dynamicSizes = *maybeDynSizes;
++    Value matC = rewriter.create<memref::AllocOp>(loc, matrixTypeMemref, dynamicSizes); // , builder.getI32IntegerAttr(64));
++
++    // 4. Call the GEMM function
++    std::vector<mlir::Value> funcOperandsVec({matA, matB, matC});
++    if (isFusedMatmulType(batchMatmulType))
++      funcOperandsVec.push_back(operandToFuseMemref);
++    else if (batchMatmulType == BATCH_SGEMM_NT_FUSED_MUL_C_CST)
++      funcOperandsVec.push_back(operandToFuse);
++
++    ValueRange funcOperands(funcOperandsVec);
++    Operation *funcCall = rewriter.create<func::CallOp>(loc, callee, funcOperands);
++    assert(funcCall->getNumResults() == 1);
++    Value funcOutput = funcCall->getResult(0);
++
++    // 5. Replace the dot operation and its result with the result from the library
++    // call, which needs to be casted (from dynamic memref to static tensor)
++    if (op->getNumResults() != 1) {
++      emitError(op.getLoc(), "expected to find an op with exactly one result");
++      signalPassFailure();
++    }
++
++    Value dotResultMemref = rewriter.create<bufferization::ToTensorOp>(loc, matrixTypeTensor, funcOutput, /*restrict*/ true);
++    Value dotResult = rewriter.create<tensor::CastOp>(loc, op->getResult(0).getType(), dotResultMemref);
++
++    op->getResult(0).replaceAllUsesWith(dotResult);
++    op->erase();
++  });
++
++  for (auto op : opsToErase)
++    op->erase();
++}
++
++std::unique_ptr<Pass> hlo::createDotToFunctionCallPass() {
++  return std::make_unique<DotToFunctionCallPass>();
++}
++
++} // namespace mlir
+diff --git a/xla/mlir_hlo/transforms/passes.h b/xla/mlir_hlo/transforms/passes.h
+index 4d89118b55..ed124ed0eb 100644
+--- a/xla/mlir_hlo/transforms/passes.h
++++ b/xla/mlir_hlo/transforms/passes.h
+@@ -108,6 +108,8 @@ void registerTestHloTransformDialectInterpreterPass();
+ namespace hlo {
+ std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass(bool useLinalgCopyFn);
+ 
++std::unique_ptr<Pass> createDotToFunctionCallPass();
++
+ std::unique_ptr<Pass> createTileLinalgCopyPass(int tileSize);
+ 
+ std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>> createLinalgCopyToMemrefPass();
+diff --git a/xla/mlir_hlo/transforms/passes.td b/xla/mlir_hlo/transforms/passes.td
+index 9909505055..4649431ce3 100644
+--- a/xla/mlir_hlo/transforms/passes.td
++++ b/xla/mlir_hlo/transforms/passes.td
+@@ -158,6 +158,11 @@ def UnbufferizePass : Pass<"unbufferize", "mlir::func::FuncOp"> {
+   let constructor = "hlo::createUnbufferizePass()";
+ }
+ 
++def DotToFunctionCallPass : Pass<"dot-to-function-call"> {
++  let summary = "Lower MHLO dot and dot_general ops to a function call";
++  let constructor = "hlo::createDotToFunctionCallPass()";
++}
++
+ def TileLinalgCopyPass : Pass<"tile-linalg-copy"> {
+   let summary = "Tiles linalg copy ops by 1.";
+   let constructor = "hlo::createTileLinalgCopyPass(1)";
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index 7112ec53a4..e27b3697f0 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ -263,6 +263,15 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
+   options.enable_concat_optimization =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_optimization();
++  options.use_matmul_library =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_matmul_library();
++  options.enable_output_tensor_reuse =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_output_tensor_reuse();
++  options.enable_concat_removal =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_removal();
++  options.enable_concat_canonicalization =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_canonicalization();
++
+   if (options.enable_concat_optimization) {
+     options.sparse_bufferization = false;
+   }
+@@ -275,6 +284,12 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+   options.experimental_deallocation =
+       xla::GetDebugOptionsFromFlags()
+           .xla_cpu_enable_experimental_deallocation();
++  if (options.use_matmul_library) {
++    // Experimental deallocation segfaults if we
++    // enable xla_cpu_use_matmul_library.
++    options.experimental_deallocation = false;
++  }
++
+   options.enable_avx2 = [&] {
+     // Derive whether this is an x86 CPU with AVX2 enabled.
+     if (!target_triple.isX86()) return false;
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+index 5e062c0755..eabc265b5b 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+@@ -142,6 +142,8 @@ static Status CheckHloXlaRuntimePipelineOptionsLegality(HloXlaRuntimePipelineOpt
+     if (!options.enable_tiling_and_fusion || !options.enable_fusion_outlining)
+       return absl::InternalError("profiling was requested with XLA_PROFILE_FUSION_CLUSTER, but tiling_and_fusion and/or fusion_outlining are disabled");
+   }
++  if (!options.enable_tiling_and_fusion && options.enable_output_tensor_reuse)
++    return absl::InternalError("cannot apply output_tensor_reuse with tiling_and_fusion disabled");
+   return absl::OkStatus();
+ }
+ 
+@@ -188,6 +190,11 @@ static Status CreateHloXlaPipeline(
+         mlir::mhlo::createSparseRewritingPass());
+   }
+ 
++  if (options.use_matmul_library) {
++    // Lower dot operations to function library calls
++    pm.addPass(mlir::hlo::createDotToFunctionCallPass());
++  }
++
+   // Transform HLO operations to Linalg.
+   pm.addNestedPass<mlir::func::FuncOp>(
+       mlir::mhlo::createLegalizeControlFlowPass());
+@@ -213,16 +220,25 @@ static Status CreateHloXlaPipeline(
+   pm.addPass(mlir::mhlo::createConvertToSignlessPass());
+ 
+   // Tile tHLO ops to 1.
+-  if (!options.enable_tiling_and_fusion) {
+-    if (options.enable_concat_optimization) {
+-      // Instead of tiling by one the thlo.concat (thus generating an
+-      // elementwise memory copy), replace it with a tensor.concat.
+-      pm.addNestedPass<mlir::func::FuncOp>(mlir::thlo::createLegalizeConcatPass());
+-      pm.addPass(mlir::tensor::createDecomposeTensorConcatPass());
+-    }
+-    else {
+-      pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
+-    }
++  if (options.enable_concat_optimization || options.enable_concat_removal || options.enable_concat_canonicalization) {
++    // Instead of tiling by one the thlo.concat (thus generating an
++    // elementwise memory copy), replace it with a tensor.concat.
++    pm.addNestedPass<mlir::func::FuncOp>(mlir::thlo::createLegalizeConcatPass());
++
++    // If more than one optimization is enabled, then, in this order, we:
++    // 1. Try to remove (or simplify) concat.
++    // 2. Try to canonicalize tensor_insert slices into the concat.
++    // 3. Optimize concat lowering.
++    if (options.enable_concat_removal)
++      pm.addPass(mlir::tensor::createConcatRemovalPass());
++    //if (options.enable_concat_canonicalization)
++    //  pm.addPass(mlir::tensor::createSimplifyTensorConcatPass());
++
++    // Lower concat into a tensor.empty plus a set of insert_slice ops.
++    pm.addPass(mlir::tensor::createDecomposeTensorConcatPass());
++  }
++  else {
++    pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
+   }
+ 
+   // Lower shape dialect to standard to enable linalg canonicalizations (e.g.
+@@ -244,6 +260,8 @@ static Status CreateHloXlaPipeline(
+         mlir::gml_st::getDefaultCPUPipelineOptions(options.cpu_name);
+     opts.matmulTileSizes = options.matmul_tile_sizes;
+     opts.inlineFusionClusters = false;
++    if (options.enable_output_tensor_reuse)
++      opts.outputTensorReuse = true;
+     mlir::gml_st::addCPUTilingPipeline(pm, opts);
+   } else {
+     pm.addNestedPass<mlir::func::FuncOp>(
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.h b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+index 64a0160f6d..e6f6db615b 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.h
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+@@ -33,6 +33,10 @@ struct HloXlaRuntimePipelineOptions {
+   bool enable_tiling_and_fusion = false;
+   bool enable_fusion_outlining = true;
+   bool enable_concat_optimization = true;
++  bool use_matmul_library = false;
++  bool enable_output_tensor_reuse = false;
++  bool enable_concat_removal = false;
++  bool enable_concat_canonicalization = false;
+   bool remove_copies_to_outparams = true;
+   bool sparse_bufferization = true;
+   bool experimental_deallocation = false;
+diff --git a/xla/xla.proto b/xla/xla.proto
+index 0e5f8b4276..f3beb775aa 100644
+--- a/xla/xla.proto
++++ b/xla/xla.proto
+@@ -532,6 +532,10 @@ message DebugOptions {
+   // instead.
+   bool xla_cpu_enable_mlir_tiling_and_fusion = 184;
+   bool xla_cpu_enable_concat_optimization = 258;
++  bool xla_cpu_use_matmul_library = 259;
++  bool xla_cpu_enable_output_tensor_reuse = 260;
++  bool xla_cpu_enable_concat_removal = 261;
++  bool xla_cpu_enable_concat_canonicalization = 262;
+ 
+   // XLA:CPU-Next tiling parameters for matmul.
+   bool xla_cpu_enable_custom_matmul_tiling = 195;

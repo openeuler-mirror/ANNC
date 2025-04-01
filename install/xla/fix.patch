@@ -1,0 +1,29 @@
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+index 775f4479e4..85a65dd76c 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+@@ -36,6 +36,7 @@ limitations under the License.
+ #include "mlir/Dialect/Linalg/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
++#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h" // from @llvm-project
+ #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/Passes.h"  // from @llvm-project
+@@ -275,6 +276,8 @@ static Status CreateHloXlaPipeline(
+       // data, which significantly improves copy performance.
+       pm.addPass(mlir::hlo::createTileLinalgCopyPass(1));
+       pm.addNestedPass<mlir::func::FuncOp>(mlir::hlo::createLinalgCopyToMemrefPass());
++      pm.addNestedPass<mlir::func::FuncOp>(
++        mlir::bufferization::createBufferDeallocationPass());
+     }
+   }
+   pm.addNestedPass<mlir::func::FuncOp>(createRewriteReallocToAllocPass());
+@@ -359,6 +362,7 @@ Status CreateDefaultHloXlaRuntimePipeline(xla::runtime::PassManager& passes) {
+ }
+ 
+ void RegisterHloXlaRuntimePipelineDialects(mlir::DialectRegistry& dialects) {
++  mlir::memref::registerAllocationOpInterfaceExternalModels(dialects);
+   mlir::arith::registerBufferizableOpInterfaceExternalModels(dialects);
+   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+       dialects);
