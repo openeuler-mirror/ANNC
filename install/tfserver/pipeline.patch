@@ -1,0 +1,191 @@
+diff --git a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+index 5e2649621f..09f1c0e8a7 100644
+--- a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
++++ b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+@@ -43,6 +43,7 @@ GmlStCPUTilingOptions getDefaultCPUPipelineOptions(StringRef cpuName,
+   opts.statsDetailLevel = statsDetailLevel;
+   opts.fuseDegenerateReshapes = false;
+   opts.inlineFusionClusters = true;
++  opts.outputTensorReuse = false;
+   return opts;
+ }
+ 
+@@ -97,6 +98,9 @@ void addCPUTilingPipeline(OpPassManager& pm,
+   pm.addNestedPass<FuncOp>(createScalarizationPass());
+   pm.addNestedPass<FuncOp>(createComposeExtractInsertSlicePass());
+ 
++  if (options.outputTensorReuse)
++    pm.addPass(createReuseOutputTensorPass());
++
+   pm.addPass(createCanonicalizerPass());
+ 
+   // Remove transformed labels after tiling all ops.
+diff --git a/xla/mlir_hlo/gml_st/transforms/passes.h b/xla/mlir_hlo/gml_st/transforms/passes.h
+index 12b02debc7..ef3c2aa671 100644
+--- a/xla/mlir_hlo/gml_st/transforms/passes.h
++++ b/xla/mlir_hlo/gml_st/transforms/passes.h
+@@ -111,6 +111,9 @@ createFusionPlanningForCpuPass(int64_t vectorSize = 8);
+ /// Pass to outline fusion regions into functions.
+ std::unique_ptr<OperationPass<mlir::ModuleOp>> createFusionOutliningPass();
+ 
++/// Pass to reuse output tensors in gml.st_fusion ops.
++std::unique_ptr<OperationPass<mlir::ModuleOp>> createReuseOutputTensorPass();
++
+ /// Pass to inline fusion clusters.
+ std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>
+ createInlineFusionClustersPass();
+@@ -156,6 +159,7 @@ struct GmlStCPUTilingOptions
+     this->statsDetailLevel = opts.statsDetailLevel;
+     this->cpuName = opts.cpuName;
+     this->inlineFusionClusters = opts.inlineFusionClusters;
++    this->outputTensorReuse = opts.outputTensorReuse;
+   }
+ 
+   Option<int64_t> vectorSize{*this, "vector-size",
+@@ -228,6 +232,11 @@ struct GmlStCPUTilingOptions
+       *this, "inline-fusion-clusters",
+       llvm::cl::desc("Inline fusion clusters at the end of the pipeline."),
+       llvm::cl::init(true)};
++
++  Option<bool> outputTensorReuse{
++      *this, "output-tensor-reuse",
++      llvm::cl::desc("Reuse output tensors in gml.st_fusion ops."),
++      llvm::cl::init(false)};
+ };
+ 
+ // Returns default "optimized" tiling parameters.
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+index fc2c13fb1c..9b6c2be6ab 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+@@ -36,12 +36,14 @@ limitations under the License.
+ #include "mlir/Dialect/Linalg/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
++#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h" // from @llvm-project
+ #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/SparseTensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/SparseTensor/Transforms/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
++#include "mlir/Dialect/Tensor/Transforms/Passes.h" // from @llvm-project
+ #include "mlir/Dialect/Vector/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Pass/PassManager.h"  // from @llvm-project
+ #include "mlir/Transforms/Passes.h"  // from @llvm-project
+@@ -59,6 +61,15 @@ limitations under the License.
+ #include "tsl/platform/errors.h"
+ #include "tsl/platform/logging.h"
+ 
++#include "mlir/Pass/Pass.h"
++
++namespace mlir {
++namespace tensor {
++  std::unique_ptr<Pass> createConcatRemovalPass();
++  std::unique_ptr<Pass> createDecomposeTensorConcatPass();
++} // namespace tensor
++} // namespace mlir
++
+ namespace xla {
+ namespace cpu {
+ namespace {
+@@ -135,12 +146,27 @@ void AddSparsificationPassPipeline(mlir::OpPassManager& pm) {
+ 
+ }  // namespace
+ 
++static Status CheckHloXlaRuntimePipelineOptionsLegality(HloXlaRuntimePipelineOptions options) {
++  if (getenv("XLA_PROFILE_FUSION_CLUSTER") != NULL) {
++    if (!options.enable_tiling_and_fusion || !options.enable_fusion_outlining)
++      return absl::InternalError("profiling was requested with XLA_PROFILE_FUSION_CLUSTER, but tiling_and_fusion and/or fusion_outlining are disabled");
++  }
++  if (!options.enable_tiling_and_fusion && options.enable_output_tensor_reuse)
++    return absl::InternalError("cannot apply output_tensor_reuse with tiling_and_fusion disabled");
++  return absl::OkStatus();
++}
++
+ // -------------------------------------------------------------------------- //
+ // Assemble a HLO XLA Runtime pipeline to lower from HLO to Linalg on buffers.
+ // -------------------------------------------------------------------------- //
+ 
+ static Status CreateHloXlaPipeline(
+     mlir::OpPassManager& pm, const HloXlaRuntimePipelineOptions& options) {
++  // First, make sure that the passed options are legal.
++  Status legalOptions = CheckHloXlaRuntimePipelineOptionsLegality(options);
++  if (!legalOptions.ok())
++    return legalOptions;
++
+   // Resolve all shape constraints (e.g. broadcast constraints that can be
+   // proved statically and changed to const witness) early to allow more
+   // efficient broadcast operations moving.
+@@ -173,6 +199,11 @@ static Status CreateHloXlaPipeline(
+         mlir::mhlo::createSparseRewritingPass());
+   }
+ 
++  if (options.use_matmul_library) {
++    // Lower dot operations to function library calls
++    pm.addPass(mlir::hlo::createDotToFunctionCallPass());
++  }
++
+   // Transform HLO operations to Linalg.
+   pm.addNestedPass<mlir::func::FuncOp>(
+       mlir::mhlo::createLegalizeControlFlowPass());
+@@ -198,7 +229,24 @@ static Status CreateHloXlaPipeline(
+   pm.addPass(mlir::mhlo::createConvertToSignlessPass());
+ 
+   // Tile tHLO ops to 1.
+-  if (!options.enable_tiling_and_fusion) {
++  if (options.enable_concat_optimization || options.enable_concat_removal || options.enable_concat_canonicalization) {
++    // Instead of tiling by one the thlo.concat (thus generating an
++    // elementwise memory copy), replace it with a tensor.concat.
++    pm.addNestedPass<mlir::func::FuncOp>(mlir::thlo::createLegalizeConcatPass());
++
++    // If more than one optimization is enabled, then, in this order, we:
++    // 1. Try to canonicalize tensor_insert slices into the concat.
++    // 2. Try to remove (or simplify) concat.
++    // 3. Optimize concat lowering.
++    if (options.enable_concat_canonicalization)
++      pm.addPass(mlir::tensor::createSimplifyTensorConcatPass());
++    if (options.enable_concat_removal)
++      pm.addPass(mlir::tensor::createConcatRemovalPass());
++
++    // Lower concat into a tensor.empty plus a set of insert_slice ops.
++    pm.addPass(mlir::tensor::createDecomposeTensorConcatPass());
++  }
++  else {
+     pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
+   }
+ 
+@@ -221,6 +269,8 @@ static Status CreateHloXlaPipeline(
+         mlir::gml_st::getDefaultCPUPipelineOptions(options.cpu_name);
+     opts.matmulTileSizes = options.matmul_tile_sizes;
+     opts.inlineFusionClusters = false;
++    if (options.enable_output_tensor_reuse)
++      opts.outputTensorReuse = true;
+     mlir::gml_st::addCPUTilingPipeline(pm, opts);
+   } else {
+     pm.addNestedPass<mlir::func::FuncOp>(
+@@ -260,7 +310,15 @@ static Status CreateHloXlaPipeline(
+     AddSparsificationPasses(pm, options.experimental_deallocation,
+                             options.xla_cpu_sparse_cuda_threads);
+   } else {
+-    pm.addPass(mlir::hlo::createOneShotBufferizePass());
++    pm.addPass(mlir::hlo::createOneShotBufferizePass(false));
++    if (options.enable_concat_optimization) {
++      // Tiling the linalg copy by 1 makes the linalg.copy work on contiguous
++      // data, which significantly improves copy performance.
++      // pm.addPass(mlir::hlo::createTileLinalgCopyPass(1));
++      // pm.addNestedPass<mlir::func::FuncOp>(mlir::hlo::createLinalgCopyToMemrefPass());
++      pm.addNestedPass<mlir::func::FuncOp>(
++        mlir::bufferization::createBufferDeallocationPass());
++    }
+   }
+   pm.addNestedPass<mlir::func::FuncOp>(createRewriteReallocToAllocPass());
+ 
+@@ -344,6 +402,7 @@ Status CreateDefaultHloXlaRuntimePipeline(xla::runtime::PassManager& passes) {
+ }
+ 
+ void RegisterHloXlaRuntimePipelineDialects(mlir::DialectRegistry& dialects) {
++  mlir::memref::registerAllocationOpInterfaceExternalModels(dialects);
+   mlir::arith::registerBufferizableOpInterfaceExternalModels(dialects);
+   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+       dialects);

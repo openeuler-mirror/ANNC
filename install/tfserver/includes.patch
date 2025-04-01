@@ -1,0 +1,39 @@
+diff --git a/xla/mlir_hlo/transforms/passes.h b/xla/mlir_hlo/transforms/passes.h
+index d18c603205..ed124ed0eb 100644
+--- a/xla/mlir_hlo/transforms/passes.h
++++ b/xla/mlir_hlo/transforms/passes.h
+@@ -106,7 +106,13 @@ void registerTestHloTransformDialectEraseSchedulePass();
+ void registerTestHloTransformDialectInterpreterPass();
+ 
+ namespace hlo {
+-std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass();
++std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass(/*bool useLinalgCopyFn*/);
++
++std::unique_ptr<Pass> createDotToFunctionCallPass();
++
++std::unique_ptr<Pass> createTileLinalgCopyPass(int tileSize);
++
++std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>> createLinalgCopyToMemrefPass();
+ 
+ std::unique_ptr<OperationPass<ModuleOp>> createGenericHostToLLVMPass(
+     const GenericHostToLLVMPassOptions& options = {});
+diff --git a/xla/mlir_hlo/thlo/transforms/passes.h b/xla/mlir_hlo/thlo/transforms/passes.h
+index 7ac8499f71..1a51f9e9da 100644
+--- a/xla/mlir_hlo/thlo/transforms/passes.h
++++ b/xla/mlir_hlo/thlo/transforms/passes.h
+@@ -32,11 +32,15 @@ class FuncOp;
+ namespace thlo {
+ 
+ #define GEN_PASS_DECL_THLOLEGALIZESORTPASS
++#define GEN_PASS_DECL_THLOLEGALIZECONCATPASS
+ #include "thlo/transforms/thlo_passes.h.inc"
+ 
+ /// Lowers sort to Arith, MemRef, and SCF
+ std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeSortPass();
+ 
++/// Lowers sort to Vector
++std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeConcatPass();
++
+ #define GEN_PASS_REGISTRATION
+ #include "thlo/transforms/thlo_passes.h.inc"
+ 
