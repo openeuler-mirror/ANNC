@@ -19,7 +19,6 @@ http_archive(
         "//install/llvm:annc2.patch",
         "//install/llvm:annc3.patch",
         "//install/llvm:annc4.patch",
-        "//install/xla:pipeline.patch"
     ],
     sha256 = "90e72fa3558a69cf2562e4600e62c478d22c3986c642d7dcdc7ef0841ded52c5",
     strip_prefix = "xla-40008cb2c85749ae436be61c40d3279cb24705c7",
