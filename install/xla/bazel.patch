@@ -1,0 +1,28 @@
+diff --git a/xla/mlir_hlo/BUILDo b/xla/mlir_hlo/BUILD
+index 906fa57..f955d88 100644
+--- a/xla/mlir_hlo/BUILDo
++++ b/xla/mlir_hlo/BUILD
+@@ -1344,6 +1344,7 @@ cc_library(
+         "@llvm-project//mlir:X86VectorTransforms",
+         "@stablehlo//:chlo_ops",
+     ],
++    alwayslink = True,
+ )
+
+ cc_library(
+@@ -1610,6 +1611,7 @@ cc_library(
+         "@llvm-project//mlir:X86VectorTransforms",
+         "@stablehlo//:chlo_ops",
+     ],
++    alwayslink = True,
+ )
+
+ CAPI_HEADERS = [
+@@ -1967,6 +1969,7 @@ cc_library(
+         "@llvm-project//mlir:SCFDialect",
+         "@llvm-project//mlir:Transforms",
+     ],
++    alwayslink = True,
+ )
+
+ # A light-weight runtime support library, used by MLIR code that results

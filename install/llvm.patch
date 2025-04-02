@@ -1,11 +1,12 @@
-diff --git a/workspace.bzl b/third_party/tsl/third_party/llvm/workspace.bzl
-index cf8ee42..67e8ca9 100644
---- a/workspace.bzl
+diff --git a/third_party/tsl/third_party/llvm/workspace.bzl b/third_party/tsl/third_party/llvm/workspace.bzl
+index cf8ee42..53ee054 100644
+--- a/third_party/tsl/third_party/llvm/workspace.bzl
 +++ b/third_party/tsl/third_party/llvm/workspace.bzl
-@@ -22,6 +22,10 @@ def repo(name):
+@@ -22,6 +22,11 @@ def repo(name):
              "//third_party/llvm:mathextras.patch",
              "//third_party/llvm:toolchains.patch",
              "//third_party/llvm:zstd.patch",
++            "//third_party/llvm:bazel.patch",
 +            "//third_party/llvm:annc1.patch",
 +            "//third_party/llvm:annc2.patch",
 +            "//third_party/llvm:annc3.patch",
