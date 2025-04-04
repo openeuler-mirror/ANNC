@@ -28,6 +28,7 @@ cc_library(
     name = "cambridge",
     srcs = glob(["xla/*.cpp", "xla/*.cc", "llvm/*.cpp"]),
     linkstatic = True,
+    alwayslink = True,
     visibility = ["//visibility:public"],
     deps = [
         "@xla//xla/mlir_hlo:transforms_passes",
