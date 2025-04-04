@@ -24,15 +24,28 @@ cc_library(
     ],
 )
 
+genrule(
+    name = "generate_empty_hpc",
+    outs = ["dummy.c"],
+    cmd = "touch $@",
+)
+
+cc_binary(
+    name = "hpc.so",
+    srcs = [":dummy.c"],
+    linkshared = True,
+)
+
 cc_library(
     name = "cambridge",
-    srcs = glob(["xla/*.cpp", "xla/*.cc", "llvm/*.cpp"]),
+    srcs = glob(["xla/*.cpp", "xla/*.cc", "llvm/*.cpp", "hpc.so"]),
     linkstatic = True,
     alwayslink = True,
     visibility = ["//visibility:public"],
     deps = [
         "@xla//xla/mlir_hlo:transforms_passes",
         "@xla//xla/mlir_hlo:thlo_passes",
+        ":hpc.so"
     ],
 )
 
