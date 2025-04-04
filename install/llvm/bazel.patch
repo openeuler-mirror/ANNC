@@ -1,7 +1,7 @@
 diff --git a/third_party/tsl/third_party/llvm/bazel.patch b/third_party/tsl/third_party/llvm/bazel.patch
 new file mode 100644
 index 0000000..81954bb
---- /dev/null
+--- a/third_party/tsl/third_party/llvm/bazel.patch
 +++ b/third_party/tsl/third_party/llvm/bazel.patch
 @@ -0,0 +1,13 @@
 +diff --git a/utils/bazel/llvm-project-overlay/mlir/BUILD.bazel b/utils/bazel/llvm-project-overlay/mlir/BUILD.bazel

@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..0cb2a54
 --- /dev/null
 +++ b/third_party/tsl/third_party/llvm/annc2.patch
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,34 @@
 +diff --git a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h b/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h
 +index 48f9066934a2..d2dd95416241 100644
 +--- a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h
@@ -38,64 +38,3 @@ index 0000000..0cb2a54
 ++}
 ++
 + #endif // MLIR_DIALECT_TENSOR_TRANSFORMS_PASSES
-+diff --git a/mlir/lib/Dialect/Tensor/Transforms/ConcatOpPatterns.cpp b/mlir/lib/Dialect/Tensor/Transforms/ConcatOpPatterns.cpp
-+index 2108fc591055..a9b08fce84e1 100644
-+--- a/mlir/lib/Dialect/Tensor/Transforms/ConcatOpPatterns.cpp
-++++ b/mlir/lib/Dialect/Tensor/Transforms/ConcatOpPatterns.cpp
-+@@ -10,8 +10,17 @@
-+ #include "mlir/Dialect/Arith/IR/Arith.h"
-+ #include "mlir/Dialect/Arith/Utils/Utils.h"
-+ #include "mlir/Dialect/Tensor/IR/Tensor.h"
-++#include "mlir/Dialect/Tensor/Transforms/Passes.h"
-+ #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
-+ #include "mlir/IR/PatternMatch.h"
-++#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-++
-++namespace mlir {
-++namespace tensor {
-++#define GEN_PASS_DEF_DECOMPOSETENSORCONCAT
-++#include "mlir/Dialect/Tensor/Transforms/Passes.h.inc"
-++} // namespace tensor
-++} // namespace mlir
-+ 
-+ using namespace mlir;
-+ using namespace mlir::tensor;
-+@@ -91,3 +100,27 @@ void mlir::tensor::populateDecomposeTensorConcatPatterns(
-+     RewritePatternSet &patterns) {
-+   patterns.add<DecomposeTensorConcatOp>(patterns.getContext());
-+ }
-++
-++//===----------------------------------------------------------------------===//
-++// Pass registration
-++//===----------------------------------------------------------------------===//
-++
-++namespace {
-++
-++struct DecomposeTensorConcatPass final
-++    : public tensor::impl::DecomposeTensorConcatBase<
-++          DecomposeTensorConcatPass> {
-++  void runOnOperation() override;
-++};
-++
-++} // namespace
-++
-++void DecomposeTensorConcatPass::runOnOperation() {
-++  RewritePatternSet patterns(&getContext());
-++  tensor::populateDecomposeTensorConcatPatterns(patterns);
-++  (void)applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
-++}
-++
-++std::unique_ptr<Pass> tensor::createDecomposeTensorConcatPass() {
-++  return std::make_unique<DecomposeTensorConcatPass>();
-++}
-+\ No newline at end of file
-+diff --git a/mlir/test/Dialect/Tensor/decompose-concat.mlir b/mlir/test/Dialect/Tensor/decompose-concat.mlir
-+index 5712c77a743d..56f874e68b9c 100644
-+--- a/mlir/test/Dialect/Tensor/decompose-concat.mlir
-++++ b/mlir/test/Dialect/Tensor/decompose-concat.mlir
-+@@ -1,4 +1,5 @@
-+ // RUN: mlir-opt -split-input-file -transform-interpreter -cse  %s | FileCheck %s
-++// RUN: mlir-opt --decompose-tensor-concat -cse %s | FileCheck %s
-+ 
-+ module attributes {transform.with_named_sequence} {
-+   transform.named_sequence @__transform_main(%func_op: !transform.op<"func.func"> {transform.readonly}) {
