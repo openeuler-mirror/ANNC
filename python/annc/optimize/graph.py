@@ -49,7 +49,36 @@ class Attr:
         self.type = attr.type
 
     def __str__(self) -> str:
-        return self.attr.__str__()
+        attr_str = 'attr {\n'
+        attr_str += f'  key: "{self.key}"\n'
+        attr_str += '  value {\n'
+        attr_str += '\n'.join([
+            '    ' + li for li in self.attr.__str__().split('\n')
+            if li.strip()
+        ])
+        attr_str += '\n  }\n}\n'
+        return attr_str
+
+
+class CustomAttr:
+
+    def __init__(self, key, type, value):
+        self.key: str = key
+        self.type = type
+        self.value = value
+
+    def __str__(self) -> str:
+        return f'''attr {{
+  key: "{self.key}"
+  value {{
+    tensor {{
+      dtype: {self.type}
+      tensor_shape {{
+      }}
+      int64_val: {self.value}
+    }}
+  }}
+}}'''
 
 
 class Node:
@@ -96,25 +125,40 @@ class Node:
         return attrs
 
     def __str__(self, indent: int = 6) -> str:
+
+        def get_attr(k, a):
+            attr_str = 'attr {\n'
+            attr_str += f'  key: "{k}"\n'
+            attr_str += '  value {\n'
+            attr_str += '\n'.join(
+                ['    ' + li for li in a.__str__().split('\n') if li.strip()])
+            attr_str += '\n  }\n}\n'
+            return attr_str
+
         attrs = {}
         for key, attr in self.node.node_def.attr.items():
-            attrs[key] = attr.__str__().replace('?', '-1')
+            attrs[key] = get_attr(key, attr).replace('?', '-1')
 
         if self.type not in ('NoOp', 'AssignVariableOp'):
-            attrs['_output_shapes'] = 'list {\n'
+            output_shapes = 'list {\n'
             for output_shape in self.output_shapes:
-                attrs['_output_shapes'] += '  shape {\n'
+                output_shapes += '  shape {\n'
                 rank, dims = output_shape
                 if rank is None:
-                    attrs['_output_shapes'] += '    unknown_rank: true\n'
+                    output_shapes += '    unknown_rank: true\n'
                 else:
                     for dim in dims:
-                        attrs[
-                            '_output_shapes'] += f'    dim {{\n      size: {dim}\n    }}\n'
-                attrs['_output_shapes'] += '  }\n'
-            attrs['_output_shapes'] += '}'
-            attrs['_output_shapes'] = attrs['_output_shapes'].replace(
-                '?', '-1')
+                        output_shapes += f'    dim {{\n      size: {dim}\n    }}\n'
+                output_shapes += '  }\n'
+            output_shapes += '}'
+            output_shapes = output_shapes.replace('?', '-1')
+            attrs['_output_shapes'] = 'attr {\n'
+            attrs['_output_shapes'] += '  key: "_output_shapes"\n'
+            attrs['_output_shapes'] += '  value {\n'
+            attrs['_output_shapes'] += '\n'.join([
+                '    ' + li for li in output_shapes.split('\n') if li.strip()
+            ])
+            attrs['_output_shapes'] += '\n  }\n}\n'
 
         node_str = f'name: "{self.name}"\n'
         node_str += f'op: "{self.type}"\n'
@@ -130,12 +174,7 @@ class Node:
             node_str += f'device: "{self.node.device}"\n'
 
         for key, attr in sorted(attrs.items(), key=lambda item: item[0]):
-            node_str += 'attr {\n'
-            node_str += f'  key: "{key}"\n'
-            node_str += '  value {\n'
-            node_str += '\n'.join(
-                ['    ' + li for li in attr.split('\n') if li.strip()])
-            node_str += '\n  }\n}\n'
+            node_str += attr
         return '\n'.join(
             [indent * ' ' + li for li in node_str.split('\n') if li.strip()])
 
@@ -160,19 +199,24 @@ class CustomNode:
             for attr in self.attrs
         }
 
-        attrs['_output_shapes'] = 'list {\n'
+        output_shapes = 'list {\n'
         for output_shape in self.output_shapes:
-            attrs['_output_shapes'] += '  shape {\n'
+            output_shapes += '  shape {\n'
             rank, dims = output_shape
             if rank is None:
-                attrs['_output_shapes'] += '    unknown_rank: true\n'
+                output_shapes += '    unknown_rank: true\n'
             else:
                 for dim in dims:
-                    attrs[
-                        '_output_shapes'] += f'    dim {{\n      size: {dim}\n    }}\n'
-            attrs['_output_shapes'] += '  }\n'
-        attrs['_output_shapes'] += '}'
-        attrs['_output_shapes'] = attrs['_output_shapes'].replace('?', '-1')
+                    output_shapes += f'    dim {{\n      size: {dim}\n    }}\n'
+            output_shapes += '  }\n'
+        output_shapes += '}'
+        output_shapes = output_shapes.replace('?', '-1')
+        attrs['_output_shapes'] = 'attr {\n'
+        attrs['_output_shapes'] += '  key: "_output_shapes"\n'
+        attrs['_output_shapes'] += '  value {\n'
+        attrs['_output_shapes'] += '\n'.join(
+            ['    ' + li for li in output_shapes.split('\n') if li.strip()])
+        attrs['_output_shapes'] += '\n  }\n}\n'
 
         node_str = f'name: "{self.name}"\n'
         node_str += f'op: "{self.type}"\n'
@@ -188,12 +232,7 @@ class CustomNode:
             node_str += f'device: "{self.device}"\n'
 
         for key, attr in sorted(attrs.items(), key=lambda item: item[0]):
-            node_str += 'attr {\n'
-            node_str += f'  key: "{key}"\n'
-            node_str += '  value {\n'
-            node_str += '\n'.join(
-                ['    ' + li for li in attr.split('\n') if li.strip()])
-            node_str += '\n  }\n}\n'
+            node_str += attr
         return '\n'.join(
             [indent * ' ' + li for li in node_str.split('\n') if li.strip()])
 

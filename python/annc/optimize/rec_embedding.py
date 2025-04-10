@@ -1,5 +1,5 @@
-from .graph import Node, CustomNode
-from .rewriter import BaseRewriter
+from .graph import Node, CustomNode, CustomAttr
+from .rewriter import BaseRewriter, CheckFailed
 from .op_type import OpType
 
 
@@ -205,5 +205,276 @@ class EmbeddingV2PatternRewriter(BaseRewriter):
             select_op, shape_op_3, slice_op_2, concatv2, cast_op_2, slice_op_3,
             reshape_op_2, shape_op_4, stride_slice_3, pack_op_3, reshape_op_3
         ]
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
+
+
+class EmbeddingV3PatternRewriter(BaseRewriter):
+
+    def match_seg_sum(self, node: Node):
+        self.check_node(node, (OpType.SparseFillEmptyRows, None))
+        self.check_operands(node, [(OpType.GatherV2, None),
+                                   (OpType.GatherV2, None),
+                                   (OpType.Identity, None)])
+        gather_v2_0: Node = node.operands[0][0]
+        gather_v2_1: Node = node.operands[1][0]
+        identity_0: Node = node.operands[2][0]
+        self.check_operands(gather_v2_0, [(OpType.SparseReshape, None),
+                                          (OpType.Reshape, None)])
+        sparse_reshape_0: Node = gather_v2_0.operands[0][0]
+        reshape_0: Node = gather_v2_0.operands[1][0]
+        self.check_operands(gather_v2_1, [(OpType.Identity, None),
+                                          (OpType.Reshape, reshape_0.name)])
+        identity_1: Node = gather_v2_1.operands[0][0]
+        self.check_operands(identity_0,
+                            [(OpType.SparseReshape, sparse_reshape_0.name)])
+        self.check_operands(reshape_0, [(OpType.Where, None)])
+        where_0: Node = reshape_0.operands[0][0]
+        self.check_operands(where_0, [(OpType.GreaterEqual, None)])
+        greater_equal_0 = where_0.operands[0][0]
+        self.check_operands(greater_equal_0,
+                            [(OpType.Identity, identity_1.name)])
+        self.check_operands(identity_1, [(OpType.Identity, None)])
+        identity_2: Node = identity_1.operands[0][0]
+        self.check_operands(identity_2,
+                            [(OpType.StringToHashBucketFast, None)])
+
+        self.check_operands(sparse_reshape_0, [(OpType.SparseReshape, None),
+                                               (OpType.SparseReshape, None),
+                                               (OpType.Pack, None)])
+        sparse_reshape_1: Node = sparse_reshape_0.operands[0][0]
+        pack_0: Node = sparse_reshape_0.operands[2][0]
+        self.check_operands(pack_0, [(OpType.Prod, None),
+                                     (OpType.GatherV2, None)])
+        prod_0: Node = pack_0.operands[0][0]
+        gather_v2_2: Node = pack_0.operands[1][0]
+        self.check_operands(prod_0, [(OpType.Slice, None)])
+        slice_0 = prod_0.operands[0][0]
+        self.check_operands(slice_0,
+                            [(OpType.SparseReshape, sparse_reshape_1.name)])
+        self.check_operands(gather_v2_2,
+                            [(OpType.SparseReshape, sparse_reshape_1.name)])
+        self.check_operands(sparse_reshape_1, [(OpType.Where, None),
+                                               (OpType.Shape, None),
+                                               (OpType.Cast, None)])
+        where_1: Node = sparse_reshape_1.operands[0][0]
+        shape_0: Node = sparse_reshape_1.operands[1][0]
+        cast_0: Node = sparse_reshape_1.operands[2][0]
+        self.check_operands(cast_0, [(OpType.Pack, None)])
+        pack_1: Node = cast_0.operands[0][0]
+        self.check_operands(pack_1, [(OpType.StridedSlice, None)])
+        stride_slice_0: Node = pack_1.operands[0][0]
+        cast_1 = stride_slice_0.operands[0][0]
+        self.check_operands(cast_1, [(OpType.Shape, shape_0.name)])
+
+        self.check_users(node, [(OpType.StridedSlice, None),
+                                (OpType.Unique, None), (OpType.Reshape, None)],
+                         3)
+        stride_slice_1: Node = node.users[0]
+        unique_0: Node = node.users[1]
+        reshape_1: Node = node.users[2]
+        self.check_users(unique_0, [(OpType.ResourceGather, None),
+                                    (OpType.SparseSegmentSum, None)], 2)
+        resource_gather_0: Node = unique_0.users[0]
+        sparse_segment_sum_0: Node = unique_0.users[1]
+        self.check_users(resource_gather_0, [(OpType.Identity, None)])
+        identity_3: Node = resource_gather_0.users[0]
+        self.check_users(identity_3, [(OpType.Identity, None)])
+        identity_4: Node = identity_3.users[0]
+        self.check_users(
+            identity_4, [(OpType.SparseSegmentSum, sparse_segment_sum_0.name)])
+        self.check_users(stride_slice_1, [(OpType.Cast, None)])
+        cast_2: Node = stride_slice_1.users[0]
+        self.check_users(
+            cast_2, [(OpType.SparseSegmentSum, sparse_segment_sum_0.name)])
+        self.check_users(sparse_segment_sum_0, [(OpType.Shape, None),
+                                                (OpType.ZerosLike, None),
+                                                (OpType.Select, None)])
+        shape_1: Node = sparse_segment_sum_0.users[0]
+        zeros_like_0: Node = sparse_segment_sum_0.users[1]
+        select_0: Node = sparse_segment_sum_0.users[2]
+        self.check_users(shape_1, [(OpType.StridedSlice, None)])
+        stride_slice_2: Node = shape_1.users[0]
+        self.check_users(stride_slice_2, [(OpType.Pack, None)])
+        pack_2: Node = stride_slice_2.users[0]
+        self.check_users(pack_2, [(OpType.Tile, None)])
+        tile_0: Node = pack_2.users[0]
+        self.check_users(reshape_1, [(OpType.Tile, tile_0.name)])
+        self.check_users(tile_0, [(OpType.Select, select_0.name)])
+        self.check_users(zeros_like_0, [(OpType.Select, select_0.name)])
+
+        self.check_users(select_0, [(OpType.Shape, None),
+                                    (OpType.Reshape, None)])
+        shape_2: Node = select_0.users[0]
+        reshape_2: Node = select_0.users[1]
+        self.check_users(shape_2, [(OpType.Slice, None)])
+        slice_1: Node = shape_2.users[0]
+        self.check_users(slice_1, [(OpType.ConcatV2, None)])
+        concat_v2_0: Node = slice_1.users[0]
+        self.check_users(sparse_reshape_1, [(OpType.Slice, None),
+                                            (OpType.GatherV2, None),
+                                            (OpType.SparseReshape, None),
+                                            (OpType.SparseReshape, None),
+                                            (OpType.Cast, None)])
+        cast_3: Node = sparse_reshape_1.users[4]
+        self.check_users(cast_3, [(OpType.Slice, None)])
+        slice_2: Node = cast_3.users[0]
+        self.check_users(slice_2, [(OpType.ConcatV2, concat_v2_0.name)])
+        self.check_users(concat_v2_0, [(OpType.Reshape, reshape_2.name)])
+
+        # combiner: 0 for sum, 1 for mean
+        custom_node = CustomNode(
+            'RecEmbeddingV3', node.name + '/rec_embed_v3', self.graph,
+            reshape_2.output_shapes, [
+                resource_gather_0.operands[0], identity_2.operands[0],
+                sparse_reshape_1.operands[1], sparse_reshape_1.operands[0]
+            ], [CustomAttr('combiner', 'DT_INT64', '0')], reshape_2.users)
+        fused_ops = [
+            cast_1, stride_slice_0, pack_1, cast_0, sparse_reshape_1, slice_0,
+            prod_0, gather_v2_2, pack_0, sparse_reshape_0, identity_2,
+            identity_1, greater_equal_0, where_0, reshape_0, gather_v2_0,
+            gather_v2_1, identity_0, node, unique_0, resource_gather_0,
+            identity_3, identity_4, stride_slice_1, cast_2,
+            sparse_segment_sum_0, shape_1, stride_slice_2, pack_2, reshape_1,
+            tile_0, zeros_like_0, select_0, shape_2, slice_1, cast_3, slice_2,
+            concat_v2_0, reshape_2
+        ]
+        replace_ops = [(reshape_2, 0)]
+        return custom_node, fused_ops, replace_ops
+
+    def match_seg_mean(self, node: Node):
+        self.check_node(node, (OpType.SparseFillEmptyRows, None))
+        self.check_operands(node, [(OpType.GatherV2, None),
+                                   (OpType.GatherV2, None),
+                                   (OpType.Identity, None)])
+        gather_v2_0: Node = node.operands[0][0]
+        gather_v2_1: Node = node.operands[1][0]
+        identity_0: Node = node.operands[2][0]
+        self.check_operands(gather_v2_0, [(OpType.SparseReshape, None),
+                                          (OpType.Reshape, None)])
+        sparse_reshape_0: Node = gather_v2_0.operands[0][0]
+        reshape_0: Node = gather_v2_0.operands[1][0]
+        self.check_operands(gather_v2_1, [(OpType.Identity, None),
+                                          (OpType.Reshape, reshape_0.name)])
+        identity_1: Node = gather_v2_1.operands[0][0]
+        self.check_operands(identity_0,
+                            [(OpType.SparseReshape, sparse_reshape_0.name)])
+        self.check_operands(reshape_0, [(OpType.Where, None)])
+        where_0: Node = reshape_0.operands[0][0]
+        self.check_operands(where_0, [(OpType.GreaterEqual, None)])
+        greater_equal_0 = where_0.operands[0][0]
+        self.check_operands(greater_equal_0,
+                            [(OpType.Identity, identity_1.name)])
+        self.check_operands(identity_1,
+                            [(OpType.StringToHashBucketFast, None)])
+        self.check_operands(sparse_reshape_0, [(OpType.Where, None),
+                                               (OpType.Shape, None),
+                                               (OpType.Pack, None)])
+        shape_0: Node = sparse_reshape_0.operands[1][0]
+        pack_0: Node = sparse_reshape_0.operands[2][0]
+        self.check_operands(pack_0, [(OpType.Prod, None),
+                                     (OpType.GatherV2, None)])
+        prod_0: Node = pack_0.operands[0][0]
+        gather_v2_2: Node = pack_0.operands[1][0]
+        self.check_operands(prod_0, [(OpType.Slice, None)])
+        slice_0 = prod_0.operands[0][0]
+        self.check_operands(slice_0, [(OpType.Shape, None)])
+        self.check_operands(gather_v2_2, [(OpType.Shape, None)])
+
+        self.check_users(node, [(OpType.StridedSlice, None),
+                                (OpType.Unique, None), (OpType.Reshape, None)],
+                         3)
+        stride_slice_1: Node = node.users[0]
+        unique_0: Node = node.users[1]
+        reshape_1: Node = node.users[2]
+        self.check_users(unique_0, [(OpType.GatherV2, None),
+                                    (OpType.SparseSegmentMean, None)])
+        gather_v2_3: Node = unique_0.users[0]
+        sparse_segment_mean_0: Node = unique_0.users[1]
+        self.check_users(gather_v2_3, [(OpType.Identity, None)])
+        identity_3: Node = gather_v2_3.users[0]
+        self.check_users(
+            identity_3,
+            [(OpType.SparseSegmentMean, sparse_segment_mean_0.name)])
+        self.check_users(stride_slice_1, [(OpType.Cast, None)])
+        cast_2: Node = stride_slice_1.users[0]
+        self.check_users(
+            cast_2, [(OpType.SparseSegmentMean, sparse_segment_mean_0.name)])
+        self.check_users(sparse_segment_mean_0, [(OpType.Shape, None),
+                                                 (OpType.ZerosLike, None),
+                                                 (OpType.Select, None)])
+        shape_1: Node = sparse_segment_mean_0.users[0]
+        zeros_like_0: Node = sparse_segment_mean_0.users[1]
+        select_0: Node = sparse_segment_mean_0.users[2]
+        self.check_users(shape_1, [(OpType.StridedSlice, None)])
+        stride_slice_2: Node = shape_1.users[0]
+        self.check_users(stride_slice_2, [(OpType.Pack, None)])
+        pack_1: Node = stride_slice_2.users[0]
+        self.check_users(pack_1, [(OpType.Tile, None)])
+        tile_0: Node = pack_1.users[0]
+        self.check_users(reshape_1, [(OpType.Tile, tile_0.name)])
+        self.check_users(tile_0, [(OpType.Select, select_0.name)])
+        self.check_users(zeros_like_0, [(OpType.Select, select_0.name)])
+
+        self.check_users(select_0, [(OpType.Shape, None),
+                                    (OpType.Reshape, None)])
+        shape_2: Node = select_0.users[0]
+        reshape_2: Node = select_0.users[1]
+        self.check_users(shape_2, [(OpType.Slice, None)])
+        slice_1: Node = shape_2.users[0]
+        self.check_users(slice_1, [(OpType.ConcatV2, None)])
+        concat_v2_0: Node = slice_1.users[0]
+        self.check_users(shape_0, [(OpType.Slice, None),
+                                   (OpType.GatherV2, None),
+                                   (OpType.SparseReshape, None),
+                                   (OpType.Cast, None)])
+        cast_3: Node = shape_0.users[3]
+        self.check_users(cast_3, [(OpType.Slice, None)])
+        slice_2: Node = cast_3.users[0]
+        self.check_users(slice_2, [(OpType.ConcatV2, concat_v2_0.name)])
+        self.check_users(concat_v2_0, [(OpType.Reshape, reshape_2.name)])
+        self.check_users(reshape_2, [(OpType.Shape, None),
+                                     (OpType.Reshape, None)])
+        shape_3: Node = reshape_2.users[0]
+        reshape_3: Node = reshape_2.users[1]
+        self.check_users(shape_3, [(OpType.StridedSlice, None)])
+        stride_slice_3: Node = shape_3.users[0]
+        self.check_users(stride_slice_3, [(OpType.Pack, None)])
+        pack_2: Node = stride_slice_3.users[0]
+        self.check_users(pack_2, [(OpType.Reshape, reshape_3.name)])
+
+        # combiner: 0 for sum, 1 for mean
+        custom_node = CustomNode(
+            'RecEmbeddingV3', node.name + '/rec_embed_v3', self.graph,
+            reshape_3.output_shapes, [
+                gather_v2_3.operands[0], identity_1.operands[0],
+                sparse_reshape_0.operands[1], sparse_reshape_0.operands[0]
+            ], [CustomAttr('combiner', 'DT_INT64', '1')], reshape_3.users)
+        fused_ops = [
+            slice_0, prod_0, gather_v2_2, pack_0, sparse_reshape_0, identity_1,
+            greater_equal_0, where_0, reshape_0, identity_0, gather_v2_1,
+            gather_v2_0, node, unique_0, gather_v2_3, identity_3,
+            stride_slice_1, cast_2, sparse_segment_mean_0, shape_1,
+            stride_slice_2, pack_1, tile_0, zeros_like_0, select_0, shape_2,
+            slice_1, cast_3, slice_2, concat_v2_0, reshape_2, shape_3,
+            stride_slice_3, pack_2, reshape_3, reshape_1
+        ]
+        replace_ops = [(reshape_3, 0)]
+        return custom_node, fused_ops, replace_ops
+
+    def match_and_rewrite(self, node: Node):
+        try:
+            res = self.match_seg_sum(node)
+        except CheckFailed:
+            res = None
+        if res is None:
+            res = self.match_seg_mean(node)
+        custom_node, fused_ops, replace_ops = res
+
+        index = node.get_index()
+        self.graph.nodes.insert(index + 1, custom_node)
+        for rep_op in replace_ops:
+            self.replace_all_users_with(*rep_op, self.graph.nodes[index + 1],
+                                        0)
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
