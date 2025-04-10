@@ -18,20 +18,20 @@ def parse_args():
                         required=True,
                         help='Output model path')
     parser.add_argument(
-        '--passes',
+        'passes',
         nargs='+',
         help=
-        'opt: \'--sparse-v1\', \'--sparse-v2\', \'--sparse-v3\','
-        ' \'--linear-v1\''
+        'opt: \'sparse-v1\', \'sparse-v2\', \'sparse-v3\','
+        ' \'linear-v1\''
     )
     return parser.parse_args()
 
 
 OPT_PASSES = {
-    '--sparse-v1': EmbeddingV1PatternRewriter,
-    '--sparse-v2': EmbeddingV2PatternRewriter,
-    '--sparse-v3': EmbeddingV3PatternRewriter,
-    '--linear-v1': LinearEmbeddingV1PatternRewriter,
+    'sparse-v1': EmbeddingV1PatternRewriter,
+    'sparse-v2': EmbeddingV2PatternRewriter,
+    'sparse-v3': EmbeddingV3PatternRewriter,
+    'linear-v1': LinearEmbeddingV1PatternRewriter,
 }
 
 
