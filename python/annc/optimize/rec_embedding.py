@@ -476,5 +476,104 @@ class EmbeddingV3PatternRewriter(BaseRewriter):
         for rep_op in replace_ops:
             self.replace_all_users_with(*rep_op, self.graph.nodes[index + 1],
                                         0)
+
+
+class LinearEmbeddingV1PatternRewriter(BaseRewriter):
+
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.ExpandDims, None))
+        self.check_operands(node, [(OpType.Placeholder, None),
+                                   (OpType.Const, None)])
+        expand_dim = node.operands[1][0]
+        self.check_users(node,
+                         [(OpType.NotEqual, None), (OpType.GatherNd, None),
+                          (OpType.Shape, None)], 3)
+        not_equal, gather_nd, shape_op = node.users
+        self.check_users(not_equal, [(OpType.Where, None)], 1)
+        where_op = not_equal.users[0]
+        self.check_users(where_op, [(OpType.GatherNd, gather_nd.name),
+                                    (OpType.SparseReshape, None)])
+        sparse_reshape = where_op.users[1]
+        self.check_users(gather_nd, [(OpType.StringToHashBucketFast, None)], 1)
+        string_to_hash_bucket_fast = gather_nd.users[0]
+        self.check_users(string_to_hash_bucket_fast, [(OpType.Identity, None)],
+                         1)
+        identity = string_to_hash_bucket_fast.users[0]
+        self.check_users(identity, [(OpType.Identity, None)], 1)
+        identity_2 = identity.users[0]
+        self.check_users(identity_2, [(OpType.GreaterEqual, None),
+                                      (OpType.GatherV2, None)], 2)
+        greater_equal, gather_v2 = identity_2.users
+        self.check_users(greater_equal, [(OpType.Where, None)], 1)
+        where_op_2 = greater_equal.users[0]
+        self.check_users(where_op_2, [(OpType.Reshape, None)], 1)
+        reshape = where_op_2.users[0]
+        self.check_users(reshape, [(OpType.GatherV2, None),
+                                   (OpType.GatherV2, gather_v2.name)], 2)
+        gather_v2_1, gather_v2_2 = reshape.users
+        self.check_users(shape_op,
+                         [(OpType.Cast, None),
+                          (OpType.SparseReshape, sparse_reshape.name)], 2)
+        cast_op = shape_op.users[0]
+        self.check_users(cast_op, [(OpType.StridedSlice, None)], 1)
+        strideslice_op = cast_op.users[0]
+        self.check_users(strideslice_op, [(OpType.Pack, None)], 1)
+        pack_op = strideslice_op.users[0]
+        self.check_users(pack_op, [(OpType.Cast, None)], 1)
+        cast_op_1 = pack_op.users[0]
+        self.check_users(cast_op_1,
+                         [(OpType.SparseReshape, sparse_reshape.name)], 1)
+        self.check_users(sparse_reshape, [(OpType.Slice, None),
+                                          (OpType.GatherV2, None),
+                                          (OpType.SparseReshape, None),
+                                          (OpType.SparseReshape, None),
+                                          (OpType.Cast, None)], 5)
+        slice_1, gather_v2, sparse_reshape_2 = sparse_reshape.users[:3]
+        self.check_users(slice_1, [(OpType.Prod, None)], 1)
+        prod = slice_1.users[0]
+        self.check_users(prod, [(OpType.Pack, None)], 1)
+        pack_op_1 = prod.users[0]
+        self.check_users(gather_v2, [(OpType.Pack, pack_op_1.name)], 1)
+        self.check_users(sparse_reshape_2,
+                         [(OpType.GatherV2, gather_v2_1.name),
+                          (OpType.Identity, None)], 2)
+        identity_3 = sparse_reshape_2.users[1]
+        self.check_users(identity_3, [(OpType.SparseFillEmptyRows, None)], 1)
+        sparse_fill_empty_rows = identity_3.users[0]
+        self.check_users(
+            gather_v2_1,
+            [(OpType.SparseFillEmptyRows, sparse_fill_empty_rows.name)], 1)
+        self.check_users(
+            gather_v2_2,
+            [(OpType.SparseFillEmptyRows, sparse_fill_empty_rows.name)], 1)
+
+        index = node.get_index()
+        self.graph.nodes.insert(
+            index + 1,
+            CustomNode(
+                'RecEmbeddingV1',
+                sparse_fill_empty_rows.name + '/rec_embed_v1', self.graph,
+                sparse_fill_empty_rows.output_shapes[:3] +
+                [sparse_reshape.output_shapes[1]], node.operands[:1],
+                string_to_hash_bucket_fast.attrs,
+                sparse_fill_empty_rows.users + [sparse_reshape.users[4]]))
+
+        self.replace_all_users_with(sparse_reshape, 1,
+                                    self.graph.nodes[index + 1], 3)
+        self.replace_all_users_with(sparse_fill_empty_rows, 0,
+                                    self.graph.nodes[index + 1], 0)
+        self.replace_all_users_with(sparse_fill_empty_rows, 1,
+                                    self.graph.nodes[index + 1], 1)
+        self.replace_all_users_with(sparse_fill_empty_rows, 2,
+                                    self.graph.nodes[index + 1], 2)
+
+        fused_ops = [
+            expand_dim, node, not_equal, where_op, gather_nd,
+            string_to_hash_bucket_fast, identity, identity_2, greater_equal,
+            where_op_2, reshape, gather_v2_1, gather_v2_2, shape_op, cast_op,
+            strideslice_op, pack_op, cast_op_1, sparse_reshape, slice_1, prod,
+            gather_v2, pack_op_1, sparse_reshape_2, identity_3,
+            sparse_fill_empty_rows
+        ]
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)

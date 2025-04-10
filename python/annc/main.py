@@ -3,6 +3,7 @@ import argparse
 from optimize.rec_embedding import EmbeddingV1PatternRewriter
 from optimize.rec_embedding import EmbeddingV2PatternRewriter
 from optimize.rec_embedding import EmbeddingV3PatternRewriter
+from optimize.rec_embedding import LinearEmbeddingV1PatternRewriter
 from optimize.graph import MetaGraph
 
 
@@ -16,16 +17,21 @@ def parse_args():
                         '--output',
                         required=True,
                         help='Output model path')
-    parser.add_argument('--passes',
-                        nargs='+',
-                        help='opt: \'--rec-v1\', \'--rec-v2\', \'--rec-v3\'')
+    parser.add_argument(
+        '--passes',
+        nargs='+',
+        help=
+        'opt: \'--sparse-v1\', \'--sparse-v2\', \'--sparse-v3\','
+        ' \'--linear-v1\''
+    )
     return parser.parse_args()
 
 
 OPT_PASSES = {
-    '--rec-v1': EmbeddingV1PatternRewriter,
-    '--rec-v2': EmbeddingV2PatternRewriter,
-    '--rec-v3': EmbeddingV3PatternRewriter,
+    '--sparse-v1': EmbeddingV1PatternRewriter,
+    '--sparse-v2': EmbeddingV2PatternRewriter,
+    '--sparse-v3': EmbeddingV3PatternRewriter,
+    '--linear-v1': LinearEmbeddingV1PatternRewriter,
 }
 
 
