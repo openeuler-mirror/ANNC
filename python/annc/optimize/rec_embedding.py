@@ -476,6 +476,8 @@ class EmbeddingV3PatternRewriter(BaseRewriter):
         for rep_op in replace_ops:
             self.replace_all_users_with(*rep_op, self.graph.nodes[index + 1],
                                         0)
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
 
 
 class LinearEmbeddingV1PatternRewriter(BaseRewriter):
