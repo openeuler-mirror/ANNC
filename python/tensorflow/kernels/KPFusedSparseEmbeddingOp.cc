@@ -7,7 +7,7 @@
 #include "tensorflow/core/platform/fingerprint.h"
 using namespace tensorflow;
 
-REGISTER_OP("RecEmbeddingV1")
+REGISTER_OP("KPFusedSparseEmbedding")
     .Input("placeholder: string")
     .Attr("num_buckets: int >= 1")
     .Output("output_indices: int64")
@@ -16,9 +16,9 @@ REGISTER_OP("RecEmbeddingV1")
     .Output("output_shape: int64")
     .SetShapeFn(shape_inference::UnknownShape);
 
-class RecEmbeddingV1Op : public OpKernel {
+class KPFusedSparseEmbeddingOp : public OpKernel {
  public:
-  explicit RecEmbeddingV1Op(OpKernelConstruction* context) : OpKernel(context) {
+  explicit KPFusedSparseEmbeddingOp(OpKernelConstruction* context) : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("num_buckets", &num_buckets_));
   }
 
@@ -83,5 +83,5 @@ class RecEmbeddingV1Op : public OpKernel {
   int64_t num_buckets_;
 };
 
-REGISTER_KERNEL_BUILDER(Name("RecEmbeddingV1").Device(DEVICE_CPU),
-                        RecEmbeddingV1Op);
+REGISTER_KERNEL_BUILDER(Name("KPFusedSparseEmbedding").Device(DEVICE_CPU),
+                        KPFusedSparseEmbeddingOp);

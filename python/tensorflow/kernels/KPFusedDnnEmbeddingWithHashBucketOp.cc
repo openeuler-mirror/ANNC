@@ -7,16 +7,16 @@
 #include "tensorflow/core/platform/fingerprint.h"
 using namespace tensorflow;
 
-REGISTER_OP("RecEmbeddingV2")
+REGISTER_OP("KPFusedDnnEmbeddingWithHashBucket")
     .Input("placeholder: string")
     .Input("variable: float")
     .Attr("num_buckets: int >= 1")
     .Output("output: float")
     .SetShapeFn(shape_inference::UnknownShape);
 
-class RecEmbeddingV2Op : public OpKernel {
+class KPFusedDnnEmbeddingWithHashBucketOp : public OpKernel {
  public:
-  explicit RecEmbeddingV2Op(OpKernelConstruction* context) : OpKernel(context) {
+  explicit KPFusedDnnEmbeddingWithHashBucketOp(OpKernelConstruction* context) : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("num_buckets", &num_buckets_));
   }
 
@@ -62,5 +62,5 @@ class RecEmbeddingV2Op : public OpKernel {
   int64_t num_buckets_;
 };
 
-REGISTER_KERNEL_BUILDER(Name("RecEmbeddingV2").Device(DEVICE_CPU),
-                        RecEmbeddingV2Op);
+REGISTER_KERNEL_BUILDER(Name("KPFusedDnnEmbeddingWithHashBucket").Device(DEVICE_CPU),
+                        KPFusedDnnEmbeddingWithHashBucketOp);
