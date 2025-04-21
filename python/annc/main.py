@@ -1,10 +1,11 @@
 import os
 import argparse
-from optimize.rec_embedding import EmbeddingV1PatternRewriter
-from optimize.rec_embedding import EmbeddingV2PatternRewriter
-from optimize.rec_embedding import EmbeddingV3PatternRewriter
-from optimize.rec_embedding import LinearEmbeddingV1PatternRewriter
-from optimize.graph import MetaGraph
+from annc.optimize.rec_embedding import DnnSparseEmbeddingPatternRewriter
+from annc.optimize.rec_embedding import DnnEmbeddingWithHashBucketPatternRewriter
+from annc.optimize.rec_embedding import EmbeddingPatternRewriter
+from annc.optimize.rec_embedding import EmbeddingWithHashBucketPatternRewriter
+from annc.optimize.rec_embedding import LinearSparseEmbeddingPatternRewriter
+from annc.optimize.graph import MetaGraph
 
 
 def parse_args():
@@ -20,18 +21,17 @@ def parse_args():
     parser.add_argument(
         'passes',
         nargs='+',
-        help=
-        'opt: \'sparse-v1\', \'sparse-v2\', \'sparse-v3\','
-        ' \'linear-v1\''
-    )
+        help='opt: \'dnn_sparse\', \'dnn_hash_bucket\', \'embed\','
+        ' \'embed_hash_bucket\', \'linear_sparse\'')
     return parser.parse_args()
 
 
 OPT_PASSES = {
-    'sparse-v1': EmbeddingV1PatternRewriter,
-    'sparse-v2': EmbeddingV2PatternRewriter,
-    'sparse-v3': EmbeddingV3PatternRewriter,
-    'linear-v1': LinearEmbeddingV1PatternRewriter,
+    'dnn_sparse': DnnSparseEmbeddingPatternRewriter,
+    'dnn_hash_bucket': DnnEmbeddingWithHashBucketPatternRewriter,
+    'embed': EmbeddingPatternRewriter,
+    'embed_hash_bucket': EmbeddingWithHashBucketPatternRewriter,
+    'linear_sparse': LinearSparseEmbeddingPatternRewriter,
 }
 
 

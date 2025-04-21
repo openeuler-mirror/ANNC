@@ -9,3 +9,4 @@ github
 proxy
 
 __pycache__
+*.whl

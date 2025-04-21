@@ -62,23 +62,17 @@ class Attr:
 
 class CustomAttr:
 
-    def __init__(self, key, type, value):
+    def __init__(self, key, value):
         self.key: str = key
-        self.type = type
         self.value = value
 
     def __str__(self) -> str:
         return f'''attr {{
   key: "{self.key}"
   value {{
-    tensor {{
-      dtype: {self.type}
-      tensor_shape {{
-      }}
-      int64_val: {self.value}
-    }}
+    {self.value}
   }}
-}}'''
+}}\n'''
 
 
 class Node:
