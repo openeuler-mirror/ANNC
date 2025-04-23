@@ -19,3 +19,8 @@ cc_library(
     name = "optimizer_util",
     hdrs = ["optimizer_util.h"]
 )
+
+cc_library(
+    name = "blas_util",
+    hdrs = ["blas_util.h"]
+)

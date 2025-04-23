@@ -15,10 +15,12 @@ cc_library(
         "//annc/service:hlo_util",
         "//annc/service:optimizer_util",
         "//annc/service:kdnn_util",
+        "//annc/service:blas_util",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/service:hlo_pass",
         "@xla//xla/service:custom_call_target_registry",
         "@xla//xla/service:pattern_matcher",
+        "@openblas//:openblas"
     ],
 )
 
@@ -30,6 +32,7 @@ cc_binary(
         "//annc/service:hlo_util",
         "//annc/service:optimizer_util",
         "//annc/service:kdnn_util",
+        "//annc/service:blas_util",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/service:hlo_pass",
         "@xla//xla/service:custom_call_target_registry",

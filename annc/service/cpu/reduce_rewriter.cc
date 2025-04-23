@@ -2,15 +2,8 @@
 #include <cmath>
 
 #include "annc/service/kdnn_util.h"
+#include "annc/service/blas_util.h"
 #include "kdnn_rewriter.h"
-
-#if defined(ANNC_ENABLED_KDNN)
-#include <kblas/kblas.h>
-#endif
-
-#if defined(ANNC_ENABLED_OPENBLAS)
-#include <openblas/cblas.h>
-#endif
 
 namespace xla {
 namespace cpu {
