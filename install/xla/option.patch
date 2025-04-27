@@ -1,24 +1,20 @@
-diff --git a/xla/xla.proto b/xla/xla.proto
-index 7e01954..f3beb77 100644
---- a/xla/xla.proto
-+++ b/xla/xla.proto
-@@ -531,6 +531,11 @@ message DebugOptions {
-   // is enabled, the pipeline will use tiling, fusion, peeling, vectorization
-   // instead.
-   bool xla_cpu_enable_mlir_tiling_and_fusion = 184;
-+  bool xla_cpu_enable_concat_optimization = 256;
-+  bool xla_cpu_use_matmul_library = 257;
-+  bool xla_cpu_enable_output_tensor_reuse = 258;
-+  bool xla_cpu_enable_concat_removal = 259;
-+  bool xla_cpu_enable_concat_canonicalization = 260;
- 
-   // XLA:CPU-Next tiling parameters for matmul.
-   bool xla_cpu_enable_custom_matmul_tiling = 195;
 diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
-index 31722bf..d070de6 100644
+index 6063f17..7982ab2 100644
 --- a/xla/debug_options_flags.cc
 +++ b/xla/debug_options_flags.cc
-@@ -161,6 +161,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+@@ -93,9 +93,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+   // flag.
+   opts.set_xla_gpu_enable_cublaslt(false);
+ 
+-  // TODO(b/258036887): Create separate flags for enabling cuBLAS, cuDNN, and
+-  // NCCL in GPU graphs.
+-  opts.set_xla_gpu_graph_level(1);
++  // TODO(b/258036887): Enable gpu_graph_level=3.
++  opts.set_xla_gpu_graph_level(2);
+   opts.set_xla_gpu_graph_num_runs_to_instantiate(-1);
+   opts.set_xla_gpu_enable_persistent_temp_buffers(false);
+   opts.set_xla_gpu_graph_min_graph_size(5);
+@@ -162,6 +161,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
        std::numeric_limits<int64_t>::max());
  
    opts.set_xla_cpu_enable_mlir_tiling_and_fusion(true);
@@ -29,7 +25,7 @@ index 31722bf..d070de6 100644
    opts.set_xla_cpu_enable_custom_matmul_tiling(false);
    opts.set_xla_cpu_matmul_tiling_m_dim(8);
    opts.set_xla_cpu_matmul_tiling_n_dim(8);
-@@ -1067,6 +1071,33 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+@@ -1076,6 +1079,33 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
        bool_setter_for(&DebugOptions::set_xla_cpu_enable_mlir_tiling_and_fusion),
        debug_options->xla_cpu_enable_mlir_tiling_and_fusion(),
        "Enable MLIR tiling and fusion."));
@@ -63,3 +59,19 @@ index 31722bf..d070de6 100644
    flag_list->push_back(tsl::Flag(
        "xla_cpu_enable_mlir_fusion_outlining",
        bool_setter_for(&DebugOptions::set_xla_cpu_enable_mlir_fusion_outlining),
+diff --git a/xla/xla.proto b/xla/xla.proto
+index 7399600..d7601ac 100644
+--- a/xla/xla.proto
++++ b/xla/xla.proto
+@@ -532,6 +532,11 @@ message DebugOptions {
+   // is enabled, the pipeline will use tiling, fusion, peeling, vectorization
+   // instead.
+   bool xla_cpu_enable_mlir_tiling_and_fusion = 184;
++  bool xla_cpu_enable_concat_optimization = 258;
++  bool xla_cpu_use_matmul_library = 259;
++  bool xla_cpu_enable_output_tensor_reuse = 260;
++  bool xla_cpu_enable_concat_removal = 261;
++  bool xla_cpu_enable_concat_canonicalization = 262;
+ 
+   // XLA:CPU-Next tiling parameters for matmul.
+   bool xla_cpu_enable_custom_matmul_tiling = 195;

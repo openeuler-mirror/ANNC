@@ -200,22 +200,23 @@ index 7ac8499..1a51f9e 100644
  #include "thlo/transforms/thlo_passes.h.inc"
  
 diff --git a/xla/mlir_hlo/thlo/transforms/thlo_passes.td b/xla/mlir_hlo/thlo/transforms/thlo_passes.td
-index be0bdf4..8f02cda 100644
+index be0bdf4..d0095e4 100644
 --- a/xla/mlir_hlo/thlo/transforms/thlo_passes.td
 +++ b/xla/mlir_hlo/thlo/transforms/thlo_passes.td
-@@ -21,4 +21,11 @@ def ThloLegalizeSortPass : Pass<"thlo-legalize-sort", "func::FuncOp"> {
-   let constructor = "createLegalizeSortPass()";
-   let dependentDialects = ["arith::ArithDialect", "memref::MemRefDialect",
-                            "scf::SCFDialect"];
--}
-+}
-+
+@@ -15,6 +15,13 @@ limitations under the License.
+
+ include "mlir/Pass/PassBase.td"
+
 +def ThloLegalizeConcatPass : Pass<"thlo-legalize-concat", "func::FuncOp"> {
 +  let summary =
 +    "Legalize from THLO concat on tensors to MLIR upstream tensor.concat.";
 +  let constructor = "createLegalizeConcatPass()";
 +  let dependentDialects = ["tensor::TensorDialect"];
 +}
++
+ def ThloLegalizeSortPass : Pass<"thlo-legalize-sort", "func::FuncOp"> {
+   let summary =
+     "Legalize from THLO sort with buffer semantics to SCF control flow.";
 diff --git a/xla/mlir_hlo/transforms/bufferize_pass.cc b/xla/mlir_hlo/transforms/bufferize_pass.cc
 index 9c2d3e4..07c5d5b 100644
 --- a/xla/mlir_hlo/transforms/bufferize_pass.cc
