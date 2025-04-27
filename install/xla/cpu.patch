@@ -1,61 +1,55 @@
-diff --git a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
-index 5e2649621f..09f1c0e8a7 100644
---- a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
-+++ b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
-@@ -43,6 +43,7 @@ GmlStCPUTilingOptions getDefaultCPUPipelineOptions(StringRef cpuName,
-   opts.statsDetailLevel = statsDetailLevel;
-   opts.fuseDegenerateReshapes = false;
-   opts.inlineFusionClusters = true;
-+  opts.outputTensorReuse = false;
-   return opts;
- }
- 
-@@ -97,6 +98,9 @@ void addCPUTilingPipeline(OpPassManager& pm,
-   pm.addNestedPass<FuncOp>(createScalarizationPass());
-   pm.addNestedPass<FuncOp>(createComposeExtractInsertSlicePass());
- 
-+  if (options.outputTensorReuse)
-+    pm.addPass(createReuseOutputTensorPass());
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index e519cf0..e27b369 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ -261,6 +261,20 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+   xla::cpu::HloXlaRuntimePipelineOptions options;
+   options.enable_tiling_and_fusion =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
++  options.enable_concat_optimization =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_optimization();
++  options.use_matmul_library =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_matmul_library();
++  options.enable_output_tensor_reuse =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_output_tensor_reuse();
++  options.enable_concat_removal =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_removal();
++  options.enable_concat_canonicalization =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_canonicalization();
 +
-   pm.addPass(createCanonicalizerPass());
- 
-   // Remove transformed labels after tiling all ops.
-diff --git a/xla/mlir_hlo/gml_st/transforms/passes.h b/xla/mlir_hlo/gml_st/transforms/passes.h
-index 12b02debc7..ef3c2aa671 100644
---- a/xla/mlir_hlo/gml_st/transforms/passes.h
-+++ b/xla/mlir_hlo/gml_st/transforms/passes.h
-@@ -111,6 +111,9 @@ createFusionPlanningForCpuPass(int64_t vectorSize = 8);
- /// Pass to outline fusion regions into functions.
- std::unique_ptr<OperationPass<mlir::ModuleOp>> createFusionOutliningPass();
- 
-+/// Pass to reuse output tensors in gml.st_fusion ops.
-+std::unique_ptr<OperationPass<mlir::ModuleOp>> createReuseOutputTensorPass();
++  if (options.enable_concat_optimization) {
++    options.sparse_bufferization = false;
++  }
+   if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
+     options.matmul_tile_sizes = {
+         xla::GetDebugOptionsFromFlags().xla_cpu_matmul_tiling_m_dim(),
+@@ -270,6 +284,12 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+   options.experimental_deallocation =
+       xla::GetDebugOptionsFromFlags()
+           .xla_cpu_enable_experimental_deallocation();
++  if (options.use_matmul_library) {
++    // Experimental deallocation segfaults if we
++    // enable xla_cpu_use_matmul_library.
++    options.experimental_deallocation = false;
++  }
 +
- /// Pass to inline fusion clusters.
- std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>
- createInlineFusionClustersPass();
-@@ -156,6 +159,7 @@ struct GmlStCPUTilingOptions
-     this->statsDetailLevel = opts.statsDetailLevel;
-     this->cpuName = opts.cpuName;
-     this->inlineFusionClusters = opts.inlineFusionClusters;
-+    this->outputTensorReuse = opts.outputTensorReuse;
-   }
+   options.enable_avx2 = [&] {
+     // Derive whether this is an x86 CPU with AVX2 enabled.
+     if (!target_triple.isX86()) return false;
+@@ -876,7 +896,10 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+   pipeline.AddPass<ReshapeDecomposer>();
  
-   Option<int64_t> vectorSize{*this, "vector-size",
-@@ -228,6 +232,11 @@ struct GmlStCPUTilingOptions
-       *this, "inline-fusion-clusters",
-       llvm::cl::desc("Inline fusion clusters at the end of the pipeline."),
-       llvm::cl::init(true)};
-+
-+  Option<bool> outputTensorReuse{
-+      *this, "output-tensor-reuse",
-+      llvm::cl::desc("Reuse output tensors in gml.st_fusion ops."),
-+      llvm::cl::init(false)};
- };
+   // Add a fusion pass now that layout assignment is done.
+-  pipeline.AddPass<CpuInstructionFusion>();
++  if (getenv("XLA_ORCJIT_DISABLE_FUSION") == NULL)
++    pipeline.AddPass<CpuInstructionFusion>();
++  else
++    std::cout << "WARNING: Disabling CpuInstructionFusion\n";
  
- // Returns default "optimized" tiling parameters.
+   // The LayoutAssignment pass may leave behind kCopy instructions which are
+   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
 diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
-index fc2c13fb1c..9b6c2be6ab 100644
+index fc2c13f..87b2f76 100644
 --- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
 +++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
 @@ -36,12 +36,14 @@ limitations under the License.
@@ -169,12 +163,12 @@ index fc2c13fb1c..9b6c2be6ab 100644
                              options.xla_cpu_sparse_cuda_threads);
    } else {
 -    pm.addPass(mlir::hlo::createOneShotBufferizePass());
-+    pm.addPass(mlir::hlo::createOneShotBufferizePass(false));
++    pm.addPass(mlir::hlo::createOneShotBufferizePass(options.enable_concat_optimization));
 +    if (options.enable_concat_optimization) {
 +      // Tiling the linalg copy by 1 makes the linalg.copy work on contiguous
 +      // data, which significantly improves copy performance.
-+      // pm.addPass(mlir::hlo::createTileLinalgCopyPass(1));
-+      // pm.addNestedPass<mlir::func::FuncOp>(mlir::hlo::createLinalgCopyToMemrefPass());
++      pm.addPass(mlir::hlo::createTileLinalgCopyPass(1));
++      pm.addNestedPass<mlir::func::FuncOp>(mlir::hlo::createLinalgCopyToMemrefPass());
 +      pm.addNestedPass<mlir::func::FuncOp>(
 +        mlir::bufferization::createBufferDeallocationPass());
 +    }
@@ -189,3 +183,41 @@ index fc2c13fb1c..9b6c2be6ab 100644
    mlir::arith::registerBufferizableOpInterfaceExternalModels(dialects);
    mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
        dialects);
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.h b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+index b77436c..e6f6db6 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.h
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+@@ -32,6 +32,11 @@ namespace cpu {
+ struct HloXlaRuntimePipelineOptions {
+   bool enable_tiling_and_fusion = false;
+   bool enable_fusion_outlining = true;
++  bool enable_concat_optimization = true;
++  bool use_matmul_library = false;
++  bool enable_output_tensor_reuse = false;
++  bool enable_concat_removal = false;
++  bool enable_concat_canonicalization = false;
+   bool remove_copies_to_outparams = true;
+   bool sparse_bufferization = true;
+   bool experimental_deallocation = false;
+diff --git a/xla/service/cpu/runtime_matmul_common.h b/xla/service/cpu/runtime_matmul_common.h
+index a08be9d..e226325 100644
+--- a/xla/service/cpu/runtime_matmul_common.h
++++ b/xla/service/cpu/runtime_matmul_common.h
+@@ -69,8 +69,15 @@ void MatMul(const void* run_options_ptr, T* out, T* lhs, T* rhs, int64_t m,
+   // Matrix multiply is a special case of the "contract" operation where
+   // the contraction is performed along dimension 1 of the lhs and dimension
+   // 0 of the rhs.
+-  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
+-  C.device(*run_options->intra_op_thread_pool()) = A.contract(B, dims);
++
++  // If run_options_ptr is null, this is being called from LLJIT, so just run
++  // the contraction directly without using the thread pool.
++  if (run_options_ptr == nullptr)
++    C = A.contract(B, dims);
++  else {
++    XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++    C.device(*run_options->intra_op_thread_pool()) = A.contract(B, dims);
++  }
+ }
+ 
+ template <typename T, Eigen::AlignmentType Alignment>

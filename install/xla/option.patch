@@ -1,0 +1,65 @@
+diff --git a/xla/xla.proto b/xla/xla.proto
+index 7e01954..f3beb77 100644
+--- a/xla/xla.proto
++++ b/xla/xla.proto
+@@ -531,6 +531,11 @@ message DebugOptions {
+   // is enabled, the pipeline will use tiling, fusion, peeling, vectorization
+   // instead.
+   bool xla_cpu_enable_mlir_tiling_and_fusion = 184;
++  bool xla_cpu_enable_concat_optimization = 256;
++  bool xla_cpu_use_matmul_library = 257;
++  bool xla_cpu_enable_output_tensor_reuse = 258;
++  bool xla_cpu_enable_concat_removal = 259;
++  bool xla_cpu_enable_concat_canonicalization = 260;
+ 
+   // XLA:CPU-Next tiling parameters for matmul.
+   bool xla_cpu_enable_custom_matmul_tiling = 195;
+diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
+index 31722bf..d070de6 100644
+--- a/xla/debug_options_flags.cc
++++ b/xla/debug_options_flags.cc
+@@ -161,6 +161,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+       std::numeric_limits<int64_t>::max());
+ 
+   opts.set_xla_cpu_enable_mlir_tiling_and_fusion(true);
++  opts.set_xla_cpu_enable_concat_optimization(false);
++  opts.set_xla_cpu_enable_concat_removal(false);
++  opts.set_xla_cpu_enable_concat_canonicalization(false);
++  opts.set_xla_cpu_use_matmul_library(false);
+   opts.set_xla_cpu_enable_custom_matmul_tiling(false);
+   opts.set_xla_cpu_matmul_tiling_m_dim(8);
+   opts.set_xla_cpu_matmul_tiling_n_dim(8);
+@@ -1067,6 +1071,33 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+       bool_setter_for(&DebugOptions::set_xla_cpu_enable_mlir_tiling_and_fusion),
+       debug_options->xla_cpu_enable_mlir_tiling_and_fusion(),
+       "Enable MLIR tiling and fusion."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_concat_optimization",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_optimization),
++      debug_options->xla_cpu_enable_concat_optimization(),
++      "Enable concat optimization."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_concat_removal",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_removal),
++      debug_options->xla_cpu_enable_concat_removal(),
++      "Enable concat removal."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_concat_canonicalization",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_concat_canonicalization),
++      debug_options->xla_cpu_enable_concat_canonicalization(),
++      "Enable concat canonicalization."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_use_matmul_library",
++      bool_setter_for(&DebugOptions::set_xla_cpu_use_matmul_library),
++      debug_options->xla_cpu_use_matmul_library(),
++      "Replace mhlo.dot and mhlo.dot_general with library calls to "
++      "an external library."));
++  flag_list->push_back(tsl::Flag(
++      "xla_cpu_enable_output_tensor_reuse",
++      bool_setter_for(&DebugOptions::set_xla_cpu_enable_output_tensor_reuse),
++      debug_options->xla_cpu_enable_output_tensor_reuse(),
++      "Replace the output tensor of gml.st_fusion ops with the "
++      "input tensor when shape matches and it is legal to do so."));
+   flag_list->push_back(tsl::Flag(
+       "xla_cpu_enable_mlir_fusion_outlining",
+       bool_setter_for(&DebugOptions::set_xla_cpu_enable_mlir_fusion_outlining),

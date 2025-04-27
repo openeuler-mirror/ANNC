@@ -1,0 +1,14 @@
+diff --git a/xla/mlir/runtime/transforms/jit_compiler.cc b/xla/mlir/runtime/transforms/jit_compiler.cc
+index d3eab83..01a2e9b 100644
+--- a/xla/mlir/runtime/transforms/jit_compiler.cc
++++ b/xla/mlir/runtime/transforms/jit_compiler.cc
+@@ -62,6 +62,9 @@ static bool DebugJitCompiler() {
+ #if defined(DEBUG_XLA_RUNTIME_COMPILER)
+   return true;
+ #endif
++  char * dump_env_var = getenv("XLA_DUMP_MLIR");
++  if (dump_env_var != NULL)
++    return true;
+   return VLOG_IS_ON(5);
+ }
+ 
