@@ -208,7 +208,6 @@ index be0bdf4..8f02cda 100644
    let dependentDialects = ["arith::ArithDialect", "memref::MemRefDialect",
                             "scf::SCFDialect"];
 -}
-\ No newline at end of file
 +}
 +
 +def ThloLegalizeConcatPass : Pass<"thlo-legalize-concat", "func::FuncOp"> {
