@@ -29,15 +29,16 @@ class KPFusedDnnEmbeddingWithHashBucketOp : public OpKernel {
     int64 dim_0 = input.size();
     int64 dim_1 = variable.dimension(1);
 
-    std::vector<std::vector<float>> output(dim_0, std::vector<float>(dim_1, 0));
+    std::vector<float> output(dim_0 * dim_1, 0);
 
     for (int64 i = 0; i < input.size(); ++i) {
       if (input(i) != "") {
         uint64 hash_value = Fingerprint64(input(i).data());
-        int64 x = hash_value % num_buckets_;
-        if (x >= 0 && x < variable.dimension(0)) {
+        int64 bucket_idx = hash_value % num_buckets_;
+        if (bucket_idx >= 0 && bucket_idx < variable.dimension(0)) {
+          int64 base = i * dim_1;
           for (int64 j = 0; j < dim_1; ++j) {
-            output[i][j] = variable(x, j);
+            output[base + j] = variable(bucket_idx, j);
           }
         }
       } else {
@@ -50,12 +51,8 @@ class KPFusedDnnEmbeddingWithHashBucketOp : public OpKernel {
                    context->allocate_output(0, TensorShape({dim_0, dim_1}),
                                             &output_tensor));
 
-    auto output_matrix = output_tensor->matrix<float>();
-    for (int64 i = 0; i < dim_0; ++i) {
-      for (int64 j = 0; j < dim_1; ++j) {
-        output_matrix(i, j) = output[i][j];
-      }
-    }
+    auto output_flat = output_tensor->flat<float>();
+    std::copy(output.begin(), output.end(), output_flat.data());
   }
 
  private:
