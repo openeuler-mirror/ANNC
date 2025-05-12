@@ -37,7 +37,3 @@ setup(name=project,
               f'{project}-apply-tf = scripts.install:tf_install',
           ],
       })
-
-shutil.rmtree('build')
-shutil.rmtree(f'{project}.egg-info')
-shutil.rmtree('./scripts/patches')
