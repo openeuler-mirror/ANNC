@@ -1,0 +1,12 @@
+.vscode
+.venv
+
+bazel-*
+output
+
+github
+
+proxy
+
+__pycache__
+*.whl
