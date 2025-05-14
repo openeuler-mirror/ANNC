@@ -3,7 +3,7 @@ workspace(name = "aicompiler")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//tools:version_check.bzl", "check_bazel_version_at_least")
 
-check_bazel_version_at_least("6.1.0")
+check_bazel_version_at_least("5.3.0")
 
 load("//third_party:repo.bzl", "load_openblas")
 
@@ -12,7 +12,16 @@ load_openblas()
 http_archive(
     name = "xla",
     patch_args = ["-p1"],
-    patches = ["//install:openxla.patch"],
+    patches = [
+        "//install:openxla.patch",
+        "//install:llvm.patch",
+        "//install/llvm:annc1.patch",
+        "//install/llvm:annc2.patch",
+        "//install/llvm:annc3.patch",
+        "//install/llvm:annc4.patch",
+        "//install/llvm:concat.patch",
+        "//install/xla:mlir_hlo.patch",
+    ],
     sha256 = "90e72fa3558a69cf2562e4600e62c478d22c3986c642d7dcdc7ef0841ded52c5",
     strip_prefix = "xla-40008cb2c85749ae436be61c40d3279cb24705c7",
     urls = [

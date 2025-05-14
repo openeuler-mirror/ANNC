@@ -1,0 +1,115 @@
+diff --git a/xla/mlir/runtime/transforms/rt_to_llvm.cc b/xla/mlir/runtime/transforms/rt_to_llvm.cc
+index f08d70e..0628de3 100644
+--- a/xla/mlir/runtime/transforms/rt_to_llvm.cc
++++ b/xla/mlir/runtime/transforms/rt_to_llvm.cc
+@@ -480,11 +480,110 @@ class CallOpLowering : public OpConversionPattern<CallOp> {
+         ret_encoding_(ret_encoding),
+         encoded_args_(encoded_args) {}
+ 
++  Value GenerateCallForMatmul(CallOp op, OpAdaptor adaptor,
++                              ConversionPatternRewriter &rewriter,
++                              StringAttr stringAttr) const {
++    // We need collect CallOp operand to prepare for annc matmul function.
++    // annc matmul  fucntion argument:
++    // %arg1 type is llvm.ptr for writeOperand
++    // %arg2 type is llvm.ptr for 4 x llvm.ptr fill with (lhs, rhs, lhs shape,
++    // rhs-shape);
++    //
++    // CallOp operand: %0 is memref lhs; %1 is memref rhs;
++    // %2 is lhs shape info -- memref 4xi64  [m, n, dim1, dim0]
++    // %3 is  rhs shape info -- memref 4xi64  [n, k, dim1, dim0]
++    Location loc = op->getLoc();
++    auto newOperands = adaptor.getOperands();
++    auto typeConverter = getTypeConverter();
++    // auto zero = rewriter.create<LLVM::ConstantOp>(loc,
++    // rewriter.getI64IntegerAttr(0)); step1: prepare operands for annc __matmul
++    // function
++    Value writeOperand =
++        rewriter.create<LLVM::ExtractValueOp>(loc, newOperands[5], 1);
++
++    auto inputTy = LLVM::LLVMArrayType::get(
++        LLVM::LLVMPointerType::get(rewriter.getContext()), 4);
++    Value input = rewriter.create<LLVM::UndefOp>(loc, inputTy);
++
++    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
++    auto one =
++        rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI32IntegerAttr(1));
++    Value inputPtr =
++        rewriter.create<LLVM::AllocaOp>(loc, ptrType, inputTy, one);
++
++    auto extract_value = [&](Value value) {
++      return rewriter.create<LLVM::ExtractValueOp>(loc, value, 1);
++    };
++    auto insert_value = [&](Value value, int64_t offset) {
++      input = rewriter.create<LLVM::InsertValueOp>(loc, input, value, offset);
++    };
++    // First operand of callop is something related to context which is unused
++    // here
++    Value lhs = extract_value(newOperands[1]);
++    insert_value(lhs, 0);
++    Value rhs = extract_value(newOperands[2]);
++    insert_value(rhs, 1);
++    Value lhsShape = extract_value(newOperands[3]);
++    insert_value(lhsShape, 2);
++    Value rhsShape = extract_value(newOperands[4]);
++    insert_value(rhsShape, 3);
++    rewriter.create<LLVM::StoreOp>(loc, input, inputPtr);
++
++    // step2: create matmul function declaration
++    func::FuncOp parentFuncOp = op->getParentOfType<func::FuncOp>();
++    rewriter.setInsertionPoint(parentFuncOp);
++    auto newFuncType =
++        FunctionType::get(rewriter.getContext(),
++                          {writeOperand.getType(), inputPtr.getType()}, {});
++    std::string mangleFuncName;
++    if (stringAttr == "__matmul")
++      mangleFuncName = "_ZN3xla3cpu8__matmulEPvPPKv";
++    else if (stringAttr == "__batch_matmul")
++      mangleFuncName = "_ZN3xla3cpu14__batch_matmulEPvPPKv";
++    else
++      assert(false && "unsupported annc function name");
++    func::FuncOp anncMatmulFunc =
++        sym_table_.lookup<func::FuncOp>(mangleFuncName);
++    if (anncMatmulFunc == nullptr) {
++      anncMatmulFunc = rewriter.create<func::FuncOp>(
++          parentFuncOp.getLoc(), mangleFuncName, newFuncType);
++      anncMatmulFunc.setSymVisibilityAttr(rewriter.getStringAttr("private"));
++      sym_table_.insert(anncMatmulFunc);
++    }
++
++    // step3: create matmul fuction caller
++    SmallVector<Value> operands;
++    operands.push_back(writeOperand);
++    operands.push_back(inputPtr);
++    rewriter.setInsertionPoint(op);
++    rewriter.create<func::CallOp>(loc, anncMatmulFunc, operands);
++    Value status = rewriter.create<LLVM::ConstantOp>(
++        loc, rewriter.getI1Type(), rewriter.getBoolAttr(true));
++    return status;
++  }
++
+   LogicalResult matchAndRewrite(
+       CallOp op, OpAdaptor adaptor,
+       ConversionPatternRewriter &rewriter) const override {
+     ImplicitLocOpBuilder b(op.getLoc(), rewriter);
+ 
++    auto target_attr = [](NamedAttribute attr) -> bool {
++      return attr.getName() == "call_target_name";
++    };
++    llvm::SmallVector<NamedAttribute> custom_call_target_attrs =
++        llvm::to_vector(llvm::make_filter_range(op->getAttrs(), target_attr));
++    if (custom_call_target_attrs.size() == 1) {
++      auto custom_call_target_name = custom_call_target_attrs[0].getValue();
++      if (auto stringAttr = dyn_cast<StringAttr>(custom_call_target_name)) {
++        if (stringAttr == "__matmul" || stringAttr == "__batch_matmul") {
++          Value newStatus =
++              GenerateCallForMatmul(op, adaptor, rewriter, stringAttr);
++          rewriter.replaceOp(op, newStatus);
++          return success();
++        }
++      }
++    }
++
+     // Reuse allocas for encoding custom call arguments.
+     Allocas allocas = allocas_.GetForOperation(op);
+ 

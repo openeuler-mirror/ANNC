@@ -1,0 +1,223 @@
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index e519cf0..e27b369 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ -261,6 +261,20 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+   xla::cpu::HloXlaRuntimePipelineOptions options;
+   options.enable_tiling_and_fusion =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
++  options.enable_concat_optimization =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_optimization();
++  options.use_matmul_library =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_matmul_library();
++  options.enable_output_tensor_reuse =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_output_tensor_reuse();
++  options.enable_concat_removal =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_removal();
++  options.enable_concat_canonicalization =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_concat_canonicalization();
++
++  if (options.enable_concat_optimization) {
++    options.sparse_bufferization = false;
++  }
+   if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
+     options.matmul_tile_sizes = {
+         xla::GetDebugOptionsFromFlags().xla_cpu_matmul_tiling_m_dim(),
+@@ -270,6 +284,12 @@ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+   options.experimental_deallocation =
+       xla::GetDebugOptionsFromFlags()
+           .xla_cpu_enable_experimental_deallocation();
++  if (options.use_matmul_library) {
++    // Experimental deallocation segfaults if we
++    // enable xla_cpu_use_matmul_library.
++    options.experimental_deallocation = false;
++  }
++
+   options.enable_avx2 = [&] {
+     // Derive whether this is an x86 CPU with AVX2 enabled.
+     if (!target_triple.isX86()) return false;
+@@ -876,7 +896,10 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+   pipeline.AddPass<ReshapeDecomposer>();
+ 
+   // Add a fusion pass now that layout assignment is done.
+-  pipeline.AddPass<CpuInstructionFusion>();
++  if (getenv("XLA_ORCJIT_DISABLE_FUSION") == NULL)
++    pipeline.AddPass<CpuInstructionFusion>();
++  else
++    std::cout << "WARNING: Disabling CpuInstructionFusion\n";
+ 
+   // The LayoutAssignment pass may leave behind kCopy instructions which are
+   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.cc b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+index fc2c13f..87b2f76 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.cc
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.cc
+@@ -36,12 +36,14 @@ limitations under the License.
+ #include "mlir/Dialect/Linalg/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
++#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h" // from @llvm-project
+ #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/Shape/Transforms/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/SparseTensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Dialect/SparseTensor/Transforms/Passes.h"  // from @llvm-project
+ #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
++#include "mlir/Dialect/Tensor/Transforms/Passes.h" // from @llvm-project
+ #include "mlir/Dialect/Vector/Transforms/BufferizableOpInterfaceImpl.h"  // from @llvm-project
+ #include "mlir/Pass/PassManager.h"  // from @llvm-project
+ #include "mlir/Transforms/Passes.h"  // from @llvm-project
+@@ -59,6 +61,15 @@ limitations under the License.
+ #include "tsl/platform/errors.h"
+ #include "tsl/platform/logging.h"
+ 
++#include "mlir/Pass/Pass.h"
++
++namespace mlir {
++namespace tensor {
++  std::unique_ptr<Pass> createConcatRemovalPass();
++  std::unique_ptr<Pass> createDecomposeTensorConcatPass();
++} // namespace tensor
++} // namespace mlir
++
+ namespace xla {
+ namespace cpu {
+ namespace {
+@@ -135,12 +146,27 @@ void AddSparsificationPassPipeline(mlir::OpPassManager& pm) {
+ 
+ }  // namespace
+ 
++static Status CheckHloXlaRuntimePipelineOptionsLegality(HloXlaRuntimePipelineOptions options) {
++  if (getenv("XLA_PROFILE_FUSION_CLUSTER") != NULL) {
++    if (!options.enable_tiling_and_fusion || !options.enable_fusion_outlining)
++      return absl::InternalError("profiling was requested with XLA_PROFILE_FUSION_CLUSTER, but tiling_and_fusion and/or fusion_outlining are disabled");
++  }
++  if (!options.enable_tiling_and_fusion && options.enable_output_tensor_reuse)
++    return absl::InternalError("cannot apply output_tensor_reuse with tiling_and_fusion disabled");
++  return absl::OkStatus();
++}
++
+ // -------------------------------------------------------------------------- //
+ // Assemble a HLO XLA Runtime pipeline to lower from HLO to Linalg on buffers.
+ // -------------------------------------------------------------------------- //
+ 
+ static Status CreateHloXlaPipeline(
+     mlir::OpPassManager& pm, const HloXlaRuntimePipelineOptions& options) {
++  // First, make sure that the passed options are legal.
++  Status legalOptions = CheckHloXlaRuntimePipelineOptionsLegality(options);
++  if (!legalOptions.ok())
++    return legalOptions;
++
+   // Resolve all shape constraints (e.g. broadcast constraints that can be
+   // proved statically and changed to const witness) early to allow more
+   // efficient broadcast operations moving.
+@@ -173,6 +199,11 @@ static Status CreateHloXlaPipeline(
+         mlir::mhlo::createSparseRewritingPass());
+   }
+ 
++  if (options.use_matmul_library) {
++    // Lower dot operations to function library calls
++    pm.addPass(mlir::hlo::createDotToFunctionCallPass());
++  }
++
+   // Transform HLO operations to Linalg.
+   pm.addNestedPass<mlir::func::FuncOp>(
+       mlir::mhlo::createLegalizeControlFlowPass());
+@@ -198,7 +229,24 @@ static Status CreateHloXlaPipeline(
+   pm.addPass(mlir::mhlo::createConvertToSignlessPass());
+ 
+   // Tile tHLO ops to 1.
+-  if (!options.enable_tiling_and_fusion) {
++  if (options.enable_concat_optimization || options.enable_concat_removal || options.enable_concat_canonicalization) {
++    // Instead of tiling by one the thlo.concat (thus generating an
++    // elementwise memory copy), replace it with a tensor.concat.
++    pm.addNestedPass<mlir::func::FuncOp>(mlir::thlo::createLegalizeConcatPass());
++
++    // If more than one optimization is enabled, then, in this order, we:
++    // 1. Try to canonicalize tensor_insert slices into the concat.
++    // 2. Try to remove (or simplify) concat.
++    // 3. Optimize concat lowering.
++    if (options.enable_concat_canonicalization)
++      pm.addPass(mlir::tensor::createSimplifyTensorConcatPass());
++    if (options.enable_concat_removal)
++      pm.addPass(mlir::tensor::createConcatRemovalPass());
++
++    // Lower concat into a tensor.empty plus a set of insert_slice ops.
++    pm.addPass(mlir::tensor::createDecomposeTensorConcatPass());
++  }
++  else {
+     pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createTileByOnePass());
+   }
+ 
+@@ -221,6 +269,8 @@ static Status CreateHloXlaPipeline(
+         mlir::gml_st::getDefaultCPUPipelineOptions(options.cpu_name);
+     opts.matmulTileSizes = options.matmul_tile_sizes;
+     opts.inlineFusionClusters = false;
++    if (options.enable_output_tensor_reuse)
++      opts.outputTensorReuse = true;
+     mlir::gml_st::addCPUTilingPipeline(pm, opts);
+   } else {
+     pm.addNestedPass<mlir::func::FuncOp>(
+@@ -260,7 +310,15 @@ static Status CreateHloXlaPipeline(
+     AddSparsificationPasses(pm, options.experimental_deallocation,
+                             options.xla_cpu_sparse_cuda_threads);
+   } else {
+-    pm.addPass(mlir::hlo::createOneShotBufferizePass());
++    pm.addPass(mlir::hlo::createOneShotBufferizePass(options.enable_concat_optimization));
++    if (options.enable_concat_optimization) {
++      // Tiling the linalg copy by 1 makes the linalg.copy work on contiguous
++      // data, which significantly improves copy performance.
++      pm.addPass(mlir::hlo::createTileLinalgCopyPass(1));
++      pm.addNestedPass<mlir::func::FuncOp>(mlir::hlo::createLinalgCopyToMemrefPass());
++      pm.addNestedPass<mlir::func::FuncOp>(
++        mlir::bufferization::createBufferDeallocationPass());
++    }
+   }
+   pm.addNestedPass<mlir::func::FuncOp>(createRewriteReallocToAllocPass());
+ 
+@@ -344,6 +402,7 @@ Status CreateDefaultHloXlaRuntimePipeline(xla::runtime::PassManager& passes) {
+ }
+ 
+ void RegisterHloXlaRuntimePipelineDialects(mlir::DialectRegistry& dialects) {
++  mlir::memref::registerAllocationOpInterfaceExternalModels(dialects);
+   mlir::arith::registerBufferizableOpInterfaceExternalModels(dialects);
+   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+       dialects);
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.h b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+index b77436c..e6f6db6 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.h
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+@@ -32,6 +32,11 @@ namespace cpu {
+ struct HloXlaRuntimePipelineOptions {
+   bool enable_tiling_and_fusion = false;
+   bool enable_fusion_outlining = true;
++  bool enable_concat_optimization = true;
++  bool use_matmul_library = false;
++  bool enable_output_tensor_reuse = false;
++  bool enable_concat_removal = false;
++  bool enable_concat_canonicalization = false;
+   bool remove_copies_to_outparams = true;
+   bool sparse_bufferization = true;
+   bool experimental_deallocation = false;
+diff --git a/xla/service/cpu/runtime_matmul_common.h b/xla/service/cpu/runtime_matmul_common.h
+index a08be9d..e226325 100644
+--- a/xla/service/cpu/runtime_matmul_common.h
++++ b/xla/service/cpu/runtime_matmul_common.h
+@@ -69,8 +69,15 @@ void MatMul(const void* run_options_ptr, T* out, T* lhs, T* rhs, int64_t m,
+   // Matrix multiply is a special case of the "contract" operation where
+   // the contraction is performed along dimension 1 of the lhs and dimension
+   // 0 of the rhs.
+-  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
+-  C.device(*run_options->intra_op_thread_pool()) = A.contract(B, dims);
++
++  // If run_options_ptr is null, this is being called from LLJIT, so just run
++  // the contraction directly without using the thread pool.
++  if (run_options_ptr == nullptr)
++    C = A.contract(B, dims);
++  else {
++    XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++    C.device(*run_options->intra_op_thread_pool()) = A.contract(B, dims);
++  }
+ }
+ 
+ template <typename T, Eigen::AlignmentType Alignment>

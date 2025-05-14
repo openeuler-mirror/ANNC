@@ -1,0 +1,326 @@
+diff --git a/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc b/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
+index 3c9d735..7543ccb 100644
+--- a/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
++++ b/xla/mlir_hlo/deallocation/transforms/buffer_reuse.cc
+@@ -513,6 +513,12 @@ void promoteBuffers(Block& block) {
+ 
+ struct BufferReusePass : public impl::BufferReusePassBase<BufferReusePass> {
+   void runOnOperation() override {
++    func::FuncOp func = dyn_cast<func::FuncOp>(getOperation());
++    assert(func);
++    // Do not run the pass on bodiless functions
++    if (func.isDeclaration())
++      return;
++
+     bool result;
+     auto& block = getOperation().getBody().front();
+     // Copy elimination requires small live-ranges to work well. We only extend
+diff --git a/xla/mlir_hlo/deallocation/transforms/deallocate.cc b/xla/mlir_hlo/deallocation/transforms/deallocate.cc
+index 90a1ed0..1007981 100644
+--- a/xla/mlir_hlo/deallocation/transforms/deallocate.cc
++++ b/xla/mlir_hlo/deallocation/transforms/deallocate.cc
+@@ -127,6 +127,9 @@ Value Deallocator::findOwnershipIndicator(Value v) {
+ LogicalResult Deallocator::transformModuleOp(ModuleOp op) {
+   LogicalResult result = success();
+   op.walk([&](func::FuncOp funcOp) {
++    if (funcOp.isDeclaration())
++      return WalkResult::advance();
++
+     if (failed(transformFuncOp(funcOp))) {
+       result = failure();
+       return WalkResult::interrupt();
+@@ -212,6 +215,15 @@ FailureOr<TransformResult> Deallocator::transformBlock(Block& block,
+ 
+   TransformResult blockResult;
+   for (auto& op : llvm::make_early_inc_range(block.without_terminator())) {
++    if (auto callOp = llvm::dyn_cast<func::CallOp>(op)) {
++      auto callee = llvm::cast<func::FuncOp>(
++        callOp->getParentOfType<ModuleOp>().lookupSymbol(callOp.getCallee()));
++      // If the op is a call op to a bodiless function, skip it, since we will
++      // not be able to transform the function body (since it is not present).
++      if (callee.isDeclaration())
++        continue;
++    }
++
+     auto opResult = transformOp(&op, ownedMemrefs);
+     if (failed(opResult)) return failure();
+     // Remove released memrefs.
+diff --git a/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc b/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
+index 0d0bf7a..ed73303 100644
+--- a/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
++++ b/xla/mlir_hlo/deallocation/transforms/split_alloc_tensors.cc
+@@ -55,7 +55,12 @@ void splitAllocTensors(Block& block) {
+ struct SplitAllocTensorsPass
+     : public impl::SplitAllocTensorsPassBase<SplitAllocTensorsPass> {
+   void runOnOperation() override {
+-    splitAllocTensors(getOperation().getBody().front());
++    func::FuncOp func = dyn_cast<func::FuncOp>(getOperation());
++    assert(func);
++
++    // Do not run the pass on bodiless functions
++    if (!func.isDeclaration())
++      splitAllocTensors(getOperation().getBody().front());
+   }
+ };
+ 
+diff --git a/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc b/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
+index 398d78c..4c424aa 100644
+--- a/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
++++ b/xla/mlir_hlo/gml_st/interfaces/bufferizable_op_interface_impl.cc
+@@ -29,6 +29,10 @@ namespace mlir {
+ namespace gml_st {
+ namespace {
+ 
++// TODO: Use the hasLabel and kElementwiseLabel from the original place rather than copy/pasting it.
++bool hasLabel(Operation *op, StringRef name) { return op->hasAttr(name); }
++constexpr llvm::StringRef kElementwiseLabel = "__elementwise_label__";
++
+ using mlir::bufferization::AliasingOpOperandList;
+ using mlir::bufferization::AliasingValueList;
+ using mlir::bufferization::AnalysisState;
+@@ -77,6 +81,16 @@ struct FusionOpBufferizationInterface
+     return true;
+   }
+ 
++  bool isNotConflicting(Operation *op, OpOperand *uRead,
++                        OpOperand *uConflictingWrite,
++                        const AnalysisState &state) const {
++    // There are no conflicts in element-wise operations.
++    // This idea is already implemented upstream, see:
++    // https://github.com/llvm/llvm-project/commit/5468340
++    FusionOp fusionOp = cast<FusionOp>(op);
++    return hasLabel(fusionOp, kElementwiseLabel);
++  }
++
+   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                           const BufferizationOptions &options) const {
+     // Take a guard before anything else.
+diff --git a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+index 5e26496..09f1c0e 100644
+--- a/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
++++ b/xla/mlir_hlo/gml_st/transforms/cpu_tiling/cpu_tiling_pipeline.cc
+@@ -43,6 +43,7 @@ GmlStCPUTilingOptions getDefaultCPUPipelineOptions(StringRef cpuName,
+   opts.statsDetailLevel = statsDetailLevel;
+   opts.fuseDegenerateReshapes = false;
+   opts.inlineFusionClusters = true;
++  opts.outputTensorReuse = false;
+   return opts;
+ }
+ 
+@@ -97,6 +98,9 @@ void addCPUTilingPipeline(OpPassManager& pm,
+   pm.addNestedPass<FuncOp>(createScalarizationPass());
+   pm.addNestedPass<FuncOp>(createComposeExtractInsertSlicePass());
+ 
++  if (options.outputTensorReuse)
++    pm.addPass(createReuseOutputTensorPass());
++
+   pm.addPass(createCanonicalizerPass());
+ 
+   // Remove transformed labels after tiling all ops.
+diff --git a/xla/mlir_hlo/gml_st/transforms/passes.h b/xla/mlir_hlo/gml_st/transforms/passes.h
+index 12b02de..ef3c2aa 100644
+--- a/xla/mlir_hlo/gml_st/transforms/passes.h
++++ b/xla/mlir_hlo/gml_st/transforms/passes.h
+@@ -111,6 +111,9 @@ createFusionPlanningForCpuPass(int64_t vectorSize = 8);
+ /// Pass to outline fusion regions into functions.
+ std::unique_ptr<OperationPass<mlir::ModuleOp>> createFusionOutliningPass();
+ 
++/// Pass to reuse output tensors in gml.st_fusion ops.
++std::unique_ptr<OperationPass<mlir::ModuleOp>> createReuseOutputTensorPass();
++
+ /// Pass to inline fusion clusters.
+ std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>
+ createInlineFusionClustersPass();
+@@ -156,6 +159,7 @@ struct GmlStCPUTilingOptions
+     this->statsDetailLevel = opts.statsDetailLevel;
+     this->cpuName = opts.cpuName;
+     this->inlineFusionClusters = opts.inlineFusionClusters;
++    this->outputTensorReuse = opts.outputTensorReuse;
+   }
+ 
+   Option<int64_t> vectorSize{*this, "vector-size",
+@@ -228,6 +232,11 @@ struct GmlStCPUTilingOptions
+       *this, "inline-fusion-clusters",
+       llvm::cl::desc("Inline fusion clusters at the end of the pipeline."),
+       llvm::cl::init(true)};
++
++  Option<bool> outputTensorReuse{
++      *this, "output-tensor-reuse",
++      llvm::cl::desc("Reuse output tensors in gml.st_fusion ops."),
++      llvm::cl::init(false)};
+ };
+ 
+ // Returns default "optimized" tiling parameters.
+diff --git a/xla/mlir_hlo/gml_st/transforms/passes.td b/xla/mlir_hlo/gml_st/transforms/passes.td
+index ce462a3..b84492b 100644
+--- a/xla/mlir_hlo/gml_st/transforms/passes.td
++++ b/xla/mlir_hlo/gml_st/transforms/passes.td
+@@ -242,6 +242,12 @@ def FusionOutliningPass : Pass<"gml-fusion-outlining", "mlir::ModuleOp"> {
+   let constructor = "createFusionOutliningPass()";
+ }
+ 
++def ReuseOutputTensorPass : Pass<"gml-st-reuse-output-tensor", "mlir::ModuleOp"> {
++  let summary = "Replace the output tensor of gml.st_fusion ops with the"
++                " input tensor when shape matches and it is legal to do so.";
++  let constructor = "createReuseOutputTensorPass()";
++}
++
+ def InlineFusionClustersPass :
+     Pass<"gml-st-inline-fusion-clusters", "mlir::func::FuncOp"> {
+   let summary = "Replaces all gml_st.fusion op with ops from the region.";
+diff --git a/xla/mlir_hlo/thlo/transforms/CMakeLists.txt b/xla/mlir_hlo/thlo/transforms/CMakeLists.txt
+index d582d86..41a8c6c 100644
+--- a/xla/mlir_hlo/thlo/transforms/CMakeLists.txt
++++ b/xla/mlir_hlo/thlo/transforms/CMakeLists.txt
+@@ -34,5 +34,6 @@ add_mlir_library(ThloPasses
+   MLIRMemRefDialect
+   MLIRPass
+   MLIRSCFDialect
++  MLIRTensorDialect
+   MLIRTransforms
+ )
+diff --git a/xla/mlir_hlo/thlo/transforms/passes.h b/xla/mlir_hlo/thlo/transforms/passes.h
+index 7ac8499..1a51f9e 100644
+--- a/xla/mlir_hlo/thlo/transforms/passes.h
++++ b/xla/mlir_hlo/thlo/transforms/passes.h
+@@ -32,11 +32,15 @@ class FuncOp;
+ namespace thlo {
+ 
+ #define GEN_PASS_DECL_THLOLEGALIZESORTPASS
++#define GEN_PASS_DECL_THLOLEGALIZECONCATPASS
+ #include "thlo/transforms/thlo_passes.h.inc"
+ 
+ /// Lowers sort to Arith, MemRef, and SCF
+ std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeSortPass();
+ 
++/// Lowers sort to Vector
++std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeConcatPass();
++
+ #define GEN_PASS_REGISTRATION
+ #include "thlo/transforms/thlo_passes.h.inc"
+ 
+diff --git a/xla/mlir_hlo/thlo/transforms/thlo_passes.td b/xla/mlir_hlo/thlo/transforms/thlo_passes.td
+index be0bdf4..d0095e4 100644
+--- a/xla/mlir_hlo/thlo/transforms/thlo_passes.td
++++ b/xla/mlir_hlo/thlo/transforms/thlo_passes.td
+@@ -15,6 +15,13 @@ limitations under the License.
+
+ include "mlir/Pass/PassBase.td"
+
++def ThloLegalizeConcatPass : Pass<"thlo-legalize-concat", "func::FuncOp"> {
++  let summary =
++    "Legalize from THLO concat on tensors to MLIR upstream tensor.concat.";
++  let constructor = "createLegalizeConcatPass()";
++  let dependentDialects = ["tensor::TensorDialect"];
++}
++
+ def ThloLegalizeSortPass : Pass<"thlo-legalize-sort", "func::FuncOp"> {
+   let summary =
+     "Legalize from THLO sort with buffer semantics to SCF control flow.";
+diff --git a/xla/mlir_hlo/transforms/bufferize_pass.cc b/xla/mlir_hlo/transforms/bufferize_pass.cc
+index 9c2d3e4..07c5d5b 100644
+--- a/xla/mlir_hlo/transforms/bufferize_pass.cc
++++ b/xla/mlir_hlo/transforms/bufferize_pass.cc
+@@ -217,6 +217,14 @@ struct ComputeOpAndFuncBufferizePass
+ 
+ struct OneShotBufferizePass
+     : public impl::OneShotBufferizeBase<OneShotBufferizePass> {
++  private:
++    bool useLinalgCopyFn;
++
++  public:
++    OneShotBufferizePass(bool useLinalgCopyFn_) {
++      useLinalgCopyFn = useLinalgCopyFn_;
++    }
++
+   // TODO(b/173201243): Move to tablegen.
+   void getDependentDialects(DialectRegistry& registry) const override {
+     registry.insert<bufferization::BufferizationDialect, lmhlo::LmhloDialect,
+@@ -255,6 +263,16 @@ struct OneShotBufferizePass
+     opts.inferFunctionResultLayout = false;
+     opts.bufferAlignment = 64;
+ 
++    if (useLinalgCopyFn) {
++      opts.setFunctionBoundaryTypeConversion(
++          bufferization::LayoutMapOption::IdentityLayoutMap);
++      // Equivalent to memcpy_op=linalg.copy
++      opts.memCpyFn = [](OpBuilder &b, Location loc, Value from, Value to) {
++        b.create<linalg::CopyOp>(loc, from, to);
++        return success();
++      };
++    }
++
+     ModuleOp module = getOperation();
+     if (failed(bufferization::runOneShotModuleBufferize(module, opts))) {
+       signalPassFailure();
+@@ -359,8 +377,8 @@ struct FinalBufferizePass
+ }  // namespace
+ 
+ namespace hlo {
+-std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass() {
+-  return std::make_unique<OneShotBufferizePass>();
++std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass(bool useLinalgCopyFn) {
++  return std::make_unique<OneShotBufferizePass>(useLinalgCopyFn);
+ }
+ }  // namespace hlo
+ 
+diff --git a/xla/mlir_hlo/transforms/passes.h b/xla/mlir_hlo/transforms/passes.h
+index d18c603..ed124ed 100644
+--- a/xla/mlir_hlo/transforms/passes.h
++++ b/xla/mlir_hlo/transforms/passes.h
+@@ -106,7 +106,13 @@ void registerTestHloTransformDialectEraseSchedulePass();
+ void registerTestHloTransformDialectInterpreterPass();
+ 
+ namespace hlo {
+-std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass();
++std::unique_ptr<OperationPass<ModuleOp>> createOneShotBufferizePass(bool useLinalgCopyFn);
++
++std::unique_ptr<Pass> createDotToFunctionCallPass();
++
++std::unique_ptr<Pass> createTileLinalgCopyPass(int tileSize);
++
++std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>> createLinalgCopyToMemrefPass();
+ 
+ std::unique_ptr<OperationPass<ModuleOp>> createGenericHostToLLVMPass(
+     const GenericHostToLLVMPassOptions& options = {});
+diff --git a/xla/mlir_hlo/transforms/passes.td b/xla/mlir_hlo/transforms/passes.td
+index b532491..07ddef0 100644
+--- a/xla/mlir_hlo/transforms/passes.td
++++ b/xla/mlir_hlo/transforms/passes.td
+@@ -100,7 +100,7 @@ def LowerIndexCastPass
+ 
+ def OneShotBufferize : Pass<"hlo-one-shot-bufferize", "ModuleOp"> {
+   let summary = "One shot bufferization pass.";
+-  let constructor = "hlo::createOneShotBufferizePass()";
++  let constructor = "hlo::createOneShotBufferizePass(false)";
+ }
+ 
+ def ComputeOpAndFuncBufferizePass : Pass<"computeop-and-func-bufferize", "ModuleOp"> {
+@@ -158,6 +158,27 @@ def UnbufferizePass : Pass<"unbufferize", "mlir::func::FuncOp"> {
+   let constructor = "hlo::createUnbufferizePass()";
+ }
+ 
++def DotToFunctionCallPass : Pass<"dot-to-function-call"> {
++  let summary = "Lower MHLO dot and dot_general ops to a function call";
++  let constructor = "hlo::createDotToFunctionCallPass()";
++  let dependentDialects = [
++    "tensor::TensorDialect",
++    "::mlir::memref::MemRefDialect",
++    "bufferization::BufferizationDialect"];
++}
++
++def TileLinalgCopyPass : Pass<"tile-linalg-copy"> {
++  let summary = "Tiles linalg copy ops by 1.";
++  let constructor = "hlo::createTileLinalgCopyPass(1)";
++  let dependentDialects = ["linalg::LinalgDialect", "scf::SCFDialect"];
++}
++
++def LinalgCopyToMemrefPass : Pass<"linalg-copy-to-memref", "func::FuncOp"> {
++  let summary = "Rewrites a linalg.copy on memrefs to a memref.copy.";
++  let constructor = "hlo::createLinalgCopyToMemrefPass()";
++  let dependentDialects = ["linalg::LinalgDialect"];
++}
++
+ def UnrollLoopsPass : Pass<"unroll-loops"> {
+   let summary = "Unrolls scf.for loops with small static iteration counts.";
+   let constructor = "hlo::createUnrollLoopsPass()";

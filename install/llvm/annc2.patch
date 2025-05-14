@@ -1,0 +1,40 @@
+diff --git a/third_party/tsl/third_party/llvm/annc2.patch b/third_party/tsl/third_party/llvm/annc2.patch
+new file mode 100644
+index 0000000..0cb2a54
+--- /dev/null
++++ b/third_party/tsl/third_party/llvm/annc2.patch
+@@ -0,0 +1,34 @@
++diff --git a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h b/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h
++index 48f9066934a2..d2dd95416241 100644
++--- a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h
+++++ b/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.h
++@@ -24,6 +24,9 @@ std::unique_ptr<Pass> createFoldTensorSubsetOpsPass();
++ /// Creates an instance of the `tensor` dialect bufferization pass.
++ std::unique_ptr<Pass> createTensorBufferizePass();
++ 
+++/// Creates an instance of the concat decomposition pass.
+++std::unique_ptr<Pass> createDecomposeTensorConcatPass();
+++
++ //===----------------------------------------------------------------------===//
++ // Registration
++ //===----------------------------------------------------------------------===//
++diff --git a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.td b/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.td
++index 4cc3844f2912..d30e5fcb604d 100644
++--- a/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.td
+++++ b/mlir/include/mlir/Dialect/Tensor/Transforms/Passes.td
++@@ -32,4 +32,15 @@ def TensorBufferize : Pass<"tensor-bufferize", "func::FuncOp"> {
++   let constructor = "mlir::tensor::createTensorBufferizePass()";
++ }
++ 
+++def DecomposeTensorConcat : Pass<"decompose-tensor-concat"> {
+++  let summary = "Decompose tensor.concat into a chain of tensor.insert_slice "
+++                "ops";
+++  let description = [{
+++    The pass decomposes tensor.concat ops into a chain of tensor.insert_slice
+++    operations inserting into a materialized destination.
+++  }];
+++  let constructor = "mlir::tensor::createDecomposeTensorConcatPass()";
+++  let dependentDialects = ["tensor::TensorDialect"];
+++}
+++
++ #endif // MLIR_DIALECT_TENSOR_TRANSFORMS_PASSES

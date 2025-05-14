@@ -1,0 +1,6 @@
+Patch Commit                                   Description
+annc1 d22f37f123462f65dbcff5bd3af01bdf71a7d1ae [mlir][tensor] Add a tensor.concat operation (#72779)
+annc2 540376151eb6e471b45c3ab4f4d6e62ff6cd8fec [mlir][tensor] Expose DecomposeTensorConcatOp as a pass
+annc3 3b20761abd21f7015aa6f2021a6ab33501a6fd93 [mlir][func] Fix multiple bugs in `DuplicateFunctionElimination` (#109571)
+annc4 -                                        Squash of xla-dev.pablo_dffm
+concat                                         Add concat relate pass

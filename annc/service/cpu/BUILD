@@ -24,6 +24,31 @@ cc_library(
     ],
 )
 
+genrule(
+    name = "generate_empty_hpc",
+    outs = ["dummy.c"],
+    cmd = "touch $@",
+)
+
+cc_binary(
+    name = "hpc.so",
+    srcs = [":dummy.c"],
+    linkshared = True,
+)
+
+cc_library(
+    name = "cambridge",
+    srcs = glob(["xla/*.cpp", "xla/*.cc", "llvm/*.cpp", "hpc.so"]),
+    linkstatic = True,
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@xla//xla/mlir_hlo:transforms_passes",
+        "@xla//xla/mlir_hlo:thlo_passes",
+        ":hpc.so"
+    ],
+)
+
 cc_binary(
     name = "libannc.so",
     srcs = glob(["*.cc", "*.h"]),
@@ -33,6 +58,7 @@ cc_binary(
         "//annc/service:optimizer_util",
         "//annc/service:kdnn_util",
         "//annc/service:blas_util",
+        ":cambridge",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/service:hlo_pass",
         "@xla//xla/service:custom_call_target_registry",
