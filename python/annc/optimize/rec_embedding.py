@@ -882,3 +882,9 @@ class LinearSparseEmbeddingPatternRewriter(BaseRewriter):
         ]
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
+
+class KPSoftmaxRewriter(BaseRewriter):
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.Softmax, None))
+        if node.attrs_contains(key="T", dtype="float32"):
+            node.type = "KPSoftmax"
