@@ -40,6 +40,10 @@ ENUM_DTYPE = {
     types_pb2.DT_BOOL: ('DT_BOOL', 'bool_val'),
 }
 
+ATTR_DTYPE = {
+    "float32": tf.float32.as_datatype_enum,
+}
+
 
 class Attr:
 
@@ -118,6 +122,11 @@ class Node:
             attrs.append(Attr(key, attr))
         return attrs
 
+    def attrs_contains(self, key, dtype):
+        for attr in self.attrs:
+            if attr.key == key and attr.type == ATTR_DTYPE.get(dtype):
+                return True
+        
     def __str__(self, indent: int = 6) -> str:
 
         def get_attr(k, a):
