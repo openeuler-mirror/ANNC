@@ -65,7 +65,7 @@ class KPFusedLinearEmbeddingWithHashBucketOp : public OpKernel {
   }
 
  private:
-  int64_t num_buckets_;
+  int64 num_buckets_;
 };
 
 REGISTER_KERNEL_BUILDER(
