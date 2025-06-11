@@ -69,16 +69,15 @@ index e519cf05..388af2b0 100644
 +
  Status CpuCompiler::RunHloPassesThroughLayoutAssn(
      HloModule* module, bool /*is_aot_compile*/,
-    LLVMTargetMachineFeatures* target_machine_features) {
-@@ -331,6 +339,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
-   
+     LLVMTargetMachineFeatures* target_machine_features) {
+@@ -331,6 +339,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+ 
    pipeline.AddPass<CpuInstructionFusion>();
  
-+
 +#if defined(ANNC_ENABLED_KDNN)
-+  KDnnFusionAfterHloLayoutAssign kdnn_fusion;
-+  kdnn_fusion.Run(module, {});
++  pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
 +#endif
 +
    return pipeline.Run(module).status();
  }
+ 
