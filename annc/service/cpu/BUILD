@@ -52,6 +52,7 @@ cc_library(
 cc_binary(
     name = "libannc.so",
     srcs = glob(["*.cc", "*.h"]),
+    copts = ["-fopenmp"],
     linkshared = True,
     deps = [
         "//annc/service:hlo_util",
