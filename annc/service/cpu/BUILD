@@ -59,6 +59,7 @@ cc_binary(
         "//annc/service:optimizer_util",
         "//annc/service:kdnn_util",
         "//annc/service:blas_util",
+        "//annc/service/bisheng-cpu:bisheng-cpu",
         ":cambridge",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/service:hlo_pass",
