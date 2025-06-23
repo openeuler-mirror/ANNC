@@ -1,7 +1,7 @@
 #include "annc/service/bisheng-cpu/reduce_combine.h"
-#include "xla/hlo/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_computation.h"
-#include "xla/service/pattern_match.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/pattern_matcher.h"
 #include <vector>
 
 namespace xla {

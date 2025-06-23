@@ -22,6 +22,7 @@ private:
   HloInstruction *hlo;
   HloInstruction *broadcast;
   HloInstruction *gather;
+  HloInstruction *mul;
   HloInstruction *select;
   HloInstruction *and0;
   HloInstruction *and1;

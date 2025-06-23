@@ -105,7 +105,7 @@ StatusOr<bool> ConcatPartition::Run(
 
       auto select_pattern =
           match::Select(&select, and_pattern, convert_1_pattern,
-                        match::Broadcast(match::Conatant()));
+                        match::Broadcast(match::Constant()));
       auto gather_pattern =
           match::Gather(&gather, match::Parameter(), select_pattern);
       // Match target patterns with concat + embedding + split graph
@@ -166,7 +166,7 @@ StatusOr<bool> ConcatPartition::Run(
       HloInstruction *newConcat = computation->AddInstruction(
           concat->CloneWithNewOperands(newConcatShape, newSlices));
       HloInstruction *newMul =
-          CreateEmbeddingV2(newConcat, change_dim, newSliceSize, computation);
+          CreateEmbeddingv2(newConcat, change_dim, newSliceSize, computation);
       // Step2: Replace back_slice of shape (? x 1) with embedding operator
       for (int i = 0; i < concatIndex.size(); i++) {
         int index = concatIndex[i];
@@ -179,7 +179,7 @@ StatusOr<bool> ConcatPartition::Run(
         HloInstruction *newSlice = computation->AddInstruction(
             HloInstruction::CreateSlice(slice->shape(), newMul, new_starts,
                                         new_limits, slice->slice_strides()));
-        TR_RETURN_IF_ERROR(computation->ReplaceInstruction(slice, newSlice));
+        TF_RETURN_IF_ERROR(computation->ReplaceInstruction(slice, newSlice));
       }
 
       // Step3: Process other slices with other different shape (? x ?)

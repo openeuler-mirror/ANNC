@@ -50,7 +50,7 @@ StatusOr<bool> EmbeddingSimplify::Run(
         continue;
 
       // ------------------ Run Optimization -------------------
-      HlOInstruction *gather_operand0 = gather->mutable_operand(0);
+      HloInstruction *gather_operand0 = gather->mutable_operand(0);
       auto gather_operand0_shape = gather_operand0->shape();
       auto gather_operand0_dim0 = gather_operand0_shape.mutable_dimensions()[0];
       auto new_gather_operand0_dim0 = gather_operand0_dim0 + 1;
@@ -74,9 +74,10 @@ StatusOr<bool> EmbeddingSimplify::Run(
             comp0->comparison_direction() == ComparisonDirection::kGe &&
             value1 == gather_operand0_dim0 &&
             comp1->comparison_direction() == ComparisonDirection::kLt) &&
-          !(value1 == 0 && comp1->comparison_direction() == ComparisonDirection
-            : kGe && value0 == gather_operand0_dim0 &&
-                  comp0->comparison_direction() == ComparisonDirection::kLt))
+          !(value1 == 0 &&
+            comp1->comparison_direction() == ComparisonDirection::kGe &&
+            value0 == gather_operand0_dim0 &&
+            comp0->comparison_direction() == ComparisonDirection::kLt))
         continue;
       VLOG(2) << "Embedding pass before opt: " << computation->ToString();
       HloInstruction *zero = computation->AddInstruction(
