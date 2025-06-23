@@ -1,6 +1,6 @@
 cc_library(
 	name ="bisheng-cpu",
-	srcs = glob([".cc"]),
+	srcs = glob(["*.cc"]),
 	hdrs = glob(["*.h"]),
 	linkstatic = True,
 	alwayslink = True,
