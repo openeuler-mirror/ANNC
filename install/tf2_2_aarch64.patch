@@ -1,0 +1,74 @@
+diff --git a/tensorflow/compiler/aot/BUILD b/tensorflow/compiler/aot/BUILD
+index dfbea9c4..7458c1b9 100644
+--- a/tensorflow/compiler/aot/BUILD
++++ b/tensorflow/compiler/aot/BUILD
+@@ -65,7 +65,8 @@ cc_library(
+         "@llvm-project//llvm:target",
+         "@llvm-project//llvm:x86_code_gen",  # fixdeps: keep
+     ] + if_llvm_aarch64_available([
+-        "//third_party/llvm/llvm-project/llvm:aarch64_target",  # fixdeps: keep
++        "@llvm-project//llvm:aarch64_code_gen",
++        # "//third_party/llvm/llvm-project/llvm:aarch64_target",  # fixdeps: keep
+     ]),
+ )
+ 
+@@ -106,7 +107,8 @@ cc_library(
+         "@llvm-project//llvm:target",
+         "@llvm-project//llvm:x86_code_gen",  # fixdeps: keep
+     ] + if_llvm_aarch64_available([
+-        "//third_party/llvm/llvm-project/llvm:aarch64_target",  # fixdeps: keep
++        "@llvm-project//llvm:aarch64_code_gen",
++        # "//third_party/llvm/llvm-project/llvm:aarch64_target",  # fixdeps: keep
+     ]),
+ )
+ 
+diff --git a/tensorflow/core/platform/default/build_config.bzl b/tensorflow/core/platform/default/build_config.bzl
+index dbb6ffdb..e035bec3 100644
+--- a/tensorflow/core/platform/default/build_config.bzl
++++ b/tensorflow/core/platform/default/build_config.bzl
+@@ -774,4 +774,5 @@ def tf_google_mobile_srcs_only_runtime():
+ def if_llvm_aarch64_available(then, otherwise = []):
+     # TODO(b/...): The TF XLA build fails when adding a dependency on
+     # @llvm/llvm-project/llvm:aarch64_target.
+-    return otherwise
++    # return otherwise
++    return then
+diff --git a/third_party/llvm/llvm.bzl b/third_party/llvm/llvm.bzl
+index f48cf84b..e952c417 100644
+--- a/third_party/llvm/llvm.bzl
++++ b/third_party/llvm/llvm.bzl
+@@ -306,7 +306,7 @@ llvm_all_cmake_vars = select({
+     "@org_tensorflow//tensorflow:macos": cmake_var_string(
+         _dict_add(
+             cmake_vars,
+-            llvm_target_cmake_vars("X86", "x86_64-apple-darwin"),
++            llvm_target_cmake_vars("AArch64", "aarch64-apple-darwin"),
+             posix_cmake_vars,
+             darwin_cmake_vars,
+         ),
+@@ -322,21 +322,21 @@ llvm_all_cmake_vars = select({
+     "@org_tensorflow//tensorflow:windows": cmake_var_string(
+         _dict_add(
+             cmake_vars,
+-            llvm_target_cmake_vars("X86", "x86_64-pc-win32"),
++            llvm_target_cmake_vars("AArch64", "aarch64-pc-win32"),
+             win32_cmake_vars,
+         ),
+     ),
+     "@org_tensorflow//tensorflow:freebsd": cmake_var_string(
+         _dict_add(
+             cmake_vars,
+-            llvm_target_cmake_vars("X86", "x86_64-unknown-freebsd"),
++            llvm_target_cmake_vars("AArch64", "aarch64-unknown-freebsd"),
+             posix_cmake_vars,
+         ),
+     ),
+     "//conditions:default": cmake_var_string(
+         _dict_add(
+             cmake_vars,
+-            llvm_target_cmake_vars("X86", "x86_64-unknown-linux_gnu"),
++            llvm_target_cmake_vars("AArch64", "aarch64-unknown-linux_gnu"),
+             posix_cmake_vars,
+             linux_cmake_vars,
+         ),
+ 

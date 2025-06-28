@@ -1,4 +1,4 @@
-#include "annc/service/hlo_util.h"
+#include "tensorflow/compiler/xla/ANNC/annc/service/hlo_util.h"
 #include "kdnn_rewriter.h"
 
 namespace xla {
@@ -87,14 +87,14 @@ bool fused_pooling(HloInstruction* select) {
 
   HloInstruction* root_instr = fusion->parent()->root_instruction();
   HloInstruction* slice_starts =
-      root_instr->AddInstruction(HloInstruction::CreateConstant(
-          LiteralUtil::CreateR1<int64_t>(slice->slice_starts())));
-  HloInstruction* slice_limits =
-      root_instr->AddInstruction(HloInstruction::CreateConstant(
-          LiteralUtil::CreateR1<int64_t>(slice->slice_limits())));
-  HloInstruction* shape_info_0 = root_instr->AddInstruction(
+      fusion->parent()->AddInstruction(HloInstruction::CreateConstant(
+          LiteralUtil::CreateR1<int64>(slice->slice_starts())));
+  HloInstruction* slice_limits = 
+      fusion->parent()->AddInstruction(HloInstruction::CreateConstant(
+          LiteralUtil::CreateR1<int64>(slice->slice_limits())));
+  HloInstruction* shape_info_0 = fusion->parent()->AddInstruction(
       HloInstruction::CreateConstant(get_param_info(fusion->operand(5))));
-  HloInstruction* shape_info_1 = root_instr->AddInstruction(
+  HloInstruction* shape_info_1 = fusion->parent()->AddInstruction(
       HloInstruction::CreateConstant(get_param_info(fusion->operand(3))));
   std::vector<HloInstruction*> operands = {fusion->mutable_operand(5),
                                            fusion->mutable_operand(3),
@@ -102,9 +102,9 @@ bool fused_pooling(HloInstruction* select) {
                                            slice_limits,
                                            shape_info_0,
                                            shape_info_1};
-  HloInstruction* custom_call = fusion->AddInstruction(
+  HloInstruction* custom_call = fusion->parent()->AddInstruction(
       HloInstruction::CreateCustomCall(fusion->shape(), operands, "__pooling"));
-  return parent->ReplaceInstruction(fusion, custom_call, false).ok();
+  return parent->ReplaceInstruction(fusion, custom_call).ok();
 }
 
 void register_pooling(std::vector<KDnnRewriter>& rewriters,

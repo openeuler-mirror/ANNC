@@ -1,6 +1,6 @@
 #include "kdnn_rewriter.h"
 
-#include "annc/service/hlo_util.h"
+#include "tensorflow/compiler/xla/ANNC/annc/service/hlo_util.h"
 
 namespace xla {
 namespace cpu {
@@ -38,7 +38,7 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
 }
 
 bool KDnnRewriter::execute(HloInstruction* instr) {
-  if (instr->HasControlDependencies()) return false;
+  // if (instr->HasControlDependencies()) return false;
   if (pattern_.custom_rewriter != nullptr) {
     return pattern_.custom_rewriter(instr);
   }
@@ -55,9 +55,9 @@ bool KDnnRewriter::execute(HloInstruction* instr) {
                                           fusion->operands().end());
     add_extra_operands(fusion, operands);
     HloInstruction* custom_call =
-        fusion->AddInstruction(HloInstruction::CreateCustomCall(
+        parent->AddInstruction(HloInstruction::CreateCustomCall(
             fusion->shape(), operands, pattern_.name));
-    return parent->ReplaceInstruction(fusion, custom_call, false).ok();
+    return parent->ReplaceInstruction(fusion, custom_call).ok();
   }
   return true;
 }
@@ -68,10 +68,9 @@ bool compare_rewriter(const KDnnRewriter& a, const KDnnRewriter& b) {
 
 #define RUN_KDNN_FUSION_PASS(pass_class, rewriter_visiter)               \
   StatusOr<bool> pass_class::Run(                                        \
-      HloModule* module,                                                 \
-      const absl::flat_hash_set<absl::string_view>& execution_threads) { \
+      HloModule* module) { \
     rewriter_visiter visitor;                                            \
-    return visitor.RunOnModule(module, execution_threads);               \
+    return visitor.RunOnModule(module);              \
   }
 
 RUN_KDNN_FUSION_PASS(KDnnFusionBeforeHloLayoutAssign,

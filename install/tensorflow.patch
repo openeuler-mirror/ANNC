@@ -2,90 +2,90 @@ diff --git a/tensorflow/core/grappler/optimizers/remapper.cc b/tensorflow/core/g
 index 3c37150f..7b9bf4f0 100644
 --- a/tensorflow/core/grappler/optimizers/remapper.cc
 +++ b/tensorflow/core/grappler/optimizers/remapper.cc
-@@ -3102,6 +3102,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+@@ -913,6 +913,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+   VLOG(2) << "Fuse " << contraction.op() << " with BiasAdd: "
            << " bias_add=" << bias_add.name()
            << " contraction=" << contraction.name();
- 
++ 
 +#if defined(DISABLE_TF_MATMUL_FUSION)
 +  if (IsMatMul(contraction)) {
 +    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++    return Status::OK();
 +  }
 +#endif
-+
+ 
    NodeDef fused_op;
    fused_op.set_name(bias_add.name());
-   fused_op.set_device(contraction.device());
-@@ -3200,6 +3207,13 @@ Status AddFusedContractionNode(
+@@ -952,6 +959,14 @@ Status AddFusedContractionNode(
+   const NodeDef& contraction = graph->node(matched.contraction);
    const NodeDef& bias_add = graph->node(matched.bias_add);
    const NodeDef& activation = graph->node(matched.activation);
- 
++ 
 +#if defined(DISABLE_TF_MATMUL_FUSION)
 +  if (IsMatMul(contraction)) {
 +    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++    return Status::OK();
 +  }
 +#endif
 +
    VLOG(2) << "Fuse " << contraction.op() << " with BiasAdd and "
            << activation.op() << ":"
            << " activation=" << activation.name()
-@@ -3396,6 +3410,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
-   DCHECK(IsConv2D(contraction) || IsMatMul(contraction) ||
-          IsConv3D(contraction));
+
+diff --git a/WORKSPACE b/WORKSPACE
+index ad645add..983dd9b0 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -24,6 +24,10 @@ load("@io_bazel_rules_closure//closure:defs.bzl", "closure_repositories")
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(contraction)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
-+  }
-+#endif
-+
-   NodeDef contraction_node;
-   const NodeDef& add = graph->node(matched.add);
-   contraction_node.set_name(add.name());
-@@ -3600,6 +3621,13 @@ Status AddFusedMatMulBiasAddAndGelu(
-   auto* matmul_node =
-       ctx->graph_view.GetNode(matched_nodes_map.at("matmul"))->node();
+ closure_repositories()
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(*matmul_node)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
-+  }
-+#endif
++load("//third_party/openblas:repo.bzl", "load_openblas")
 +
-   NodeDef fused_node;
-   // Fused node should have the name of terminal node of the fusion.
-   fused_node.set_name(output_node->name());
-diff --git a/third_party/xla/xla/service/cpu/BUILD b/third_party/xla/xla/service/cpu/BUILD
-index 6e0ea613..28550bcd 100644
---- a/third_party/xla/xla/service/cpu/BUILD
-+++ b/third_party/xla/xla/service/cpu/BUILD
-@@ -203,6 +203,7 @@ cc_library(
-     srcs = ["cpu_compiler.cc"],
-     hdrs = ["cpu_compiler.h"],
-     copts = tsl_copts(),
-+    linkopts = ["-L/user/lib64", "-lannc"],
-     visibility = ["//visibility:public"],
-     deps = [
-         ":buffer_info_util",
-diff --git a/third_party/xla/xla/service/cpu/cpu_compiler.cc b/third_party/xla/xla/service/cpu/cpu_compiler.cc
-index e519cf05..388af2b0 100644
---- a/third_party/xla/xla/service/cpu/cpu_compiler.cc
-+++ b/third_party/xla/xla/service/cpu/cpu_compiler.cc
-@@ -238,6 +238,10 @@ limitations under the License.
- #include "xla/service/cpu/onednn_rewriter.h"
- #endif
++load_openblas()
++
+ load("//third_party/toolchains/preconfig/generate:archives.bzl",
+      "bazel_toolchains_archive")
+ 
+diff --git a/tensorflow/compiler/xla/service/cpu/BUILD b/tensorflow/compiler/xla/service/cpu/BUILD
+index 7e1b8a1e..6e4988c4 100644
+--- a/tensorflow/compiler/xla/service/cpu/BUILD
++++ b/tensorflow/compiler/xla/service/cpu/BUILD
+@@ -116,6 +116,7 @@ cc_library(
+         ":target_machine_features",
+         "@com_google_absl//absl/base",
+         "@com_google_absl//absl/types:span",
++        "//tensorflow/compiler/xla/ANNC/annc/service/cpu:annc",
+         "//tensorflow/compiler/xla/service:copy_insertion",
+         "//tensorflow/compiler/xla/service:hlo_casting_utils",
+         "//tensorflow/compiler/xla/service:dump",
+@@ -175,6 +176,10 @@ cc_library(
+         "//tensorflow/compiler/xla/service/llvm_ir:llvm_util",
+         "//tensorflow/core:lib",
+         "//tensorflow/core:stream_executor_no_cuda",
++        # annc
++        "//tensorflow/compiler/xla/service:custom_call_target_registry",
++        "//tensorflow/compiler/xla/service:pattern_matcher",
++        # annc
+         "@llvm-project//llvm:core",
+         "@llvm-project//llvm:mc",
+         "@llvm-project//llvm:object",
+diff --git a/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc b/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
+index 8fbe29f4..ed3c408b 100644
+--- a/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
++++ b/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
+@@ -114,6 +114,10 @@ limitations under the License.
+ #include "tensorflow/compiler/xla/xla_data.pb.h"
+ #include "tensorflow/core/platform/dynamic_annotations.h"
  
 +#if defined(ANNC_ENABLED_KDNN)
 +#include <annc/kdnn_rewriter.h>
 +#endif
 +
- namespace {
- 
- // We need to explicitly load all the dialects we will involved in emitting the
-@@ -617,6 +621,10 @@ void AddHloVerifier(HloPassPipeline* pipeline, bool allow_sparse_shapes,
+ namespace xla {
+ namespace cpu {
+ using BufferInfo = cpu_function_runtime::BufferInfo;
+@@ -233,6 +237,10 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
  
  }  // namespace
  
@@ -94,18 +94,15 @@ index e519cf05..388af2b0 100644
 +#endif
 +
  Status CpuCompiler::RunHloPassesThroughLayoutAssn(
-     HloModule* module, bool is_aot_compile,
-     LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
-@@ -934,6 +942,12 @@ Status CpuCompiler::RunHloPasses(HloModule* module, bool is_aot_compile,
-   TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(
-       module, is_aot_compile, &target_machine_features, is_mlir_compile));
+     HloModule* module, bool /*is_aot_compile*/,
+     LLVMTargetMachineFeatures* target_machine_features) {
+@@ -331,6 +339,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
  
-+
+   pipeline.AddPass<CpuInstructionFusion>();
+ 
 +#if defined(ANNC_ENABLED_KDNN)
-+  KDnnFusionAfterHloLayoutAssign kdnn_fusion;
-+  kdnn_fusion.Run(module, {});
++  pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
 +#endif
 +
-   return RunHloPassesAfterLayoutAssn(module, is_aot_compile,
-                                      &target_machine_features, is_mlir_compile);
+   return pipeline.Run(module).status();
  }
