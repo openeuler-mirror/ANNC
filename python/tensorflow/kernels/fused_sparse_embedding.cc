@@ -27,15 +27,15 @@ class KPFusedSparseEmbeddingOp : public OpKernel {
     const Tensor& input_tensor = context->input(0);
     auto input = input_tensor.flat<tstring>();
 
-    std::vector<std::vector<int64_t>> indices;
-    std::vector<int64_t> value;
+    std::vector<std::vector<int64>> indices;
+    std::vector<int64> value;
     std::vector<bool> empty_value;
 
-    for (int64_t i = 0; i < input.size(); ++i) {
+    for (int64 i = 0; i < input.size(); ++i) {
       if (input(i) != "") {
         indices.push_back({i, 0});
-        uint64_t hash_value = Fingerprint64(input(i).data());
-        int64_t x = hash_value % num_buckets_;
+        uint64 hash_value = Fingerprint64(input(i).data());
+        int64 x = hash_value % num_buckets_;
         if (x > 0) {
           value.push_back(x);
           empty_value.push_back(false);
@@ -69,18 +69,18 @@ class KPFusedSparseEmbeddingOp : public OpKernel {
     Tensor* output_3 = nullptr;
     OP_REQUIRES_OK(context,
                    context->allocate_output(3, TensorShape({2}), &output_3));
-    output_3->flat<int64_t>()(0) = input.size();
-    output_3->flat<int64_t>()(1) = 1;
+    output_3->flat<int64>()(0) = input.size();
+    output_3->flat<int64>()(1) = 1;
     for (size_t i = 0; i < indices.size(); ++i) {
       output_matrix_0(i, 0) = indices[i][0];
       output_matrix_0(i, 1) = indices[i][1];
-      output_1->flat<int64_t>()(i) = value[i];
+      output_1->flat<int64>()(i) = value[i];
       output_2->flat<bool>()(i) = empty_value[i];
     }
   }
 
  private:
-  int64_t num_buckets_;
+  int64 num_buckets_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("KPFusedSparseEmbedding").Device(DEVICE_CPU),

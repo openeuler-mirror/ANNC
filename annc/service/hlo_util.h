@@ -3,8 +3,8 @@
 
 #include <vector>
 
-#include "xla/hlo/ir/hlo_module.h"
-#include "xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/hlo_module.h"
+#include "tensorflow/compiler/xla/literal_util.h"
 
 namespace xla {
 
@@ -13,11 +13,11 @@ namespace xla {
 
 static Literal get_param_info(const HloInstruction* arg_param) {
   const Shape& shape = arg_param->shape();
-  std::vector<int64_t> info(shape.dimensions().begin(),
+  std::vector<int64> info(shape.dimensions().begin(),
                             shape.dimensions().end());
   info.insert(info.end(), shape.layout().minor_to_major().begin(),
               shape.layout().minor_to_major().end());
-  return LiteralUtil::CreateR1<int64_t>(info);
+  return LiteralUtil::CreateR1<int64>(info);
 }
 
 static void add_extra_operands(HloInstruction* fusion,
@@ -26,7 +26,7 @@ static void add_extra_operands(HloInstruction* fusion,
   // create dummy root instruction outside for safety
   HloInstruction* root_instr = fusion->parent()->root_instruction();
   for (const HloInstruction* arg_param : fusion->fused_parameters()) {
-    HloInstruction* constant = root_instr->AddInstruction(
+    HloInstruction* constant = fusion->parent()->AddInstruction(
         HloInstruction::CreateConstant(get_param_info(arg_param)));
     operands.push_back(constant);
   }

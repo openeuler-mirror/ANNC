@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <cmath>
 
-#include "annc/service/kdnn_util.h"
-#include "annc/service/blas_util.h"
+#include "tensorflow/compiler/xla/ANNC/annc/service/kdnn_util.h"
+#include "tensorflow/compiler/xla/ANNC/annc/service/blas_util.h"
 #include "kdnn_rewriter.h"
 
 namespace xla {

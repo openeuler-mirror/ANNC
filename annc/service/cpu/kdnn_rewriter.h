@@ -5,11 +5,12 @@
 #include <string>
 #include <vector>
 
-#include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
-#include "xla/hlo/ir/hlo_module.h"
-#include "xla/service/custom_call_target_registry.h"
-#include "xla/service/hlo_pass_interface.h"
-#include "xla/service/pattern_matcher.h"
+#include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
+#include "tensorflow/compiler/xla/service/hlo_module.h"
+#include "tensorflow/compiler/xla/service/custom_call_target_registry.h"
+#include "tensorflow/compiler/xla/service/hlo_pass_interface.h"
+#include "tensorflow/compiler/xla/service/pattern_matcher.h"
+#include "tensorflow/compiler/xla/status.h"
 
 namespace xla {
 namespace cpu {
@@ -74,33 +75,33 @@ void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters);
       register_graph_opt_rewriters(rewriters);                  \
       register_gemm_rewriters(rewriters);                       \
       for (auto& rewriter : rewriters) {                        \
-        if (rewriter.execute(instr)) return OkStatus();         \
+        if (rewriter.execute(instr)) return Status::OK();         \
       }                                                         \
-      return OkStatus();                                        \
+      return Status::OK();                                        \
     }                                                           \
     Status HandleReduceWindow(HloInstruction* instr) override { \
       std::vector<KDnnRewriter> rewriters;                      \
       register_reduce_rewriters(rewriters);                     \
       for (auto& rewriter : rewriters) {                        \
-        if (rewriter.execute(instr)) return OkStatus();         \
+        if (rewriter.execute(instr)) return Status::OK();         \
       }                                                         \
-      return OkStatus();                                        \
+      return Status::OK();                                        \
     }                                                           \
     Status HandleMultiply(HloInstruction* instr) override {     \
       std::vector<KDnnRewriter> rewriters;                      \
       register_graph_opt_rewriters(rewriters);                  \
       for (auto& rewriter : rewriters) {                        \
-        if (rewriter.execute(instr)) return OkStatus();         \
+        if (rewriter.execute(instr)) return Status::OK();         \
       }                                                         \
-      return OkStatus();                                        \
+      return Status::OK();                                        \
     }                                                           \
     Status HandleSelect(HloInstruction* instr) override {       \
       std::vector<KDnnRewriter> rewriters;                      \
       register_graph_opt_rewriters(rewriters);                  \
       for (auto& rewriter : rewriters) {                        \
-        if (rewriter.execute(instr)) return OkStatus();         \
+        if (rewriter.execute(instr)) return Status::OK();         \
       }                                                         \
-      return OkStatus();                                        \
+      return Status::OK();                                        \
     }                                                           \
   };
 
@@ -114,9 +115,7 @@ CREATE_KDNN_REWRITER(KDnnAfterRunBackendRewriterVisitor);
    public:                                                           \
     absl::string_view name() const override { return pass_name; }    \
     using HloPassInterface::Run;                                     \
-    StatusOr<bool> Run(HloModule* module,                            \
-                       const absl::flat_hash_set<absl::string_view>& \
-                           execution_threads) override;              \
+    StatusOr<bool> Run(HloModule* module) override;              \
   };
 
 CREATE_KDNN_FUSION_PASS(KDnnFusionBeforeHloLayoutAssign,
