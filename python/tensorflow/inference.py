@@ -87,6 +87,12 @@ def main():
     imported = tf.saved_model.load(args.model)
     concrete_func = imported.signatures['serving_default']
     
+    if args.lib:
+        for lib in args.lib.split(':'):
+            if not lib:
+                continue
+            tf.load_op_library(lib)
+    
     inputs = generate_random_inputs(concrete_func, args.batch_size)
     result = inference(concrete_func, inputs, args.run_times, args.profiling_path)
     if args.compare:
