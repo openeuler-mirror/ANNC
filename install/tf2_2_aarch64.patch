@@ -72,3 +72,16 @@ index f48cf84b..e952c417 100644
              linux_cmake_vars,
          ),
  
+ 
+diff --git a/tensorflow/compiler/xla/service/cpu/BUILD b/tensorflow/compiler/xla/service/cpu/BUILD
+index 7e1b8a1e..b3722afb 100644
+--- a/tensorflow/compiler/xla/service/cpu/BUILD
++++ b/tensorflow/compiler/xla/service/cpu/BUILD
+@@ -181,6 +181,7 @@ cc_library(
+         "@llvm-project//llvm:support",
+         "@llvm-project//llvm:target",
+         "@llvm-project//llvm:x86_code_gen",  # fixdeps: keep
++        "@llvm-project//llvm:aarch64_code_gen",
+     ] + select({
+         "//tensorflow:linux_ppc64le": [
+             "@llvm-project//llvm:powerpc_code_gen",  # fixdeps: keep
