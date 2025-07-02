@@ -1,6 +1,7 @@
 from .graph import Node, CustomNode, CustomAttr
 from .rewriter import BaseRewriter, CheckFailed
 from .op_type import OpType
+from typing import List
 
 
 class DnnSparseEmbeddingPatternRewriter(BaseRewriter):
@@ -880,5 +881,181 @@ class LinearSparseEmbeddingPatternRewriter(BaseRewriter):
             gather_v2, pack_op_1, sparse_reshape_2, identity_3,
             sparse_fill_empty_rows
         ]
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
+
+
+class KPSparseSegmentReducePatternRewriter(BaseRewriter):
+
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.StridedSlice, None))
+        self.check_operands(node, [(OpType.Shape, None),
+                                   (OpType.Const, None),
+                                   (OpType.Const, None),
+                                   (OpType.Const, None)])
+        shape_op: Node = node.operands[0][0]
+        self.check_operands(shape_op, [(OpType.SparseSegmentMean, None)])
+        if len(shape_op.operands) != 1:
+            return
+        if shape_op.operands[0][0].type == OpType.SparseSegmentMean:
+            combiner = 'i: 1'
+        elif shape_op.operands[0][0].type == OpType.SparseSegmentSum:
+            combiner = 'i: 0'
+        else:
+            return
+        
+        sparse_segment_reduce: Node = shape_op.operands[0][0]
+        self.check_operands(sparse_segment_reduce, [(None, None),
+                                                    (None, None),
+                                                    (OpType.Cast, None)])
+        cast_op: Node = sparse_segment_reduce.operands[2][0]
+        self.check_operands(cast_op, [(OpType.StridedSlice, None)])
+        strided_slice: Node = cast_op.operands[0][0]
+        
+        print('>> Add fusion [KPFusedSparseSegmentReduce]:', sparse_segment_reduce.name)
+
+        index = node.get_index()
+        self.graph.nodes.insert(
+            index + 1,
+            CustomNode(
+                'KPFusedSparseSegmentReduce',
+                sparse_segment_reduce.name + '/kp_fused',
+                self.graph, 
+                sparse_segment_reduce.output_shapes + node.output_shapes, 
+                sparse_segment_reduce.operands[:2] + strided_slice.operands,
+                # combiner: 0 for sum, 1 for mean
+                [CustomAttr('combiner', combiner)],
+                [user for user in sparse_segment_reduce.users if user != shape_op] + node.users))
+
+        self.replace_all_users_with(sparse_segment_reduce, 0,
+                                    self.graph.nodes[index + 1], 0)
+        self.replace_all_users_with(node, 0,
+                                    self.graph.nodes[index + 1], 1)
+
+        fused_ops = [node, shape_op, sparse_segment_reduce, cast_op, strided_slice]
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
+
+
+class KPSparseConcatPatternRewriter(BaseRewriter):
+
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.StridedSlice, None))
+        self.check_operands(node, [(OpType.Shape, None),
+                                   (OpType.Const, None),
+                                   (OpType.Const, None),
+                                   (OpType.Const, None)])
+        shape_op: Node = node.operands[0][0]
+        self.check_operands(shape_op, [(OpType.Reshape, None)])
+        reshape_op: Node = shape_op.operands[0][0]
+        self.check_operands(reshape_op, [(OpType.ConcatV2, None)])
+        concat_op: Node = reshape_op.operands[0][0]
+        self.check_operands(concat_op, [(None, None),
+                                        (OpType.Fill, None),
+                                        (OpType.Const, None)])
+        if concat_op.operands[0][0].type not in (OpType.SparseSegmentMean,
+                                                 OpType.SparseSegmentSum):
+            return
+        fill_op: Node = concat_op.operands[1][0]
+        self.check_operands(fill_op, [(OpType.Pack, None), (OpType.Const, None)])
+        pack_op: Node = fill_op.operands[0][0]
+        self.check_operands(pack_op, [(OpType.Sub, None), (OpType.Const, None)])
+        sub_op: Node = pack_op.operands[0][0]
+        self.check_operands(sub_op, [(OpType.StridedSlice, None),
+                                     (OpType.StridedSlice, None)])
+        stride_slice: Node = sub_op.operands[0][0]
+        self.check_operands(stride_slice, [(OpType.Cast, None),
+                                           (OpType.Const, None), 
+                                           (OpType.Const, None),
+                                           (OpType.Const, None)])
+        cast_op: Node = stride_slice.operands[0][0]
+        
+        print('>> Add fusion [KPFusedSparseConcat]:', concat_op.name)
+
+        index = node.get_index()
+        self.graph.nodes.insert(
+            index + 1,
+            CustomNode(
+                'KPFusedSparseConcat',
+                concat_op.name + '/kp_fused',
+                self.graph, 
+                node.output_shapes + sub_op.output_shapes,
+                cast_op.operands + concat_op.operands[:1] + sub_op.operands[1:] + reshape_op.operands[1:],
+                [], # attrs
+                node.users + [user for user in sub_op.users if user != pack_op]))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+        self.replace_all_users_with(sub_op, 0, self.graph.nodes[index + 1], 1)
+
+        fused_ops = [node, shape_op, reshape_op, concat_op, fill_op, pack_op, 
+                     sub_op, stride_slice, cast_op]
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
+
+
+class KPSparseDynamicStitchPatternRewriter(BaseRewriter):
+
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.Reshape, None))
+        self.check_operands(node, [(OpType.ParallelDynamicStitch, None),
+                                   (OpType.ConcatV2, None)])
+        parallel_dynamic_stitch: Node = node.operands[0][0]
+        concat_op: Node = node.operands[1][0]
+        self.check_operands(concat_op, [(OpType.Shape, None),
+                                        (OpType.Const, None),
+                                        (OpType.Const, None)])
+        shape_op: Node = concat_op.operands[0][0]
+        self.check_operands(shape_op, [(OpType.Unique, None)])
+        self.check_operands(parallel_dynamic_stitch, 
+                            [(OpType.DynamicPartition, None)] * 12 + \
+                            [(OpType.GatherV2, None)] * 12)
+        dynamic_partition: Node = parallel_dynamic_stitch.operands[0][0]
+        gather_ops: List[Node] = [parallel_dynamic_stitch.operands[i][0] 
+                                  for i in range(12, 24)]
+        self.check_operands(dynamic_partition, [(OpType.Range, None),
+                                                (OpType.Cast, None)])
+        range_op: Node = dynamic_partition.operands[0][0]
+        cast_op: Node = dynamic_partition.operands[1][0]
+        self.check_operands(range_op, [(OpType.Const, None),
+                                       (OpType.Size, None),
+                                       (OpType.Const, None)])
+        size_op: Node = range_op.operands[1][0]
+        self.check_operands(size_op, [(OpType.Reshape, None)])
+        reshape_op: Node = size_op.operands[0][0]
+        self.check_operands(cast_op, [(OpType.FloorMod, None)])
+        floor_mod: Node = cast_op.operands[0][0]
+        self.check_operands(floor_mod, [(OpType.Reshape, reshape_op.name)])
+        
+        dynamic_partition1: Node = gather_ops[0].operands[1][0]
+        identity_ops: List[Node] = []
+        for gather_op in gather_ops:
+            self.check_operands(gather_op, [(OpType.Identity, None),
+                                            (OpType.DynamicPartition, dynamic_partition1.name),
+                                            (OpType.Const, None)])
+            identity_ops.append(gather_op.operands[0][0])
+        floor_div: Node = dynamic_partition1.operands[0][0]
+        self.check_operands(floor_div, [(OpType.Reshape, reshape_op.name),
+                                        (OpType.Const, None)])
+        
+        print('>> Add fusion [KPFusedSparseDynamicStitch]:', parallel_dynamic_stitch.name)
+
+        index = node.get_index()
+        self.graph.nodes.insert(
+            index + 1,
+            CustomNode(
+                'KPFusedSparseDynamicStitch',
+                parallel_dynamic_stitch.name + '/kp_fused',
+                self.graph, 
+                node.output_shapes,
+                reshape_op.operands + concat_op.operands[1:2] + \
+                    [op.operands[0] for op in identity_ops],
+                [], # attrs
+                node.users))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+
+        fused_ops = [node, parallel_dynamic_stitch, dynamic_partition, range_op, 
+                     size_op, cast_op, floor_mod, dynamic_partition1, floor_div, 
+                     concat_op, shape_op] + gather_ops + identity_ops
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)

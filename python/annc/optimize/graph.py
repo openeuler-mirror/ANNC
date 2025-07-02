@@ -16,6 +16,15 @@ def convert_saved_model_to_pbtxt(model_path):
         f.write(google.protobuf.text_format.MessageToString(saved_model))
 
 
+def convert_pbtxt_to_saved_model(model_path):
+    saved_model = saved_model_pb2.SavedModel()
+    with open(os.path.join(model_path, 'saved_model.pbtxt'), 'r') as f:
+        google.protobuf.text_format.Parse(f.read(), saved_model)
+    with open(os.path.join(model_path, 'saved_model.pb'), 'wb') as f:
+        f.write(saved_model.SerializeToString())
+    print('>>', os.path.join(model_path, 'saved_model.pb'))
+
+
 DTYPE = {
     'string': 'DT_STRING',
     'float32': 'DT_FLOAT',
