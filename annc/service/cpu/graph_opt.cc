@@ -1,6 +1,7 @@
 #include "tensorflow/compiler/xla/ANNC/annc/service/hlo_util.h"
 #include "kdnn_rewriter.h"
 
+#define ANNC_ENABLED_GRAPH_OPT 1
 namespace xla {
 namespace cpu {
 

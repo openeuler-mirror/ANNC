@@ -1,5 +1,5 @@
 diff --git a/tensorflow/core/grappler/optimizers/remapper.cc b/tensorflow/core/grappler/optimizers/remapper.cc
-index 3c37150f..7b9bf4f0 100644
+index d549cbdc..f07b475d 100644
 --- a/tensorflow/core/grappler/optimizers/remapper.cc
 +++ b/tensorflow/core/grappler/optimizers/remapper.cc
 @@ -913,6 +913,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
@@ -70,39 +70,32 @@ index 7e1b8a1e..6e4988c4 100644
          "@llvm-project//llvm:core",
          "@llvm-project//llvm:mc",
          "@llvm-project//llvm:object",
-diff --git a/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc b/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
-index 8fbe29f4..ed3c408b 100644
+ddiff --git a/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc b/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
+index 8fbe29f4..f4a4938b 100644
 --- a/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
 +++ b/tensorflow/compiler/xla/service/cpu/cpu_compiler.cc
-@@ -114,6 +114,10 @@ limitations under the License.
+@@ -113,6 +113,7 @@ limitations under the License.
+ #include "tensorflow/compiler/xla/util.h"
  #include "tensorflow/compiler/xla/xla_data.pb.h"
  #include "tensorflow/core/platform/dynamic_annotations.h"
++#include "tensorflow/compiler/xla/ANNC/annc/service/cpu/kdnn_rewriter.h"
  
-+#if defined(ANNC_ENABLED_KDNN)
-+#include <annc/kdnn_rewriter.h>
-+#endif
-+
  namespace xla {
  namespace cpu {
- using BufferInfo = cpu_function_runtime::BufferInfo;
-@@ -233,6 +237,10 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
+@@ -233,6 +234,8 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
  
  }  // namespace
  
-+#if defined(ANNC_ENABLED_KDNN)
 +REGISTER_ALL_GEMM_KERNELS()
-+#endif
 +
  Status CpuCompiler::RunHloPassesThroughLayoutAssn(
      HloModule* module, bool /*is_aot_compile*/,
      LLVMTargetMachineFeatures* target_machine_features) {
-@@ -331,6 +339,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+@@ -330,6 +333,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+       LayoutAssignment::InstructionCanChangeLayout, target_machine_features);
  
    pipeline.AddPass<CpuInstructionFusion>();
- 
-+#if defined(ANNC_ENABLED_KDNN)
 +  pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
-+#endif
-+
+ 
    return pipeline.Run(module).status();
  }
