@@ -5,6 +5,7 @@
 #include "tensorflow/compiler/xla/ANNC/annc/service/blas_util.h"
 #include "kdnn_rewriter.h"
 
+#define ANNC_ENABLED_KDNN 1
 namespace xla {
 namespace cpu {
 
