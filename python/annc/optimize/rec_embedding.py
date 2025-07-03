@@ -993,7 +993,7 @@ class KPSparseConcatPatternRewriter(BaseRewriter):
             sub_op.name + '/kp_fused',
             self.graph, 
             [], 
-            cast_op.operands + sub_op.operands[1:] + concat_op.operands[1:],
+            cast_op.operands + [concat_op.operands[0]] + [sub_op.operands[1]],
             # combiner: 0 for sum, 1 for mean
             [CustomAttr('_output_shapes', output_shapes)],
             [user for user in sub_op.users if user != pack_op] + node.users)
