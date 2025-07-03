@@ -2,10 +2,10 @@ import os
 from typing import List
 import google.protobuf
 import tensorflow as tf
-from tensorflow.python.framework import func_graph
-from tensorflow.python.framework.ops import Operation, SymbolicTensor
 from tensorflow.core.protobuf import saved_model_pb2
 from tensorflow.core.framework import types_pb2
+from tensorflow.core.framework import graph_pb2
+from tensorflow.core.framework import node_def_pb2
 
 
 def convert_saved_model_to_pbtxt(model_path):
@@ -52,21 +52,9 @@ ENUM_DTYPE = {
 
 class Attr:
 
-    def __init__(self, key, attr):
+    def __init__(self, key, value):
         self.key: str = key
-        self.attr = attr
-        self.type = attr.type
-
-    def __str__(self) -> str:
-        attr_str = 'attr {\n'
-        attr_str += f'  key: "{self.key}"\n'
-        attr_str += '  value {\n'
-        attr_str += '\n'.join([
-            '    ' + li for li in self.attr.__str__().split('\n')
-            if li.strip()
-        ])
-        attr_str += '\n  }\n}\n'
-        return attr_str
+        self.value = value
 
 
 class CustomAttr:
@@ -75,30 +63,23 @@ class CustomAttr:
         self.key: str = key
         self.value = value
 
-    def __str__(self) -> str:
-        return f'''attr {{
-  key: "{self.key}"
-  value {{
-    {self.value}
-  }}
-}}\n'''
-
 
 class Node:
 
-    def __init__(self, op: Operation, graph):
-        self.node = op
+    def __init__(self, node: node_def_pb2.NodeDef, graph):
+        self.node = node
         self.graph = graph
-        self.type = op.type
-        self.name = op.name
+        self.type = node.op
+        self.name = node.name
         self.operands: List[tuple] = []
         self.users: List[Node] = []
-        self.output_shapes = self.load_outputs(op.outputs)
-        self.attrs: List[Attr] = self.load_attrs(op)
+        self.attrs: List[Attr] = []
+        self.load_attrs(node)
 
-        for i in self.load_inputs(op.inputs):
+        for i in self.load_inputs(node.input):
             i_name = i.split(':')[0]
-            self.graph.tensors[i_name].users.append(self)
+            if i_name in self.graph.tensors:
+                self.graph.tensors[i_name].users.append(self)
 
     def get_index(self) -> int:
         for i, node in enumerate(self.graph.nodes):
@@ -108,78 +89,31 @@ class Node:
 
     def load_inputs(self, inputs):
         input_tensors = []
-        for input in inputs:
-            i_name = self.load_input(input)
+        for i_name in inputs:
             input_tensors.append(i_name)
-            name, index = i_name.split(':')
-            self.operands.append((self.graph.tensors[name], int(index)))
+            name = i_name.split(':')[0]
+            index = 0 if ':' not in i_name else i_name.split(':')[1]
+            operand = self.graph.tensors[name] if name in self.graph.tensors else None
+            self.operands.append((operand, int(index)))
         return input_tensors
 
-    def load_outputs(self, outputs):
-        return [(output.shape.rank, output.shape.dims) for output in outputs]
+    def load_attrs(self, node: node_def_pb2.NodeDef):
+        for key, attr in node.attr.items():
+            self.attrs.append(Attr(key, attr))
 
-    def load_input(self, tensor: SymbolicTensor):
-        return tensor.name
-
-    def load_attrs(self, op: Operation):
-        attrs = []
-        for key, attr in op.node_def.attr.items():
-            attrs.append(Attr(key, attr))
-        return attrs
-
-    def __str__(self, indent: int = 6) -> str:
-
-        def get_attr(k, a):
-            attr_str = 'attr {\n'
-            attr_str += f'  key: "{k}"\n'
-            attr_str += '  value {\n'
-            attr_str += '\n'.join(
-                ['    ' + li for li in a.__str__().split('\n') if li.strip()])
-            attr_str += '\n  }\n}\n'
-            return attr_str
-
-        attrs = {}
-        for key, attr in self.node.node_def.attr.items():
-            attrs[key] = get_attr(key, attr).replace('?', '-1')
-
-        if self.type not in ('NoOp', 'AssignVariableOp'):
-            output_shapes = 'list {\n'
-            for output_shape in self.output_shapes:
-                output_shapes += '  shape {\n'
-                rank, dims = output_shape
-                if rank is None:
-                    output_shapes += '    unknown_rank: true\n'
-                else:
-                    for dim in dims:
-                        output_shapes += f'    dim {{\n      size: {dim}\n    }}\n'
-                output_shapes += '  }\n'
-            output_shapes += '}'
-            output_shapes = output_shapes.replace('?', '-1')
-            attrs['_output_shapes'] = 'attr {\n'
-            attrs['_output_shapes'] += '  key: "_output_shapes"\n'
-            attrs['_output_shapes'] += '  value {\n'
-            attrs['_output_shapes'] += '\n'.join([
-                '    ' + li for li in output_shapes.split('\n') if li.strip()
-            ])
-            attrs['_output_shapes'] += '\n  }\n}\n'
-
-        node_str = f'name: "{self.name}"\n'
-        node_str += f'op: "{self.type}"\n'
+    def as_node_def(self):
+        inputs: List[str] = []
         for operand, index in self.operands:
             if index == 0:
-                node_str += f'input: "{operand.name}"\n'
+                inputs.append(operand.name)
             else:
-                node_str += f'input: "{operand.name}:{index}"\n'
-        for i in self.node.control_inputs:
-            node_str += f'input: "^{i.name}"\n'
-
-        if self.node.device:
-            node_str += f'device: "{self.node.device}"\n'
-
-        for key, attr in sorted(attrs.items(), key=lambda item: item[0]):
-            node_str += attr
-        return '\n'.join(
-            [indent * ' ' + li for li in node_str.split('\n') if li.strip()])
+                inputs.append(f'{operand.name}:{index}')
+        return node_def_pb2.NodeDef(
+            name=self.name,
+            op=self.type,
+            input=inputs,
+            attr={attr.key: attr.value for attr in self.attrs}
+        )
 
 
 class CustomNode:
@@ -195,49 +129,26 @@ class CustomNode:
         self.users = users
         self.control_inputs = []
         self.device = None
+    
+    def get_index(self) -> int:
+        for i, node in enumerate(self.graph.nodes):
+            if node.name == self.name:
+                return i
+        raise ValueError(f'Node "{self.name}" not in graph')
 
-    def __str__(self, indent: int = 6) -> str:
-        attrs = {
-            attr.key: attr.__str__().replace('?', '-1')
-            for attr in self.attrs
-        }
-
-        output_shapes = 'list {\n'
-        for output_shape in self.output_shapes:
-            output_shapes += '  shape {\n'
-            rank, dims = output_shape
-            if rank is None:
-                output_shapes += '    unknown_rank: true\n'
-            else:
-                for dim in dims:
-                    output_shapes += f'    dim {{\n      size: {dim}\n    }}\n'
-            output_shapes += '  }\n'
-        output_shapes += '}'
-        output_shapes = output_shapes.replace('?', '-1')
-        attrs['_output_shapes'] = 'attr {\n'
-        attrs['_output_shapes'] += '  key: "_output_shapes"\n'
-        attrs['_output_shapes'] += '  value {\n'
-        attrs['_output_shapes'] += '\n'.join(
-            ['    ' + li for li in output_shapes.split('\n') if li.strip()])
-        attrs['_output_shapes'] += '\n  }\n}\n'
-
-        node_str = f'name: "{self.name}"\n'
-        node_str += f'op: "{self.type}"\n'
+    def as_node_def(self):
+        inputs: List[str] = []
         for operand, index in self.operands:
             if index == 0:
-                node_str += f'input: "{operand.name}"\n'
+                inputs.append(operand.name)
             else:
-                node_str += f'input: "{operand.name}:{index}"\n'
-
-        for name in self.control_inputs:
-            node_str += f'input: "^{name}"\n'
-        if self.device:
-            node_str += f'device: "{self.device}"\n'
-
-        for key, attr in sorted(attrs.items(), key=lambda item: item[0]):
-            node_str += attr
-        return '\n'.join(
-            [indent * ' ' + li for li in node_str.split('\n') if li.strip()])
+                inputs.append(f'{operand.name}:{index}')
+        return node_def_pb2.NodeDef(
+            name=self.name,
+            op=self.type,
+            input=inputs,
+            attr={attr.key: attr.value for attr in self.attrs}
+        )
 
 
 class Graph:
@@ -247,13 +158,11 @@ class Graph:
         self.nodes: List[Node] = []
         self.tensors = {}
 
-    def load_graph(self, graph: func_graph.FuncGraph):
-        graph_def = graph.as_graph_def()
-        for op in graph.operations:
-            self.nodes.append(Node(op, self))
+    def load_graph(self, graph_def: graph_pb2.GraphDef):
+        self.graph_def = graph_def
+        for node in graph_def.node:
+            self.nodes.append(Node(node, self))
             self.tensors[self.nodes[-1].name] = self.nodes[-1]
-
-        self.versions['producer'] = graph_def.versions.producer
 
     def get_node(self, name: str) -> Node:
         for node in self.nodes:
@@ -261,28 +170,66 @@ class Graph:
                 return node
         raise ValueError(f'Node "{name}" not found')
 
-    def delete_node(self, node: Node):
+    def insert_before_node(self, insert_node: CustomNode, 
+                           before_node: Node,
+                           graph_nodes: List[node_def_pb2.NodeDef]):
+        index = -1
+        for i, node in enumerate(graph_nodes):
+            if node.name == before_node.name:
+                index = i
+                break
+        if index == -1:
+            raise ValueError(f'Node "{before_node.name}" not in graph')
+        graph_nodes.insert(index, insert_node.as_node_def())
+        
+        self.nodes.insert(before_node.get_index(), insert_node)
+        print(f'>> add node: [{insert_node.type}] \'{insert_node.name}\'')
+
+    def delete_nodes(self, delete_nodes: List[Node], 
+                     graph_nodes: List[node_def_pb2.NodeDef]):
+        names: List[str] = [node.name for node in delete_nodes]
+        indexes: List[int] = []
+        for i, node in enumerate(graph_nodes):
+            if node.name in names:
+                indexes.append(i)
+        for index in sorted(indexes, reverse=True):
+            print(f'-- delete node: [{graph_nodes[index].op}] \'{graph_nodes[index].name}\'')
+            graph_nodes.pop(index)
+        
+        indexes: List[int] = []
+        for i, n in enumerate(self.nodes):
+            if n.name in names:
+                indexes.append(i)
+        for i in sorted(indexes, reverse=True):
+            print(f'-- delete op: [{self.nodes[i].type}] \'{self.nodes[i].name}\'')
+            del self.nodes[i]
+
+    def delete_node(self, node: Node, graph_nodes: List[node_def_pb2.NodeDef]):
+        for i, n in enumerate(graph_nodes):
+            if n.name == node.name:
+                print(f'-- delete node: [{n.op}] \'{n.name}\'')
+                graph_nodes.pop(i)
+                break
         for i, n in enumerate(self.nodes):
             if n.name == node.name:
                 del self.nodes[i]
-                return
-        raise ValueError(f'Node "{node.name}" not found')
+                break
 
-    def dump_graph(self, output_path=None):
-        node_defs = []
-        for node in self.nodes:
-            if node.name == 'dummy_fetch':
-                continue
-            node_defs.append(f'    node {{\n{node.__str__()}\n    }}')
-        node_defs.append('    versions {\n' + \
-                         f'      producer: {self.versions["producer"]}' + \
-                         '\n    }')
-        graph_str = '  graph_def {\n' + '\n'.join(node_defs) + '\n  }'
-        if output_path:
-            with open(output_path, 'w') as f:
-                f.write(graph_str)
-        else:
-            return graph_str
+    def replace_all_users_with(self, old_node: Node, old_index: int,
+                               new_node: Node, new_index: int, 
+                               graph_nodes: List[node_def_pb2.NodeDef]):
+        for user in old_node.users:
+            for i, operand in enumerate(user.operands):
+                if operand[0].name == old_node.name and \
+                    operand[1] == old_index:
+                    user.operands[i] = (new_node, new_index)
+        
+        old_name = old_node.name if old_index == 0 else f'{old_node.name}:{old_index}'
+        new_name = new_node.name if new_index == 0 else f'{new_node.name}:{new_index}'
+        for i, node in enumerate(graph_nodes):
+            for j, i_name in enumerate(node.input):
+                if i_name == old_name:
+                    graph_nodes[i].input[j] = new_name
 
 
 class MetaGraph:
@@ -293,10 +240,38 @@ class MetaGraph:
         self.load()
 
     def load(self):
-        model = tf.saved_model.load(self.model_path)
-        self.graph.load_graph(model.graph)
+        self.saved_model = saved_model_pb2.SavedModel()
+        pb_file = os.path.join(self.model_path, 'saved_model.pb')
+        pbtxt_file = os.path.join(self.model_path, 'saved_model.pbtxt')
+        if os.path.exists(pb_file):
+            with open(pb_file, 'rb') as f:
+                self.saved_model.ParseFromString(f.read())
+        elif os.path.exists(pbtxt_file):
+            with open(pbtxt_file, 'r') as f:
+                google.protobuf.text_format.Parse(f.read(), self.saved_model)
+        self.graph.load_graph(self.saved_model.meta_graphs[0].graph_def)
 
-    def save(self, output_path):
+    def save(self, output_path, to_text: bool = False):
+        os.makedirs(output_path, exist_ok=True)
+        if to_text:
+            self.write_code(self.saved_model, output_path)
+        else:
+            # default to binary
+            self.write_binary(self.saved_model, output_path)
+    
+    def write_binary(self, model: saved_model_pb2.SavedModel, output_path: str):
+        output_file = os.path.join(output_path, 'saved_model.pb')
+        if os.path.exists(output_file):
+            overwrite = input('saved_model.pb is already exist, '
+                              'do you want to overwrite it? (y/n) ')
+            if overwrite.lower() != 'y':
+                print('Aborted')
+                return
+        with tf.io.gfile.GFile(output_file, 'wb') as f:
+            f.write(model.SerializeToString())
+        print('>>', output_file)
+    
+    def write_code(self, model: saved_model_pb2.SavedModel, output_path: str):
         output_file = os.path.join(output_path, 'saved_model.pbtxt')
         if os.path.exists(output_file):
             overwrite = input('saved_model.pbtxt is already exist, '
@@ -304,23 +279,6 @@ class MetaGraph:
             if overwrite.lower() != 'y':
                 print('Aborted')
                 return
-
-        if os.path.exists(os.path.join(self.model_path, 'saved_model.pbtxt')):
-            with open(os.path.join(self.model_path, 'saved_model.pbtxt'),
-                      'r') as f:
-                text_model = f.read()
-        else:
-            saved_model = saved_model_pb2.SavedModel()
-            with open(os.path.join(self.model_path, 'saved_model.pb'),
-                      'rb') as f:
-                saved_model.ParseFromString(f.read())
-            text_model = google.protobuf.text_format.MessageToString(
-                saved_model)
-
-        import re
-        graph_def = re.search('  graph_def[\s\S]+?\n  }', text_model).group()
-        new_text_model = text_model.replace(graph_def, self.graph.dump_graph())
-        os.makedirs(output_path, exist_ok=True)
-        with open(output_file, 'w') as f:
-            f.write(new_text_model)
+        with tf.io.gfile.GFile(output_file, 'w') as f:
+            f.write(str(model))
         print('>>', output_file)

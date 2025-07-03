@@ -14,17 +14,10 @@ from annc.optimize.graph import convert_pbtxt_to_saved_model
 
 def parse_args():
     parser = argparse.ArgumentParser('ANNC-Model-Optimizer')
-    parser.add_argument('-I',
-                        '--input',
-                        required=True,
-                        help='Input model path')
-    parser.add_argument('-O',
-                        '--output',
-                        required=True,
-                        help='Output model path')
-    parser.add_argument(
-        'passes',
-        nargs='+',
+    parser.add_argument('input', help='Input model path')
+    parser.add_argument('-o', '--output', required=True, help='Output model path')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Output debug file')
+    parser.add_argument('passes', nargs='+',
         help='opt: \'dnn_sparse\', \'dnn_hash_bucket\', \'embed\','
              ' \'embed_hash_bucket\', \'linear_sparse\', '
              '\'sparse_segment_reduce\', \'sparse_concat\'')
@@ -53,9 +46,7 @@ def opt():
         OPT_PASSES[pass_name](meta_graph.graph)
 
     os.makedirs(args.output, exist_ok=True)
-    meta_graph.save(args.output)
-    
-    convert_pbtxt_to_saved_model(args.output)
+    meta_graph.save(args.output, to_text=args.verbose)
 
 
 if __name__ == '__main__':

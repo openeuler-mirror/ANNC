@@ -14,11 +14,14 @@ class BaseRewriter(ABC):
 
         self.fused_ops: List[Node] = []
 
-        for node in self.graph.nodes:
+        index: int = 0
+        while index < len(self.graph.nodes):
+            node = self.graph.nodes[index]
             try:
-                self.match_and_rewrite(node)
+                index = self.match_and_rewrite(node) or index
             except CheckFailed:
                 pass
+            index += 1
 
     @abstractmethod
     def match_and_rewrite(self, node: Node):

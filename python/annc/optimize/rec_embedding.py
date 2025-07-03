@@ -1,6 +1,7 @@
 from .graph import Node, CustomNode, CustomAttr
 from .rewriter import BaseRewriter, CheckFailed
 from .op_type import OpType
+from tensorflow.core.framework import attr_value_pb2
 from typing import List
 
 
@@ -897,10 +898,11 @@ class KPSparseSegmentReducePatternRewriter(BaseRewriter):
         self.check_operands(shape_op, [(OpType.SparseSegmentMean, None)])
         if len(shape_op.operands) != 1:
             return
+        combiner = attr_value_pb2.AttrValue()
         if shape_op.operands[0][0].type == OpType.SparseSegmentMean:
-            combiner = 'i: 1'
+            combiner.i = 1
         elif shape_op.operands[0][0].type == OpType.SparseSegmentSum:
-            combiner = 'i: 0'
+            combiner.i = 0
         else:
             return
         
@@ -913,28 +915,35 @@ class KPSparseSegmentReducePatternRewriter(BaseRewriter):
         strided_slice: Node = cast_op.operands[0][0]
         
         print('>> Add fusion [KPFusedSparseSegmentReduce]:', sparse_segment_reduce.name)
+        
+        output_shapes = attr_value_pb2.AttrValue()
+        for attr in sparse_segment_reduce.attrs + node.attrs:
+            if attr.key == '_output_shapes':
+                output_shapes.list.shape.extend(attr.value.list.shape)
+        
+        index = sparse_segment_reduce.get_index()
+        
+        insert_node = CustomNode(
+            'KPFusedSparseSegmentReduce',
+            sparse_segment_reduce.name + '/kp_fused',
+            self.graph, 
+            [], 
+            sparse_segment_reduce.operands[:2] + strided_slice.operands,
+            # combiner: 0 for sum, 1 for mean
+            [CustomAttr('combiner', combiner), CustomAttr('_output_shapes', output_shapes)],
+            [user for user in sparse_segment_reduce.users if user != shape_op] + node.users)
+        self.graph.insert_before_node(insert_node, before_node=sparse_segment_reduce, 
+                                      graph_nodes=self.graph.graph_def.node)
 
-        index = node.get_index()
-        self.graph.nodes.insert(
-            index + 1,
-            CustomNode(
-                'KPFusedSparseSegmentReduce',
-                sparse_segment_reduce.name + '/kp_fused',
-                self.graph, 
-                sparse_segment_reduce.output_shapes + node.output_shapes, 
-                sparse_segment_reduce.operands[:2] + strided_slice.operands,
-                # combiner: 0 for sum, 1 for mean
-                [CustomAttr('combiner', combiner)],
-                [user for user in sparse_segment_reduce.users if user != shape_op] + node.users))
+        self.graph.replace_all_users_with(sparse_segment_reduce, 0,
+                                          self.graph.nodes[index], 0,
+                                          graph_nodes=self.graph.graph_def.node)
+        self.graph.replace_all_users_with(node, 0, self.graph.nodes[index], 1,
+                                          graph_nodes=self.graph.graph_def.node)
 
-        self.replace_all_users_with(sparse_segment_reduce, 0,
-                                    self.graph.nodes[index + 1], 0)
-        self.replace_all_users_with(node, 0,
-                                    self.graph.nodes[index + 1], 1)
-
-        fused_ops = [node, shape_op, sparse_segment_reduce, cast_op, strided_slice]
-        for fused_op in fused_ops:
-            self.graph.delete_node(fused_op)
+        self.graph.delete_nodes([node, shape_op, sparse_segment_reduce, cast_op, 
+                                 strided_slice], graph_nodes=self.graph.graph_def.node)
+        return insert_node.get_index()
 
 
 class KPSparseConcatPatternRewriter(BaseRewriter):
@@ -972,25 +981,34 @@ class KPSparseConcatPatternRewriter(BaseRewriter):
         
         print('>> Add fusion [KPFusedSparseConcat]:', concat_op.name)
 
-        index = node.get_index()
-        self.graph.nodes.insert(
-            index + 1,
-            CustomNode(
-                'KPFusedSparseConcat',
-                concat_op.name + '/kp_fused',
-                self.graph, 
-                node.output_shapes + sub_op.output_shapes,
-                cast_op.operands + concat_op.operands[:1] + sub_op.operands[1:] + reshape_op.operands[1:],
-                [], # attrs
-                node.users + [user for user in sub_op.users if user != pack_op]))
+        output_shapes = attr_value_pb2.AttrValue()
+        for attr in sub_op.attrs + node.attrs:
+            if attr.key == '_output_shapes':
+                output_shapes.list.shape.extend(attr.value.list.shape)
+        
+        index = sub_op.get_index()
+        
+        insert_node = CustomNode(
+            'KPFusedSparseConcat',
+            sub_op.name + '/kp_fused',
+            self.graph, 
+            [], 
+            cast_op.operands + sub_op.operands[1:] + concat_op.operands[1:],
+            # combiner: 0 for sum, 1 for mean
+            [CustomAttr('_output_shapes', output_shapes)],
+            [user for user in sub_op.users if user != pack_op] + node.users)
+        self.graph.insert_before_node(insert_node, before_node=sub_op, 
+                                      graph_nodes=self.graph.graph_def.node)
 
-        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
-        self.replace_all_users_with(sub_op, 0, self.graph.nodes[index + 1], 1)
+        self.graph.replace_all_users_with(sub_op, 0,
+                                          self.graph.nodes[index], 0,
+                                          graph_nodes=self.graph.graph_def.node)
+        self.graph.replace_all_users_with(node, 0, self.graph.nodes[index], 1,
+                                          graph_nodes=self.graph.graph_def.node)
 
-        fused_ops = [node, shape_op, reshape_op, concat_op, fill_op, pack_op, 
-                     sub_op, stride_slice, cast_op]
-        for fused_op in fused_ops:
-            self.graph.delete_node(fused_op)
+        self.graph.delete_nodes([node, shape_op, reshape_op, concat_op, fill_op, pack_op, 
+                                 sub_op, stride_slice, cast_op], graph_nodes=self.graph.graph_def.node)
+        return insert_node.get_index()
 
 
 class KPSparseDynamicStitchPatternRewriter(BaseRewriter):
