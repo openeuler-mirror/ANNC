@@ -8,16 +8,17 @@ using namespace tensorflow;
 
 REGISTER_OP("KPFusedSparseSegmentReduce")
     .Input("data: float")
-    .Input("indices: int64")
+    .Input("indices: Tidx")
     .Input("slice_input: int64")
     .Input("begin: int32")
     .Input("end: int32")
     .Input("strides: int32")
     .Attr("combiner: int = 1")  // 0 for SUM, 1 for MEAN
+    .Attr("Tidx: {int32, int64} = DT_INT32")
     .Output("output: float")
     .Output("slice_output: int32")
     .SetShapeFn(shape_inference::UnknownShape);
-
+template <typename Tidx>
 class KPFusedSparseSegmentReduceOp : public OpKernel {
  public:
   explicit KPFusedSparseSegmentReduceOp(OpKernelConstruction* context)
@@ -30,12 +31,12 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override {
-    const Tensor& data = context->input(0);     // shape [batch, embedding_size]
+    const Tensor& data = context->input(0);     // shape [?, embedding_size]
     const Tensor& indices = context->input(1);  // shape [batch]
     const Tensor& slice_input = context->input(2);
     const Tensor& begin = context->input(3);
-    int64_t batch = slice_input.dim_size(0);
-    int64_t embedding_size = slice_input.dim_size(1);
+    int64_t batch = indices.dim_size(0);
+    int64_t embedding_size = data.dim_size(1);
     int32 col = begin.flat<int32>().data()[1];
 
     Tensor* output = nullptr;
@@ -48,11 +49,11 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
                    context->allocate_output(1, TensorShape({}), &slice_out));
     slice_out->scalar<int32>()() = batch;
 
-    // KDNN：：fused_compute(data, indices, slice_input, output, batch,
+    // KDNN::fused_compute(data, indices, slice_input, output, batch,
     // embedding_size, is_mean)
 
     auto data_mat = data.matrix<float>();
-    auto indices_vec = indices.vec<int64>();
+    auto indices_vec = indices.vec<Tidx>();
     auto slice_input_mat = slice_input.matrix<int64>();
     auto output_mat = output->matrix<float>();
 
@@ -98,5 +99,12 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
   bool is_mean_;
 };
 
-REGISTER_KERNEL_BUILDER(Name("KPFusedSparseSegmentReduce").Device(DEVICE_CPU),
-                        KPFusedSparseSegmentReduceOp);
+#define REGISTER_KERNEL(Tidx) \
+    REGISTER_KERNEL_BUILDER(                                         \
+        Name("KPFusedSparseSegmentReduce")                           \
+            .Device(DEVICE_CPU)                                      \
+            .TypeConstraint<Tidx>("Tidx"),                           \
+            KPFusedSparseSegmentReduceOp<Tidx>);
+REGISTER_KERNEL(int64)
+REGISTER_KERNEL(int32)
+#undef REGISTER_KERNEL                       

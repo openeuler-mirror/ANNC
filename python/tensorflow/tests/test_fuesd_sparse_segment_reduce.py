@@ -10,9 +10,9 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
         cls.custom_op = tf.load_op_library('kp_fused_sparse_segment_reduce.so')
         
         # Base test data
-        cls.base_data = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32) # shape {3， 2}
+        cls.base_data = np.array([[1.0, 2.0, 3.0], [3.0, 4.0,5.0], [5.0, 6.0, 7.0], [5.0, 6.0, 7.0]], dtype=np.float32) # shape {4， 3}
         cls.base_indices = np.array([0, 1, 2], dtype=np.int64) # shape {3}
-        cls.base_slice_input = np.array([[0, 0], [0, 2], [1, 2]], dtype=np.int64) # shape {3}
+        cls.base_slice_input = np.array([[0, 0], [0, 2], [1, 2]], dtype=np.int64) # shape {3, 2}
         cls.base_begin = [0, 1]
         cls.base_end = [0, 2]
         cls.base_strides = [1, 2]
