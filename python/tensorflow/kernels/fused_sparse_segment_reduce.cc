@@ -31,38 +31,62 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override {
-    const Tensor& data = context->input(0);     // shape [?, embedding_size]
-    const Tensor& indices = context->input(1);  // shape [batch]
+    VLOG(0) << "Executing KPFusedSparseSegmentReduce operator";
+    const Tensor& data = context->input(0);
+    const Tensor& indices = context->input(1);
     const Tensor& slice_input = context->input(2);
     const Tensor& begin = context->input(3);
-    int64_t batch = indices.dim_size(0);
+
+    // Log input shapes
+    VLOG(0) << "Input data shape: " << data.shape().DebugString();
+    VLOG(0) << "Input indices shape: " << indices.shape().DebugString();
+    VLOG(0) << "Input slice_input shape: " << slice_input.shape().DebugString();
+    VLOG(0) << "Input begin value: " << begin.SummarizeValue(10);
+
+    int64_t num_indices = indices.dim_size(0);
     int64_t embedding_size = data.dim_size(1);
     int32 col = begin.flat<int32>().data()[1];
-
-    Tensor* output = nullptr;
-    OP_REQUIRES_OK(context,
-                   context->allocate_output(
-                       0, TensorShape({batch, embedding_size}), &output));
-    output->flat<float>().setZero();
-    Tensor* slice_out = nullptr;
-    OP_REQUIRES_OK(context,
-                   context->allocate_output(1, TensorShape({}), &slice_out));
-    slice_out->scalar<int32>()() = batch;
-
-    // KDNN::fused_compute(data, indices, slice_input, output, batch,
-    // embedding_size, is_mean)
 
     auto data_mat = data.matrix<float>();
     auto indices_vec = indices.vec<Tidx>();
     auto slice_input_mat = slice_input.matrix<int64>();
+
+    VLOG(0) << "Number of indices: " << num_indices;
+    VLOG(0) << "Embedding size: " << embedding_size;
+    VLOG(0) << "Column index from begin: " << col;
+
+    // Calculate max segment_id
+    int64 max_seg_id = 0;
+    for (int32 i = 0; i < num_indices; ++i) {
+      int64 seg_id = slice_input_mat(i, col);
+      if (seg_id > max_seg_id) {
+        max_seg_id = seg_id;
+      }
+    }
+    const int64 batch_size = max_seg_id + 1;
+    VLOG(0) << "Calculated batch size: " << batch_size;
+
+    Tensor* output = nullptr;
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(
+                       0, TensorShape({batch_size, embedding_size}), &output));
+    output->flat<float>().setZero();
+    Tensor* slice_out = nullptr;
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(1, TensorShape({}), &slice_out));
+    slice_out->scalar<int32>()() = batch_size;
+
+    // KDNN::fused_compute(data, indices, slice_input, output, batch,
+    // embedding_size, is_mean)
+
     auto output_mat = output->matrix<float>();
 
     if (is_mean_) {
-      Tensor counts(DT_INT32, TensorShape({batch}));
+      Tensor counts(DT_INT32, TensorShape({batch_size}));
       counts.flat<int32>().setZero();
       auto counts_vec = counts.flat<int32>();
 
-      for (int64 i = 0; i < batch; ++i) {
+      for (int64 i = 0; i < num_indices; ++i) {
         int32 seg_id = slice_input_mat(i, col);
         for (int64 j = 0; j < embedding_size; ++j) {
           output_mat(seg_id, j) += data_mat(indices_vec(i), j);
@@ -73,7 +97,7 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
       auto worker_threads = context->device()->tensorflow_cpu_worker_threads();
       const int64 cost_per_unit = 1000 * embedding_size;
 
-      Shard(worker_threads->num_threads, worker_threads->workers, batch,
+      Shard(worker_threads->num_threads, worker_threads->workers, batch_size,
             cost_per_unit,
             [&output_mat, &counts_vec](int64 start_seg, int64 end_seg) {
               for (int32 seg = start_seg; seg < end_seg; ++seg) {
@@ -86,7 +110,7 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
               }
             });
     } else {
-      for (int64 i = 0; i < batch; ++i) {
+      for (int64 i = 0; i < num_indices; ++i) {
         int32 seg_id = slice_input_mat(i, col);
         for (int64 j = 0; j < embedding_size; ++j) {
           output_mat(seg_id, j) += data_mat(indices_vec(i), j);
