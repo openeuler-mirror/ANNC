@@ -1,0 +1,31 @@
+diff --git a/tensorflow/compiler/xla/service/computation_placer.cc b/tensorflow/compiler/xla/service/computation_placer.cc
+index f4dfb481..cce369c6 100644
+--- a/tensorflow/compiler/xla/service/computation_placer.cc
++++ b/tensorflow/compiler/xla/service/computation_placer.cc
+@@ -192,4 +192,4 @@ static bool InitModule() {
+       stream_executor::rocm::kROCmPlatformId, &CreateComputationPlacer);
+   return true;
+ }
+-static bool module_initialized = InitModule();
++// static bool module_initialized = InitModule();
+diff --git a/tensorflow/stream_executor/host/host_platform.cc b/tensorflow/stream_executor/host/host_platform.cc
+index ab3167d8..d786fd00 100644
+--- a/tensorflow/stream_executor/host/host_platform.cc
++++ b/tensorflow/stream_executor/host/host_platform.cc
+@@ -102,11 +102,11 @@ static void InitializeHostPlatform() {
+ }  // namespace host
+ }  // namespace stream_executor
+ 
+-REGISTER_MODULE_INITIALIZER(host_platform,
+-                            stream_executor::host::InitializeHostPlatform());
++// REGISTER_MODULE_INITIALIZER(host_platform,
++//                             stream_executor::host::InitializeHostPlatform());
+ 
+ // Note that module initialization sequencing is not supported in the
+ // open-source project, so this will be a no-op there.
+-REGISTER_MODULE_INITIALIZER_SEQUENCE(host_platform, multi_platform_manager);
+-REGISTER_MODULE_INITIALIZER_SEQUENCE(multi_platform_manager_listener,
+-                                     host_platform);
++// REGISTER_MODULE_INITIALIZER_SEQUENCE(host_platform, multi_platform_manager);
++// REGISTER_MODULE_INITIALIZER_SEQUENCE(multi_platform_manager_listener,
++//                                      host_platform);

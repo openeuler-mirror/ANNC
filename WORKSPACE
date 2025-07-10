@@ -37,7 +37,7 @@ http_archive(
         "https://github.com/tensorflow/tensorflow/archive/cfe0c80169ae984bcdc99ff6de7444164aaa8e07.tar.gz",
     ],
     patch_args = ["-p1"],
-    patches = ["//install:openxla.patch"],
+    patches = ["//install:openxla.patch", "//install:tf2.2.0_fix.patch"],
 )
 
 load("@org_tensorflow//tensorflow:workspace.bzl", "tf_workspace")
