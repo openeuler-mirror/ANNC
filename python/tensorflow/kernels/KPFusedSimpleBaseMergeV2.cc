@@ -49,9 +49,6 @@ class KPFusedSimpleBaseMergeV2 : public OpKernel {
 
     auto b_equal_node0 = (b_reshaped_tensor == 4563);
     auto b_equal_node1 = (b_reshaped_tensor == 10831);
-
-    auto c_equal = (c_reshaped_tensor == 3);
-    auto c_equal_casted = c_equal.cast<float>();
     
     Eigen::Tensor<float,2, Eigen::RowMajor> tensor_ones(N,1);
     tensor_ones.setConstant(1.0f);
@@ -63,7 +60,7 @@ class KPFusedSimpleBaseMergeV2 : public OpKernel {
     auto select_2415 = b_equal_node1.select(tensor_ones,select_2412);
 
     auto sub_out = select_2415 - 1.0f;
-    auto concat_out = select_2415.concatenate(c_equal_casted,1);
+    auto concat_out = select_2415.concatenate(tensor_ones,1);
 
     Tensor* output_x = nullptr;
     Tensor* output_y = nullptr;
