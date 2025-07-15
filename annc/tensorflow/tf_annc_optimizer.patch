@@ -1,0 +1,75 @@
+diff --git a/tensorflow/cc/saved_model/BUILD b/tensorflow/cc/saved_model/BUILD
+index 882b403..9268f14 100644
+--- a/tensorflow/cc/saved_model/BUILD
++++ b/tensorflow/cc/saved_model/BUILD
+@@ -109,6 +109,7 @@ cc_library(
+         ":constants",
+         ":reader",
+     ] + if_not_mobile([
++        "//tensorflow/cc/saved_model/model_optimizer:annc_model_opt",
+         "//tensorflow/core:core_cpu",
+         "//tensorflow/core:framework",
+         "//tensorflow/core:lib",
+diff --git a/tensorflow/cc/saved_model/loader.cc b/tensorflow/cc/saved_model/loader.cc
+index 6c967dc..9ea8ee2 100644
+--- a/tensorflow/cc/saved_model/loader.cc
++++ b/tensorflow/cc/saved_model/loader.cc
+@@ -36,6 +36,8 @@ limitations under the License.
+ #include "tensorflow/core/public/session_options.h"
+ #include "tensorflow/core/util/tensor_bundle/naming.h"
+
++#include "tensorflow/cc/saved_model/model_optimizer/constant_folding.h"
++
+ namespace tensorflow {
+ namespace {
+
+@@ -345,6 +347,10 @@ Status LoadSavedModelInternal(const SessionOptions& session_options,
+   // Record wall time spent in init op.
+   load_latency_by_stage->GetCell(export_dir, "init_graph")
+       ->Add(GetLatencyMicroseconds(graph_init_start_microseconds));
++
++  annc::run_annc_constant_folding(bundle->meta_graph_def.mutable_graph_def(),
++                                  bundle->session.get());
++
+   return Status::OK();
+ }
+
+diff --git a/tensorflow/core/grappler/optimizers/BUILD b/tensorflow/core/grappler/optimizers/BUILD
+index 9be609b..da5180e 100644
+--- a/tensorflow/core/grappler/optimizers/BUILD
++++ b/tensorflow/core/grappler/optimizers/BUILD
+@@ -802,6 +802,8 @@ tf_kernel_library(
+     deps = [
+         ":constant_folding",
+         ":graph_optimizer",
++        "//tensorflow/core/grappler/optimizers/graph_optimizer:annc_graph_opt",
++        "//tensorflow/cc/saved_model/model_optimizer:annc_model_opt",
+         "//tensorflow/core:lib",
+         "//tensorflow/core:lib_internal",
+         "//tensorflow/core:protos_all_cc",
+diff --git a/tensorflow/core/grappler/optimizers/remapper.cc b/tensorflow/core/grappler/optimizers/remapper.cc
+index d549cbd..9ec02c7 100644
+--- a/tensorflow/core/grappler/optimizers/remapper.cc
++++ b/tensorflow/core/grappler/optimizers/remapper.cc
+@@ -30,6 +30,9 @@ limitations under the License.
+ #include "tensorflow/core/platform/logging.h"
+ #include "tensorflow/core/util/env_var.h"
+
++#include "tensorflow/core/grappler/optimizers/graph_optimizer/graph_opt.h"
++#include "tensorflow/cc/saved_model/model_optimizer/constant_folding.h"
++
+ #if GOOGLE_CUDA
+ #include "third_party/gpus/cudnn/cudnn.h"
+ #endif  // GOOGLE_CUDA
+@@ -1510,6 +1513,8 @@ bool RequiresInferredShapes(const RemapperContext& ctx, int node_index) {
+ Status Remapper::Optimize(Cluster* cluster, const GrapplerItem& item,
+                           GraphDef* optimized_graph) {
+   GrapplerItem mutable_item = item;
++  annc::run_graph_optimization(&mutable_item.graph);
++  annc::run_annc_constant_folding(&mutable_item.graph, nullptr);
+   Status status;
+   RemapperContext ctx(&mutable_item, &status);
+   TF_RETURN_IF_ERROR(status);
+
+
+

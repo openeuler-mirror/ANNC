@@ -946,8 +946,8 @@ class KPSparseSegmentReducePatternRewriter(BaseRewriter):
         return insert_node.get_index()
 
 
-class KPSparsePaddingFastPatternRewriter(BaseRewriter):
-    __pattern__ = 'KPFusedSparsePaddingFast'
+class KPFusedEmbeddingPaddingFastPatternRewriter(BaseRewriter):
+    __pattern__ = 'KPFusedEmbeddingPaddingFast'
 
     def match_and_rewrite(self, node: Node):
         self.check_node(node, (OpType.StridedSlice, None))
@@ -1013,8 +1013,8 @@ class KPSparsePaddingFastPatternRewriter(BaseRewriter):
         return insert_node.get_index()
 
 
-class KPSparsePaddingPatternRewriter(BaseRewriter):
-    __pattern__ = 'KPFusedSparsePadding'
+class KPFusedEmbeddingPaddingPatternRewriter(BaseRewriter):
+    __pattern__ = 'KPFusedEmbeddingPadding'
 
     def match_and_rewrite(self, node: Node):
         self.check_node(node, (OpType.Reshape, None))
