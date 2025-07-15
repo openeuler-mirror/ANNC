@@ -1077,3 +1077,123 @@ class KPSparseDynamicStitchPatternRewriter(BaseRewriter):
                      concat_op, shape_op] + gather_ops + identity_ops
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
+
+class SparseSelectPatternRewriter(BaseRewriter):
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.ConcatV2, None))
+        self.check_operands(node, [(OpType.Mul, None),
+                                   (OpType.Select, None),
+                                   (OpType.Const, None)])
+        mul_2419_op: Node = node.operands[0][0]
+        select_2427_op: Node = node.operands[1][0]
+
+        self.check_operands(select_2427_op, [(OpType.Equal, None),
+                                        (OpType.Fill, None),
+                                        (OpType.RealDiv, None)
+                                        (OpType.Const, None)])
+        equal_2424_op: Node = select_2427_op.operands[0][0]
+        fill_2422_op: Node = select_2427_op.operands[1][0]
+        realdiv_op: Node = select_2427_op.operands[2][0]
+
+        self.check_operands(equal_2424_op, [(OpType.Reshape, None),
+                                            (OpType.const, None)])
+        reshape_1_op: Node = equal_2424_op.operands[0][0]
+
+        self.check_operands(reshape_1_op,[(None, None),
+                                        (OpType.const, None)])
+
+        self.check_operands(fill_2422_op, [(OpType.Shape, None),
+                                           (OpType.const, None)])
+        shape_1_op: Node = fill_2422_op.operands[0][0]
+
+        self.check_operands(shape_1_op, [(OpType.Greater, None)])
+        greater_op: Node = shape_1_op.operands[0][0]
+
+        self.check_operands(greater_op, [(OpType.Reshape, None),
+                                         (OpType.const, None)])
+        reshape_2_op: Node = greater_op.operands[0][0]
+
+        self.check_operands(reshape_2_op, [(None, None),
+                                           (OpType.const, None)])
+
+        self.check_users(greater_op, [(OpType.Shape, None),
+                                      (OpType.shape, None),
+                                      (OpType.Cast, None)])
+        shape_2_op: Node = greater_op.user[0]
+
+        self.check_users(shape_2_op, [(OpType.Fill, None),
+                                      (OpType.const, None)])
+        fill_2432_op: Node = shape_2_op.user[0]
+
+        self.check_operands(realdiv_op, [(OpType.Fill, None)])
+
+        self.check_operands(mul_2419_op, [(OpType.Select, None),
+                                          (OpType.const, None)])
+        select_2415_op: Node = mul_2419_op.operands[0][0]
+
+        self.check_users(select_2415_op, [(OpType.Sub, None),
+                                          (OpType.Mul, None)])
+        sub_op: Node = select_2415_op.user[0]
+
+        self.check_operands(select_2415_op, [(OpType.Equal, None),
+                                             (OpType.Select, None),
+                                             (OpType.Fill, None),
+                                             (OpType.const, None)])
+        equal_2414_op: Node = select_2415_op.operands[0][0]
+        select_2412_op: Node = select_2415_op.operands[1][0]
+        fill_2409_op: Node = select_2415_op.operands[2][0]
+
+        self.check_operands(equal_2414_op, [(OpType.Reshape, None),
+                                            (OpType.const, None)])
+        reshape_3_op: Node = equal_2414_op.operands[0][0]
+
+        self.check_operands(reshape_3_op, [(None, None),
+                                           (OpType.const, None)])
+
+        self.check_operands(select_2412_op, [(OpType.Equal, None),
+                                             (OpType.Cast, None),
+                                             (OpType.Fill, None),
+                                             (OpType.const, None)])
+        equal_2411_op: Node = select_2412_op.operands[0][0]
+        cast_2406_op: Node = select_2412_op.operands[1][0]
+
+        self.check_operands(equal_2411_op, [(OpType.Reshape, None),
+                                            (OpType.const, None)])
+        
+        self.check_operands(cast_2406_op, [(OpType.Greater, None),
+                                           (OpType.const, None)])
+
+        self.check_operands(fill_2409_op, [(OpType.Shape, None),
+                                           (OpType.const, None)])
+        shape_3_op: Node = fill_2409_op.operands[0][0]
+
+        self.check_operands(shape_3_op, [(OpType.Cast, None)])
+
+        print('>> Add fusion [KPFusedSparseSelect]:', node.name)
+
+        index = node.get_index()
+        self.graph.node.insert(
+            index + 1,
+            custom_node(
+                'KPFusedSparseSelect',
+                node.name + '/kp_fused',
+                self.graph, 
+                node.output_shapes,
+                [reshape_1_op.operands[0]] + [reshape_2_op.operands[0]]+ [reshape_3_op.operands[0]],
+                [], # attrs
+                node.users))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+
+        fused_ops = [node, 
+                     mul_2419_op, sub_op, 
+                     select_2427_op, select_2415_op, 
+                     realdiv_op, select_2412_op, 
+                     fill_2432_op, fill_2422_op, fill_2409_op, 
+                     shape_1_op, shape_2_op, shape_3_op, 
+                     equal_2424_op, equal_2414_op, equal_2411_op, cast_2406_op,
+                     greater_op,
+                     reshape_1_op, reshape_2_op, reshape_3_op ]
+
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
