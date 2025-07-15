@@ -1078,6 +1078,7 @@ class KPSparseDynamicStitchPatternRewriter(BaseRewriter):
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
 
+
 class SparseSelectPatternRewriter(BaseRewriter):
     def match_and_rewrite(self, node: Node):
         self.check_node(node, (OpType.ConcatV2, None))
@@ -1119,11 +1120,11 @@ class SparseSelectPatternRewriter(BaseRewriter):
         self.check_users(greater_op, [(OpType.Shape, None),
                                       (OpType.shape, None),
                                       (OpType.Cast, None)])
-        shape_2_op: Node = greater_op.user[0]
+        shape_2_op: Node = greater_op.users[0]
 
         self.check_users(shape_2_op, [(OpType.Fill, None),
                                       (OpType.const, None)])
-        fill_2432_op: Node = shape_2_op.user[0]
+        fill_2432_op: Node = shape_2_op.users[0]
 
         self.check_operands(realdiv_op, [(OpType.Fill, None)])
 
@@ -1133,7 +1134,7 @@ class SparseSelectPatternRewriter(BaseRewriter):
 
         self.check_users(select_2415_op, [(OpType.Sub, None),
                                           (OpType.Mul, None)])
-        sub_op: Node = select_2415_op.user[0]
+        sub_op: Node = select_2415_op.users[0]
 
         self.check_operands(select_2415_op, [(OpType.Equal, None),
                                              (OpType.Select, None),
@@ -1197,3 +1198,82 @@ class SparseSelectPatternRewriter(BaseRewriter):
 
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
+
+class SparseGatherPatternRewriter(BaseRewriter):
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.GatherV2, None))
+        self.check_operands(node, [(OpType.Identity, None),
+                                   (OpType.Unique, None),
+                                   (OpType.const, None)])
+        identity_0_op: Node = node.operands[0][0]
+        unique_0_op: Node = node.operands[1][0]
+
+        self.check_operands(identity_0_op, [(OpType.GatherV2, None)])
+        gatherv2_op: Node = identity_0_op.operands[0][0]
+
+        self.check_operands(gatherv2_op, [(OpType.Unique, None),
+                                          (OpType.const, None)
+                                          (OpType.Identity, None)])
+        
+        self.check_operands(unique_0_op, [(OpType.Reshape, None)])
+        reshape_op: Node = unique_0_op.operands[0][0]
+
+        self.check_operands(reshape_op, [(OpType.Unique, None),
+                                         (OpType.const, None)])
+        unique_1_op: Node = reshape_op.operands[0][0]
+
+        self.check_operands(unique_1_op, [(OpType.Identity, None)])
+        identity_1_op: Node = unique_1_op.operands[0][0]
+        self.check_users(unique_1_op, [(OpType.Shape, None),
+                                       (OpType.Reshape, None),
+                                       (OpType.SparseSegmentSum, None)])
+
+        self.check_operands(identity_1_op, [(OpType.StridedSlice, None)])
+        stridedslice_52_op: Node = identity_1_op.operands[0][0]
+
+        self.check_operands(stridedslice_52_op, [(None, None),
+                                                 (OpType.const, None),
+                                                 (OpType.const, None),
+                                                 (OpType.const, None),
+                                                 (OpType.const, None),
+                                                 (OpType.const, None),
+                                                 (OpType.const, None),
+                                                 ])
+
+        self.check_users(unique_1_op, [(OpType.Shape, None),
+                                       (OpType.Reshape, None)])
+        shape_op: Node = unique_1_op.users[0]
+
+        print('>> Add fusion [KPFusedSparseSelect]:', node.name)
+
+        index = node.get_index()
+        self.graph.node.insert(
+            index + 1,
+            custom_node(
+                'KPFusedSparseSelect',
+                node.name + '/kp_fused',
+                self.graph,
+                [shape_op.output_shapes] + [node.output_shapes] + [unique_1_op.output_shapes[2]],
+                [stridedslice_52_op.operands[0]] + [gatherv2_op.operands[2]],
+                [], # attrs
+                shape_op.users + [unique_1_op.users[2]] + node.users))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+        self.replace_all_users_with(shape_op, 0, self.graph.nodes[index + 1], 1)
+        self.replace_all_users_with(unique_1_op, 0, self.graph.nodes[index + 1], 2)
+
+        fused_ops = [node, 
+                     identity_0_op, 
+                     gatherv2_op, 
+                     unique_0_op, 
+                     reshape_op, 
+                     shape_op, unique_1_op, 
+                     identity_1_op,
+                     stridedslice_52_op]
+
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
+
+
+
+        
