@@ -1,3 +1,5 @@
+#include <arm_neon.h>
+
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -31,29 +33,18 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override {
-    VLOG(0) << "Executing KPFusedSparseSegmentReduce operator";
-    const Tensor& data = context->input(0);
+    const Tensor& input_tensor = context->input(0);
     const Tensor& indices = context->input(1);
     const Tensor& slice_input = context->input(2);
     const Tensor& begin = context->input(3);
 
-    // Log input shapes
-    VLOG(0) << "Input data shape: " << data.shape().DebugString();
-    VLOG(0) << "Input indices shape: " << indices.shape().DebugString();
-    VLOG(0) << "Input slice_input shape: " << slice_input.shape().DebugString();
-    VLOG(0) << "Input begin value: " << begin.SummarizeValue(10);
-
     int64_t num_indices = indices.dim_size(0);
-    int64_t embedding_size = data.dim_size(1);
+    int64_t embedding_size = input_tensor.dim_size(1);
     int32 col = begin.flat<int32>().data()[1];
 
-    auto data_mat = data.matrix<float>();
+    auto input_data = input_tensor.matrix<float>().data();
     auto indices_vec = indices.vec<Tidx>();
     auto slice_input_mat = slice_input.matrix<int64>();
-
-    VLOG(0) << "Number of indices: " << num_indices;
-    VLOG(0) << "Embedding size: " << embedding_size;
-    VLOG(0) << "Column index from begin: " << col;
 
     // Calculate max segment_id
     int64 max_seg_id = 0;
@@ -64,7 +55,6 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
       }
     }
     const int64 batch_size = max_seg_id + 1;
-    VLOG(0) << "Calculated batch size: " << batch_size;
 
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context,
@@ -76,10 +66,7 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
                    context->allocate_output(1, TensorShape({}), &slice_out));
     slice_out->scalar<int32>()() = batch_size;
 
-    // KDNN::fused_compute(data, indices, slice_input, output, batch,
-    // embedding_size, is_mean)
-
-    auto output_mat = output->matrix<float>();
+    auto output_data = output->matrix<float>().data();
 
     if (is_mean_) {
       Tensor counts(DT_INT32, TensorShape({batch_size}));
@@ -87,33 +74,62 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
       auto counts_vec = counts.flat<int32>();
 
       for (int64 i = 0; i < num_indices; ++i) {
-        int32 seg_id = slice_input_mat(i, col);
-        for (int64 j = 0; j < embedding_size; ++j) {
-          output_mat(seg_id, j) += data_mat(indices_vec(i), j);
-        }
+        const int32 seg_id = slice_input_mat(i, col);
+        const int32 data_row = indices_vec(i);
         counts_vec(seg_id) += 1;
+
+        float* output_row = output_data + seg_id * embedding_size;
+        const float* input_data_row = input_data + data_row * embedding_size;
+        int64 j = 0;
+        for (; j + 3 < embedding_size; j += 4) {
+          float32x4_t out = vld1q_f32(output_row + j);
+          float32x4_t data = vld1q_f32(input_data_row + j);
+          out = vaddq_f32(out, data);
+          vst1q_f32(output_row + j, out);
+        }
+
+        for (; j < embedding_size; ++j) {
+          output_row[j] += input_data_row[j];
+        }
       }
 
-      auto worker_threads = context->device()->tensorflow_cpu_worker_threads();
-      const int64 cost_per_unit = 1000 * embedding_size;
+      for (int64_t seg = 0; seg < batch_size; ++seg) {
+        const int32_t count = counts_vec(seg);
+        if (count > 0) {
+          const float inv_count = 1.0f / static_cast<float>(count);
+          const float32x4_t inv_count_vec = vdupq_n_f32(inv_count);
 
-      Shard(worker_threads->num_threads, worker_threads->workers, batch_size,
-            cost_per_unit,
-            [&output_mat, &counts_vec](int64 start_seg, int64 end_seg) {
-              for (int32 seg = start_seg; seg < end_seg; ++seg) {
-                const int32 count = counts_vec(seg);
-                if (count > 0) {
-                  for (int64 j = 0; j < output_mat.dimension(1); ++j) {
-                    output_mat(seg, j) /= count;
-                  }
-                }
-              }
-            });
+          float* row_start = output_data + seg * embedding_size;
+          int64_t j = 0;
+
+          for (; j + 3 < embedding_size; j += 4) {
+            float32x4_t val = vld1q_f32(row_start + j);
+            val = vmulq_f32(val, inv_count_vec);
+            vst1q_f32(row_start + j, val);
+          }
+
+          for (; j < embedding_size; ++j) {
+            row_start[j] *= inv_count;
+          }
+        }
+      }
     } else {
       for (int64 i = 0; i < num_indices; ++i) {
-        int32 seg_id = slice_input_mat(i, col);
-        for (int64 j = 0; j < embedding_size; ++j) {
-          output_mat(seg_id, j) += data_mat(indices_vec(i), j);
+        const int32 seg_id = slice_input_mat(i, col);
+        const int32 data_row = indices_vec(i);
+
+        float* output_row = output_data + seg_id * embedding_size;
+        const float* input_data_row = input_data + data_row * embedding_size;
+        int64 j = 0;
+        for (; j + 3 < embedding_size; j += 4) {
+          float32x4_t out = vld1q_f32(output_row + j);
+          float32x4_t data = vld1q_f32(input_data_row + j);
+          out = vaddq_f32(out, data);
+          vst1q_f32(output_row + j, out);
+        }
+
+        for (; j < embedding_size; ++j) {
+          output_row[j] += input_data_row[j];
         }
       }
     }
@@ -123,12 +139,11 @@ class KPFusedSparseSegmentReduceOp : public OpKernel {
   bool is_mean_;
 };
 
-#define REGISTER_KERNEL(Tidx) \
-    REGISTER_KERNEL_BUILDER(                                         \
-        Name("KPFusedSparseSegmentReduce")                           \
-            .Device(DEVICE_CPU)                                      \
-            .TypeConstraint<Tidx>("Tidx"),                           \
-            KPFusedSparseSegmentReduceOp<Tidx>);
+#define REGISTER_KERNEL(Tidx)                                \
+  REGISTER_KERNEL_BUILDER(Name("KPFusedSparseSegmentReduce") \
+                              .Device(DEVICE_CPU)            \
+                              .TypeConstraint<Tidx>("Tidx"), \
+                          KPFusedSparseSegmentReduceOp<Tidx>);
 REGISTER_KERNEL(int64)
 REGISTER_KERNEL(int32)
-#undef REGISTER_KERNEL                       
+#undef REGISTER_KERNEL
