@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 import unittest
 
-class TestSparseSegmentMeanSlice(unittest.TestCase):
+class TestFusedSparseReshape(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Initialize test data and custom op"""
@@ -10,7 +10,6 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
         cls.custom_op = tf.load_op_library('kppattern6.so')
         
         # Base test data
-        cls.base_shape_input = np.array([4, 2, 3, 1], dtype=np.int64)
         cls.base_slice_input = np.array([[0, 0], [0, 1], [1, 2], [3, 4]], dtype=np.int64)
         cls.base_begin = [0, 1]
         cls.base_end = [0, 2]
@@ -26,7 +25,6 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
     def test_custom(self):
         # execute custom op
         custom_out1, custom_out2, = self.custom_op.KPFusedSparseReshape(
-            shape_input=self.base_shape_input,
             slice_input=self.base_slice_input,
             begin=self.base_begin,
             new_shape=self.base_newshape
@@ -34,7 +32,6 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
 
         # tf native implementation
         tf_out1, tf_out2, tf_out3 = self._tf_reference_impl(
-            self.base_shape_input, 
             self.base_slice_input,
             self.base_begin,
             self.base_newshape
@@ -60,7 +57,7 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
             err_msg="Segment count mismatch"
         )
 
-    def _tf_reference_impl(self, shape_input, slice_input, begin, new_shape):
+    def _tf_reference_impl(self, slice_input, begin, new_shape):
         slice67_out = tf.strided_slice(
             slice_input,
             begin=begin,
@@ -72,7 +69,7 @@ class TestSparseSegmentMeanSlice(unittest.TestCase):
         )
 
         slice67_out = tf.reshape(slice67_out, [-1, 1])
-        shape_out = tf.shape(shape_input)
+        shape_out = tf.shape(slice67_out)
         slice57_out = tf.strided_slice(
             shape_out, 
             begin=[0],

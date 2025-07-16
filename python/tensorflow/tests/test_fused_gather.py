@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 import unittest
 
-class TestSparseSegmentMeanSlice(unittest.TestCase):
+class TestFusedGather(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Initialize test data and custom op"""

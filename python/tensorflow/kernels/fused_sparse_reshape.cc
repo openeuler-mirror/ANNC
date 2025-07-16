@@ -27,10 +27,9 @@ limitations under the License.
 using namespace tensorflow;
 
 REGISTER_OP("KPFusedSparseReshape")
-    .Input("shape_input: int64")
     .Input("slice_input: int64")
     .Input("begin: int32")
-    .Input("new_shape: int64")
+    .Input("new_shape: int32")
     .Output("out_indices: int64")
     .Output("out_shape: int64")
     .SetShapeFn(shape_inference::UnknownShape);
@@ -160,20 +159,18 @@ class KPFusedSparseReshape : public OpKernel {
 
   void Compute(OpKernelContext* context) override {
     VLOG(2) << "Executing KPFusedSparseReshape operator";
-    const Tensor& shape_input = context->input(0);
-    const Tensor& slice_input = context->input(1);
-    const Tensor& begin = context->input(2);
-    const Tensor& new_shape = context->input(3);
+    const Tensor& slice_input = context->input(0);
+    const Tensor& begin = context->input(1);
+    const Tensor& new_shape = context->input(2);
 
     OP_REQUIRES(context, slice_input.dims() == 2, errors::Internal("slice_input dims must == 2"));
 
-    VLOG(2) << "Input shape_input shape: " << shape_input.shape().DebugString();
     VLOG(2) << "Input slice_input shape: " << slice_input.shape().DebugString();
-    VLOG(2) << "Input begin value: " << begin.SummarizeValue(10);
-    VLOG(2) << "Input new_shape value: " << new_shape.SummarizeValue(10);
+    VLOG(2) << "Input begin value: " << begin.DebugString();
+    VLOG(2) << "Input new_shape value: " << new_shape.DebugString();
 
     int32 col = begin.flat<int32>().data()[1];
-    int64_t stridedslice57_out = shape_input.flat<int64>().data()[0];
+    int64_t stridedslice57_out = slice_input.dim_size(0);
     auto slice_input_mat = slice_input.matrix<int64>();
 
     VLOG(2) << "stridedslice57_out: " << stridedslice57_out;
@@ -194,7 +191,12 @@ class KPFusedSparseReshape : public OpKernel {
         indices_in_mat(i, 0) = i;
         indices_in_mat(i, 1) = slice_input_mat(i, col);
     }
-    ReshapeKp(context, indices_in, shape_in, new_shape, 0, 1);
+
+    Tensor new_shape_in(DT_INT64, TensorShape({2}));
+    auto newshape_tensor_flat = new_shape_in.flat<int64>();
+    newshape_tensor_flat(0) = static_cast<int64>(new_shape.flat<int32>()(0));
+    newshape_tensor_flat(1) = static_cast<int64>(new_shape.flat<int32>()(1));
+    ReshapeKp(context, indices_in, shape_in, new_shape_in, 0, 1);
   }
 };
 
