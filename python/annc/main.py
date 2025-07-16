@@ -6,7 +6,8 @@ from annc.optimize.rec_embedding import (DnnSparseEmbeddingPatternRewriter,
                                          EmbeddingWithHashBucketPatternRewriter,
                                          LinearSparseEmbeddingPatternRewriter,
                                          KPSparseSegmentReducePatternRewriter,
-                                         KPSparseConcatPatternRewriter,
+                                         KPSparsePaddingFastPatternRewriter,
+                                         KPSparsePaddingPatternRewriter,
                                          KPSparseDynamicStitchPatternRewriter,)
 from annc.optimize.graph import MetaGraph
 from annc.optimize.graph import convert_pbtxt_to_saved_model
@@ -31,7 +32,8 @@ OPT_PASSES = {
     'embed_hash_bucket': EmbeddingWithHashBucketPatternRewriter,
     'linear_sparse': LinearSparseEmbeddingPatternRewriter,
     'sparse_segment_reduce': KPSparseSegmentReducePatternRewriter,
-    'sparse_concat': KPSparseConcatPatternRewriter,
+    'sparse_padding_fast': KPSparsePaddingFastPatternRewriter,
+    'sparse_padding': KPSparsePaddingPatternRewriter,
     'sparse_dynamic_stitch': KPSparseDynamicStitchPatternRewriter,
 }
 
