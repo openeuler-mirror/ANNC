@@ -1362,7 +1362,73 @@ class SparseReshapePatterRewriter(BaseRewriter):
                      shape_53_op]
 
         for fused_op in fused_ops:
-            self.graph.delete_node(fused_op)
+            self.graph.delete_node
+            
+class SparsePackConcatPatternRewriter(BaseRewriter):
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.ConcatV2, None))
+        self.check_operands(node, [(OpType.Fill, None),
+                                   (OpType.Reshape, None),
+                                   (OpType.Const, None)])
+        fill_op: Node = node.operands[0][0]
+        reshape_op: Node = node.operands[1][0]
+
+        self.check_operands(fill_op, [(OpType.Pack, None),
+                                      (OpType.Const, None)])
+        pack_0_op: Node = fill_op.operands[0][0]
+
+        self.check_operands(pack_0_op,[(None, None),
+                                       (OpType.Const, None)])
+        
+        self.check_operands(reshape_op, [(OpType.Pack, None),
+                                         (OpType.Identity, None)])
+        pack_1_op: Node = reshape_op.operands[0][0]
+        identity_0_op: Node = reshape_op.operands[1][0]
+
+        self.check_oprands(pack_1_op, [(None, None),
+                                       (OpType.Const, None)])
+        
+        self.check_operands(identity_0_op, [(OpType.GatherV2, None)])
+        gatherv2_1022_op: Node = identity_op.operands[0][0]
+
+        self.check_operands(gatherv2_1022_op, [(None, None),
+                                               (OpType.Identity, None).
+                                               (OpType.Const, None)])
+        identity_1_op: Node = gatherv2_1022_op.operands[1][0]
+
+        self.check_operands(identity_1_op, [(OpType.GatherV2, None)])
+        gatherv2_1019_op: Node = identity_1_op.operands[0][0]
+
+        self.check_operands(gatherv2_1019_op, [(None, None),
+                                               (None, None),
+                                               (OpType.Const, None)])
+        
+        print('>> Add fusion [KPFusedEmbeddingActionldGather]:', node.name)
+
+        index = node.get_index()
+        self.graph.node.insert(
+            index + 1,
+            custom_node(
+                'KPFusedEmbeddingActionldGather'
+                node.name + '/kp_fused',
+                self.graph,
+                node.output_shapes,
+                [gatherv2_1019_op.operands[0]] + [gatherv2_1019_op.operands[1]] + [gatherv2_1022_op.operands[0]] + [pack_1_op.operands[0]] + [cack_0_op.operands[0]],
+                [], # attrs
+                node.users))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+
+        fused_ops = [node, 
+                     fill_op, reshape_op,
+                     pack_0_op, pack_1_op, identity_0_op, 
+                     gatherv2_1022_op,
+                     identity_1_op, 
+                     gatherv2_1019_op]
+
+        for fused_op in fused_ops:
+            self.graph.delete_node
+
 
 
         
