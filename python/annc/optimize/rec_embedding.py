@@ -1097,25 +1097,25 @@ class SparseSelectPatternRewriter(BaseRewriter):
         realdiv_op: Node = select_2427_op.operands[2][0]
 
         self.check_operands(equal_2424_op, [(OpType.Reshape, None),
-                                            (OpType.const, None)])
+                                            (OpType.Const, None)])
         reshape_1_op: Node = equal_2424_op.operands[0][0]
 
         self.check_operands(reshape_1_op,[(None, None),
-                                        (OpType.const, None)])
+                                        (OpType.Const, None)])
 
         self.check_operands(fill_2422_op, [(OpType.Shape, None),
-                                           (OpType.const, None)])
+                                           (OpType.Const, None)])
         shape_1_op: Node = fill_2422_op.operands[0][0]
 
         self.check_operands(shape_1_op, [(OpType.Greater, None)])
         greater_op: Node = shape_1_op.operands[0][0]
 
         self.check_operands(greater_op, [(OpType.Reshape, None),
-                                         (OpType.const, None)])
+                                         (OpType.Const, None)])
         reshape_2_op: Node = greater_op.operands[0][0]
 
         self.check_operands(reshape_2_op, [(None, None),
-                                           (OpType.const, None)])
+                                           (OpType.Const, None)])
 
         self.check_users(greater_op, [(OpType.Shape, None),
                                       (OpType.shape, None),
@@ -1123,13 +1123,13 @@ class SparseSelectPatternRewriter(BaseRewriter):
         shape_2_op: Node = greater_op.users[0]
 
         self.check_users(shape_2_op, [(OpType.Fill, None),
-                                      (OpType.const, None)])
+                                      (OpType.Const, None)])
         fill_2432_op: Node = shape_2_op.users[0]
 
         self.check_operands(realdiv_op, [(OpType.Fill, None)])
 
         self.check_operands(mul_2419_op, [(OpType.Select, None),
-                                          (OpType.const, None)])
+                                          (OpType.Const, None)])
         select_2415_op: Node = mul_2419_op.operands[0][0]
 
         self.check_users(select_2415_op, [(OpType.Sub, None),
@@ -1139,33 +1139,33 @@ class SparseSelectPatternRewriter(BaseRewriter):
         self.check_operands(select_2415_op, [(OpType.Equal, None),
                                              (OpType.Select, None),
                                              (OpType.Fill, None),
-                                             (OpType.const, None)])
+                                             (OpType.Const, None)])
         equal_2414_op: Node = select_2415_op.operands[0][0]
         select_2412_op: Node = select_2415_op.operands[1][0]
         fill_2409_op: Node = select_2415_op.operands[2][0]
 
         self.check_operands(equal_2414_op, [(OpType.Reshape, None),
-                                            (OpType.const, None)])
+                                            (OpType.Const, None)])
         reshape_3_op: Node = equal_2414_op.operands[0][0]
 
         self.check_operands(reshape_3_op, [(None, None),
-                                           (OpType.const, None)])
+                                           (OpType.Const, None)])
 
         self.check_operands(select_2412_op, [(OpType.Equal, None),
                                              (OpType.Cast, None),
                                              (OpType.Fill, None),
-                                             (OpType.const, None)])
+                                             (OpType.Const, None)])
         equal_2411_op: Node = select_2412_op.operands[0][0]
         cast_2406_op: Node = select_2412_op.operands[1][0]
 
         self.check_operands(equal_2411_op, [(OpType.Reshape, None),
-                                            (OpType.const, None)])
+                                            (OpType.Const, None)])
         
         self.check_operands(cast_2406_op, [(OpType.Greater, None),
-                                           (OpType.const, None)])
+                                           (OpType.Const, None)])
 
         self.check_operands(fill_2409_op, [(OpType.Shape, None),
-                                           (OpType.const, None)])
+                                           (OpType.Const, None)])
         shape_3_op: Node = fill_2409_op.operands[0][0]
 
         self.check_operands(shape_3_op, [(OpType.Cast, None)])
@@ -1204,7 +1204,7 @@ class SparseGatherPatternRewriter(BaseRewriter):
         self.check_node(node, (OpType.GatherV2, None))
         self.check_operands(node, [(OpType.Identity, None),
                                    (OpType.Unique, None),
-                                   (OpType.const, None)])
+                                   (OpType.Const, None)])
         identity_0_op: Node = node.operands[0][0]
         unique_0_op: Node = node.operands[1][0]
 
@@ -1212,14 +1212,14 @@ class SparseGatherPatternRewriter(BaseRewriter):
         gatherv2_op: Node = identity_0_op.operands[0][0]
 
         self.check_operands(gatherv2_op, [(OpType.Unique, None),
-                                          (OpType.const, None)
+                                          (OpType.Const, None)
                                           (OpType.Identity, None)])
         
         self.check_operands(unique_0_op, [(OpType.Reshape, None)])
         reshape_op: Node = unique_0_op.operands[0][0]
 
         self.check_operands(reshape_op, [(OpType.Unique, None),
-                                         (OpType.const, None)])
+                                         (OpType.Const, None)])
         unique_1_op: Node = reshape_op.operands[0][0]
 
         self.check_operands(unique_1_op, [(OpType.Identity, None)])
@@ -1232,25 +1232,25 @@ class SparseGatherPatternRewriter(BaseRewriter):
         stridedslice_52_op: Node = identity_1_op.operands[0][0]
 
         self.check_operands(stridedslice_52_op, [(None, None),
-                                                 (OpType.const, None),
-                                                 (OpType.const, None),
-                                                 (OpType.const, None),
-                                                 (OpType.const, None),
-                                                 (OpType.const, None),
-                                                 (OpType.const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
                                                  ])
 
         self.check_users(unique_1_op, [(OpType.Shape, None),
                                        (OpType.Reshape, None)])
         shape_op: Node = unique_1_op.users[0]
 
-        print('>> Add fusion [KPFusedSparseSelect]:', node.name)
+        print('>> Add fusion [KPFusedGather]:', node.name)
 
         index = node.get_index()
         self.graph.node.insert(
             index + 1,
             custom_node(
-                'KPFusedSparseSelect',
+                'KPFusedGather',
                 node.name + '/kp_fused',
                 self.graph,
                 [shape_op.output_shapes] + [node.output_shapes] + [unique_1_op.output_shapes[2]],
@@ -1274,6 +1274,95 @@ class SparseGatherPatternRewriter(BaseRewriter):
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
 
+
+class SparseReshapePatterRewriter(BaseRewriter):
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node，(OpType.SparseReshape, None))
+        self.check_operands(node, [(OpType.Cast, None),
+                                   (OpType.ConcatV2, None),
+                                   (OpType.Cast, None),
+                                   (OpType.Const, None)])
+        cast_0_op: Node = node.operands[0][0]
+        concatv2_op: Node = node.operands[1][0]
+        cast_2_op: Node = node.operands[2][0]
+
+        self.check_operands(cast_0_op, [(OpType.Const, None)])
+
+        self.check_operands(concatv2_op, [(OpType.Reshape, None),
+                                          (OpType.Cast, None),
+                                          (OpType.Const, None)])
+        reshape_0_op: Node = concatv2_op.operands[0][0]
+        cast_1_op: Node = concatv2_op.operands[1][0]
+
+        self.check_operands(reshape_0_op, [(OpType.StridedSlice, None),
+                                           (OpType.Const, None)])
+        stridedslice_67_op: Node = reshape_0_op.operands[0][0]
+
+        self.check_operands(stridedslice_67_op, [(None, None),
+                                                 (None, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),])
+        
+        self.check_operands(cast_1_op, [(OpType.Reshape, None)])
+        reshape_1_op: Node = cast_1_op.operands[0][0]
+
+        self.check_operands(reshape_1_op, [(OpType.Range, None),
+                                           (OpType.Const, None)])
+        range_op: Node = reshape_1_op.operands[0][0]
+
+        self.check_operands(range_op, [(OpType.StridedSlice, None),
+                                       (OpType.Const, None),
+                                       (OpType.Const, None)])
+        stridedslice_57_op: Node = range_op.operands[0][0]
+
+        self.check_operands(stridedslice_57_op, [(OpType.Shape, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None),
+                                                 (OpType.Const, None)])
+        shape_53_op: Node = stridedslice_57_op.operands[0][0]
+
+        self.check_operands(shape_53_op, [(None, None)])
+
+        self.check_users(stridedslice_57_op, [(OpType.Pack, None),
+                                              (OpType.Range, None)])
+        pack_op: Node = stridedslice_57_op.users[0]
+
+        Self.check_users(pack_op, [(OpType.Cast, None)])
+        cast_2_op = pack_op.users[0]
+
+        self.check_users(cast_2_op, [(OpType.SparseReshape, None)])
+
+        print('>> Add fusion [KPFusedSparseReshape]:', node.name)
+
+        index = node.get_index()
+        self.graph.node.insert(
+            index + 1,
+            custom_node(
+                'KPFusedSparseReshape'
+                node.name + '/kp_fused',
+                self.graph,
+                node.output_shapes,
+                [shape_53_op.operands[0]] + [stridedslice_67_op.operands[0]] + [stridedslice_67_op.operands[1]] + [cast_0.operands[0]],
+                [], # attrs
+                node.users))
+
+        self.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+        
+        fused_ops = [node, 
+                     cast_0_op, concatv2_op,
+                     cast_1_op, 
+                     reshape_1_op cast_2_op,
+                     reshape_0_op, range_op, pack_op, 
+                     stridedslice_67_op, stridedslice_57_op,
+                     shape_53_op]
+
+        for fused_op in fused_ops:
+            self.graph.delete_node(fused_op)
 
 
         
