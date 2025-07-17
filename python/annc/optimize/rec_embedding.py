@@ -1125,7 +1125,8 @@ class KPSparseDynamicStitchPatternRewriter(BaseRewriter):
         self.graph.insert_before_node(insert_node, before_node=node,
                                       graph_nodes=self.graph.graph_def.node)
 
-        self.graph.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0)
+        self.graph.replace_all_users_with(node, 0, self.graph.nodes[index + 1], 0,
+                                          graph_nodes=self.graph.graph_def.node)
         self.graph.replace_all_users_with(node, 0, self.graph.nodes[index], 0,
                                           graph_nodes=self.graph.graph_def.node)
         
@@ -1147,7 +1148,7 @@ class SparseSelectPatternRewriter(BaseRewriter):
 
         self.check_operands(select_2427_op, [(OpType.Equal, None),
                                         (OpType.Fill, None),
-                                        (OpType.RealDiv, None)
+                                        (OpType.RealDiv, None),
                                         (OpType.Const, None)])
         equal_2424_op: Node = select_2427_op.operands[0][0]
         fill_2422_op: Node = select_2427_op.operands[1][0]
@@ -1270,7 +1271,7 @@ class SparseGatherPatternRewriter(BaseRewriter):
         gatherv2_op: Node = identity_0_op.operands[0][0]
 
         self.check_operands(gatherv2_op, [(OpType.Unique, None),
-                                          (OpType.Const, None)
+                                          (OpType.Const, None),
                                           (OpType.Identity, None)])
         
         self.check_operands(unique_0_op, [(OpType.Reshape, None)])

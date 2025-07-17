@@ -183,7 +183,7 @@ class Graph:
         graph_nodes.insert(index, insert_node.as_node_def())
         
         self.nodes.insert(before_node.get_index(), insert_node)
-        print(f'>> add node: [{insert_node.type}] \'{insert_node.name}\'')
+        # print(f'>> add node: [{insert_node.type}] \'{insert_node.name}\'')
 
     def delete_nodes(self, delete_nodes: List[Node], 
                      graph_nodes: List[node_def_pb2.NodeDef]):
@@ -193,7 +193,7 @@ class Graph:
             if node.name in names:
                 indexes.append(i)
         for index in sorted(indexes, reverse=True):
-            print(f'-- delete node: [{graph_nodes[index].op}] \'{graph_nodes[index].name}\'')
+            # print(f'-- delete node: [{graph_nodes[index].op}] \'{graph_nodes[index].name}\'')
             graph_nodes.pop(index)
         
         indexes: List[int] = []
@@ -201,7 +201,7 @@ class Graph:
             if n.name in names:
                 indexes.append(i)
         for i in sorted(indexes, reverse=True):
-            print(f'-- delete op: [{self.nodes[i].type}] \'{self.nodes[i].name}\'')
+            # print(f'-- delete op: [{self.nodes[i].type}] \'{self.nodes[i].name}\'')
             del self.nodes[i]
 
     def delete_node(self, node: Node, graph_nodes: List[node_def_pb2.NodeDef]):

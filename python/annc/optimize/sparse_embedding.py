@@ -8,7 +8,7 @@ class KPSparseSelectPatternRewriter(BaseRewriter):
     __pattern__ = 'KPFusedSparseSelect'
 
     def match_and_rewrite(self, node: Node):
-        self.check_node(node, (OpType.Concat, None))
+        self.check_node(node, (OpType.ConcatV2, None))
         self.check_operands(node, [(OpType.Mul, None),
                                    (OpType.Select, None),
                                    (OpType.Const, None)])
@@ -125,7 +125,7 @@ class KPFusedGatherPatternRewriter(BaseRewriter):
         print(f'>> Add fusion [{self.__pattern__}]:', unique_1_op.name)
 
         output_shapes = attr_value_pb2.AttrValue()
-        for attr in [shape_op, node.attrs]:
+        for attr in shape_op.attrs + node.attrs:
             if attr.key == '_output_shapes':
                 output_shapes.list.shape.extend(attr.value.list.shape)
         
@@ -138,7 +138,7 @@ class KPFusedGatherPatternRewriter(BaseRewriter):
             [], 
             [gatherv2_op.operands[0]] + strided_slice.operands[:2],
             [CustomAttr('_output_shapes', output_shapes)],
-            shape_op.users, unique_1_op.users + node.users)
+            shape_op.users + unique_1_op.users + node.users)
         self.graph.insert_before_node(insert_node, before_node=unique_1_op, 
                                       graph_nodes=self.graph.graph_def.node)
         self.graph.replace_all_users_with(shape_op, 0, self.graph.nodes[index], 0,
@@ -159,7 +159,7 @@ class KPSparseReshapePatternRewriter(BaseRewriter):
 
     def match_and_rewrite(self, node: Node):
         self.check_node(node, (OpType.SparseReshape, None))
-        self.check_operands(node, [(OpType.Concat, None),
+        self.check_operands(node, [(OpType.ConcatV2, None),
                                    (OpType.Cast, None),
                                    (OpType.Cast, None)])
         concat_op: Node = node.operands[0][0]
@@ -173,7 +173,7 @@ class KPSparseReshapePatternRewriter(BaseRewriter):
         strided_slice: Node = pack_op.operands[0][0]
         self.check_operands(strided_slice, [(OpType.Shape, None),
                                             (OpType.Const, None),
-                                            (OpType.Const, None)
+                                            (OpType.Const, None),
                                             (OpType.Const, None)])
         shape_op: Node = strided_slice.operands[0][0]
         self.check_operands(concat_op, [(OpType.Cast, None),
@@ -237,8 +237,11 @@ class KPEmbeddingActionIdGatherPatternRewriter(BaseRewriter):
         self.check_operands(pack_op, [(OpType.StridedSlice, None),
                                       (OpType.Const, None)])
         self.check_operands(reshape_op, [(OpType.Identity, None),
-                                         (OpType.Pack, pack_op.name)])
+                                         (OpType.Pack, None)])
         identity_op: Node = reshape_op.operands[0][0]
+        pack_1_op: Node = reshape_op.operands[1][0]
+        self.check_operands(pack_1_op, [(OpType.StridedSlice, None),
+                                        (OpType.Const, None)])
         self.check_operands(identity_op, [(OpType.GatherV2, None)])
         gatherv2_op: Node = identity_op.operands[0][0]
         self.check_operands(gatherv2_op, [(OpType.Identity, None),
@@ -272,7 +275,7 @@ class KPEmbeddingActionIdGatherPatternRewriter(BaseRewriter):
                                           graph_nodes=self.graph.graph_def.node)
 
         self.graph.delete_nodes([node, reshape_op, fill_op, pack_op, identity_op, 
-                                 gatherv2_op, identity_1_op, gatherv2_1_op], 
+                                 pack_1_op, gatherv2_op, identity_1_op, gatherv2_1_op], 
                                 graph_nodes=self.graph.graph_def.node)
         return insert_node.get_index()
 
