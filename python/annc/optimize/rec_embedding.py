@@ -1340,7 +1340,7 @@ class SparseGatherPatternRewriter(BaseRewriter):
 
 class SparseReshapePatterRewriter(BaseRewriter):
     def match_and_rewrite(self, node: Node):
-        self.check_node(node，(OpType.SparseReshape, None))
+        self.check_node(node, (OpType.SparseReshape, None))
         self.check_operands(node, [(OpType.Cast, None),
                                    (OpType.ConcatV2, None),
                                    (OpType.Cast, None),
@@ -1395,7 +1395,7 @@ class SparseReshapePatterRewriter(BaseRewriter):
                                               (OpType.Range, None)])
         pack_op: Node = stridedslice_57_op.users[0]
 
-        Self.check_users(pack_op, [(OpType.Cast, None)])
+        self.check_users(pack_op, [(OpType.Cast, None)])
         cast_2_op = pack_op.users[0]
 
         self.check_users(cast_2_op, [(OpType.SparseReshape, None)])
@@ -1405,12 +1405,13 @@ class SparseReshapePatterRewriter(BaseRewriter):
         index = node.get_index()
         self.graph.node.insert(
             index + 1,
-            custom_node(
-                'KPFusedSparseReshape'
+            CustomNode(
+                'KPFusedSparseReshape',
                 node.name + '/kp_fused',
                 self.graph,
                 node.output_shapes,
-                [shape_53_op.operands[0]] + [stridedslice_67_op.operands[0]] + [stridedslice_67_op.operands[1]] + [cast_0.operands[0]],
+                [shape_53_op.operands[0]] + [stridedslice_67_op.operands[0]] + \
+                    [stridedslice_67_op.operands[1]] + [cast_0_op.operands[0]],
                 [], # attrs
                 node.users))
 
@@ -1419,7 +1420,7 @@ class SparseReshapePatterRewriter(BaseRewriter):
         fused_ops = [node, 
                      cast_0_op, concatv2_op,
                      cast_1_op, 
-                     reshape_1_op cast_2_op,
+                     reshape_1_op, cast_2_op,
                      reshape_0_op, range_op, pack_op, 
                      stridedslice_67_op, stridedslice_57_op,
                      shape_53_op]
@@ -1452,10 +1453,10 @@ class SparsePackConcatPatternRewriter(BaseRewriter):
                                        (OpType.Const, None)])
         
         self.check_operands(identity_0_op, [(OpType.GatherV2, None)])
-        gatherv2_1022_op: Node = identity_op.operands[0][0]
+        gatherv2_1022_op: Node = identity_0_op.operands[0][0]
 
         self.check_operands(gatherv2_1022_op, [(None, None),
-                                               (OpType.Identity, None).
+                                               (OpType.Identity, None),
                                                (OpType.Const, None)])
         identity_1_op: Node = gatherv2_1022_op.operands[1][0]
 
@@ -1471,12 +1472,14 @@ class SparsePackConcatPatternRewriter(BaseRewriter):
         index = node.get_index()
         self.graph.node.insert(
             index + 1,
-            custom_node(
-                'KPFusedEmbeddingActionldGather'
+            CustomNode(
+                'KPFusedEmbeddingActionldGather',
                 node.name + '/kp_fused',
                 self.graph,
                 node.output_shapes,
-                [gatherv2_1019_op.operands[0]] + [gatherv2_1019_op.operands[1]] + [gatherv2_1022_op.operands[0]] + [pack_1_op.operands[0]] + [cack_0_op.operands[0]],
+                [gatherv2_1019_op.operands[0]] + [gatherv2_1019_op.operands[1]] + \
+                    [gatherv2_1022_op.operands[0]] + [pack_1_op.operands[0]] + \
+                        [pack_0_op.operands[0]],
                 [], # attrs
                 node.users))
 

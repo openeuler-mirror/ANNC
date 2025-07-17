@@ -1,16 +1,19 @@
 import os
 import argparse
-from annc.optimize.rec_embedding import (DnnSparseEmbeddingPatternRewriter,
-                                         DnnEmbeddingWithHashBucketPatternRewriter,
-                                         EmbeddingPatternRewriter,
-                                         EmbeddingWithHashBucketPatternRewriter,
-                                         LinearSparseEmbeddingPatternRewriter,
-                                         KPSparseSegmentReducePatternRewriter,
-                                         KPSparsePaddingFastPatternRewriter,
-                                         KPSparsePaddingPatternRewriter,
-                                         KPSparseDynamicStitchPatternRewriter,)
+from annc.optimize import (DnnSparseEmbeddingPatternRewriter,
+                           DnnEmbeddingWithHashBucketPatternRewriter,
+                           EmbeddingPatternRewriter,
+                           EmbeddingWithHashBucketPatternRewriter,
+                           LinearSparseEmbeddingPatternRewriter,
+                           KPSparseSegmentReducePatternRewriter,
+                           KPSparsePaddingFastPatternRewriter,
+                           KPSparsePaddingPatternRewriter,
+                           KPSparseDynamicStitchPatternRewriter,
+                           KPSparseSelectPatternRewriter,
+                           KPFusedGatherPatternRewriter,
+                           KPSparseReshapePatternRewriter,
+                           KPEmbeddingActionIdGatherPatternRewriter)
 from annc.optimize.graph import MetaGraph
-from annc.optimize.graph import convert_pbtxt_to_saved_model
 
 
 def parse_args():
@@ -21,7 +24,9 @@ def parse_args():
     parser.add_argument('passes', nargs='+',
         help='opt: \'dnn_sparse\', \'dnn_hash_bucket\', \'embed\','
              ' \'embed_hash_bucket\', \'linear_sparse\', '
-             '\'sparse_segment_reduce\', \'sparse_concat\'')
+             '\'sparse_segment_reduce\', \'sparse_concat\','
+             '\'sparse_select\', \'fused_gather\', \'sparse_reshape\','
+             '\'action_id_gather\'')
     return parser.parse_args()
 
 
@@ -35,6 +40,10 @@ OPT_PASSES = {
     'sparse_padding_fast': KPSparsePaddingFastPatternRewriter,
     'sparse_padding': KPSparsePaddingPatternRewriter,
     'sparse_dynamic_stitch': KPSparseDynamicStitchPatternRewriter,
+    'sparse_select': KPSparseSelectPatternRewriter,
+    'fused_gather': KPFusedGatherPatternRewriter,
+    'sparse_reshape': KPSparseReshapePatternRewriter,
+    'action_id_gather': KPEmbeddingActionIdGatherPatternRewriter,
 }
 
 
@@ -47,8 +56,8 @@ def opt():
             raise TypeError(f'Pass \'{pass_name}\' not found')
         OPT_PASSES[pass_name](meta_graph.graph)
 
-    os.makedirs(args.output, exist_ok=True)
-    meta_graph.save(args.output, to_text=args.verbose)
+    # os.makedirs(args.output, exist_ok=True)
+    # meta_graph.save(args.output, to_text=args.verbose)
 
 
 if __name__ == '__main__':
