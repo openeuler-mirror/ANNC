@@ -56,8 +56,8 @@ def opt():
             raise TypeError(f'Pass \'{pass_name}\' not found')
         OPT_PASSES[pass_name](meta_graph.graph)
 
-    # os.makedirs(args.output, exist_ok=True)
-    # meta_graph.save(args.output, to_text=args.verbose)
+    os.makedirs(args.output, exist_ok=True)
+    meta_graph.save(args.output, to_text=args.verbose)
 
 
 if __name__ == '__main__':
