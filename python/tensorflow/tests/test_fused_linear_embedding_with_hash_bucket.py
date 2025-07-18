@@ -12,8 +12,8 @@ class TestFusedLinearEmbeddingWithHashBucket(unittest.TestCase):
         #base test data
         cls.base_placeholder = "test this pattern"
         cls.base_variable = np.linspace(0, 1, num=2, endpoint=False, dtype=np.float32).reshape(2, 1)
-         # Create tf session
-         cls.sess = tf.compat.v1.session()
+        # Create tf session
+        cls.sess = tf.compat.v1.session()
 
     @classmethod
     def tearDownClass(cls):
@@ -49,7 +49,7 @@ class TestFusedLinearEmbeddingWithHashBucket(unittest.TestCase):
         shape_0_out = tf.shape(expanddims_out)
         notequal_out = tf.not_equal(expanddims_out, y = "")
         cast_0_out = tf.cast(shape_0_out)
-        where_0_out = tf.where(not_equal_out)
+        where_0_out = tf.where(notequal_out)
         stridedslice_0_out = tf.strided_slice(cast_0_out, begin = [0], end = [1], strides = [1])
         pack_0_out = tf.pack(stridedslice_0_out, -1)
         gathernd_out = tf.gather_nd(expanddims_out, where_0_out)
