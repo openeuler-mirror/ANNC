@@ -53,13 +53,8 @@ class KPFusedSparseSelect : public OpKernel {
     Eigen::Tensor<float,2, Eigen::RowMajor> tensor_ones(N,1);
     tensor_ones.setConstant(1.0f);
 
-    Eigen::Tensor<float,2, Eigen::RowMajor> tensor_zeros(N,1);
-    tensor_zeros.setConstant(0.0f);
-
     auto select_2412 = b_equal_node0.select(tensor_ones,a_greater_casted);
     auto select_2415 = b_equal_node1.select(tensor_ones,select_2412);
-
-    auto sub_out = select_2415 - 1.0f;
     auto concat_out = select_2415.concatenate(tensor_ones,1);
 
     Tensor* output_x = nullptr;
@@ -79,14 +74,14 @@ class KPFusedSparseSelect : public OpKernel {
         output_x->dim_size(0),
         output_x->dim_size(1)
     );
-    map_output_x = tensor_zeros;
+    map_output_x = a_reshaped_tensor;
 
     Eigen::TensorMap<Eigen::Tensor<float, 2, Eigen::RowMajor>> map_output_y(
         output_y->flat<float>().data(),
         output_y->dim_size(0),
         output_y->dim_size(1)
     );
-    map_output_y = sub_out;
+    map_output_y = select_2415;
 
     Eigen::TensorMap<Eigen::Tensor<float, 2, Eigen::RowMajor>> map_output_w(
         output_w->flat<float>().data(),
