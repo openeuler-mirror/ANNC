@@ -11,7 +11,7 @@ REGISTER_OP("KPFusedGather")
     .Input("slice_input: int64")
     .Input("begin: int32")
     .Output("out_shape: int64")
-    .Output("out_indices: int64")
+    .Output("out_indices: int32")
     .Output("out_data: float")
     .SetShapeFn(shape_inference::UnknownShape);
 class KPFusedGather : public OpKernel {
@@ -38,7 +38,7 @@ class KPFusedGather : public OpKernel {
     VLOG(2) << "Column index from begin: " << col;
 
     std::vector<int64_t> unique_values;
-    std::vector<int64_t> indices(slice_input.dim_size(0));
+    std::vector<int32_t> indices(slice_input.dim_size(0));
     std::unordered_map<int64_t, int32_t> value_to_index;
     int current_index = 0;
     for (int64_t i = 0; i < slice_input.dim_size(0); ++i) {
@@ -65,8 +65,8 @@ class KPFusedGather : public OpKernel {
 
     OP_REQUIRES_OK(context,
                    context->allocate_output(
-                        1, TensorShape({static_cast<int64>(indices.size())}), &out_indices));
-    std::memcpy(out_indices->data(), indices.data(), indices.size() * sizeof(int64_t));
+                        1, TensorShape({static_cast<int32>(indices.size())}), &out_indices));
+    std::memcpy(out_indices->data(), indices.data(), indices.size() * sizeof(int32_t));
     OP_REQUIRES(context, data.dim_size(1) * unique_values.size() % 12 == 0, 
                 errors::Internal("cannot reshape to [-1, 12]"));
     
