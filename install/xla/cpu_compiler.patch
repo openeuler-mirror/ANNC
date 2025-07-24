@@ -1,0 +1,112 @@
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index e519cf0..9f34fb8 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ 238,6 +238,11 @@ limitations under the License.
+ #include "xla/service/cpu/onednn_rewriter.h"
+ #endif
+ 
++#include <annc/xnnpack_ops_rewriter.h>
++#include <annc/kernel_selector_ops_rewriter.h>
++
++#include <annc/bisheng_cpu.h>
++
+ namespace {
+ 
+ // We need to explicitly load all the dialects we will involved in emitting the
+@@ 259,6 +264,8 @@ void LoadMLIRDialects(mlir::MLIRContext& context) {
+ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+     llvm::Triple target_triple, llvm::StringRef cpu_name) {
+   xla::cpu::HloXlaRuntimePipelineOptions options;
++  options.use_kernel_selector =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
+   options.enable_tiling_and_fusion =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
+   if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
+@@ 686,6 +693,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+   pipeline.AddPass<BatchDotSimplification>();
+   pipeline.AddPass<DotDecomposer>();
+ 
++  // Rewrite to custom calls with XNNPACK targets.
++  bool enable_xnnpack =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_xnnpack();
++  if (enable_xnnpack)
++    pipeline.AddPass<XnnPackOpsRewriter>();
++
+   // Rewrite to custom calls with target as oneDNN library calls.
+ #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+   // AOT compiled code runs in single thread.
+@@ 844,6 +857,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+         &layout_constraints);
+   }
+ 
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
++    ADD_GRAPH_OPT_PASSES();
++  }
++
+   return pipeline.Run(module).status();
+ }
+ 
+@@ 875,8 +892,18 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+ 
+   pipeline.AddPass<ReshapeDecomposer>();
+ 
++  bool use_kernel_selector =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
++  if (use_kernel_selector) {
++    // This pass rewrites hlo.dot into custom calls.
++    pipeline.AddPass<KernelSelectorOpsRewriter>();
++  }
++
+   // Add a fusion pass now that layout assignment is done.
+  pipeline.AddPass<CpuInstructionFusion>();
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL)
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/false);
++  else
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/true);
+ 
+   // The LayoutAssignment pass may leave behind kCopy instructions which are
+   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
+diff --git a/xla/service/cpu/cpu_instruction_fusion.h b/xla/service/cpu/cpu_instruction_fusion.h
+index 1e090cb69b..6c5d87eb2e 100644
+--- a/xla/service/cpu/cpu_instruction_fusion.h
++++ b/xla/service/cpu/cpu_instruction_fusion.h
+@@ 26,8 +26,8 @@ namespace cpu {
+ 
+ class CpuInstructionFusion : public InstructionFusion {
+  public:
+  CpuInstructionFusion()
+      : InstructionFusion(CpuInstructionFusion::IsExpensive) {}
++  CpuInstructionFusion(bool may_duplicate)
++      : InstructionFusion(CpuInstructionFusion::IsExpensive, may_duplicate) {}
+   ~CpuInstructionFusion() override = default;
+ 
+   using HloPassInterface::Run;
+diff --git a/third_party/xla/xla/service/cpu/cpu_compiler.cc b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+index da582c0f..ca640717 100644
+--- a/third_party/xla/xla/service/cpu/cpu_compiler.cc
++++ b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+@@ 245,7 +245,9 @@ limitations under the License.
+ #include <xnnpack_ops_rewriter.h>
+ #include <kernel_selector_ops_rewriter.h>
+ 
+-#include <bisheng_cpu.h>
++#include <bisheng-cpu/embedding_simplify.h>
++#include <bisheng-cpu/concat_partition.h>
++#include <bisheng-cpu/reduce_combine.h>
+ 
+ namespace {
+ 
+@@ 866,7 +868,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+   }
+ 
+   if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
+-    ADD_GRAPH_OPT_PASSES();
++    pipeline.AddPass<ConcatPartition>();
++    pipeline.AddPass<EmbeddingSimplify>();
++    pipeline.AddPass<ReduceCombine>();
++    pipeline.AddPass<HloDCE>();
+   }
+ 
+   return pipeline.Run(module).status();
+

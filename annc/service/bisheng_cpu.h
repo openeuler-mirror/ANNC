@@ -10,7 +10,7 @@ namespace xla {
 class ReduceCombine : public HloModulePass {
 public:
   ~ReduceCombine() override = default;
-  absl::string_view name() const override : { return "reduce-combine"; }
+  absl::string_view name() const override { return "reduce-combine"; }
 
   using HloPassInterface::Run;
   StatusOr<bool>
@@ -29,16 +29,16 @@ public:
       const absl::flat_hash_set<absl::string_view> &execution_threads) override;
 
 private:
-  HloInstruction *hlo;
-  HloInstruction *broadcast;
-  HloInstruction *gather;
-  HloInstruction *select;
-  HloInstruction *and0;
-  HloInstruction *and1;
-  HloInstruction *comp0;
-  HloInstruction *comp1;
-  HloInstruction *constant0;
-  HloInstruction *constant1;
+    HloInstruction *broadcast= nullptr;
+    HloInstruction *gather= nullptr;
+    HloInstruction *mul= nullptr;
+    HloInstruction *select= nullptr;
+    HloInstruction *and0= nullptr;
+    HloInstruction *and1= nullptr;
+    HloInstruction *comp0= nullptr;
+    HloInstruction *comp1= nullptr;
+    HloInstruction *constant0= nullptr;
+    HloInstruction *constant1= nullptr;
 };
 
 class ConcatPartition : public HloModulePass {
@@ -55,21 +55,20 @@ public:
                                     int newSliceSize, HloComputation *comp);
 
 private:
-  HloInstruction *hlo;
-  HloInstruction *mul;
-  HloInstruction *broadcast;
-  HloInstruction *gather;
-  HloInstruction *select;
-  HloInstruction *convert;
-  HloInstruction *andOp;
-  HloInstruction *comp_0;
-  HloInstruction *comp_1;
-  HloInstruction *broadcast_1;
-  HloInstruction *constant_1;
-  HloInstruction *broadcast_0;
-  HloInstruction *constant_0;
-  HloInstruction *convert_1;
-  HloInstruction *concat;
+    HloInstruction *mul= nullptr;
+    HloInstruction *broadcast= nullptr;
+    HloInstruction *gather= nullptr;
+    HloInstruction *select= nullptr;
+    HloInstruction *convert= nullptr;
+    HloInstruction *andOp= nullptr;
+    HloInstruction *comp_0= nullptr;
+    HloInstruction *comp_1= nullptr;
+    HloInstruction *broadcast_1= nullptr;
+    HloInstruction *constant_1= nullptr;
+    HloInstruction *broadcast_0= nullptr;
+    HloInstruction *constant_0= nullptr;
+    HloInstruction *convert_1= nullptr;
+    HloInstruction *concat= nullptr;
 };
 
 #define ADD_GRAPH_OPT_PASSES()                                                 \
