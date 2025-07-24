@@ -1,0 +1,50 @@
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index 371c836c4a..14c9429165 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ -241,6 +241,9 @@ limitations under the License.
+ #include "xla/service/cpu/onednn_rewriter.h"
+ #endif
+ 
++#include <annc/xnnpack_ops_rewriter.h>
++#include <annc/kernel_selector_ops_rewriter.h>
++
+ namespace {
+ 
+ // We need to explicitly load all the dialects we will involved in emitting the
+@@ -262,6 +265,8 @@ void LoadMLIRDialects(mlir::MLIRContext& context) {
+ xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
+     llvm::Triple target_triple, llvm::StringRef cpu_name) {
+   xla::cpu::HloXlaRuntimePipelineOptions options;
++  options.use_kernel_selector =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
+   options.enable_tiling_and_fusion =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
+   if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
+@@ -689,6 +694,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+   pipeline.AddPass<BatchDotSimplification>();
+   pipeline.AddPass<DotDecomposer>();
+ 
++  // Rewrite to custom calls with XNNPACK targets.
++  bool enable_xnnpack =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_xnnpack();
++  if (enable_xnnpack)
++    pipeline.AddPass<XnnPackOpsRewriter>();
++
+   // Rewrite to custom calls with target as oneDNN library calls.
+ #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+   // AOT compiled code runs in single thread.
+@@ -890,6 +901,13 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+ 
+   pipeline.AddPass<ReshapeDecomposer>();
+ 
++  bool use_kernel_selector =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
++  if (use_kernel_selector) {
++    // This pass rewrites hlo.dot into custom calls.
++    pipeline.AddPass<KernelSelectorOpsRewriter>();
++  }
++
+   // Add a fusion pass now that layout assignment is done.
+   bool may_duplicate =
+       xla::GetDebugOptionsFromFlags().xla_cpu_enable_duplicate_fusion();

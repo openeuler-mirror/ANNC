@@ -1,0 +1,12 @@
+diff --git a/xla/service/cpu/hlo_xla_runtime_pipeline.h b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+index b77436c165..3fb94cca82 100644
+--- a/xla/service/cpu/hlo_xla_runtime_pipeline.h
++++ b/xla/service/cpu/hlo_xla_runtime_pipeline.h
+@@ -35,6 +35,7 @@ struct HloXlaRuntimePipelineOptions {
+   bool remove_copies_to_outparams = true;
+   bool sparse_bufferization = true;
+   bool experimental_deallocation = false;
++  bool use_kernel_selector = false;
+   bool enable_avx2 = true;
+   // Accelerate sparse computations with CUDA threading.
+   // This is an experimental feature, so off by default.

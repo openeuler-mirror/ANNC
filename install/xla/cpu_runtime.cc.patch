@@ -1,0 +1,51 @@
+diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
+index 84879eaf0f..f29b02e8b1 100644
+--- a/xla/service/cpu/cpu_runtime.cc
++++ b/xla/service/cpu/cpu_runtime.cc
+@@ -34,6 +34,9 @@ limitations under the License.
+ #include "absl/strings/str_format.h"
+ #include "absl/strings/str_join.h"
+ #include "absl/synchronization/mutex.h"
++#include "tsl/platform/logging.h"
++#include "tsl/platform/status.h"
++#include "tsl/profiler/lib/traceme.h"
+ #include "xla/executable_run_options.h"
+ #include "xla/layout_util.h"
+ #include "xla/primitive_util.h"
+@@ -46,9 +49,6 @@ limitations under the License.
+ #include "xla/statusor.h"
+ #include "xla/stream_executor/device_memory.h"
+ #include "xla/stream_executor/stream_executor.h"
+-#include "tsl/platform/logging.h"
+-#include "tsl/platform/status.h"
+-#include "tsl/profiler/lib/traceme.h"
+ 
+ namespace xla {
+ namespace cpu {
+@@ -149,6 +149,26 @@ extern const char* const kPartitionIdSymbolName =
+ extern const char* const kReplicaIdSymbolName = "__xla_cpu_runtime_ReplicaId";
+ extern const char* const kOneDnnMatMulSymbolName =
+     "__xla_cpu_runtime_OneDnnMatMul";
++extern const char* const kXnnPackSoftMaxNDSymbolName =
++    "__xla_cpu_runtime_XnnPackSoftMaxND";
++extern const char* const kKernelSelectorGEMVSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMV";
++extern const char* const kKernelSelectorGEMMSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMM";
++extern const char* const kKernelSelectorBatch3DSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3D";
++extern const char* const kKernelSelectorGEMVMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMVMLIR";
++extern const char* const kKernelSelectorGEMMMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMMMLIR";
++extern const char* const kKernelSelectorBatch3DMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3DMLIR";
++extern const char* const kKernelSelectorBatch4DMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch4DMLIR";
++extern const char* const kKernelSelectorOperationGEMV = "GEMV";
++extern const char* const kKernelSelectorOperationGEMM = "GEMM";
++extern const char* const kKernelSelectorOperationBATCH3D = "BATCH3D";
++extern const char* const kKernelSelectorOperationBATCH4D = "BATCH4D";
+ 
+ namespace {
+ 
