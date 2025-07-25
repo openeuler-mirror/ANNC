@@ -9,28 +9,27 @@
 namespace xla {
 
 class EmbeddingSimplify : public HloModulePass {
-public:
+ public:
   ~EmbeddingSimplify() override = default;
   absl::string_view name() const override { return "embedding-simplify"; }
 
   using HloPassInterface::Run;
-  StatusOr<bool>
-  Run(HloModule *module,
+  StatusOr<bool> Run(
+      HloModule *module,
       const absl::flat_hash_set<absl::string_view> &execution_threads) override;
 
-private:
-  HloInstruction *hlo;
-  HloInstruction *broadcast;
-  HloInstruction *gather;
-  HloInstruction *mul;
-  HloInstruction *select;
-  HloInstruction *and0;
-  HloInstruction *and1;
-  HloInstruction *comp0;
-  HloInstruction *comp1;
-  HloInstruction *constant0;
-  HloInstruction *constant1;
+ private:
+  HloInstruction* broadcast = nullptr;
+  HloInstruction* gather = nullptr;
+  HloInstruction* mul = nullptr;
+  HloInstruction* select = nullptr;
+  HloInstruction* and0 = nullptr;
+  HloInstruction* and1 = nullptr;
+  HloInstruction* comp0 = nullptr;
+  HloInstruction* comp1 = nullptr;
+  HloInstruction* constant0 = nullptr;
+  HloInstruction* constant1 = nullptr;
 };
-} // namespace xla
+}  // namespace xla
 
-#endif // XLA_SERVIVE_EMBEDDING_SIMPLIFY_H_
+#endif  // XLA_SERVIVE_EMBEDDING_SIMPLIFY_H_
