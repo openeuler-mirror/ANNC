@@ -12,7 +12,8 @@ from annc.optimize import (DnnSparseEmbeddingPatternRewriter,
                            KPSparseSelectPatternRewriter,
                            KPFusedGatherPatternRewriter,
                            KPSparseReshapePatternRewriter,
-                           KPEmbeddingActionIdGatherPatternRewriter)
+                           KPEmbeddingActionIdGatherPatternRewriter,
+                           KPFusedSparseSegmentReduceNonzeroPatternRewriter)
 from annc.optimize.graph import MetaGraph
 
 
@@ -26,7 +27,7 @@ def parse_args():
              ' \'embed_hash_bucket\', \'linear_sparse\', '
              '\'sparse_segment_reduce\', \'sparse_concat\','
              '\'sparse_select\', \'fused_gather\', \'sparse_reshape\','
-             '\'action_id_gather\'')
+             '\'action_id_gather\', \'sparse_segment_reduce_nonzero\'')
     return parser.parse_args()
 
 
@@ -44,6 +45,7 @@ OPT_PASSES = {
     'fused_gather': KPFusedGatherPatternRewriter,
     'sparse_reshape': KPSparseReshapePatternRewriter,
     'action_id_gather': KPEmbeddingActionIdGatherPatternRewriter,
+    'sparse_segment_reduce_nonzero': KPFusedSparseSegmentReduceNonzeroPatternRewriter,
 }
 
 

@@ -279,3 +279,74 @@ class KPEmbeddingActionIdGatherPatternRewriter(BaseRewriter):
                                 graph_nodes=self.graph.graph_def.node)
         return insert_node.get_index()
 
+class KPFusedSparseSegmentReduceNonzeroPatternRewriter(BaseRewriter):
+    __pattern__ = 'KPFusedSparseSegmentReduceNonzero'
+
+    def match_and_rewrite(self, node: Node):
+        self.check_node(node, (OpType.GatherNd, None))
+        combiner = attr_value_pb2.AttrValue()
+        if node.operands[0][0].type == OpType.SparseSegmentMean:
+            combiner.i = 1
+        elif node.operands[0][0].type == OpType.SparseSegmentSum:
+            combiner.i = 0
+        else:
+            return
+        self.check_operands(node, [(None, None),
+                                (OpType.Where, None)])
+        sparse_segment_reduce_op: Node = node.operands[0][0]
+        where_op: Node = node.operands[1][0]
+        self.check_operands(sparse_segment_reduce_op, [(None, None),
+                                                    (None, None),
+                                                    (OpType.Cast, None)])
+        cast_op: Node = sparse_segment_reduce_op.operands[2][0]
+        self.check_operands(cast_op, [(OpType.StridedSlice, None)])
+        strided_slice_op: Node = cast_op.operands[0][0]
+        self.check_users(sparse_segment_reduce_op, [(OpType.ZerosLike, None),
+                                            (OpType.NotEqual, None),
+                                            (OpType.GatherNd, None),
+                                            (OpType.Shape, None)])
+        shape_op = sparse_segment_reduce_op.users[3]
+        self.check_users(shape_op, [(OpType.Cast, None)])
+        cast_op_1 = shape_op.users[0]  # output : 0
+        self.check_users(where_op, [(OpType.GatherNd, None),
+                                    (OpType.Cast, None)])
+        cast_op_2 = where_op.users[1] # output : 1
+        self.check_operands(where_op, [(OpType.NotEqual, None)])
+        not_equal_op = where_op.operands[0][0]
+        self.check_operands(not_equal_op, [(None, None),
+                                           (OpType.ZerosLike, None)])
+        zero_like_op = not_equal_op.operands[0][0]
+
+        print(f'>> Add fusion [{self.__pattern__}]:', sparse_segment_reduce_op.name)
+
+        output_shapes = attr_value_pb2.AttrValue()
+        for attr in cast_op_1.attrs + cast_op_2.attrs + node.attrs:
+            if attr.key == '_output_shapes':
+                output_shapes.list.shape.extend(attr.value.list.shape)
+
+        index = node.get_index()
+
+        insert_node = CustomNode(
+            self.__pattern__,
+            node.name + '/kp_fused',
+            self.graph,
+            [],
+            sparse_segment_reduce_op.operands[:2] + strided_slice_op.operands,
+            # combiner: 0 for sum, 1 for mean
+            [CustomAttr('combiner', combiner), CustomAttr('_output_shapes', output_shapes)],
+            [cast_op_1.users + cast_op_2.users + node.users])
+
+        self.graph.insert_before_node(insert_node, before_node=node,
+                                      graph_nodes=self.graph.graph_def.node)
+
+        self.graph.replace_all_users_with(cast_op_1, 0, self.graph.nodes[index], 0,
+                                          graph_nodes=self.graph.graph_def.node)
+        self.graph.replace_all_users_with(cast_op_2, 0, self.graph.nodes[index], 1,
+                                          graph_nodes=self.graph.graph_def.node)
+        self.graph.replace_all_users_with(node, 0, self.graph.nodes[index], 2,
+                                          graph_nodes=self.graph.graph_def.node)
+
+        self.graph.delete_nodes([node, cast_op_2, where_op, not_equal_op, zero_like_op,
+                                 sparse_segment_reduce_op, shape_op, cast_op_1, cast_op, strided_slice_op],
+                                graph_nodes=self.graph.graph_def.node)
+        return insert_node.get_index()
