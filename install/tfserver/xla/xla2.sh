@@ -7,4 +7,3 @@ patch -p1 < $PATH_OF_PATCHES/cpu_runtime.cc.patch
 patch -p1 < $PATH_OF_PATCHES/xla.proto.patch
 patch -p1 < $PATH_OF_PATCHES/ir_emitter.h.patch
 patch -p1 < $PATH_OF_PATCHES/ir_emitter.cc.patch
-patch -p1 < $PATH_OF_PATCHES/bisheng_xla.patch

@@ -1,18 +1,20 @@
-diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
-index 371c836c4a..14c9429165 100644
+diff -git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index e519cf0..9f34fb8 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
-@@ -241,6 +241,9 @@ limitations under the License.
+@@ 238,6 +238,11 @@ limitations under the License.
  #include "xla/service/cpu/onednn_rewriter.h"
  #endif
  
 +#include <annc/xnnpack_ops_rewriter.h>
 +#include <annc/kernel_selector_ops_rewriter.h>
 +
++#include <annc/bisheng_cpu.h>
++
  namespace {
  
  // We need to explicitly load all the dialects we will involved in emitting the
-@@ -262,6 +265,8 @@ void LoadMLIRDialects(mlir::MLIRContext& context) {
+@@ 259,6 +264,8 @@ void LoadMLIRDialects(mlir::MLIRContext& context) {
  xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
      llvm::Triple target_triple, llvm::StringRef cpu_name) {
    xla::cpu::HloXlaRuntimePipelineOptions options;
@@ -21,7 +23,7 @@ index 371c836c4a..14c9429165 100644
    options.enable_tiling_and_fusion =
        xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
    if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
-@@ -689,6 +694,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+@@ 686,6 +693,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
    pipeline.AddPass<BatchDotSimplification>();
    pipeline.AddPass<DotDecomposer>();
  
@@ -34,7 +36,18 @@ index 371c836c4a..14c9429165 100644
    // Rewrite to custom calls with target as oneDNN library calls.
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    // AOT compiled code runs in single thread.
-@@ -890,6 +901,13 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+@@ 844,6 +857,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+         &layout_constraints);
+   }
+ 
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
++    ADD_GRAPH_OPT_PASSES();
++  }
++
+   return pipeline.Run(module).status();
+ }
+ 
+@@ 875,8 +892,18 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
  
    pipeline.AddPass<ReshapeDecomposer>();
  
@@ -46,5 +59,12 @@ index 371c836c4a..14c9429165 100644
 +  }
 +
    // Add a fusion pass now that layout assignment is done.
-   bool may_duplicate =
-       xla::GetDebugOptionsFromFlags().xla_cpu_enable_duplicate_fusion();
+  pipeline.AddPass<CpuInstructionFusion>();
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL)
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/false);
++  else
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/true);
+ 
+   // The LayoutAssignment pass may leave behind kCopy instructions which are
+   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
+
