@@ -1,4 +1,4 @@
-diff -git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
 index e519cf0..9f34fb8 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
@@ -67,4 +67,18 @@ index e519cf0..9f34fb8 100644
  
    // The LayoutAssignment pass may leave behind kCopy instructions which are
    // duplicate or NOPs, so remove them with algebraic simplification and CSE.
-
+diff --git a/xla/service/cpu/cpu_instruction_fusion.h b/xla/service/cpu/cpu_instruction_fusion.h
+index 1e090cb69b..6c5d87eb2e 100644
+--- a/xla/service/cpu/cpu_instruction_fusion.h
++++ b/xla/service/cpu/cpu_instruction_fusion.h
+@@ 26,8 +26,8 @@ namespace cpu {
+ 
+ class CpuInstructionFusion : public InstructionFusion {
+  public:
+  CpuInstructionFusion()
+      : InstructionFusion(CpuInstructionFusion::IsExpensive) {}
++  CpuInstructionFusion(bool may_duplicate)
++      : InstructionFusion(CpuInstructionFusion::IsExpensive, may_duplicate) {}
+   ~CpuInstructionFusion() override = default;
+ 
+   using HloPassInterface::Run;
