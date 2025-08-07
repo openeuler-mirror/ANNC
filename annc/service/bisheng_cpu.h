@@ -27,6 +27,18 @@ public:
   StatusOr<bool>
   Run(HloModule *module,
       const absl::flat_hash_set<absl::string_view> &execution_threads) override;
+
+private:
+    HloInstruction *broadcast= nullptr;
+    HloInstruction *gather= nullptr;
+    HloInstruction *mul= nullptr;
+    HloInstruction *select= nullptr;
+    HloInstruction *and0= nullptr;
+    HloInstruction *and1= nullptr;
+    HloInstruction *comp0= nullptr;
+    HloInstruction *comp1= nullptr;
+    HloInstruction *constant0= nullptr;
+    HloInstruction *constant1= nullptr;
 };
 
 class ConcatPartition : public HloModulePass {
@@ -41,6 +53,22 @@ public:
 
   HloInstruction *CreateEmbeddingv2(HloInstruction *input, int change_dim,
                                     int newSliceSize, HloComputation *comp);
+
+private:
+    HloInstruction *mul= nullptr;
+    HloInstruction *broadcast= nullptr;
+    HloInstruction *gather= nullptr;
+    HloInstruction *select= nullptr;
+    HloInstruction *convert= nullptr;
+    HloInstruction *andOp= nullptr;
+    HloInstruction *comp_0= nullptr;
+    HloInstruction *comp_1= nullptr;
+    HloInstruction *broadcast_1= nullptr;
+    HloInstruction *constant_1= nullptr;
+    HloInstruction *broadcast_0= nullptr;
+    HloInstruction *constant_0= nullptr;
+    HloInstruction *convert_1= nullptr;
+    HloInstruction *concat= nullptr;
 };
 
 #define ADD_GRAPH_OPT_PASSES()                                                 \
