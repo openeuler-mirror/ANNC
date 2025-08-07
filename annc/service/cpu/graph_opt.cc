@@ -1,4 +1,5 @@
 #include "annc/service/hlo_util.h"
+#include "annc_flags.h"
 #include "kdnn_rewriter.h"
 
 namespace xla {
@@ -117,10 +118,13 @@ void register_pooling(std::vector<KDnnRewriter>& rewriters,
 }
 
 void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters) {
-#if defined(ANNC_ENABLED_GRAPH_OPT)
-  register_sparse_embedding2(rewriters, RewriterType::FUSED_OPERATION, 3);
-  // register_pooling(rewriters, RewriterType::FUSED_OPERATION, 3);
-#endif
+  auto& flags = annc::get_annc_flags();
+  if (flags.is_enabled("sps_emd_2")) {
+    register_sparse_embedding2(rewriters, RewriterType::FUSED_OPERATION, 3);
+  }
+  if (flags.is_enabled("pooling")) {
+    register_pooling(rewriters, RewriterType::FUSED_OPERATION, 3);
+  }
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
 }
 
@@ -160,8 +164,8 @@ void __pooling(void* out, void** in) {
     }
   }
 
-  for (int i = 0; i < m; i ++) {
-    for (int j = 0; j < n; j ++) {
+  for (int i = 0; i < m; i++) {
+    for (int j = 0; j < n; j++) {
       float sum = 0.0f;
       for (int p = 0; p < k; p++) {
         sum += sel_1[i][j][p];
