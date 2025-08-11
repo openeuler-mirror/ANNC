@@ -1,10 +1,10 @@
 #include <algorithm>
 #include <memory>
 
-#include "annc/service/kdnn_util.h"
 #include "annc/service/blas_util.h"
+#include "annc/service/kdnn_util.h"
+#include "annc_flags.h"
 #include "kdnn_rewriter.h"
-
 namespace xla {
 namespace cpu {
 
@@ -60,12 +60,19 @@ void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
 }
 
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
-  // register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
-  // register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
-  // register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
-#endif
+  auto& flags = annc::get_annc_flags();
+  if (flags.is_enabled("matmul")) {
+    register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
+  }
+  if (flags.is_enabled("batcch_matmul")) {
+    register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
+  }
+  if (flags.is_enabled("matmul_add")) {
+    register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
+  }
+  if (flags.is_enabled("matmul_add_relu")) {
+    register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
+  }
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
 }
 
@@ -79,7 +86,6 @@ void __matmul(void* out, const void** in) {
   int k = lhs_shape[1];
   int n = rhs_shape[1];
 
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
@@ -94,7 +100,6 @@ void __matmul(void* out, const void** in) {
   // C = alpha * A * B + beta * C;
   cblas_sgemm(clayout, transa, transb, m, n, k, alpha, lhs, lda, rhs, ldb, beta,
               out_buf, ldc);
-#endif
 }
 
 void __batch_matmul(void* out, const void** in) {
@@ -108,7 +113,6 @@ void __batch_matmul(void* out, const void** in) {
   int k = lhs_shape[2];
   int n = rhs_shape[2];
 
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
@@ -127,7 +131,6 @@ void __batch_matmul(void* out, const void** in) {
     cblas_sgemm(clayout, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta,
                 C, ldc);
   }
-#endif
 }
 
 void __matmul_add(void* out, const void** in) {
@@ -143,7 +146,6 @@ void __matmul_add(void* out, const void** in) {
   int64_t k = lhs_shape[1];
   int64_t n = rhs_shape[1];
 
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
@@ -160,7 +162,6 @@ void __matmul_add(void* out, const void** in) {
   // C = alpha * A * B + beta * C;
   cblas_sgemm(clayout, transa, transb, m, n, k, alpha, lhs, lda, rhs, ldb, beta,
               out_buf, ldc);
-#endif
 }
 
 void __matmul_add_relu(void* out, const void** in) {
@@ -176,7 +177,6 @@ void __matmul_add_relu(void* out, const void** in) {
   int64_t k = lhs_shape[1];
   int64_t n = rhs_shape[1];
 
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
   CBLAS_LAYOUT clayout = CblasRowMajor;
   CBLAS_TRANSPOSE transa = CblasNoTrans;
   CBLAS_TRANSPOSE transb = CblasNoTrans;
@@ -196,7 +196,6 @@ void __matmul_add_relu(void* out, const void** in) {
   for (int i = 0; i < m * n; ++i) {
     out_buf[i] = std::max(out_buf[i], 0.0f);
   }
-#endif
 }
 
 }  // namespace cpu

@@ -1,111 +1,151 @@
+diff --git a/tensorflow/core/grappler/optimizers/BUILD b/tensorflow/core/grappler/optimizers/BUILD
+index ecd55973..76cd55d7 100644
+--- a/tensorflow/core/grappler/optimizers/BUILD
++++ b/tensorflow/core/grappler/optimizers/BUILD
+@@ -886,6 +886,7 @@ tf_kernel_library(
+     hdrs = [
+         "remapper.h",
+     ],
++    linkopts = ["-lannc"],
+     visibility = ["//visibility:public"],
+     deps = [
+         ":constant_folding",
 diff --git a/tensorflow/core/grappler/optimizers/remapper.cc b/tensorflow/core/grappler/optimizers/remapper.cc
-index 3c37150f..7b9bf4f0 100644
+index 3c37150f..09d65e52 100644
 --- a/tensorflow/core/grappler/optimizers/remapper.cc
 +++ b/tensorflow/core/grappler/optimizers/remapper.cc
-@@ -3102,6 +3102,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+@@ -52,6 +52,9 @@ limitations under the License.
+ #include "third_party/gpus/cudnn/cudnn.h"
+ #endif  // GOOGLE_CUDA
+ 
++#include <annc/annc_flags.h>
++bool disable_tf_matmul_fusion = false;
++
+ namespace tensorflow {
+ namespace grappler {
+ 
+@@ -3102,6 +3105,14 @@ Status AddFusedContractionNode(RemapperContext* ctx,
            << " bias_add=" << bias_add.name()
            << " contraction=" << contraction.name();
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(contraction)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++  if (disable_tf_matmul_fusion) {
++    if (IsMatMul(contraction)) {
++      VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
++      return OkStatus();
++    }
 +  }
-+#endif
++
 +
    NodeDef fused_op;
    fused_op.set_name(bias_add.name());
    fused_op.set_device(contraction.device());
-@@ -3200,6 +3207,13 @@ Status AddFusedContractionNode(
+@@ -3200,6 +3211,13 @@ Status AddFusedContractionNode(
    const NodeDef& bias_add = graph->node(matched.bias_add);
    const NodeDef& activation = graph->node(matched.activation);
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(contraction)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++ if (disable_tf_matmul_fusion) {
++    if (IsMatMul(contraction)) {
++      VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
++      return OkStatus();
++    }
 +  }
-+#endif
 +
    VLOG(2) << "Fuse " << contraction.op() << " with BiasAdd and "
            << activation.op() << ":"
            << " activation=" << activation.name()
-@@ -3396,6 +3410,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
+@@ -3396,6 +3414,13 @@ Status AddFusedContractionNode(RemapperContext* ctx,
    DCHECK(IsConv2D(contraction) || IsMatMul(contraction) ||
           IsConv3D(contraction));
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(contraction)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++ if (disable_tf_matmul_fusion) {
++    if (IsMatMul(contraction)) {
++      VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
++      return OkStatus();
++    }
 +  }
-+#endif
 +
    NodeDef contraction_node;
    const NodeDef& add = graph->node(matched.add);
    contraction_node.set_name(add.name());
-@@ -3600,6 +3621,13 @@ Status AddFusedMatMulBiasAddAndGelu(
+@@ -3600,6 +3625,13 @@ Status AddFusedMatMulBiasAddAndGelu(
    auto* matmul_node =
        ctx->graph_view.GetNode(matched_nodes_map.at("matmul"))->node();
  
-+#if defined(DISABLE_TF_MATMUL_FUSION)
-+  if (IsMatMul(*matmul_node)) {
-+    VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
-+    return OkStatus();
++ if (disable_tf_matmul_fusion) {
++    if (IsMatMul(*matmul_node)) {
++      VLOG(1) << " Disable MatMul operator fusion in TensorFlow. ";
++      return OkStatus();
++    }
 +  }
-+#endif
 +
    NodeDef fused_node;
    // Fused node should have the name of terminal node of the fusion.
    fused_node.set_name(output_node->name());
+@@ -4595,6 +4627,8 @@ bool RequiresInferredShapes(const RemapperContext& ctx, int node_index,
+ 
+ Status Remapper::Optimize(Cluster* cluster, const GrapplerItem& item,
+                           GraphDef* optimized_graph) {
++  auto& flags = annc::get_annc_flags();
++  if (flags.is_enabled("disable_tf_matmul_fusion")) disable_tf_matmul_fusion = true;
+   GrapplerItem mutable_item = item;
+   Status status;
+   RemapperContext ctx(&mutable_item, &status, cpu_layout_conversion_,
 diff --git a/third_party/xla/xla/service/cpu/BUILD b/third_party/xla/xla/service/cpu/BUILD
-index 6e0ea613..28550bcd 100644
+index 6e0ea613..158bb0f7 100644
 --- a/third_party/xla/xla/service/cpu/BUILD
 +++ b/third_party/xla/xla/service/cpu/BUILD
 @@ -203,6 +203,7 @@ cc_library(
      srcs = ["cpu_compiler.cc"],
      hdrs = ["cpu_compiler.h"],
      copts = tsl_copts(),
-+    linkopts = ["-L/user/lib64", "-lannc", "-fopenmp"],
++    linkopts = ["-L/usr/lib64", "-lannc", "-fopenmp"],
      visibility = ["//visibility:public"],
      deps = [
          ":buffer_info_util",
 diff --git a/third_party/xla/xla/service/cpu/cpu_compiler.cc b/third_party/xla/xla/service/cpu/cpu_compiler.cc
-index e519cf05..388af2b0 100644
+index e519cf05..d7e092dd 100644
 --- a/third_party/xla/xla/service/cpu/cpu_compiler.cc
 +++ b/third_party/xla/xla/service/cpu/cpu_compiler.cc
-@@ -238,6 +238,10 @@ limitations under the License.
+@@ -238,6 +238,9 @@ limitations under the License.
  #include "xla/service/cpu/onednn_rewriter.h"
  #endif
  
-+#if defined(ANNC_ENABLED_KDNN)
 +#include <annc/kdnn_rewriter.h>
-+#endif
++#include <annc/annc_flags.h>
 +
  namespace {
  
  // We need to explicitly load all the dialects we will involved in emitting the
-@@ -617,6 +621,10 @@ void AddHloVerifier(HloPassPipeline* pipeline, bool allow_sparse_shapes,
+@@ -617,6 +620,18 @@ void AddHloVerifier(HloPassPipeline* pipeline, bool allow_sparse_shapes,
  
  }  // namespace
  
-+#if defined(ANNC_ENABLED_KDNN)
-+REGISTER_ALL_GEMM_KERNELS()
-+#endif
++namespace {
++    const bool kAnncKernelRegistered = []() {
++        auto& flags = annc::get_annc_flags();
++        if (flags.is_enabled("enable_annc_pass")) {
++          REGISTER_ALL_GEMM_KERNELS()
++          VLOG(1) << "#### register all gemm kernels ";
++        }
++        return true;
++    } ();
++}
++
 +
  Status CpuCompiler::RunHloPassesThroughLayoutAssn(
      HloModule* module, bool is_aot_compile,
      LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
-@@ -934,6 +942,12 @@ Status CpuCompiler::RunHloPasses(HloModule* module, bool is_aot_compile,
-   TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(
-       module, is_aot_compile, &target_machine_features, is_mlir_compile));
+@@ -843,7 +858,12 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+         module->mutable_entry_computation_layout(), target_machine_features,
+         &layout_constraints);
+   }
++  auto& flags = annc::get_annc_flags();
  
-+
-+#if defined(ANNC_ENABLED_KDNN)
-+  KDnnFusionAfterHloLayoutAssign kdnn_fusion;
-+  kdnn_fusion.Run(module, {});
-+#endif
-+
-   return RunHloPassesAfterLayoutAssn(module, is_aot_compile,
-                                      &target_machine_features, is_mlir_compile);
++  if (flags.is_enabled("enable_annc_pass")) {
++    VLOG(1) << "#### Run KDnnFusion Pass" ;
++    pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
++  }
+   return pipeline.Run(module).status();
  }
+ 
+

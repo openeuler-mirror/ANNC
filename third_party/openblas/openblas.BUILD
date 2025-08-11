@@ -1,6 +1,6 @@
 genrule(
     name = "build_openblas",
-    srcs = glob(["**"]),
+    srcs = glob(["**"], exclude = ["*.a"]),
     outs = ["libopenblas.a"],
     cmd = """
         cd $$(dirname $(location //:README.md)) && \
