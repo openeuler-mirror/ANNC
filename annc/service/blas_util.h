@@ -25,6 +25,14 @@ typedef enum CBLAS_TRANSPOSE {
 
 typedef int blasint;
 
+void cblas_sgemv(OPENBLAS_CONST enum CBLAS_ORDER order,
+                 OPENBLAS_CONST enum CBLAS_TRANSPOSE trans,
+                 OPENBLAS_CONST blasint m, OPENBLAS_CONST blasint n,
+                 OPENBLAS_CONST float alpha, OPENBLAS_CONST float* a,
+                 OPENBLAS_CONST blasint lda, OPENBLAS_CONST float* x,
+                 OPENBLAS_CONST blasint incx, OPENBLAS_CONST float beta,
+                 float* y, OPENBLAS_CONST blasint incy);
+
 void cblas_sgemm(OPENBLAS_CONST enum CBLAS_ORDER Order,
                  OPENBLAS_CONST enum CBLAS_TRANSPOSE TransA,
                  OPENBLAS_CONST enum CBLAS_TRANSPOSE TransB,

@@ -1,0 +1,1849 @@
+diff --git a/tensorflow/c/experimental/grappler/grappler.cc b/tensorflow/c/experimental/grappler/grappler.cc
+index f6f00d43..f11bc394 100644
+--- a/tensorflow/c/experimental/grappler/grappler.cc
++++ b/tensorflow/c/experimental/grappler/grappler.cc
+@@ -139,6 +139,7 @@ void CGraphOptimizerRegister(
+   CONFIG_TOGGLE(auto_mixed_precision_mkl);
+   CONFIG_TOGGLE(pin_to_host_optimization);
+   CONFIG_TOGGLE(layout_optimizer);
++  CONFIG_TOGGLE(subgraph_remap_optimizer);
+   CONFIG_TOGGLE(remapping);
+   CONFIG_TOGGLE(loop_optimization);
+   CONFIG_TOGGLE(dependency_optimization);
+diff --git a/tensorflow/core/grappler/optimizers/BUILD b/tensorflow/core/grappler/optimizers/BUILD
+index ecd55973..62435d29 100644
+--- a/tensorflow/core/grappler/optimizers/BUILD
++++ b/tensorflow/core/grappler/optimizers/BUILD
+@@ -651,6 +651,7 @@ cc_library(
+         ":remapper",
+         ":scoped_allocator_optimizer",
+         ":shape_optimizer",
++        ":subgraph_remap_optimizer",
+         "//tensorflow/core:core_cpu_base",
+         "//tensorflow/core:framework",
+         "//tensorflow/core:framework_internal",
+@@ -880,6 +881,34 @@ tf_cuda_cc_test(
+     ],
+ )
+ 
++tf_kernel_library(
++    name = "subgraph_remap_optimizer",
++    srcs = ["subgraph_remap_optimizer.cc"],
++    hdrs = [
++      "subgraph_remap_optimizer.h",
++    ],
++    visibility = ["//visibility:public"],
++    deps = [
++        ":constant_folding",
++        ":graph_optimizer",
++        "//tensorflow/core:framework",
++        "//tensorflow/core:lib",
++        "//tensorflow/core:lib_internal",
++        "//tensorflow/core:protos_all_cc",
++        "//tensorflow/core/grappler:graph_view",
++        "//tensorflow/core/grappler:grappler_item",
++        "//tensorflow/core/grappler:op_types",
++        "//tensorflow/core/grappler:utils",
++        "//tensorflow/core/grappler/costs:graph_properties",
++        "//tensorflow/core/grappler/utils:graph_view",
++        "//tensorflow/core/grappler/utils:pattern_utils",
++        "//tensorflow/core/grappler/utils:symbolic_shapes",
++        "//tensorflow/core/grappler/utils:topological_sort",
++        "@com_google_absl//absl/container:flat_hash_set",
++        "@jsoncpp_git//:jsoncpp",
++    ] + if_mkl(["//tensorflow/core/graph:mkl_graph_util"]),
++)
++
+ tf_kernel_library(
+     name = "remapper",
+     srcs = ["remapper.cc"],
+diff --git a/tensorflow/core/grappler/optimizers/custom_graph_optimizer_registry.cc b/tensorflow/core/grappler/optimizers/custom_graph_optimizer_registry.cc
+index c4f4fdc1..fbf879c3 100644
+--- a/tensorflow/core/grappler/optimizers/custom_graph_optimizer_registry.cc
++++ b/tensorflow/core/grappler/optimizers/custom_graph_optimizer_registry.cc
+@@ -70,6 +70,7 @@ const ConfigList& DefaultPluginConfigs() {
+        {"auto_mixed_precision_cpu", RewriterConfig::ON},
+        {"pin_to_host_optimization", RewriterConfig::ON},
+        {"layout_optimizer", RewriterConfig::ON},
++       {"subgraph_remap_optimizer", RewriterConfig::ON},
+        {"remapping", RewriterConfig::ON},
+        {"loop_optimization", RewriterConfig::ON},
+        {"dependency_optimization", RewriterConfig::ON},
+diff --git a/tensorflow/core/grappler/optimizers/meta_optimizer.cc b/tensorflow/core/grappler/optimizers/meta_optimizer.cc
+index 999e7c0d..70cf14fb 100644
+--- a/tensorflow/core/grappler/optimizers/meta_optimizer.cc
++++ b/tensorflow/core/grappler/optimizers/meta_optimizer.cc
+@@ -54,6 +54,7 @@ limitations under the License.
+ #include "tensorflow/core/grappler/optimizers/remapper.h"
+ #include "tensorflow/core/grappler/optimizers/scoped_allocator_optimizer.h"
+ #include "tensorflow/core/grappler/optimizers/shape_optimizer.h"
++#include "tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.h"
+ #include "tensorflow/core/grappler/utils/canonicalizer.h"
+ #include "tensorflow/core/grappler/utils/colocation.h"
+ #include "tensorflow/core/grappler/utils/functions.h"
+@@ -220,6 +221,9 @@ std::unique_ptr<GraphOptimizer> MetaOptimizer::MakeNewOptimizer(
+              cfg_.experimental_disable_compressed_tensor_optimization(),
+              !cfg_.experimental_disable_folding_quantization_emulation()));
+   MK_OPT("shape", "shape_optimization", new ShapeOptimizer());
++  MK_OPT("subgraph_remap", "subgraph_remap_optimizer",
++         new SubgraphRemapOptimizer(cfg_.subgraph_remap_optimizer(), cfg_.cpu_layout_conversion(),
++                      xla_auto_clustering_on_));
+   MK_OPT("remap", "remapping",
+          new Remapper(cfg_.remapping(), cfg_.cpu_layout_conversion(),
+                       xla_auto_clustering_on_));
+@@ -338,6 +342,11 @@ Status MetaOptimizer::InitializeOptimizers(
+           /*lower_control_flow=*/LowerControlFlow()));
+     }
+   }
++  if (BOTH_NOT_OFF(subgraph_remap_optimizer)) {
++    optimizers->push_back(std::make_unique<SubgraphRemapOptimizer>(
++          cfg_.subgraph_remap_optimizer(), cfg_.cpu_layout_conversion(),
++          xla_auto_clustering_on_));
++  }
+   if (BOTH_NOT_OFF(common_subgraph_elimination) &&
+       BOTH_NOT_OFF(arithmetic_optimization)) {
+     if (USER_IS_EXPERIMENTAL_MLIR(common_subgraph_elimination) ||
+@@ -632,6 +641,7 @@ void MetaOptimizer::PrintUserAndPluginConfigs(
+     PRINT_CFG(shape_optimization)
+     PRINT_CFG(pin_to_host_optimization)
+     PRINT_CFG(layout_optimizer)
++    PRINT_CFG(subgraph_remap_optimizer)
+     PRINT_CFG(remapping)
+     PRINT_CFG(loop_optimization)
+     PRINT_CFG(dependency_optimization)
+@@ -685,6 +695,7 @@ void MetaOptimizer::PrintUserAndPluginConfigs(
+       PRINT_CFG("auto_mixed_precision_cpu", "auto_mixed_precision_cpu")
+       PRINT_CFG("pin_to_host", "pin_to_host_optimization")
+       PRINT_CFG("layout", "layout_optimizer")
++      PRINT_CFG("subgraph_remap", "subgraph_remap_optimizer")
+       PRINT_CFG("remap", "remapping")
+       PRINT_CFG("loop", "loop_optimization")
+       PRINT_CFG("dependency", "dependency_optimization")
+@@ -1340,6 +1351,7 @@ bool MetaOptimizerEnabled(const ConfigProto& cfg) {
+          rewrite_cfg.function_optimization() != RewriterConfig::OFF ||
+          rewrite_cfg.constant_folding() != RewriterConfig::OFF ||
+          rewrite_cfg.shape_optimization() != RewriterConfig::OFF ||
++         rewrite_cfg.subgraph_remap_optimizer() != RewriterConfig::OFF ||
+          rewrite_cfg.remapping() != RewriterConfig::OFF ||
+          rewrite_cfg.common_subgraph_elimination() != RewriterConfig::OFF ||
+          rewrite_cfg.arithmetic_optimization() != RewriterConfig::OFF ||
+diff --git a/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.h b/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.h
+new file mode 100644
+index 00000000..e0d07b07
+--- /dev/null
++++ b/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.h
+@@ -0,0 +1,55 @@
++/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_SUBGRAPH_REMAP_OPTIMIZER_H_
++#define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_SUBGRAPH_REMAP_OPTIMIZER_H_
++
++#include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
++#include "tensorflow/core/protobuf/rewriter_config.pb.h"
++
++namespace tensorflow {
++namespace grappler {
++
++class SubgraphRemapOptimizer : public GraphOptimizer {
++ public:
++  explicit SubgraphRemapOptimizer(RewriterConfig::Toggle opt_level,
++                                  RewriterConfig::CpuLayout cpu_layout_conversion =
++                                      RewriterConfig::NO_CONVERSION_ON_CPU,
++                                  bool xla_auto_clustering_on = false)
++      : opt_level_(opt_level),
++        cpu_layout_conversion_(cpu_layout_conversion),
++        xla_auto_clustering_on_(xla_auto_clustering_on) {}
++
++  // explicit EmbeddingOptimizer() {};
++
++  ~SubgraphRemapOptimizer() override {}
++
++  string name() const override { return "subgraph_remap_optimizer"; };
++
++  bool UsesFunctionLibrary() const override { return false; }
++
++  Status Optimize(Cluster* cluster, const GrapplerItem& item,
++                  GraphDef* optimized_graph) override;
++
++ private:
++   RewriterConfig::Toggle opt_level_;
++   RewriterConfig::CpuLayout cpu_layout_conversion_;
++   bool xla_auto_clustering_on_;
++};
++
++}  // end namespace grappler
++}  // end namespace tensorflow
++
++#endif  // TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_SUBGRAPH_REMAP_OPTIMIZER_H_
+diff --git a/tensorflow/core/kernels/argmax_op.cc b/tensorflow/core/kernels/argmax_op.cc
+index 8c562587..e33f80d0 100644
+--- a/tensorflow/core/kernels/argmax_op.cc
++++ b/tensorflow/core/kernels/argmax_op.cc
+@@ -36,6 +36,7 @@ limitations under the License.
+ #include "tensorflow/core/framework/types.h"
+ #include "tensorflow/core/platform/logging.h"
+ #include "tensorflow/core/platform/macros.h"
++#include "tensorflow/core/platform/fingerprint.h"
+ 
+ namespace tensorflow {
+ 
+@@ -131,6 +132,126 @@ class ArgMinOp
+       : ArgOp<Device, T, Tout, functor::ArgMin<Device, T, Tout> >(context) {}
+ };
+ 
++class RecEmbeddingV1Op : public OpKernel {
++ public:
++  explicit RecEmbeddingV1Op(OpKernelConstruction* context) : OpKernel(context) {
++    OP_REQUIRES_OK(context, context->GetAttr("num_buckets", &num_buckets_));
++  }
++ 
++  void Compute(OpKernelContext* context) override {
++    // Grab the input tensor
++    const Tensor& input_tensor = context->input(0);
++    auto input = input_tensor.flat<tstring>();
++ 
++    std::vector<std::vector<int64_t>> indices;
++    std::vector<int64_t> value;
++    std::vector<bool> empty_value;
++ 
++    for (int64_t i = 0; i < input.size(); ++i) {
++      if (input(i) != "") {
++        indices.push_back({i, 0});
++        uint64_t hash_value = Fingerprint64(input(i).data());
++        int64_t x = hash_value % num_buckets_;
++        if (x > 0) {
++          value.push_back(x);
++          empty_value.push_back(false);
++        }
++      } else {
++        indices.push_back({i, 0});
++        value.push_back(0);
++        empty_value.push_back(true);
++      }
++    }
++ 
++    Tensor* output_0 = nullptr;
++    OP_REQUIRES_OK(
++        context,
++        context->allocate_output(
++            0, TensorShape({static_cast<int>(indices.size()), 2}), &output_0));
++    auto output_matrix_0 = output_0->matrix<int64>();
++ 
++    Tensor* output_1 = nullptr;
++    OP_REQUIRES_OK(
++        context,
++        context->allocate_output(
++            1, TensorShape({static_cast<int>(value.size())}), &output_1));
++ 
++    Tensor* output_2 = nullptr;
++    OP_REQUIRES_OK(
++        context,
++        context->allocate_output(
++            2, TensorShape({static_cast<int>(empty_value.size())}), &output_2));
++ 
++    Tensor* output_3 = nullptr;
++    OP_REQUIRES_OK(context,
++                   context->allocate_output(3, TensorShape({2}), &output_3));
++    output_3->flat<int64_t>()(0) = input.size();
++    output_3->flat<int64_t>()(1) = 1;
++    for (size_t i = 0; i < indices.size(); ++i) {
++      output_matrix_0(i, 0) = indices[i][0];
++      output_matrix_0(i, 1) = indices[i][1];
++      output_1->flat<int64_t>()(i) = value[i];
++      output_2->flat<bool>()(i) = empty_value[i];
++    }
++  }
++ 
++ private:
++  int64_t num_buckets_;
++};
++REGISTER_KERNEL_BUILDER(Name("RecEmbeddingV1").Device(DEVICE_CPU),
++                        RecEmbeddingV1Op);
++
++class RecEmbeddingV2Op : public OpKernel {
++ public:
++  explicit RecEmbeddingV2Op(OpKernelConstruction* context) : OpKernel(context) {
++    OP_REQUIRES_OK(context, context->GetAttr("num_buckets", &num_buckets_));
++  }
++
++  void Compute(OpKernelContext* context) override {
++    // Grab the input tensor
++    const Tensor& input_tensor = context->input(0);
++    const Tensor& variable_tensor = context->input(1);
++    auto input = input_tensor.flat<tstring>();
++    auto variable = variable_tensor.matrix<float>();
++    int64 dim_0 = input.size();
++    int64 dim_1 = variable.dimension(1);
++
++    std::vector<std::vector<float>> output(dim_0, std::vector<float>(dim_1, 0));
++
++    for (int64 i = 0; i < input.size(); ++i) {
++      if (input(i) != "") {
++        uint64 hash_value = Fingerprint64(input(i).data());
++        int64 x = hash_value % num_buckets_;
++        if (x >= 0 && x < variable.dimension(0)) {
++          for (int64 j = 0; j < dim_1; ++j) {
++            output[i][j] = variable(x, j);
++          }
++        }
++      } else {
++        // Already initialized to zero, no action needed
++      }
++    }
++
++    Tensor* output_tensor = nullptr;
++    OP_REQUIRES_OK(context,
++                   context->allocate_output(0, TensorShape({dim_0, dim_1}),
++                                            &output_tensor));
++
++    auto output_matrix = output_tensor->matrix<float>();
++    for (int64 i = 0; i < dim_0; ++i) {
++      for (int64 j = 0; j < dim_1; ++j) {
++        output_matrix(i, j) = output[i][j];
++      }
++    }
++  }
++
++ private:
++  int64_t num_buckets_;
++};
++
++REGISTER_KERNEL_BUILDER(Name("RecEmbeddingV2").Device(DEVICE_CPU),
++                        RecEmbeddingV2Op);
++
+ #define REGISTER_ARGMAX(type)                                         \
+   REGISTER_KERNEL_BUILDER(Name("ArgMax")                              \
+                               .Device(DEVICE_CPU)                     \
+diff --git a/tensorflow/core/ops/array_ops.cc b/tensorflow/core/ops/array_ops.cc
+index 331cfa84..4e557397 100644
+--- a/tensorflow/core/ops/array_ops.cc
++++ b/tensorflow/core/ops/array_ops.cc
+@@ -539,6 +539,22 @@ REGISTER_OP("ConcatV2")
+     .Attr("Tidx: {int32, int64} = DT_INT32")
+     .SetShapeFn(shape_inference::ConcatV2Shape);
+ 
++REGISTER_OP("RecEmbeddingV1")
++    .Input("placeholder: string")
++    .Attr("num_buckets: int >= 1")
++    .Output("output_indices: int64")
++    .Output("output_values: int64")
++    .Output("empty_row_indicator: bool")
++    .Output("output_shape: int64")
++    .SetShapeFn(shape_inference::UnknownShape);
++
++REGISTER_OP("RecEmbeddingV2")
++    .Input("placeholder: string")
++    .Input("variable: float")
++    .Attr("num_buckets: int >= 1")
++    .Output("output: float")
++    .SetShapeFn(shape_inference::UnknownShape);
++
+ // TODO(vivek.v.rane@intel.com): Prefix the op names with underscore if the ops
+ // are not to be made user-accessible.
+ #ifdef INTEL_MKL
+diff --git a/tensorflow/core/protobuf/rewriter_config.proto b/tensorflow/core/protobuf/rewriter_config.proto
+index 9f4042e6..3ad26e2a 100644
+--- a/tensorflow/core/protobuf/rewriter_config.proto
++++ b/tensorflow/core/protobuf/rewriter_config.proto
+@@ -77,6 +77,9 @@ message RewriterConfig {
+   // Remapping (default is ON)
+   // Remap subgraphs onto more efficient implementations.
+   Toggle remapping = 14;
++  // Subgraph Remap Optimizer(default is ON)
++  // Replace subgraph with customized node.
++  Toggle subgraph_remap_optimizer = 33;
+   // Common subgraph elimination (default is ON)
+   // e.g. Simplify arithmetic ops; merge ops with same value (like constants).
+   Toggle common_subgraph_elimination = 24;
+diff --git a/tensorflow/python/eager/context.py b/tensorflow/python/eager/context.py
+index 9308567d..6b861e94 100644
+--- a/tensorflow/python/eager/context.py
++++ b/tensorflow/python/eager/context.py
+@@ -1186,6 +1186,7 @@ class Context:
+     rewriter_toggle("layout_optimizer")
+     rewriter_toggle("constant_folding")
+     rewriter_toggle("shape_optimization")
++    rewriter_toggle("subgraph_remap_optimizer")
+     rewriter_toggle("remapping")
+     rewriter_toggle("arithmetic_optimization")
+     rewriter_toggle("dependency_optimization")
+@@ -1932,6 +1933,7 @@ class Context:
+     rewriter_toggle("layout_optimizer")
+     rewriter_toggle("constant_folding")
+     rewriter_toggle("shape_optimization")
++    rewriter_toggle("subgraph_remap_optimizer")
+     rewriter_toggle("remapping")
+     rewriter_toggle("arithmetic_optimization")
+     rewriter_toggle("dependency_optimization")
+diff --git a/tensorflow/python/framework/config.py b/tensorflow/python/framework/config.py
+index 228bacb7..8e4ad8ec 100644
+--- a/tensorflow/python/framework/config.py
++++ b/tensorflow/python/framework/config.py
+@@ -226,6 +226,8 @@ def set_optimizer_experimental_options(options):
+       - constant_folding: Fold constants Statically infer the value of tensors
+         when possible, and materialize the result using constants.
+       - shape_optimization: Simplify computations made on shapes.
++      - subgraph_remap_optimizer: Experimental optimization for replacing subgraph
++        with customized operator.
+       - remapping: Remap subgraphs onto more efficient implementations.
+       - arithmetic_optimization: Simplify arithmetic ops with common
+         sub-expression elimination and arithmetic simplification.
+diff --git a/tensorflow/python/tools/set_and_generate_patterns.py b/tensorflow/python/tools/set_and_generate_patterns.py
+new file mode 100644
+index 00000000..616fe937
+--- /dev/null
++++ b/tensorflow/python/tools/set_and_generate_patterns.py
+@@ -0,0 +1,296 @@
++import json
++from dataclasses import dataclass, field
++from typing import Dict, Any, List, Union
++
++class OpTypePattern:
++    def __init__(self, op, label, children=None):
++        self.op = op
++        self.label = label
++        self.children = children or []
++
++@dataclass
++class CustomNode:
++    op: str = ""
++    name: str = ""
++    fanins: Dict[str, List[int]] = field(default_factory=dict)
++    fanouts: Dict[str, List[int]] = field(default_factory=dict)
++    attributes: Dict[str, Any] = field(default_factory=dict)
++
++    @classmethod
++    def from_dict(cls, data: Dict) -> 'CustomNode':
++        fanins = {k: v if isinstance(v, list) else [v] for k, v in data.get("fanins", {}).items()}
++        fanouts = {k: v if isinstance(v, list) else [v] for k, v in data.get("fanouts", {}).items()}
++
++        return cls(
++            op=data.get("op", ""),
++            name=data.get("name", ""),
++            fanins=fanins,
++            fanouts=fanouts,
++            attributes=data.get("attributes", {})
++        )
++
++OP = OpTypePattern
++
++#
++#
++# =============================== Define Patterns and Customized Op Node ========================= #
++# Example 1
++# ----------------------------- Define Pattern 1 ------------------------------- #
++pattern1 = \
++    OP("Mul", "mulToswish",
++        [
++            OP("Sigmoid", "sigmoid",
++                [
++                    OP("BiasAdd", "biasadd",
++                        [
++                            OP("Conv2D", "conv"),
++                            OP("*", "bias")
++                        ]
++                    )
++                ]
++            ),
++            OP("BiasAdd", "biasadd")
++        ]
++    )
++
++# 输出节点
++output_node1 = ["mulToswish", "conv"]
++
++# --------------------------- Customized Op Node 1 ------------------------------ #
++
++customized_nodes_dict1 = {
++    "op": "myop",
++    "name": "myname",
++    "fanins": {
++        "biasadd": [0, 1, 3],
++        "conv": [0]
++    },
++    "fanouts": {
++        "mulToswish": [0, 1],
++        "sigmoid": [3]
++    },
++    "attributes": {
++        "_output_shapes": {
++            "mulToswish": [0, 1, 2],
++            "sigmoid": [3]
++        },
++        "num_buckets": "conv",
++        "custom_attr": ["value1", "value2"]
++    }
++}
++
++customized_node1 = CustomNode.from_dict(customized_nodes_dict1)
++
++# Example 2
++# ----------------------------- Define Pattern 2 ------------------------------- #
++pattern2 = \
++    OP("SparseFillEmptyRows", "output",
++    [
++        OP("GatherV2", "gatherv2_1",
++        [
++            OP("SparseReshape", "sparse_reshape",
++            [
++                OP("Where", "where_1",
++                [
++                    OP("NotEqual", "not_equal",
++                    [
++                        OP("ExpandDims", "input"),
++                        OP("Const", "const_3")
++                    ])
++                ]),
++                OP("Shape", "output_2",
++                [
++                    OP("ExpandDims", "input")
++                ]),
++                OP("Pack", "pack",
++                [
++                    OP("Prod", "prod",
++                    [
++                        OP("Slice", "slice",
++                        [
++                            OP("Shape", "output_2"),
++                            OP("Const", "const_5"),
++                            OP("Const", "const_6")
++                        ]),
++                        OP("Const", "const_4")
++                    ]),
++                    OP("GatherV2", "gatherv2_3",
++                    [
++                        OP("Shape", "output_2"),
++                        OP("Const", "const_7"),
++                        OP("Const", "const_8")
++                    ])
++                ])
++            ]),
++            OP("Reshape", "reshape",
++            [
++                OP("Where", "where_2",
++                [
++                    OP("GreaterEqual", "greater_equal",
++                    [
++                        OP("StringToHashBucketFast", "string_to_hash_bucket_fast",
++                        [
++                            OP("GatherNd", "gather_nd",
++                            [
++                                OP("ExpandDims", "input"),
++                                OP("Where", "where_1")
++                            ])
++                        ]),
++                        OP("Const", "const_10")
++                    ])
++                ]),
++                OP("Const", "const_9")
++            ]),
++            OP("Const", "const_2")
++        ]),
++        OP("GatherV2", "gatherv2_2",
++        [
++            OP("StringToHashBucketFast", "string_to_hashbucket_fast"),
++            OP("Reshape", "reshape"),
++            OP("Const", "const_11")
++        ]),
++        OP("SparseReshape", "sparse_reshape"),
++        OP("Const", "const_1")
++    ])
++
++output_node2 = ["output", "output_2"]
++
++# --------------------------- Customized Op Node 2 ------------------------------ #
++
++customized_nodes_dict2 = {
++    "op": "RecEmbeddingV1",
++    "name": "rec_embedding_v1",
++    "fanins": {
++        "input": [0]
++    },
++    "fanouts": {
++        "output": [0, 1, 2],
++        "output_2": [0]
++    },
++    "attributes": {
++        "_output_shapes": {
++            "output": [0, 1, 2],
++            "output_2": [0]
++        },
++        "num_buckets": "string_to_hash_bucket_fast"
++    }
++}
++
++customized_node2 = CustomNode.from_dict(customized_nodes_dict2)
++
++# ============================================== End ============================================= #
++
++
++# =============================== Append pattern and customized op node ========================== #
++
++patterns = [pattern2]
++output_nodes = [output_node2]
++customized_nodes = [customized_node2]
++
++
++# ================================== Write Patterns to Json File ================================= #
++
++def op_to_dict(op: OpTypePattern, output_labels: set) -> Dict:
++    status = "NodeStatus::kReplace" if op.label in output_labels else "NodeStatus::kRemove"
++    children = [op_to_dict(child, output_labels) for child in op.children]
++
++    return {
++        "op": op.op,
++        "label": op.label,
++        "status": status,
++        "children": children
++    }
++
++def process_attribute_value(key: str, value: Any) -> Dict:
++    attr = {"key": key}
++
++    if isinstance(value, dict):
++        value_from = []
++        for label, items in value.items():
++            if isinstance(items, list):
++                for item in items:
++                    value_from.append({
++                        "label": label,
++                        "item": item
++                    })
++            else:
++                value_from.append({
++                    "label": label,
++                    "item": items
++                })
++        attr["value_from"] = value_from
++    elif isinstance(value, list):
++        attr["value_from"] = value
++    else:
++        attr["value_from"] = value
++
++    return attr
++
++def convert_to_json(patterns: List[OpTypePattern], output_nodes: List[List[str]],
++                    customized_nodes: List[CustomNode]) -> Dict:
++    json_data = {
++        "patterns": []
++    }
++
++    for i, pattern in enumerate(patterns):
++        outputs = output_nodes[i] if i < len(output_nodes) else []
++        output_labels = set(outputs)
++
++        # pattern
++        pattern_dict = op_to_dict(pattern, output_labels)
++
++        # customized_node
++        custom_node = customized_nodes[i] if i < len(customized_nodes) else None
++        if custom_node:
++            # fanins
++            node_fanins = []
++            for input_label, ports in custom_node.fanins.items():
++                for node_port, input_port in enumerate(ports):
++                    node_fanins.append({
++                        "node_port": node_port,
++                        "input_label": input_label,
++                        "input_port": input_port
++                    })
++
++            # fanouts
++            node_fanouts = []
++            for output_label, ports in custom_node.fanouts.items():
++                for node_port, output_port in enumerate(ports):
++                    node_fanouts.append({
++                        "node_port": node_port,
++                        "output_label": output_label,
++                        "output_port": output_port
++                    })
++
++            # attributes
++            attributes = []
++            for key, value in custom_node.attributes.items():
++                attr = process_attribute_value(key, value)
++                attributes.append(attr)
++
++            customized_node_data = {
++                "node_name": custom_node.name,
++                "operator_type": custom_node.op,
++                "node_fanins": node_fanins,
++                "node_fanouts": node_fanouts,
++                "attributes": attributes
++            }
++        else:
++            customized_node_data = None
++
++        # add to Json
++        json_data["patterns"].append({
++            "pattern": pattern_dict,
++            "output_nodes": outputs,
++            "customized_node": customized_node_data
++        })
++
++    return json_data
++
++json_data = convert_to_json(patterns, output_nodes, customized_nodes)
++
++with open('output_patterns.json', 'w') as f:
++    json.dump(json_data, f, indent=4)
++
++print("JSON data has been writtern into output_patterns.json")
++
+diff --git a/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.cc b/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.cc
+new file mode 100644
+index 00000000..e78d5572
+--- /dev/null
++++ b/tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.cc
+@@ -0,0 +1,1135 @@
++#include "tensorflow/core/grappler/optimizers/subgraph_remap_optimizer.h"
++
++#include <algorithm>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <map>
++#include <set>
++#include <string>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++#include "absl/container/flat_hash_set.h"
++#include "json/json.h"
++#include "tensorflow/core/framework/tensor_shape.h"
++#include "tensorflow/core/framework/versions.pb.h"
++#include "tensorflow/core/grappler/costs/graph_properties.h"
++#include "tensorflow/core/grappler/graph_view.h"
++#include "tensorflow/core/grappler/grappler_item.h"
++#include "tensorflow/core/grappler/op_types.h"
++#include "tensorflow/core/grappler/optimizers/constant_folding.h"
++#include "tensorflow/core/grappler/utils.h"
++#include "tensorflow/core/grappler/utils/graph_view.h"
++#include "tensorflow/core/grappler/utils/pattern_utils.h"
++#include "tensorflow/core/grappler/utils/symbolic_shapes.h"
++#include "tensorflow/core/grappler/utils/topological_sort.h"
++#include "tensorflow/core/lib/core/errors.h"
++#include "tensorflow/core/platform/logging.h"
++#include "tensorflow/core/protobuf/rewriter_config.pb.h"
++#include "tensorflow/core/util/env_var.h"
++#include "tensorflow/core/util/use_cudnn.h"
++#include "tsl/platform/errors.h"
++#ifdef INTEL_MKL
++#include "tensorflow/core/util/mkl_heuristics.h"
++#endif  // INTEL_MKL
++#include "tensorflow/core/util/util.h"
++
++#if GOOGLE_CUDA
++#include "third_party/gpus/cudnn/cudnn.h"
++#endif  // GOOGLE_CUDA
++
++namespace tensorflow {
++namespace grappler {
++
++constexpr char patterns_str[] = "patterns";
++constexpr char pattern_str[] = "pattern";
++constexpr char op_str[] = "op";
++constexpr char label_str[] = "label";
++constexpr char status_str[] = "status";
++constexpr char children_str[] = "children";
++constexpr char customized_node_str[] = "customized_node";
++constexpr char node_name_str[] = "node_name";
++constexpr char op_type_str[] = "operator_type";
++constexpr char fanins_str[] = "node_fanins";
++constexpr char fanouts_str[] = "node_fanouts";
++constexpr char node_port_str[] = "node_port";
++constexpr char input_label_str[] = "input_label";
++constexpr char input_port_str[] = "input_port";
++constexpr char output_label_str[] = "output_label";
++constexpr char output_port_str[] = "output_port";
++constexpr char attributes_str[] = "attributes";
++constexpr char key_str[] = "key";
++constexpr char value_str[] = "value_from";
++constexpr char item_str[] = "item";
++constexpr char output_nodes_str[] = "output_nodes";
++
++struct SubgraphRemapOptimizerContext {
++  explicit SubgraphRemapOptimizerContext(GrapplerItem* item, Status* status,
++                           RewriterConfig::CpuLayout cpu_layout_conversion,
++                           bool xla_auto_clustering_on)
++      : nodes_to_preserve(item->NodesToPreserve()),
++        graph_view(&item->graph, status),
++        graph_properties(*item),
++        inferred_graph_properties(false),
++        cpu_layout_conversion(cpu_layout_conversion),
++        xla_auto_clustering_on(xla_auto_clustering_on) {}
++
++  std::unordered_set<string> nodes_to_preserve;
++  utils::MutableGraphView graph_view;
++  GraphProperties graph_properties;
++  bool inferred_graph_properties;
++  RewriterConfig::CpuLayout cpu_layout_conversion;
++  bool xla_auto_clustering_on;
++};
++
++struct PatternInfo {
++  utils::OpTypePattern pattern;
++  string node_name;
++  string operator_type;
++  std::vector<string> output_nodes;
++  std::unordered_map<unsigned int, std::pair<string, unsigned int>> node_fanins;
++  std::unordered_map<unsigned int, std::pair<string, unsigned  int>> node_fanouts;
++  std::unordered_map<string, std::unordered_map<string, std::vector<int>>> node_attrs;
++};
++
++void CopyOrAppendeAttribute(const NodeDef& src_node, NodeDef* dst_node, string attr_key,
++                            bool PartialCopy = false, int item = 0) {
++  auto* attr = dst_node->mutable_attr();
++  auto& src_attr = src_node.attr();
++
++  if (!PartialCopy) {
++    (*attr)[attr_key] = src_attr.at(attr_key);
++    return;
++  }
++
++  // Copy partialshape from source to new node.
++  AttrValue* dst_attr_value = &(*attr)[attr_key];
++  const AttrValue& src_attr_value = src_attr.at(attr_key);
++  const auto& src_shape_list = src_attr_value.list().shape();
++  *dst_attr_value->mutable_list()->add_shape() = src_shape_list[item];
++}
++
++// port: port for dst node
++Status AddOrUpdateFanout(SubgraphRemapOptimizerContext* ctx, const NodeDef& src_node, const NodeDef* dst_node, int& port) {
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  const auto* src_node_view = ctx->graph_view.GetNode(src_node.name());
++  for (const auto& fanouts : src_node_view->GetRegularFanouts()) {
++    for (const auto& fanout : fanouts) {
++      utils::MutableNodeView* fanout_node_view = fanout.node_view();
++      SafeTensorId safe_tensor_id(dst_node->name(), port);
++      TensorId tensor_id(safe_tensor_id);
++      // Get the input port for fanout.
++      mutation->AddOrUpdateRegularFanin(fanout_node_view, fanout.index(), tensor_id);
++      TF_RETURN_IF_ERROR(mutation->Apply());
++    }
++    port++;
++  }
++
++  return OkStatus();
++}
++
++// port: port for dst node
++// src_port: port for src node
++Status AddOrUpdateFanoutByPort(SubgraphRemapOptimizerContext* ctx, const NodeDef& src_node, const NodeDef* dst_node, int src_port, int port) {
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  const auto* src_node_view = ctx->graph_view.GetNode(src_node.name());
++  int iter = 0;
++  for (const auto& fanouts : src_node_view->GetRegularFanouts()) {
++    if (iter++ != src_port)
++      continue;
++    for (const auto& fanout : fanouts) {
++      utils::MutableNodeView* fanout_node_view = fanout.node_view();
++      SafeTensorId safe_tensor_id(dst_node->name(), port);
++      TensorId tensor_id(safe_tensor_id);
++      // Get the input port for fanout.
++      mutation->AddOrUpdateRegularFanin(fanout_node_view, fanout.index(), tensor_id);
++      TF_RETURN_IF_ERROR(mutation->Apply());
++    }
++  }
++
++  return OkStatus();
++}
++
++bool FindEmbeddingPatternV1(SubgraphRemapOptimizerContext* ctx, int node_index,
++                             std::map<string, int>* matched_nodes_map,
++                             std::set<int>* remove_node_indices) {
++  using utils::MatchingDirection;
++  using utils::NodeStatus;
++
++  // clang-format off
++  utils::OpTypePattern embedding_pattern_v1 {
++    "SparseFillEmptyRows", "output", NodeStatus::kReplace,
++    {
++      {"GatherV2", "gatherv2_1", NodeStatus::kRemove,
++        {
++          {"SparseReshape", "sparse_reshape", NodeStatus::kRemove,
++            {
++              {"Where", "where_1", NodeStatus::kRemove,
++                {
++                  {"NotEqual", "not_equal", NodeStatus::kRemove,
++                    {
++                      {"ExpandDims", "input", NodeStatus::kRemove},
++                      {"Const", "const_3", NodeStatus::kRemove}
++                    }
++                  }
++                }
++              },
++              {"Shape", "output_2", NodeStatus::kReplace,
++                { {"ExpandDims", "input", NodeStatus::kRemove} }
++              },
++              {"Pack", "pack", NodeStatus::kRemove,
++                {
++                  {"Prod", "prod", NodeStatus::kRemove,
++                    {
++                      {"Slice", "slice", NodeStatus::kRemove,
++                        {
++                          {"Shape", "output_2", NodeStatus::kReplace},
++                          {"Const", "const_5", NodeStatus::kRemove},
++                          {"Const", "const_6", NodeStatus::kRemove}
++                        }
++                      },
++                      {"Const", "const_4", NodeStatus::kRemove}
++                    }
++		              },
++                  {"GatherV2", "gatherv2_3", NodeStatus::kRemove,
++                    {
++                      {"Shape", "output_2", NodeStatus::kReplace},
++                      {"Const", "const_7", NodeStatus::kRemove},
++                      {"Const", "const_8", NodeStatus::kRemove}
++                    }
++                  }
++                }
++              }
++            }
++	        },
++          {"Reshape", "reshape", NodeStatus::kRemove,
++            {
++              {"Where", "where_2", NodeStatus::kRemove,
++                {
++                  {"GreaterEqual", "greater_equal", NodeStatus::kRemove,
++                    {
++                      {"StringToHashBucketFast", "string_to_hash_bucket_fast", NodeStatus::kRemove,
++                        {
++                          {"GatherNd", "gather_nd", NodeStatus::kRemove,
++                            {
++                              {"ExpandDims", "input", NodeStatus::kRemove},
++                              {"Where", "where_1", NodeStatus::kRemove}
++                            }
++                          }
++                        }
++                      },
++		                  {"Const", "const_10", NodeStatus::kRemove}
++                    }
++                  }
++                }
++              },
++	            {"Const", "const_9", NodeStatus::kRemove}
++            }
++          },
++          {"Const", "const_2", NodeStatus::kRemove}
++        }
++      },
++      {"GatherV2", "gatherv2_2", NodeStatus::kRemove,
++        {
++          {"StringToHashBucketFast", "string_to_hashbucket_fast", NodeStatus::kRemove},
++          {"Reshape", "reshape", NodeStatus::kRemove},
++	        {"Const", "const_11", NodeStatus::kRemove}
++        }
++      },
++      {"SparseReshape", "sparse_reshape", NodeStatus::kRemove},
++      {"Const", "const_1", NodeStatus::kRemove}
++    }
++  };
++  // clang-format on
++  //
++  // Do we need to check type?
++  auto* mul_node_def = ctx->graph_view.GetNode(node_index)->node();
++
++  bool found_op_type_match = false;
++  utils::SubGraphMatcher<MatchingDirection::kFollowInputs> graph_matcher(
++      &(ctx->graph_view));
++  matched_nodes_map->clear();
++  remove_node_indices->clear();
++
++  found_op_type_match = graph_matcher.GetMatchedNodes(
++      embedding_pattern_v1, {}, ctx->graph_view.GetNode(node_index),
++      matched_nodes_map, remove_node_indices);
++  if (found_op_type_match) {
++    VLOG(2) << "Subgraph remap optimizer: found the embedding pattern v1\n";
++    VLOG(2) << "the embedding pattern v1: " << embedding_pattern_v1.DebugString();
++  }
++  return found_op_type_match;
++}
++
++Status ReplaceEmbeddingSubgraphV1WithCustomizedEmbedding(
++    SubgraphRemapOptimizerContext* ctx, const std::map<string, int>* matched_nodes_map,
++    const std::set<int>* remove_node_indices,
++    std::vector<bool>* invalidated_nodes, std::vector<bool>* nodes_to_delete) {
++  const auto* output_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("output"))->node();
++  const auto* input_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("input"))->node();
++  const auto* shape_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("output_2"))->node();
++  const auto* string_to_hash_bucket_fast_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("string_to_hash_bucket_fast"))->node();
++
++  NodeDef fused_node;
++  fused_node.set_name(output_node->name() + "/rec_embedding_v1");
++  fused_node.set_op("RecEmbeddingV1");
++  fused_node.set_device(output_node->device());
++  fused_node.add_input(input_node->input(0));
++
++  auto* fused_node_attr = fused_node.mutable_attr();
++
++  // Set attribute for new fused node, which copy from the exit node.
++  // Note: If we want to do general subgraph optimization via a plugin,
++  // it is best to create new node attributes via a configuration
++  // file instead of copying the attributes.
++  CopyOrAppendeAttribute(*string_to_hash_bucket_fast_node, &fused_node, "num_buckets");
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 0);
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 1);
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 2);
++  CopyOrAppendeAttribute(*shape_node, &fused_node, "_output_shapes", true, 0);
++
++  Status status;
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  auto mutation_fused_node = mutation->AddNode(std::move(fused_node), &status);
++  TF_RETURN_IF_ERROR(status);
++  TF_RETURN_IF_ERROR(mutation->Apply());
++
++  const auto* new_node = ctx->graph_view.GetNode(output_node->name() + "/rec_embedding_v1")->node();
++
++  int port = 0;
++  // After apply of mutation, node view may be invalid, so we use NodeDef to get node view, too.
++  AddOrUpdateFanout(ctx, *output_node, new_node, port);
++  AddOrUpdateFanout(ctx, *shape_node, new_node, port);
++
++  (*invalidated_nodes)[matched_nodes_map->at("output")] = true;
++  (*nodes_to_delete)[matched_nodes_map->at("output_2")] = true;
++  (*nodes_to_delete)[matched_nodes_map->at("output")] = true;
++
++  for (const auto& node_index : *remove_node_indices) {
++    (*nodes_to_delete)[node_index] = true;
++  }
++
++  VLOG(2) << "Subgraph remap optimizer: replaced the embedding pattern v1 with " << new_node->name() << "\n";
++  return OkStatus();
++}
++
++bool FindLinearEmbeddingPatternV1(SubgraphRemapOptimizerContext* ctx, int node_index,
++                             std::map<string, int>* matched_nodes_map,
++                             std::set<int>* remove_node_indices) {
++  using utils::MatchingDirection;
++  using utils::NodeStatus;
++
++  // clang-format off
++  utils::OpTypePattern linear_embedding_pattern_v1 {
++    "SparseFillEmptyRows", "output", NodeStatus::kReplace,
++    {
++      {"GatherV2", "gatherv2_1", NodeStatus::kRemove,
++        {
++          {"SparseReshape", "sparse_reshape_1", NodeStatus::kRemove,
++            {
++              {"SparseReshape", "output_2", NodeStatus::kReplace,
++                {
++                  {"Where", "where_1", NodeStatus::kRemove,
++                    {
++                      {"NotEqual", "note_equal", NodeStatus::kRemove,
++                        {
++                          {"ExpandDims", "input", NodeStatus::kRemove},
++                          {"Const", "const_1", NodeStatus::kRemove}
++                        }
++                      }
++                    }
++                  },
++                  {"Shape", "shape_1", NodeStatus::kRemove,
++                    {{"ExpandDims", "input", NodeStatus::kRemove}}
++                  },
++                  {"Cast", "cast_1", NodeStatus::kRemove,
++                    {
++                      {"Pack", "pack_1", NodeStatus::kRemove,
++                        {
++                          {"StridedSlice", "strided_slice", NodeStatus::kRemove,
++                            {
++                              {"Cast", "cast_2", NodeStatus::kRemove,
++                                { {"Shape", "shape_1", NodeStatus::kRemove} }
++                              },
++                              {"Const", "const_2", NodeStatus::kRemove},
++                              {"Const", "const_3", NodeStatus::kRemove},
++                              {"Const", "const_4", NodeStatus::kRemove}
++                            }
++                          },
++                          {"Const", "const_5", NodeStatus::kRemove}
++                        }
++                      }
++                    }
++                  }
++                }
++              },
++              {"SparseReshape", "output_2", NodeStatus::kReplace},
++              {"Pack", "pack", NodeStatus::kRemove,
++                {
++                  {"Prod", "prod", NodeStatus::kRemove,
++                    {
++                      {"Slice", "slice", NodeStatus::kRemove,
++                        {
++                          {"SparseReshape", "output_2", NodeStatus::kReplace},
++                          {"Const", "const_6", NodeStatus::kRemove},
++                          {"Const", "const_7", NodeStatus::kRemove}
++                        }
++                      },
++                      {"Const", "const_8", NodeStatus::kRemove}
++                    }
++		              },
++                  {"GatherV2", "gatherv2_3", NodeStatus::kRemove,
++                    {
++                      {"SparseReshape", "output_2", NodeStatus::kReplace},
++                      {"Const", "const_9", NodeStatus::kRemove},
++                      {"Const", "const_10", NodeStatus::kRemove}
++                    }
++                  }
++                }
++              }
++            }
++	        },
++          {"Reshape", "reshape", NodeStatus::kRemove,
++            {
++              {"Where", "where_2", NodeStatus::kRemove,
++                {
++                  {"GreaterEqual", "greater_equal", NodeStatus::kRemove,
++                    {
++                      {"StringToHashBucketFast", "string_to_hash_bucket_fast", NodeStatus::kRemove,
++                        {
++                          {"GatherNd", "gather_nd", NodeStatus::kRemove,
++                            {
++                              {"ExpandDims", "input", NodeStatus::kRemove},
++                              {"Where", "where_1", NodeStatus::kRemove}
++                            }
++                          }
++                        }
++                      },
++		                  {"Const", "const_11", NodeStatus::kRemove}
++                    }
++                  }
++                }
++              },
++	            {"Const", "const_12", NodeStatus::kRemove}
++            }
++          },
++          {"Const", "const_13", NodeStatus::kRemove}
++        }
++      },
++      {"GatherV2", "gatherv2_2", NodeStatus::kRemove,
++        {
++          {"StringToHashBucketFast", "string_to_hashbucket_fast", NodeStatus::kRemove},
++          {"Reshape", "reshape", NodeStatus::kRemove},
++	        {"Const", "const_14", NodeStatus::kRemove}
++        }
++      },
++      {"SparseReshape", "sparse_reshape_1", NodeStatus::kRemove},
++      {"Const", "const_15", NodeStatus::kRemove}
++    }
++  };
++  // clang-format on
++
++  bool found_op_type_match = false;
++  utils::SubGraphMatcher<MatchingDirection::kFollowInputs> graph_matcher(
++      &(ctx->graph_view));
++
++  matched_nodes_map->clear();
++  remove_node_indices->clear();
++
++  found_op_type_match = graph_matcher.GetMatchedNodes(
++      linear_embedding_pattern_v1, {}, ctx->graph_view.GetNode(node_index),
++      matched_nodes_map, remove_node_indices);
++  if (found_op_type_match) {
++    VLOG(2) << "Subgraph remap optimizer: found the linear embedding pattern v1\n";
++  }
++  return found_op_type_match;
++}
++
++Status ReplaceLinearEmbeddingSubgraphV1WithCustomizedEmbedding(
++    SubgraphRemapOptimizerContext* ctx, const std::map<string, int>* matched_nodes_map,
++    const std::set<int>* remove_node_indices,
++    std::vector<bool>* invalidated_nodes, std::vector<bool>* nodes_to_delete) {
++  const auto* output_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("output"))->node();
++  const auto* input_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("input"))->node();
++  const auto* sparse_reshape_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("output_2"))->node();
++  const auto* string_to_hash_bucket_fast_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("string_to_hash_bucket_fast"))->node();
++
++  NodeDef fused_node;
++  fused_node.set_name(output_node->name() + "/rec_embedding_v1");
++  fused_node.set_op("RecEmbeddingV1");
++  fused_node.set_device(output_node->device());
++  fused_node.add_input(input_node->input(0));
++
++  auto* fused_node_attr = fused_node.mutable_attr();
++
++  // Set attribute for new fused node, which copy from the exit node.
++  // Note: If we want to do general subgraph optimization via a plugin,
++  // it is best to create new node attributes via a configuration
++  // file instead of copying the attributes.
++  CopyOrAppendeAttribute(*string_to_hash_bucket_fast_node, &fused_node, "num_buckets");
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 0);
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 1);
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes", true, 2);
++  CopyOrAppendeAttribute(*sparse_reshape_node, &fused_node, "_output_shapes", true, 1);
++
++  Status status;
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  auto mutation_fused_node = mutation->AddNode(std::move(fused_node), &status);
++  TF_RETURN_IF_ERROR(status);
++  TF_RETURN_IF_ERROR(mutation->Apply());
++
++  const auto* new_node = ctx->graph_view.GetNode(output_node->name() + "/rec_embedding_v1")->node();
++
++  int port = 0;
++  // After apply of mutation, node view may be invalid, so we use NodeDef to get node view, too.
++  AddOrUpdateFanout(ctx, *output_node, new_node, port);
++  AddOrUpdateFanoutByPort(ctx, *sparse_reshape_node, new_node, 1, port);
++
++  (*invalidated_nodes)[matched_nodes_map->at("output")] = true;
++  (*nodes_to_delete)[matched_nodes_map->at("output_2")] = true;
++  (*nodes_to_delete)[matched_nodes_map->at("output")] = true;
++
++  for (const auto& node_index : *remove_node_indices) {
++    (*nodes_to_delete)[node_index] = true;
++  }
++
++  VLOG(2) << "Subgraph remap optimizer: replaced the linear embedding pattern v1 with " << new_node->name() << "\n";
++  return OkStatus();
++}
++
++bool FindEmbeddingPatternV2(SubgraphRemapOptimizerContext* ctx, int node_index,
++                             std::map<string, int>* matched_nodes_map,
++                             std::set<int>* remove_node_indices) {
++  using utils::MatchingDirection;
++  using utils::NodeStatus;
++
++  VLOG(1) << "****** this is a test for jhb's embedding optimizer: start to find the embedding pattern v2\n";
++
++  // clang-format off
++  utils::OpTypePattern embedding_pattern_v2 {
++    "Reshape", "output", NodeStatus::kReplace,
++    {
++      {"Reshape", "reshape_1", NodeStatus::kRemove,
++        {
++          {"Select", "select_1", NodeStatus::kRemove,
++            {
++              {"Tile", "tile_1", NodeStatus::kRemove,
++                {
++                  {"Reshape", "reshape_2", NodeStatus::kRemove,
++                    {
++                      {"SparseFillEmptyRows", "sparse_fill_empty_rows", NodeStatus::kRemove,
++                        {
++                          {"GatherV2", "gatherv2_1", NodeStatus::kRemove,
++                            {
++                              {"SparseReshape", "sparse_reshape_1", NodeStatus::kRemove,
++                                {
++                                  {"Where", "where_1", NodeStatus::kRemove,
++                                    {
++                                      {"NotEqual", "not_equal", NodeStatus::kRemove,
++                                        {
++                                          {"ExpandDims", "input", NodeStatus::kRemove},
++                                          {"Const", "const_1", NodeStatus::kRemove}
++                                        }
++                                      },
++                                    }
++                                  },
++                                  {"Shape", "shape_1", NodeStatus::kRemove,
++                                    { {"ExpandDims", "input", NodeStatus::kRemove} }
++                                  },
++                                  {"Pack", "pack_1", NodeStatus::kRemove,
++                                    {
++                                      {"Prod", "prod_1", NodeStatus::kRemove,
++                                        {
++                                          {"Slice", "slice_1", NodeStatus::kRemove,
++                                            {
++                                              {"Shape", "shape_1", NodeStatus::kRemove},
++                                              {"Const", "const_3", NodeStatus::kRemove},
++                                              {"Const", "const_4", NodeStatus::kRemove}
++                                            }
++                                          },
++                                          {"Const", "const_5", NodeStatus::kRemove}
++                                        }
++                                      },
++                                      {"GatherV2", "gatherv2_2", NodeStatus::kRemove,
++                                        {
++                                          {"Shape", "shape_1", NodeStatus::kRemove},
++                                          {"Const", "const_6", NodeStatus::kRemove},
++                                          {"Const", "const_7", NodeStatus::kRemove}
++                                        }
++                                      }
++                                    }
++                                  }
++                                }
++                              },
++                              {"Reshape", "reshape_3", NodeStatus::kRemove,
++                                {
++                                  {"Where", "where_2", NodeStatus::kRemove,
++                                    {
++                                      {"GreaterEqual", "greater_equal_1", NodeStatus::kRemove,
++                                        {
++                                          {"StringToHashBucketFast", "string_to_hash_bucket_fast", NodeStatus::kRemove,
++                                            {
++                                              {"GatherNd", "gather_nd", NodeStatus::kRemove,
++                                                {
++                                                  {"ExpandDims", "input", NodeStatus::kRemove},
++                                                  {"Where", "where_1", NodeStatus::kRemove}
++                                                }
++                                              }
++                                            }
++                                          },
++                                          {"Const", "const_8", NodeStatus::kRemove}
++                                        }
++                                      }
++                                    }
++                                  },
++                                  {"Const", "const_10", NodeStatus::kRemove}
++                                }
++                              },
++                              {"Const", "const_11", NodeStatus::kRemove}
++                            }
++                          },
++                          {"GatherV2", "gatherv2_3", NodeStatus::kRemove,
++                            {
++                              {"StringToHashBucketFast", "string_to_hashbucket_fast", NodeStatus::kRemove},
++                              {"Reshape", "reshape_3", NodeStatus::kRemove},
++                              {"Const", "const_12", NodeStatus::kRemove}
++                            }
++                          },
++                          {"SparseReshape", "sparse_reshape_1", NodeStatus::kRemove},
++                          {"Const", "const_13", NodeStatus::kRemove}
++                        }
++                      },
++                      {"Const", "const_14", NodeStatus::kRemove}
++                    }
++                  },
++                  {"Pack", "pack_2", NodeStatus::kRemove,
++                    {
++                      {"Const", "const_22", NodeStatus::kRemove},
++                      {"StridedSlice", "strided_slice_1", NodeStatus::kRemove,
++                        {
++                          {"Shape", "shape_2", NodeStatus::kRemove,
++                            {
++                              {"SparseSegmentMean", "sparse_segment_mean", NodeStatus::kRemove,
++                                {
++                                  {"GatherV2", "input_2", NodeStatus::kRemove,
++                                    {
++                                      {"*", "any_value", NodeStatus::kRemain},
++                                      {"Unique", "unique_1", NodeStatus::kRemove,
++                                        {
++                                          {"SparseFillEmptyRows", "sparse_fill_empty_rows", NodeStatus::kRemove}
++                                        }
++                                      },
++                                      {"Const", "const_15", NodeStatus::kRemove}
++                                    }
++                                  },
++                                  {"Unique", "unique_1", NodeStatus::kRemove},
++                                  {"Cast", "cast_1", NodeStatus::kRemove,
++                                    {
++                                      {"StridedSlice", "strided_slice_2", NodeStatus::kRemove,
++                                        {
++                                          {"SparseFillEmptyRows", "sparse_fill_empty_rows", NodeStatus::kRemove},
++                                          {"Const", "const_16", NodeStatus::kRemove},
++                                          {"Const", "const_17", NodeStatus::kRemove},
++                                          {"Const", "const_18", NodeStatus::kRemove}
++                                        }
++                                      }
++                                    }
++                                  }
++                                }
++                              }
++                            }
++                          },
++                          {"Const", "const_19", NodeStatus::kRemove},
++                          {"Const", "const_20", NodeStatus::kRemove},
++                          {"Const", "const_21", NodeStatus::kRemove}
++                        }
++                      }
++                    }
++                  }
++                }
++              },
++              {"ZerosLike", "zeros_like_1", NodeStatus::kRemove,
++                { {"SparseSegmentMean", "sparse_segment_mean", NodeStatus::kRemove} }
++              },
++              {"SparseSegmentMean", "sparse_segment_mean", NodeStatus::kRemove}
++            }
++          },
++          {"ConcatV2", "concatv2_1", NodeStatus::kRemove,
++            {
++              {"Slice", "slice_2", NodeStatus::kRemove,
++                {
++                  {"Cast", "cast_2", NodeStatus::kRemove,
++                    {
++                      {"Shape", "shape_1", NodeStatus::kRemove}
++                    }
++                  },
++                  {"Const", "const_23", NodeStatus::kRemove},
++                  {"Const", "const_24", NodeStatus::kRemove}
++                }
++              },
++              {"Slice", "slice_3", NodeStatus::kRemove,
++                {
++                  {"Shape", "shape_3", NodeStatus::kRemove,
++                    {
++                      {"Select", "select_1", NodeStatus::kRemove}
++                    }
++                  },
++                  {"Const", "const_25", NodeStatus::kRemove},
++                  {"Const", "const_26", NodeStatus::kRemove}
++                }
++              },
++              {"Const", "const_27", NodeStatus::kRemove}
++            }
++          }
++        }
++      },
++      {"Pack", "pack_3", NodeStatus::kRemove,
++        {
++          {"StridedSlice", "strided_slice_3", NodeStatus::kRemove,
++            {
++              {"Shape", "shape_4", NodeStatus::kRemove,
++                { {"Reshape", "reshape_1", NodeStatus::kRemove} }
++              },
++              {"Const", "const_28", NodeStatus::kRemove},
++              {"Const", "const_29", NodeStatus::kRemove},
++              {"Const", "const_30", NodeStatus::kRemove}
++            }
++          },
++          {"Const", "const_31", NodeStatus::kRemove}
++        }
++      }
++    }
++  };
++  // clang-format on
++
++  bool found_op_type_match = false;
++  utils::SubGraphMatcher<MatchingDirection::kFollowInputs> graph_matcher(
++      &(ctx->graph_view));
++
++  matched_nodes_map->clear();
++  remove_node_indices->clear();
++
++  found_op_type_match = graph_matcher.GetMatchedNodes(
++      embedding_pattern_v2, {}, ctx->graph_view.GetNode(node_index),
++      matched_nodes_map, remove_node_indices);
++  if (found_op_type_match) {
++    auto* mul_node_def = ctx->graph_view.GetNode(node_index)->node();
++    VLOG(1) << "Subgraph remap optimizer: found the embedding pattern v2\n";
++  }
++  return found_op_type_match;
++}
++
++Status ReplaceEmbeddingSubgraphV2WithCustomizedEmbedding(
++    SubgraphRemapOptimizerContext* ctx, const std::map<string, int>* matched_nodes_map,
++    const std::set<int>* remove_node_indices,
++    std::vector<bool>* invalidated_nodes, std::vector<bool>* nodes_to_delete) {
++
++  const auto* output_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("output"))->node();
++  const auto* input_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("input"))->node();
++  const auto* input_node2 =
++      ctx->graph_view.GetNode(matched_nodes_map->at("input_2"))->node();
++  const auto* sparse_fill_empty_rows_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("sparse_fill_empty_rows"))->node();
++  const auto* string_to_hash_bucket_fast_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at("string_to_hash_bucket_fast"))->node();
++
++  NodeDef fused_node;
++  fused_node.set_name(sparse_fill_empty_rows_node->name() + "/rec_embedding_v2");
++  fused_node.set_op("RecEmbeddingV2");
++  fused_node.set_device(output_node->device());
++  fused_node.add_input(input_node->input(0));
++  fused_node.add_input(input_node2->input(0));
++
++  auto* fused_node_attr = fused_node.mutable_attr();
++
++  // Set attribute for new fused node, which copy from the exit node.
++  // Note: If we want to do general subgraph optimization via a plugin,
++  // it is best to create new node attributes via a configuration
++  // file instead of copying the attributes.
++  CopyOrAppendeAttribute(*string_to_hash_bucket_fast_node, &fused_node, "num_buckets");
++  CopyOrAppendeAttribute(*output_node, &fused_node, "_output_shapes");
++
++  Status status;
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  auto mutation_fused_node = mutation->AddNode(std::move(fused_node), &status);
++  TF_RETURN_IF_ERROR(status);
++  TF_RETURN_IF_ERROR(mutation->Apply());
++
++  const auto* new_node = ctx->graph_view.GetNode(sparse_fill_empty_rows_node->name() + "/rec_embedding_v2")->node();
++
++  int port = 0;
++  // After apply of mutation, node view may be invalid, so we use NodeDef to get node view, too.
++  AddOrUpdateFanout(ctx, *output_node, new_node, port);
++
++  (*invalidated_nodes)[matched_nodes_map->at("output")] = true;
++  (*nodes_to_delete)[matched_nodes_map->at("output")] = true;
++
++  for (const auto& node_index : *remove_node_indices) {
++    (*nodes_to_delete)[node_index] = true;
++  }
++
++  VLOG(2) << "Subgraph remap optimizer: replaced the embedding pattern v2 with " << new_node->name() << "\n";
++  return OkStatus();
++}
++
++bool EnableReplaceEmbeddingV1() {
++  const char* env_var = std::getenv("TF_ENABLE_REPLACE_EMBEDDING_V1");
++  if (env_var != nullptr) {
++    std::string value = absl::AsciiStrToLower(env_var);
++    return (value == "1" || value == "true" || value == "yes");
++  }
++
++  return false;
++}
++
++bool EnableReplaceLinearEmbeddingV1() {
++  const char* env_var = std::getenv("TF_ENABLE_REPLACE_LINEAR_EMBEDDING_V1");
++  if (env_var != nullptr) {
++    std::string value = absl::AsciiStrToLower(env_var);
++    return (value == "1" || value == "true" || value == "yes");
++  }
++
++  return false;
++}
++
++bool EnableReplaceEmbeddingV2() {
++  const char* env_var = std::getenv("TF_ENABLE_REPLACE_EMBEDDING_V2");
++  if (env_var != nullptr) {
++    std::string value = absl::AsciiStrToLower(env_var);
++    return (value == "1" || value == "true" || value == "yes");
++  }
++
++  return false;
++}
++
++utils::NodeStatus NodeStatusFromString(string& str) {
++  if (str == "NodeStatus::kRemain") return utils::NodeStatus::kRemain;
++  if (str == "NodeStatus::kRemove") return utils::NodeStatus::kRemove;
++  if (str == "NodeStatus::kReplace") return utils::NodeStatus::kReplace;
++}
++
++utils::OpTypePattern ParsePattern(Json::Value& pattern_value) {
++  string op = pattern_value[op_str].asString();
++  string label = pattern_value[label_str].asString();
++  string status = pattern_value[status_str].asString();
++  utils::NodeStatus node_status = NodeStatusFromString(status);
++  std::vector<utils::OpTypePattern> children;
++
++  for (unsigned int i = 0; i < pattern_value[children_str].size(); ++i) {
++    utils::OpTypePattern child = ParsePattern(pattern_value[children_str][i]);
++    children.push_back(child);
++  }
++
++  return utils::OpTypePattern{op, label, node_status, children};
++}
++
++bool ReadPatternFromConfig(std::vector<PatternInfo>& patterns) {
++  const char* env_var = std::getenv("TF_SUBGRAPH_REMAP_PATTERN");
++  if (env_var == nullptr) {
++    VLOG(1) << "config is null\n";
++    return false;
++  }
++  
++  Json::Reader reader;
++  Json::Value root;
++
++  std::ifstream configFile(env_var, std::ios::binary);
++  if (!configFile.is_open()) {
++    VLOG(1) << "Open subgraph remapp pattern config file failed\n";
++    return false;
++  }
++
++  if (reader.parse(configFile, root)) {
++    if (!root[patterns_str].isArray()) {
++      VLOG(1) << "Pattern config file format is invalid, 'patterns' value must be array.";
++      return false;
++    }
++    for (unsigned int i = 0; i < root[patterns_str].size(); i++) {
++      PatternInfo pattern_info;
++      Json::Value pattern_info_value = root[patterns_str][i];
++      // Parse pattern
++      // pattern_info.pattern = pattern_value["pattern"].asString();
++      Json::Value pattern_value = pattern_info_value[pattern_str];
++      pattern_info.pattern = ParsePattern(pattern_value);
++      pattern_info.node_name = pattern_info_value[node_name_str].asString();
++      pattern_info.operator_type = pattern_info_value[op_type_str].asString();
++
++      // Parse output nodes
++      for (unsigned int j = 0; j < pattern_info_value[output_nodes_str].size(); j++) {
++        string node = pattern_info_value[output_nodes_str][j].asString();
++        pattern_info.output_nodes.push_back(node);
++      }
++
++      // Parse customized operator node
++      Json::Value customized_node = pattern_info_value[customized_node_str];
++      // Read node fanins
++      if (!customized_node[fanins_str].isArray()) {
++        VLOG(1) << "Pattern config file format is invalid, 'node_fanins' value must be array.";
++        return false;
++      }
++      for (unsigned int j = 0; j < customized_node[fanins_str].size(); j++) {
++        Json::Value fain_value = customized_node[fanins_str][j];
++        unsigned int node_port = fain_value[node_port_str].asUInt();
++        string input_label = fain_value[input_label_str].asString();
++        unsigned input_port = fain_value[input_port_str].asUInt();
++        pattern_info.node_fanins.insert(std::pair(node_port, std::pair(input_label, input_port)));
++      }
++
++      // Read node fanouts
++      if (!customized_node[fanouts_str].isArray()) {
++        VLOG(1) << "Pattern config file format is invalid, 'node_fanouts' value must be array.";
++        return false;
++      }
++      for (unsigned int j = 0; j < customized_node[fanouts_str].size(); j++) {
++        Json::Value faout_value = customized_node[fanouts_str][j];
++        unsigned int node_port = faout_value[node_port_str].asUInt();
++        string output_label = faout_value[output_label_str].asString();
++        unsigned int output_port = faout_value[output_port_str].asUInt();
++        pattern_info.node_fanouts.insert(std::pair(node_port, std::pair(output_label, output_port)));
++      }
++
++      // Read attributes info
++      if (!customized_node[attributes_str].isArray()) {
++        VLOG(1) << "Pattern config file format is invalid, 'attributes' value must be array.";
++        return false;
++      }
++      for (unsigned int j = 0; j < customized_node[attributes_str].size(); j++) {
++        Json::Value attribute_value = customized_node[attributes_str][j];
++        string key = attribute_value[key_str].asString();
++        if (attribute_value[value_str].isArray()) {
++          for (unsigned k = 0; k < attribute_value[value_str].size(); k++) {
++            Json::Value attr_value_from = attribute_value[value_str][k];
++            string label = attr_value_from[label_str].asString();
++            std::vector<int> items;
++            if (attr_value_from[item_str].isArray()) {
++              for (unsigned m = 0; m < attr_value_from[item_str].size(); ++m) {
++                int item = attr_value_from[item_str][m].asInt();
++                items.push_back(item);
++              }
++            }
++            std::unordered_map<string, std::vector<int>> attr_value_map;
++            attr_value_map.insert(std::pair(label, items));
++            auto has_inserted = pattern_info.node_attrs.insert(std::pair(key, attr_value_map));
++            if (!has_inserted.second) {
++              pattern_info.node_attrs[key].insert(std::pair(label, items));
++            }
++          }
++        } else {
++          string label = attribute_value[value_str].asString();
++          std::unordered_map<string, std::vector<int>> attr_value_map;
++          std::vector<int> items;
++          attr_value_map.insert(std::pair(label, items));
++          pattern_info.node_attrs.insert(std::pair(key, attr_value_map));
++        }
++      }
++      patterns.push_back(pattern_info);
++    }
++    VLOG(1) << "pattern config read success\n";
++    return true;
++  } else {
++    VLOG(1) << "parse error\n";
++  }
++
++  return false;
++}
++
++bool FindCustomizedPattern(utils::OpTypePattern& pattern, SubgraphRemapOptimizerContext* ctx,
++                           int node_index, std::map<string, int>* matched_nodes_map,
++                           std::set<int>* remove_node_indices) {
++  using utils::MatchingDirection;
++  using utils::NodeStatus;
++
++  bool found_op_type_match = false;
++  utils::SubGraphMatcher<MatchingDirection::kFollowInputs> graph_matcher(
++      &(ctx->graph_view));
++
++  matched_nodes_map->clear();
++  remove_node_indices->clear();
++
++  found_op_type_match = graph_matcher.GetMatchedNodes(
++    pattern, {}, ctx->graph_view.GetNode(node_index),
++    matched_nodes_map, remove_node_indices);
++  if (found_op_type_match) {
++    VLOG(2) << "Subgraph remap optimizer: found the pattern from config.\n";
++  }
++  return found_op_type_match;
++}
++
++Status ReplacePatternWithCustomizedNode(PatternInfo& pattern_info, SubgraphRemapOptimizerContext* ctx,
++                                       std::map<string, int>* matched_nodes_map,
++                                       std::set<int>* remove_node_indices,
++                                       std::vector<bool>* invalidated_nodes,
++                                       std::vector<bool>* nodes_to_delete) {
++  // get one output node
++  const auto* output_node =
++      ctx->graph_view.GetNode(matched_nodes_map->at(pattern_info.output_nodes[0]))->node();
++
++  // create new node
++  NodeDef fused_node;
++  string name = output_node->name() + "/" + pattern_info.node_name;
++  fused_node.set_name(name);
++  fused_node.set_op(pattern_info.operator_type);
++  fused_node.set_device(output_node->device());
++  for (auto it : pattern_info.node_fanins) {
++    string tmp = it.second.first;
++    const auto* input_node =
++        ctx->graph_view.GetNode(matched_nodes_map->at(it.second.first))->node();
++    fused_node.add_input(input_node->input(it.second.second));
++  }
++  // copy attribute
++  for (auto it : pattern_info.node_attrs) {
++    if (it.second.size() == 1) {
++      const auto* src_node =
++          ctx->graph_view.GetNode(matched_nodes_map->at(it.second.begin()->first))->node();
++      if (it.second.begin()->second.size() == 0)
++        CopyOrAppendeAttribute(*src_node, &fused_node, it.first);
++      else {
++        for (auto item : it.second.begin()->second) {
++          CopyOrAppendeAttribute(*src_node, &fused_node, it.first, /*PartialCopy*/true, item);
++        }
++      }
++    } else {
++      for (auto attr : it.second) {
++        const auto* src_node =
++          ctx->graph_view.GetNode(matched_nodes_map->at(attr.first))->node();
++        for (auto item : attr.second) {
++          CopyOrAppendeAttribute(*src_node, &fused_node, it.first, /*PartialCopy*/true, item);
++        }
++      }
++    }
++  }
++
++  Status status;
++  utils::Mutation* mutation = ctx->graph_view.GetMutationBuilder();
++  auto mutation_fused_node = mutation->AddNode(std::move(fused_node), &status);
++  TF_RETURN_IF_ERROR(status);
++  TF_RETURN_IF_ERROR(mutation->Apply());
++
++  const auto* new_node = ctx->graph_view.GetNode(name)->node();
++
++  // After apply of mutation, node view may be invalid, so we use NodeDef to get node view, too.
++  for (auto it : pattern_info.node_fanouts) {
++    const auto* src_node =
++        ctx->graph_view.GetNode(matched_nodes_map->at(it.second.first))->node();
++    AddOrUpdateFanoutByPort(ctx, *src_node, new_node, it.second.second, it.first);
++  }
++
++  for (auto it : pattern_info.output_nodes) {
++    (*invalidated_nodes)[matched_nodes_map->at(it)] = true;
++    (*nodes_to_delete)[matched_nodes_map->at(it)] = true;
++  }
++
++  for (const auto& node_index : *remove_node_indices) {
++    (*nodes_to_delete)[node_index] = true;
++  }
++
++  VLOG(2) << "Subgraph remap optimizer: replaced the subgrapth with cutomized op node: "
++          << new_node->name() << "\n";
++  return OkStatus();
++}
++
++Status SubgraphRemapOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
++                                        GraphDef* optimized_graph) {
++  GrapplerItem mutable_item = item;
++  Status status;
++  SubgraphRemapOptimizerContext ctx(&mutable_item, &status, cpu_layout_conversion_,
++                      xla_auto_clustering_on_);
++
++  TF_RETURN_IF_ERROR(status);
++  // Processing graph in reverse-topological sorted order allows to remap
++  // longer chains of dependent ops in one pass.
++  TF_RETURN_IF_ERROR(
++      ctx.graph_view.SortTopologically(/*ignore_cycles=*/false, {}));
++
++  const int num_nodes = item.graph.node_size();
++  // Skip nodes that were invalidated by a remapper, e.g. do not process BiasAdd
++  // and Activation nodes that were fused into a Conv2D node.
++  std::vector<bool> invalidated_nodes(num_nodes);
++  std::vector<bool> nodes_to_delete(num_nodes);
++
++  std::vector<PatternInfo> patterns;
++  bool have_read_config = ReadPatternFromConfig(patterns);
++
++  for (int i = num_nodes - 1; i >= 0; --i) {
++    // Check if node was invalidated by one of the previous remaps.
++    if (invalidated_nodes[i] || nodes_to_delete[i]) {
++      continue;
++    }
++    std::map<string, int> matched_nodes_map;
++    std::set<int> remove_node_indices;
++
++    if (have_read_config) {
++      for (auto pattern_info : patterns) {
++        matched_nodes_map.clear();
++        remove_node_indices.clear();
++        utils::OpTypePattern pattern = pattern_info.pattern;
++        if (FindCustomizedPattern(pattern, &ctx, i, &matched_nodes_map, &remove_node_indices)) {
++          TF_RETURN_IF_ERROR(ReplacePatternWithCustomizedNode(pattern_info, &ctx, &matched_nodes_map,
++          &remove_node_indices, &invalidated_nodes, &nodes_to_delete));
++          continue;
++        }
++      }
++    }
++
++    // embedding subgraph to customized embedding v1 conversion
++    matched_nodes_map.clear();
++    remove_node_indices.clear();
++    if (EnableReplaceEmbeddingV1() && FindEmbeddingPatternV1(&ctx, i, &matched_nodes_map,
++                               &remove_node_indices)) {
++      TF_RETURN_IF_ERROR(ReplaceEmbeddingSubgraphV1WithCustomizedEmbedding(
++          &ctx, &matched_nodes_map, &remove_node_indices, &invalidated_nodes,
++          &nodes_to_delete));
++      continue;
++    }
++
++    matched_nodes_map.clear();
++    remove_node_indices.clear();
++    if (EnableReplaceLinearEmbeddingV1() &&
++        FindLinearEmbeddingPatternV1(&ctx, i, &matched_nodes_map, &remove_node_indices)) {
++      TF_RETURN_IF_ERROR(ReplaceLinearEmbeddingSubgraphV1WithCustomizedEmbedding(
++          &ctx, &matched_nodes_map, &remove_node_indices, &invalidated_nodes,
++          &nodes_to_delete));
++      continue;
++    }
++
++    matched_nodes_map.clear();
++    remove_node_indices.clear();
++    // The embedding pattern v1 is a subset of embedding v2, Therefore, need to set a
++    // argument to enable or disable a pattern optimization.
++    if (EnableReplaceEmbeddingV2() && FindEmbeddingPatternV2(&ctx, i, &matched_nodes_map,
++                               &remove_node_indices)) {
++      TF_RETURN_IF_ERROR(ReplaceEmbeddingSubgraphV2WithCustomizedEmbedding(
++          &ctx, &matched_nodes_map, &remove_node_indices, &invalidated_nodes,
++          &nodes_to_delete));
++      continue;
++    }
++  }
++
++  // Remove invalidated nodes.
++  utils::Mutation* mutation = ctx.graph_view.GetMutationBuilder();
++  for (int i = 0; i < num_nodes; ++i) {
++    if (nodes_to_delete[i]) {
++      mutation->RemoveNode(ctx.graph_view.GetNode(i));
++    }
++  }
++  TF_RETURN_IF_ERROR(mutation->Apply());
++
++  *optimized_graph = std::move(mutable_item.graph);
++  return OkStatus();
++}
++
++}  // namespace grappler
++}  // namespace tensorflow
++
+-- 
+2.27.0
+

@@ -1,0 +1,71 @@
+diff --git a/xla/service/cpu/BUILD b/xla/service/cpu/BUILD
+index f882ee2210..1c053f0f9c 100644
+--- a/xla/service/cpu/BUILD
++++ b/xla/service/cpu/BUILD
+@@ -199,6 +199,7 @@ cc_library(
+     srcs = ["cpu_compiler.cc"],
+     hdrs = ["cpu_compiler.h"],
+     copts = tsl_copts(),
++    visibility = ["//visibility:public"],
+     deps = [
+         ":buffer_info_util",
+         ":compiler_functor",
+@@ -510,6 +511,7 @@ cc_library(
+     ],
+     hdrs = ["simple_orc_jit.h"],
+     copts = if_enable_acl(["-DXLA_CPU_USE_ACL=1"]) + tsl_copts(),
++    visibility = ["//visibility:public"],
+     deps = [
+         ":compiler_functor",
+         ":cpu_runtime",
+@@ -553,6 +555,7 @@ cc_library(
+     hdrs = ["runtime_lightweight_check.h"],
+     compatible_with = get_compatible_with_portable(),
+     copts = runtime_copts(),
++    visibility = ["//visibility:public"],
+ )
+
+ cc_library(
+@@ -641,6 +644,7 @@ cc_library(
+         "ir_emitter.h",
+     ],
+     copts = tsl_copts(),
++    visibility = ["//visibility:public"],
+     deps = [
+         ":backend_config_proto_cc",
+         ":cpu_options",
+@@ -873,6 +877,7 @@ cc_library(
+         "xfeed_manager.h",
+     ],
+     copts = runtime_copts(),
++    visibility = ["//visibility:public"],
+     deps = [
+         "//xla:executable_run_options",
+         "//xla:refcounting_hash_map",
+
+diff --git a/xla/service/BUILD b/xla/service/BUILD
+index 1a0836c9f3..f7bbe16f5a 100644
+--- a/xla/service/BUILD
++++ b/xla/service/BUILD
+@@ -1986,6 +1986,7 @@ cc_library(
+     hdrs = [
+         "hlo_creation_utils.h",
+     ],
++    visibility = ["//visibility:public"],
+     deps = [
+         ":hlo_module_config",
+         ":shape_inference",
+
+diff --git a/xla/BUILD b/xla/BUILD
+index b4b1996064..9de937be7b 100644
+--- a/xla/BUILD
++++ b/xla/BUILD
+@@ -648,7 +648,7 @@ cc_library(
+     name = "literal_comparison",
+     srcs = ["literal_comparison.cc"],
+     hdrs = ["literal_comparison.h"],
+-    visibility = [":friends"],
++    visibility = ["//visibility:public"],
+     deps = [
+         ":error_spec",
+         ":literal",

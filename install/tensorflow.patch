@@ -98,7 +98,7 @@ index 6e0ea613..158bb0f7 100644
      srcs = ["cpu_compiler.cc"],
      hdrs = ["cpu_compiler.h"],
      copts = tsl_copts(),
-+    linkopts = ["-lannc"],
++    linkopts = ["-L/usr/lib64", "-lannc", "-fopenmp"],
      visibility = ["//visibility:public"],
      deps = [
          ":buffer_info_util",
