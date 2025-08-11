@@ -151,6 +151,7 @@ void __pooling(void* out, void** in);
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu); \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);     \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);
+
 }  // namespace cpu
 }  // namespace xla
 
