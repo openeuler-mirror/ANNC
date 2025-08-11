@@ -66,7 +66,7 @@ cc_import(
 cc_import(
   name = "libmlir",
   visibility = ["//visibility:public"],
-  shared_library = "xla/libs/libblas_920b_single_mlir.so",
+  shared_library = "xla/libs/libmlir.so",
   system_provided = 0,
 )
 
