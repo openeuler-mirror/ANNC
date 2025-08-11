@@ -86,7 +86,7 @@ index 3c37150f..09d65e52 100644
  Status Remapper::Optimize(Cluster* cluster, const GrapplerItem& item,
                            GraphDef* optimized_graph) {
 +  auto& flags = annc::get_annc_flags();
-+  if (flags.is_enabled("disable_tf_matmul_fusion")) disable_tf_matmul_fusion = true;
++  if (flags.is_enabled("disable-tf-matmul-fusion")) disable_tf_matmul_fusion = true;
    GrapplerItem mutable_item = item;
    Status status;
    RemapperContext ctx(&mutable_item, &status, cpu_layout_conversion_,
@@ -123,7 +123,7 @@ index e519cf05..d7e092dd 100644
 +namespace {
 +    const bool kAnncKernelRegistered = []() {
 +        auto& flags = annc::get_annc_flags();
-+        if (flags.is_enabled("enable_annc_pass")) {
++        if (flags.is_enabled("annc-pass")) {
 +          REGISTER_ALL_GEMM_KERNELS()
 +          VLOG(1) << "#### register all gemm kernels ";
 +        }
@@ -141,7 +141,7 @@ index e519cf05..d7e092dd 100644
    }
 +  auto& flags = annc::get_annc_flags();
  
-+  if (flags.is_enabled("enable_annc_pass")) {
++  if (flags.is_enabled("annc-pass")) {
 +    VLOG(1) << "#### Run KDnnFusion Pass" ;
 +    pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
 +  }

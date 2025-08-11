@@ -119,7 +119,7 @@ void register_pooling(std::vector<KDnnRewriter>& rewriters,
 
 void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters) {
   auto& flags = annc::get_annc_flags();
-  if (flags.is_enabled("sps_emd_2")) {
+  if (flags.is_enabled("sps-emd-2")) {
     register_sparse_embedding2(rewriters, RewriterType::FUSED_OPERATION, 3);
   }
   if (flags.is_enabled("pooling")) {
