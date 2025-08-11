@@ -97,31 +97,6 @@ void __matmul(void* out, const void** in) {
 #endif
 }
 
-void __matvec(void* out, const void** in) {
-  float* out_buf = reinterpret_cast<float*>(out);
-  const float* lhs = reinterpret_cast<const float*>(in[0]);
-  const float* rhs = reinterpret_cast<const float*>(in[1]);
-  const int64_t* lhs_shape = reinterpret_cast<const int64_t*>(in[2]);
-  const int64_t* rhs_shape = reinterpret_cast<const int64_t*>(in[3]);
-  int m = lhs_shape[0];
-  int n = rhs_shape[1];
-
-#if defined(ANNC_ENABLED_KDNN) || defined(ANNC_ENABLED_OPENBLAS)
-  CBLAS_LAYOUT clayout = CblasRowMajor;
-  CBLAS_TRANSPOSE transa = CblasNoTrans;
-
-  int lda = n;
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  int incx = 1;
-  int incy = 1;
-
-  // Y = alpha * A * X + beta * Y;
-  cblas_sgemv(clayout, transa, m, n, alpha, lhs, lda, rhs, incx, beta,
-                   out_buf, incy);
-#endif
-}
-
 void __batch_matmul(void* out, const void** in) {
   float* out_buf = reinterpret_cast<float*>(out);
   const float* lhs = reinterpret_cast<const float*>(in[0]);
