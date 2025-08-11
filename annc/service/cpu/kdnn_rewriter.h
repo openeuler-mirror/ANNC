@@ -143,7 +143,6 @@ void __matmul_add(void* out, const void** in);
 void __matmul_add_relu(void* out, const void** in);
 void __reduce_mean(void* out, const void** in);
 void __pooling(void* out, void** in);
-void __softmax(void* out, void** in);
 
 #define REGISTER_ALL_GEMM_KERNELS()                       \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul);          \
@@ -151,8 +150,7 @@ void __softmax(void* out, void** in);
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);      \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu); \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);     \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);         \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__softmax);
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);
 }  // namespace cpu
 }  // namespace xla
 
