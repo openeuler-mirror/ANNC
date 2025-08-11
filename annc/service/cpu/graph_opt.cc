@@ -1,6 +1,5 @@
 #include "annc/service/hlo_util.h"
 #include "kdnn_rewriter.h"
-#include <omp.h>
 
 namespace xla {
 namespace cpu {
@@ -108,62 +107,6 @@ bool fused_pooling(HloInstruction* select) {
   return parent->ReplaceInstruction(fusion, custom_call, false).ok();
 }
 
-bool fused_softmax(HloInstruction* dot) {
-  IS_VALID(dot->opcode() == HloOpcode::kDot)
-  IS_VALID(dot->users()[0]->opcode() == HloOpcode::kMultiply)
-  HloInstruction* mul = dot->users()[0];
-  IS_VALID(mul->users()[0]->opcode() == HloOpcode::kAdd)
-  HloInstruction* add = mul->users()[0];
-  IS_VALID(add->users().size() == 2 &&
-           add->users()[0]->opcode() == HloOpcode::kReduceWindow &&
-           add->users()[1]->opcode() == HloOpcode::kSubtract)
-  HloInstruction* reduce_window = add->users()[0];
-  HloInstruction* subtract = add->users()[1];
-  IS_VALID(reduce_window->users()[0]->opcode() == HloOpcode::kReduce)
-  HloInstruction* reduce = reduce_window->users()[0];
-  IS_VALID(reduce->users()[0]->opcode() == HloOpcode::kBroadcast)
-  HloInstruction* broadcast = reduce->users()[0];
-  IS_VALID(broadcast->users()[0]->opcode() == HloOpcode::kSubtract)
-  IS_VALID(subtract->users()[0]->opcode() == HloOpcode::kExp)
-  HloInstruction* exponential = subtract->users()[0];
-  IS_VALID(exponential->users().size() == 2 &&
-           exponential->users()[0]->opcode() == HloOpcode::kReduceWindow &&
-           exponential->users()[1]->opcode() == HloOpcode::kDivide)
-  HloInstruction* reduce_window_1 = exponential->users()[0];
-  HloInstruction* divide = exponential->users()[1];
-  IS_VALID(reduce_window_1->users()[0]->opcode() == HloOpcode::kReduce)
-  HloInstruction* reduce_1 = reduce_window_1->users()[0];
-  IS_VALID(reduce_1->users()[0]->opcode() == HloOpcode::kBroadcast)
-  HloInstruction* broadcast_1 = reduce_1->users()[0];
-
-  std::vector<HloInstruction*> fused_instrs = {
-    divide, broadcast_1, reduce_1, reduce_window_1, exponential,
-    subtract, broadcast, reduce, reduce_window, add, mul};
-  
-  HloComputation* parent = dot->parent();
-  HloInstruction* fusion = parent->CreateFusionInstruction(
-    fused_instrs, HloInstruction::FusionKind::kInput);
-  HloInstruction* root_instr = fusion->parent()->root_instruction();
-  HloInstruction* shape_info = root_instr->AddInstruction(
-    HloInstruction::CreateConstant(get_param_info(fusion->operand(2)))
-  );
-  std::vector<HloInstruction*> operands = {fusion->mutable_operand(2),
-                                           fusion->mutable_operand(3),
-                                           fusion->mutable_operand(4),
-                                           shape_info};
-  HloInstruction* custom_call = fusion->AddInstruction(
-    HloInstruction::CreateCustomCall(fusion->shape(), operands, "__softmax"));
-  return parent->ReplaceInstruction(fusion, custom_call, false).ok();
-}
-
-void register_softmax(std::vector<KDnnRewriter>& rewriters,
-                      RewriterType rewrite_type, int benefit = 1) {
-  RewritePattern pattern("softmax", HloOpcode::kDot);
-  pattern.custom_rewriter = fused_softmax;
-  auto rewriter = KDnnRewriter(benefit, pattern, rewrite_type);
-  rewriters.push_back(rewriter);
-}
-
 void register_pooling(std::vector<KDnnRewriter>& rewriters,
                       RewriterType rewrite_type, int benefit = 1) {
   RewritePattern pattern("pooling", HloOpcode::kSelect);
@@ -176,70 +119,9 @@ void register_pooling(std::vector<KDnnRewriter>& rewriters,
 void register_graph_opt_rewriters(std::vector<KDnnRewriter>& rewriters) {
 #if defined(ANNC_ENABLED_GRAPH_OPT)
   register_sparse_embedding2(rewriters, RewriterType::FUSED_OPERATION, 3);
-  register_softmax(rewriters, RewriterType::FUSED_OPERATION, 3);
   // register_pooling(rewriters, RewriterType::FUSED_OPERATION, 3);
 #endif
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
-}
-
-void __softmax(void* out, void** in) {
-  float* out_buf = reinterpret_cast<float*>(out);
-  const float* mul_param_0 = reinterpret_cast<const float*>(in[1]);
-  const float* mul_param_1 = reinterpret_cast<const float*>(in[2]);
-  const float* add_param = reinterpret_cast<const float*>(in[0]);
-  const uint64_t* shape = reinterpret_cast<const uint64_t*>(in[3]);
-  
-  uint64_t batches = shape[0];
-  uint64_t heads = shape[1];
-  uint64_t m = shape[2];
-  uint64_t n = shape[3];
-
-  const uint64_t total_rows = batches * heads * m;
-  const uint64_t row_size = n;
-
-  #pragma omp parallel for schedule(guided, 64)
-  for (uint64_t row_idx = 0; row_idx < total_rows; ++row_idx) {
-    // Calculate the position of the current row in the tensor.
-    const uint64_t batch_idx = row_idx / (heads * m);
-    const uint64_t head_idx = (row_idx % (heads * m)) / m;
-    const uint64_t m_idx = row_idx % m;
-
-    // Calculate the starting offset of the current row 
-    const uint64_t base_offset = batch_idx * heads * m * n + 
-                                 head_idx * m * n +
-                                 m_idx * n;
-
-    const float* mul0_row = mul_param_0 + base_offset;
-    const float* mul1_row = mul_param_1 + base_offset;
-    const float* add_row = add_param + base_offset;
-    float* out_row = out_buf + base_offset;
-
-    float max_val = -std::numeric_limits<float>::infinity();
-
-    float temp_vals[row_size];
-
-    for (uint64_t i = 0; i < row_size; ++i) {
-      temp_vals[i] = mul0_row[i] * mul1_row[i] + add_row[i];
-      if (temp_vals[i] > max_val) {
-        max_val = temp_vals[i];
-      }
-    }
-
-    float exp_sum = 0.0f;
-    for (uint64_t i = 0; i < row_size; ++i) {
-      float exp_val = std::exp(temp_vals[i] - max_val);
-      out_row[i] = exp_val;
-      exp_sum += exp_val;
-    }
-
-    exp_sum += 1e-8f;
-    
-    float inv_exp_sum = 1.0f / exp_sum;
-
-    for (uint64_t i = 0; i < row_size; ++i) {
-      out_row[i] *= inv_exp_sum;
-    }
-  }
 }
 
 void __pooling(void* out, void** in) {
