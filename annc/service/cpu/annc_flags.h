@@ -12,6 +12,7 @@ enum OptType {
   GRAPH_OPT,
   GEMM_OPT,
   TF_OPT,
+  NONE
 };
 
 struct Flag {

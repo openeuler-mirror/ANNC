@@ -64,13 +64,13 @@ void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
   if (flags.is_enabled("matmul")) {
     register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   }
-  if (flags.is_enabled("batcch_matmul")) {
+  if (flags.is_enabled("batch-matmul")) {
     register_batch_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   }
-  if (flags.is_enabled("matmul_add")) {
+  if (flags.is_enabled("matmul-add")) {
     register_matmul_add(rewriters, RewriterType::DNN_CUSTOM_CALL, 2);
   }
-  if (flags.is_enabled("matmul_add_relu")) {
+  if (flags.is_enabled("matmul-add-relu")) {
     register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
   }
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
