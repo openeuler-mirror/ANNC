@@ -51,7 +51,6 @@ cc_library(
         "@xla//xla:executable_run_options",
         "@xla//xla/service/cpu:ir_emitter",
         "@xla//xla/service:pattern_matcher",
-        ":libmlir",
         ":libXNNPACK",
     ],
 )
@@ -61,13 +60,6 @@ cc_import(
     visibility = ["//visibility:public"],
     shared_library = "xla/libs/libXNNPACK.so",
     system_provided = 0
-)
-
-cc_import(
-  name = "libmlir",
-  visibility = ["//visibility:public"],
-  shared_library = "xla/libs/libmlir.so",
-  system_provided = 0,
 )
 
 cc_binary(

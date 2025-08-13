@@ -1,0 +1,15 @@
+diff --git a/third_party/xla/xla/service/cpu/cpu_instruction_fusion.h b/third_party/xla/xla/service/cpu/cpu_instruction_fusion.h
+index 1e090cb6..c2a1d891 100644
+--- a/third_party/xla/xla/service/cpu/cpu_instruction_fusion.h
++++ b/third_party/xla/xla/service/cpu/cpu_instruction_fusion.h
+@@ -26,8 +26,8 @@ namespace cpu {
+ 
+ class CpuInstructionFusion : public InstructionFusion {
+  public:
+-  CpuInstructionFusion()
+-      : InstructionFusion(CpuInstructionFusion::IsExpensive) {}
++  CpuInstructionFusion(bool may_duplicate)
++      : InstructionFusion(CpuInstructionFusion::IsExpensive, may_duplicate) {}
+   ~CpuInstructionFusion() override = default;
+ 
+   using HloPassInterface::Run;

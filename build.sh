@@ -19,9 +19,9 @@
 BAZEL=""
 GO=""
 
-ANNC_BASE="$HOME/tools"
-if [ ! -d "${ANNC_BASE/ANNC}" ]; then
-  echo "Please set ANNC_BASE in this script to point to the base directory of ANNC"
+ANNC="$ANNC"
+if [ ! -d "${ANNC}" ]; then
+  echo "Please set ANNC in this script to point to the base directory of ANNC"
 fi
 
 # Adjust as appropriate
@@ -39,14 +39,6 @@ if ! command -v bazel >/dev/null 2>&1; then
   exit -1
 fi
 
-# Check for go.
-if ! command -v go >/dev/null 2>&1; then
-  echo "Please add go to PATH."
-  echo "Exiting"
-  exit -1
-fi
-
-ANNC="$ANNC_BASE/ANNC"
 XNNPACK_BASE="$ANNC/annc/service/cpu/xla/libs"
 XNNPACK_DIR="$XNNPACK_BASE/XNNPACK"
 
@@ -82,6 +74,5 @@ bazel --output_user_root=./output                                              \
       --action_env=$ACTION_ENV                                                 \
       --define tflite_with_xnnpack=false                                       \
       annc/service/cpu:libannc.so                                              \
-      --copt=-DANNC_ENABLED_OPENBLAS                                           \
       --jobs 32
 
