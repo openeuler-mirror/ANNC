@@ -1,4 +1,4 @@
-diff -git a/third_party/xla/xla/service/cpu/ir_emitter.cc b/third_party/xla/xla/service/cpu/ir_emitter.cc
+diff --git a/third_party/xla/xla/service/cpu/ir_emitter.cc b/third_party/xla/xla/service/cpu/ir_emitter.cc
 index 7013a45f..c4974226 100644
 --- a/third_party/xla/xla/service/cpu/ir_emitter.cc
 +++ b/third_party/xla/xla/service/cpu/ir_emitter.cc
