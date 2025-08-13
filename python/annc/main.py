@@ -6,6 +6,7 @@ from annc.optimize.rec_embedding import EmbeddingPatternRewriter
 from annc.optimize.rec_embedding import EmbeddingWithHashBucketPatternRewriter
 from annc.optimize.rec_embedding import LinearSparseEmbeddingPatternRewriter
 from annc.optimize.rec_embedding import KPSoftmaxRewriter
+from annc.optimize.rec_embedding import LookupEmbeddingWithHashPatternRewriter
 from annc.optimize.graph import MetaGraph
 
 
@@ -22,7 +23,7 @@ def parse_args():
     parser.add_argument(
         'passes',
         nargs='+',
-        help='opt: \'dnn_sparse\', \'dnn_hash_bucket\', \'embed\','
+        help='opt: \'lookup_embedding_hash\', \'dnn_sparse\', \'dnn_hash_bucket\', \'embed\','
         ' \'embed_hash_bucket\', \'linear_sparse\', \'softmax\'')
     return parser.parse_args()
 
@@ -32,6 +33,7 @@ OPT_PASSES = {
     'dnn_hash_bucket': DnnEmbeddingWithHashBucketPatternRewriter,
     'embed': EmbeddingPatternRewriter,
     'embed_hash_bucket': EmbeddingWithHashBucketPatternRewriter,
+    'lookup_embedding_hash': LookupEmbeddingWithHashPatternRewriter,
     'linear_sparse': LinearSparseEmbeddingPatternRewriter,
     'softmax': KPSoftmaxRewriter,
 }

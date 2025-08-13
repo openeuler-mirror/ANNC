@@ -488,6 +488,8 @@ class EmbeddingPatternRewriter(BaseRewriter):
 
 
 class EmbeddingWithHashBucketPatternRewriter(BaseRewriter):
+    __pattern__ = 'KPFusedEmbeddingWithHashBucket'
+    __suffix__ = '/rec_embed_kp_bucket'
 
     def match_seg_sum(self, node: Node):
         self.check_node(node, (OpType.SparseFillEmptyRows, None))
@@ -611,7 +613,7 @@ class EmbeddingWithHashBucketPatternRewriter(BaseRewriter):
 
         # combiner: 0 for sum, 1 for mean
         custom_node = CustomNode(
-            'KPFusedEmbeddingWithHashBucket', node.name + '/rec_embed_kp_bucket',
+            self.__pattern__, node.name + self.__suffix__,
             self.graph, reshape_2.output_shapes,
             expand_dims.operands[:1] + resource_gather_0.operands[:1], [
                 CustomAttr('combiner', 'i: 0'),
@@ -745,7 +747,7 @@ class EmbeddingWithHashBucketPatternRewriter(BaseRewriter):
 
         # combiner: 0 for sum, 1 for mean
         custom_node = CustomNode(
-            'KPFusedEmbeddingWithHashBucket', node.name + '/rec_embed_kp_bucket',
+            self.__pattern__, node.name + self.__suffix__,
             self.graph, reshape_3.output_shapes,
             expand_dims.operands[:1] + gather_v2_3.operands[:1],
             string_to_hash.attrs + [
@@ -782,6 +784,12 @@ class EmbeddingWithHashBucketPatternRewriter(BaseRewriter):
         for fused_op in fused_ops:
             self.graph.delete_node(fused_op)
 
+class LookupEmbeddingWithHashPatternRewriter(EmbeddingWithHashBucketPatternRewriter):
+    __pattern__ = 'KPLookupEmbeddingByHash'
+    __suffix__ = '/rec_embed_kp_hash'
+
+    def match_and_rewrite(self, node: Node):
+        super().match_and_rewrite(node)
 
 class LinearSparseEmbeddingPatternRewriter(BaseRewriter):
 

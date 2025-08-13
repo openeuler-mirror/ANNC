@@ -9,21 +9,21 @@ static const char kWS[] = " \t\r\n";  // whitespace
 
 static const std::vector<Flag> g_default_flags = {
     {"matmul", "Register matmul operator.", false, GEMM_OPT},
-    {"batch_matmul", "Register batch_matmul operator", false, GEMM_OPT},
-    {"matmul_add", "Register matmul_add operator", false, GEMM_OPT},
-    {"matmul_add_relu", "Register matmul_add_relu operator", false, GEMM_OPT},
+    {"batch-matmul", "Register batch_matmul operator", false, NONE},
+    {"matmul-add", "Register matmul_add operator", false, NONE},
+    {"matmul-add-relu", "Register matmul_add_relu operator", false, NONE},
 
-    {"sps_emd_2", "Enable sparse_embedding2 fusion", false, GRAPH_OPT},
-    {"pooling", "Enable pooling fustion", false, GRAPH_OPT},
+    {"sps-emd-2", "Enable sparse_embedding2 fusion", false, GRAPH_OPT},
+    {"pooling", "Enable pooling fustion", false, NONE},
 
-    {"disable_tf_matmul_fusion", "Disable matmul fusion in TF", false, TF_OPT},
-    {"enable_annc_pass", "Enable annc optimizer pass", true, TF_OPT},
+    {"disable-tf-matmul-fusion", "Disable matmul fusion in TF", false, GEMM_OPT},
+    {"annc-pass", "Enable annc optimizer pass", true, TF_OPT},
 };
 
 static const Flag kGraphOptFlag = {
-    "enable_graph_opt", "Enable all graph optimizations", false, GRAPH_OPT};
+    "graph-opt", "Enable all graph optimizations", false, GRAPH_OPT};
 static const Flag kGemmOptFlag = {
-    "enable_gemm_opt", "Enable all gemm optimizations", false, GEMM_OPT};
+    "gemm-opt", "Enable all gemm optimizations", false, GEMM_OPT};
 
 static size_t skip_whitespace(const std::string& s, size_t pos) {
   while (pos < s.size() && s[pos] == ' ') {
