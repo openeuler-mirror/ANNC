@@ -1,7 +1,7 @@
-diff --git a/third_party/xla/xla/service/cpu/cpu_compiler.cc b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
 index e519cf05..4e862eb1 100644
---- a/third_party/xla/xla/service/cpu/cpu_compiler.cc
-+++ b/third_party/xla/xla/service/cpu/cpu_compiler.cc
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
 @@ -238,6 +238,13 @@ limitations under the License.
  #include "xla/service/cpu/onednn_rewriter.h"
  #endif
