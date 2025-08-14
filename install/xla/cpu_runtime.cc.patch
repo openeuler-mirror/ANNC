@@ -1,7 +1,7 @@
-diff --git a/third_party/xla/xla/service/cpu/cpu_runtime.cc b/third_party/xla/xla/service/cpu/cpu_runtime.cc
+diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
 index 84879eaf..8c1ae608 100644
---- a/third_party/xla/xla/service/cpu/cpu_runtime.cc
-+++ b/third_party/xla/xla/service/cpu/cpu_runtime.cc
+--- a/xla/service/cpu/cpu_runtime.cc
++++ b/xla/service/cpu/cpu_runtime.cc
 @@ -34,6 +34,9 @@ limitations under the License.
  #include "absl/strings/str_format.h"
  #include "absl/strings/str_join.h"
