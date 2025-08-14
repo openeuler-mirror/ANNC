@@ -26,14 +26,10 @@ cc_library(
 
 cc_library(
     name = "cambridge",
-    srcs = ["xla/kernel_selector.cc",
-            "xla/kernel_selector_ops_rewriter.cc",
-            "xla/xnnpack_ops.cc",
+    srcs = ["xla/xnnpack_ops.cc",
             "xla/xnnpack_ops_rewriter.cc",
             ],
-    hdrs = ["xla/kernel_selector.h",
-            "xla/kernel_selector_ops_rewriter.h",
-            "xla/xnnpack_ops.h",
+    hdrs = ["xla/xnnpack_ops.h",
             "xla/xnnpack_ops_rewriter.h",
             "xla/xnnpack_pattern_utils.h",
             ],
