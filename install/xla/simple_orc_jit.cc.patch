@@ -1,7 +1,7 @@
-diff --git a/third_party/xla/xla/service/cpu/simple_orc_jit.cc b/third_party/xla/xla/service/cpu/simple_orc_jit.cc
+diff --git a/xla/service/cpu/simple_orc_jit.cc b/xla/service/cpu/simple_orc_jit.cc
 index be8741a4..caf7f440 100644
---- a/third_party/xla/xla/service/cpu/simple_orc_jit.cc
-+++ b/third_party/xla/xla/service/cpu/simple_orc_jit.cc
+--- a/xla/service/cpu/simple_orc_jit.cc
++++ b/xla/service/cpu/simple_orc_jit.cc
 @@ -38,6 +38,7 @@ limitations under the License.
  #include "llvm/Support/Process.h"
  #include "llvm/TargetParser/Host.h"
