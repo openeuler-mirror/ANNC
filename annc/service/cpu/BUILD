@@ -26,14 +26,10 @@ cc_library(
 
 cc_library(
     name = "cambridge",
-    srcs = ["xla/kernel_selector.cc",
-            "xla/kernel_selector_ops_rewriter.cc",
-            "xla/xnnpack_ops.cc",
+    srcs = ["xla/xnnpack_ops.cc",
             "xla/xnnpack_ops_rewriter.cc",
             ],
-    hdrs = ["xla/kernel_selector.h",
-            "xla/kernel_selector_ops_rewriter.h",
-            "xla/xnnpack_ops.h",
+    hdrs = ["xla/xnnpack_ops.h",
             "xla/xnnpack_ops_rewriter.h",
             "xla/xnnpack_pattern_utils.h",
             ],
@@ -51,7 +47,6 @@ cc_library(
         "@xla//xla:executable_run_options",
         "@xla//xla/service/cpu:ir_emitter",
         "@xla//xla/service:pattern_matcher",
-        ":libmlir",
         ":libXNNPACK",
     ],
 )
@@ -61,13 +56,6 @@ cc_import(
     visibility = ["//visibility:public"],
     shared_library = "xla/libs/libXNNPACK.so",
     system_provided = 0
-)
-
-cc_import(
-  name = "libmlir",
-  visibility = ["//visibility:public"],
-  shared_library = "xla/libs/libmlir.so",
-  system_provided = 0,
 )
 
 cc_binary(

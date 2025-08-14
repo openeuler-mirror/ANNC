@@ -1,5 +1,5 @@
 diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
-index 84879eaf0f..f29b02e8b1 100644
+index 84879eaf..8c1ae608 100644
 --- a/xla/service/cpu/cpu_runtime.cc
 +++ b/xla/service/cpu/cpu_runtime.cc
 @@ -34,6 +34,9 @@ limitations under the License.
@@ -22,30 +22,12 @@ index 84879eaf0f..f29b02e8b1 100644
  
  namespace xla {
  namespace cpu {
-@@ -149,6 +149,26 @@ extern const char* const kPartitionIdSymbolName =
+@@ -149,6 +149,8 @@ extern const char* const kPartitionIdSymbolName =
  extern const char* const kReplicaIdSymbolName = "__xla_cpu_runtime_ReplicaId";
  extern const char* const kOneDnnMatMulSymbolName =
      "__xla_cpu_runtime_OneDnnMatMul";
 +extern const char* const kXnnPackSoftMaxNDSymbolName =
 +    "__xla_cpu_runtime_XnnPackSoftMaxND";
-+extern const char* const kKernelSelectorGEMVSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorGEMV";
-+extern const char* const kKernelSelectorGEMMSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorGEMM";
-+extern const char* const kKernelSelectorBatch3DSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorBatch3D";
-+extern const char* const kKernelSelectorGEMVMLIRSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorGEMVMLIR";
-+extern const char* const kKernelSelectorGEMMMLIRSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorGEMMMLIR";
-+extern const char* const kKernelSelectorBatch3DMLIRSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorBatch3DMLIR";
-+extern const char* const kKernelSelectorBatch4DMLIRSymbolName =
-+    "__xla_cpu_runtime_KernelSelectorBatch4DMLIR";
-+extern const char* const kKernelSelectorOperationGEMV = "GEMV";
-+extern const char* const kKernelSelectorOperationGEMM = "GEMM";
-+extern const char* const kKernelSelectorOperationBATCH3D = "BATCH3D";
-+extern const char* const kKernelSelectorOperationBATCH4D = "BATCH4D";
  
  namespace {
- 
+

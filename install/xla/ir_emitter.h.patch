@@ -1,12 +1,9 @@
 diff --git a/xla/service/cpu/ir_emitter.h b/xla/service/cpu/ir_emitter.h
-index c4534fa619..1ea0bbaca8 100644
+index c4534fa6..ef47a738 100644
 --- a/xla/service/cpu/ir_emitter.h
 +++ b/xla/service/cpu/ir_emitter.h
-@@ -190,8 +190,10 @@ class IrEmitter : public DfsHloVisitorWithDefault,
-   Status HandleSliceToDynamic(HloInstruction* hlo);
-   Status HandlePadToStatic(HloInstruction* hlo);
+@@ -192,6 +192,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
    Status HandleTopK(HloInstruction* hlo);
-+  Status HandleKernelSelector(HloInstruction* hlo);
    Status HandleAllReduceSingleReplica(HloInstruction* crs);
    Status HandleAllReduceMultipleReplica(HloInstruction* crs);
 +  Status HandleXnnPackSoftMax(HloInstruction* hlo);
