@@ -1,6 +1,3 @@
-TF_PATH=""
-XLA_PATH=""
-
 TF_PATCH_PATH="$ANNC/install"
 PATH_OF_PATCHES="$ANNC/install/xla"
 if [ ! -d "${TF_PATH}" ]; then
