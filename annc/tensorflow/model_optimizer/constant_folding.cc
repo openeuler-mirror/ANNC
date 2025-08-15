@@ -203,7 +203,7 @@ Status ConstantFoldingRewritter::get_tensors(
       g_variable_tensors[vars[i]->name()] = tensors[i];
       set_variable_tensor(vars[i], tensors[i]);
     }
-    save_variables_to_proto_file(hash);
+    if (stage_ == LoaderDumpCache) save_variables_to_proto_file(hash);
   }
   return Status::OK();
 }
@@ -273,6 +273,8 @@ void ConstantFoldingRewritter::fold_matmuladd_batchnorm(
 
 class KPFusedMatMulBiasAddBNRewriter : public ConstantFoldingRewritter {
  public:
+  KPFusedMatMulBiasAddBNRewriter(OptStage stage) { stage_ = stage; }
+
   bool match_and_rewrite(const NodeDef* node, GraphDef* graph,
                          std::unordered_map<std::string, int>& node_indexes,
                          Session* session) override {
@@ -347,6 +349,8 @@ class KPFusedMatMulBiasAddBNRewriter : public ConstantFoldingRewritter {
 
 class KPFusedReluRewriter : public ConstantFoldingRewritter {
  public:
+  KPFusedReluRewriter(OptStage stage) { stage_ = stage; }
+
   bool match_and_rewrite(const NodeDef* node, GraphDef* graph,
                          std::unordered_map<std::string, int>& node_indexes,
                          Session* session) override {
@@ -385,6 +389,8 @@ class KPFusedReluRewriter : public ConstantFoldingRewritter {
 
 class KPFusedRelu2Rewriter : public ConstantFoldingRewritter {
  public:
+  KPFusedRelu2Rewriter(OptStage stage) { stage_ = stage; }
+
   bool match_and_rewrite(const NodeDef* node, GraphDef* graph,
                          std::unordered_map<std::string, int>& node_indexes,
                          Session* session) override {
@@ -436,6 +442,25 @@ bool enabled_aarch64_cf_rewriters() {
   return flag;
 }
 
+Status dump_saved_model(const MetaGraphDef& meta_graph_def,
+                        const string& export_dir, bool dump_as_text = false) {
+  SavedModel saved_model_proto;
+  saved_model_proto.mutable_meta_graphs()->Add()->CopyFrom(meta_graph_def);
+  mkdir(export_dir.c_str(), 0755);
+  const std::string saved_model_pb_path =
+      tensorflow::io::JoinPath(export_dir, "saved_model.pb");
+  if (dump_as_text) {
+    TF_CHECK_OK(tensorflow::WriteTextProto(
+        tensorflow::Env::Default(), absl::StrCat(saved_model_pb_path, "txt"),
+        saved_model_proto));
+  } else {
+    TF_CHECK_OK(tensorflow::WriteBinaryProto(
+        tensorflow::Env::Default(), saved_model_pb_path, saved_model_proto));
+  }
+  LOG(INFO) << "Model saved: " << saved_model_pb_path;
+  return Status::OK();
+}
+
 void run_annc_constant_folding(GraphDef* graph, Session* session) {
   std::vector<std::unique_ptr<ConstantFoldingRewritter>> rewriters;
 
@@ -444,12 +469,20 @@ void run_annc_constant_folding(GraphDef* graph, Session* session) {
     const char* annc_cf_relu = getenv("ANNC_CF_RELU");
 
     // default disable all rewriters
-    if (annc_cf_matmul_badd_bn != nullptr &&
-        strcmp(annc_cf_matmul_badd_bn, "1") == 0)
-      rewriters.push_back(std::make_unique<KPFusedMatMulBiasAddBNRewriter>());
+    if (annc_cf_matmul_badd_bn != nullptr) {
+      if (strcmp(annc_cf_matmul_badd_bn, "1") == 0 && session != nullptr) {
+        rewriters.push_back(std::make_unique<KPFusedMatMulBiasAddBNRewriter>(
+            LoaderNoDumpCache));
+      } else if (strcmp(annc_cf_matmul_badd_bn, "2") == 0) {
+        OptStage stage = (session != nullptr) ? LoaderDumpCache : Remapper;
+        rewriters.push_back(
+            std::make_unique<KPFusedMatMulBiasAddBNRewriter>(stage));
+      }
+    }
     if (annc_cf_relu != nullptr && strcmp(annc_cf_relu, "1") == 0) {
-      rewriters.push_back(std::make_unique<KPFusedReluRewriter>());
-      rewriters.push_back(std::make_unique<KPFusedRelu2Rewriter>());
+      OptStage stage = (session != nullptr) ? LoaderNoDumpCache : Remapper;
+      rewriters.push_back(std::make_unique<KPFusedReluRewriter>(stage));
+      rewriters.push_back(std::make_unique<KPFusedRelu2Rewriter>(stage));
     }
   }
 
@@ -469,6 +502,18 @@ void run_annc_constant_folding(GraphDef* graph, Session* session) {
       if (is_matched) break;
     }
     if (!is_matched) break;
+  }
+}
+
+void run_annc_constant_folding(MetaGraphDef& meta_graph_def, Session* session) {
+  run_annc_constant_folding(meta_graph_def.mutable_graph_def(), session);
+  const char* annc_cf_dump = getenv("ANNC_CF_DUMP");
+  const char* annc_cf_dump_text = getenv("ANNC_CF_DUMP_TEXT");
+  if (annc_cf_dump != nullptr) {
+    const std::string export_dir = annc_cf_dump;
+    bool dump_as_text =
+        (annc_cf_dump_text != nullptr && strcmp(annc_cf_dump_text, "1") == 0);
+    dump_saved_model(meta_graph_def, export_dir, dump_as_text);
   }
 }
 }  // namespace annc
