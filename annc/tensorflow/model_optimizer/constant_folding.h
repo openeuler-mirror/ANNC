@@ -8,8 +8,10 @@
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/grappler/op_types.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/protobuf/graph_debug_info.pb.h"
 #include "tensorflow/core/protobuf/meta_graph.pb.h"
+#include "tensorflow/core/protobuf/saved_model.pb.h"
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/util/tensor_bundle/tensor_bundle.h"
 
@@ -23,6 +25,9 @@ namespace annc {
   }
 
 static std::unordered_map<std::string, Tensor> g_variable_tensors;
+
+enum OptStage { LoaderDumpCache, LoaderNoDumpCache, Remapper };
+
 void save_variables_to_proto_file(const size_t& hash);
 void load_variables_from_proto_file(const size_t& hash);
 
@@ -86,10 +91,12 @@ class ConstantFoldingRewritter {
   }
 
   GraphDef* graph_;
+  OptStage stage_;
   std::unordered_map<std::string, int>* indexes_;
 };
 
 void run_annc_constant_folding(GraphDef* graph, Session* session);
+void run_annc_constant_folding(MetaGraphDef& meta_graph_def, Session* session);
 }  // namespace annc
 
 #endif  // ANNC_TF_MODEL_OPTIMIZER_H_
