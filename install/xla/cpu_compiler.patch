@@ -1,4 +1,4 @@
-diff -git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
 index d1e57621..8dba4d0b 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
