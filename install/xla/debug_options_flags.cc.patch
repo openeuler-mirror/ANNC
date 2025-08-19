@@ -1,22 +1,25 @@
 diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
-index 7982ab2590..e2706e6fda 100644
+index 31722bfe..9ae65565 100644
 --- a/xla/debug_options_flags.cc
 +++ b/xla/debug_options_flags.cc
-@@ -171,6 +171,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+@@ -167,7 +167,12 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
    opts.set_xla_cpu_matmul_tiling_k_dim(8);
    opts.set_xla_cpu_enable_mlir_fusion_outlining(true);
    opts.set_xla_cpu_enable_experimental_deallocation(true);
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +  opts.set_xla_cpu_enable_xnnpack(false);
-+
+ 
 +  // Kernel Selector
 +  opts.set_xla_cpu_use_kernel_selector(false);
-
++#endif
    opts.set_xla_partitioning_algorithm(
        DebugOptions::PARTITIONING_ALGORITHM_NOOP);
-@@ -1143,6 +1147,16 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+ 
+@@ -1104,6 +1109,18 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
                      &DebugOptions::set_xla_gpu_enable_latency_hiding_scheduler),
                  debug_options->xla_gpu_enable_latency_hiding_scheduler(),
                  "Enable latency-hiding scheduler for XLA:GPU"));
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +  flag_list->push_back(tsl::Flag(
 +      "xla_cpu_enable_xnnpack",
 +      bool_setter_for(&DebugOptions::set_xla_cpu_enable_xnnpack),
@@ -27,6 +30,8 @@ index 7982ab2590..e2706e6fda 100644
 +      bool_setter_for(&DebugOptions::set_xla_cpu_use_kernel_selector),
 +      debug_options->xla_cpu_use_kernel_selector(),
 +      "Replace dot with custom call to libraries."));
++#endif
    flag_list->push_back(tsl::Flag(
        "xla_gpu_enable_analytical_latency_estimator",
        bool_setter_for(
+

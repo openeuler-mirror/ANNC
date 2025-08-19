@@ -1,38 +1,24 @@
 diff --git a/xla/service/cpu/simple_orc_jit.cc b/xla/service/cpu/simple_orc_jit.cc
-index be8741a4..caf7f440 100644
+index be8741a4..1dc9d84d 100644
 --- a/xla/service/cpu/simple_orc_jit.cc
 +++ b/xla/service/cpu/simple_orc_jit.cc
-@@ -38,6 +38,7 @@ limitations under the License.
- #include "llvm/Support/Process.h"
- #include "llvm/TargetParser/Host.h"
- #include "mlir/ExecutionEngine/CRunnerUtils.h"  // from @llvm-project
-+#include "tsl/platform/logging.h"
- #include "xla/service/cpu/cpu_runtime.h"
- #include "xla/service/cpu/orc_jit_memory_mapper.h"
- #include "xla/service/cpu/runtime_conv2d.h"
-@@ -58,15 +59,16 @@ limitations under the License.
+@@ -58,6 +58,9 @@ limitations under the License.
  #include "xla/service/cpu/runtime_single_threaded_matmul.h"
  #include "xla/service/cpu/runtime_topk.h"
  #include "xla/service/cpu/windows_compatibility.h"
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +#include <xnnpack_ops.h>
++#endif
  #include "xla/service/custom_call_target_registry.h"
  #include "xla/types.h"
  #include "xla/util.h"
--#include "tsl/platform/logging.h"
- 
- #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
- #include "xla/service/cpu/onednn_matmul.h"
- #endif
- 
-+
- // Provided by compiler-rt and MLIR.
- // Converts an F32 value to a BF16.
- extern "C" uint16_t __truncsfbf2(float);
-@@ -514,6 +516,7 @@ bool RegisterKnownJITSymbols() {
+@@ -514,6 +517,9 @@ bool RegisterKnownJITSymbols() {
    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC64);
    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC128);
    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulS32);
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +  REGISTER_CPU_RUNTIME_SYMBOL(XnnPackSoftMaxND);
++#endif
    REGISTER_CPU_RUNTIME_SYMBOL(ParallelForkJoin);
    REGISTER_CPU_RUNTIME_SYMBOL(PrintfToStderr);
    REGISTER_CPU_RUNTIME_SYMBOL(ReleaseInfeedBufferAfterDequeue);

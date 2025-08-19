@@ -1,83 +1,59 @@
-diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
-index e519cf05..4e862eb1 100644
+diff -git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index d1e57621..8dba4d0b 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
-@@ -238,6 +238,13 @@ limitations under the License.
- #include "xla/service/cpu/onednn_rewriter.h"
- #endif
- 
-+#include <annc/kdnn_rewriter.h>
-+#include <annc/annc_flags.h>
+@@ -242,6 +242,10 @@ limitations under the License.
+ #ifdef __aarch64__
+ #include <annc/kdnn_rewriter.h>
+ #include <annc/annc_flags.h>
 +#include <xnnpack_ops_rewriter.h>
 +#include <bisheng-cpu/embedding_simplify.h>
 +#include <bisheng-cpu/concat_partition.h>
 +#include <bisheng-cpu/reduce_combine.h>
-+
- namespace {
+ #endif
+ #endif
  
- // We need to explicitly load all the dialects we will involved in emitting the
-@@ -617,6 +624,17 @@ void AddHloVerifier(HloPassPipeline* pipeline, bool allow_sparse_shapes,
- 
- }  // namespace
- 
-+namespace {
-+    const bool kAnncKernelRegistered = []() {
-+        auto& flags = annc::get_annc_flags();
-+        if (flags.is_enabled("annc-pass")) {
-+          REGISTER_ALL_GEMM_KERNELS()
-+          VLOG(1) << "#### register all gemm kernels ";
-+        }
-+        return true;
-+    } ();
-+}
-+
- Status CpuCompiler::RunHloPassesThroughLayoutAssn(
-     HloModule* module, bool is_aot_compile,
-     LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
-@@ -685,7 +703,11 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
-   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
+@@ -709,6 +713,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
    pipeline.AddPass<BatchDotSimplification>();
    pipeline.AddPass<DotDecomposer>();
--
+ 
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +  // Rewrite to custom calls with XNNPACK targets.
 +  bool enable_xnnpack =
 +      xla::GetDebugOptionsFromFlags().xla_cpu_enable_xnnpack();
 +  if (enable_xnnpack)
 +    pipeline.AddPass<XnnPackOpsRewriter>();
++#endif
++
    // Rewrite to custom calls with target as oneDNN library calls.
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    // AOT compiled code runs in single thread.
-@@ -843,7 +865,18 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
-         module->mutable_entry_computation_layout(), target_machine_features,
-         &layout_constraints);
-   }
--
+@@ -869,6 +881,13 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+ 
+ #ifdef ENABLE_ANNC
+ #ifdef __aarch64__
 +  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
 +    pipeline.AddPass<ConcatPartition>();
 +    pipeline.AddPass<EmbeddingSimplify>();
 +    pipeline.AddPass<ReduceCombine>();
 +    pipeline.AddPass<HloDCE>();
 +  }
-+  auto& flags = annc::get_annc_flags();
-+ 
-+  if (flags.is_enabled("annc-pass")) {
-+    VLOG(1) << "#### Run KDnnFusion Pass" ;
-+    pipeline.AddPass<KDnnFusionAfterHloLayoutAssign>();
-+  }
-   return pipeline.Run(module).status();
- }
- 
-@@ -874,9 +907,11 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
-                  HloVerifierOpts{}.MakeLayoutSensitive(), /*debug_only=*/true);
- 
++
+   auto& flags = annc::get_annc_flags();
+   if (flags.is_enabled("annc-pass")) {
+     VLOG(1) << "#### Run KDnnFusion Pass" ;
+@@ -909,7 +928,14 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
    pipeline.AddPass<ReshapeDecomposer>();
--
+ 
    // Add a fusion pass now that layout assignment is done.
--  pipeline.AddPass<CpuInstructionFusion>();
++#if defined(ENABLE_ANNC) && defined(__aarch64__)
 +  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL)
 +    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/false);
 +  else
 +    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/true);
++#else
+   pipeline.AddPass<CpuInstructionFusion>();
++#endif
  
    // The LayoutAssignment pass may leave behind kCopy instructions which are
    // duplicate or NOPs, so remove them with algebraic simplification and CSE.
