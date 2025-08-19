@@ -16,6 +16,7 @@ cc_library(
         "//tensorflow/core/grappler:graph_view",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
+        "//tensorflow:gflags",
     ],
 )
 
@@ -28,5 +29,6 @@ cc_binary(
         "//tensorflow/core/grappler:graph_view",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
+        "//tensorflow:gflags",
     ],
 )
