@@ -1,10 +1,16 @@
 #include "constant_folding.h"
+#include "gflags/gflags.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;
+
+DEFINE_int32(annc_cf_matmul_batchnorm, 0, "Enable BatchNorm folding.");
+DEFINE_bool(annc_cf_relu, false, "Enable Relu folding.");
+DEFINE_string(annc_cf_dump, "", "Enable dump constant folding result.");
+DEFINE_bool(annc_cf_dump_text, false, "Enable dump constant folding text result.");
 
 namespace annc {
 std::string get_cache_dir() {
@@ -465,21 +471,18 @@ void run_annc_constant_folding(GraphDef* graph, Session* session) {
   std::vector<std::unique_ptr<ConstantFoldingRewritter>> rewriters;
 
   if (enabled_aarch64_cf_rewriters()) {
-    const char* annc_cf_matmul_badd_bn = getenv("ANNC_CF_MATMUL_BADD_BN");
-    const char* annc_cf_relu = getenv("ANNC_CF_RELU");
-
     // default disable all rewriters
-    if (annc_cf_matmul_badd_bn != nullptr) {
-      if (strcmp(annc_cf_matmul_badd_bn, "1") == 0 && session != nullptr) {
+    if (FLAGS_annc_cf_matmul_batchnorm) {
+      if (FLAGS_annc_cf_matmul_batchnorm == 1 && session != nullptr) {
         rewriters.push_back(std::make_unique<KPFusedMatMulBiasAddBNRewriter>(
             LoaderNoDumpCache));
-      } else if (strcmp(annc_cf_matmul_badd_bn, "2") == 0) {
+      } else if (FLAGS_annc_cf_matmul_batchnorm == 2) {
         OptStage stage = (session != nullptr) ? LoaderDumpCache : Remapper;
         rewriters.push_back(
             std::make_unique<KPFusedMatMulBiasAddBNRewriter>(stage));
       }
     }
-    if (annc_cf_relu != nullptr && strcmp(annc_cf_relu, "1") == 0) {
+    if (FLAGS_annc_cf_relu) {
       OptStage stage = (session != nullptr) ? LoaderNoDumpCache : Remapper;
       rewriters.push_back(std::make_unique<KPFusedReluRewriter>(stage));
       rewriters.push_back(std::make_unique<KPFusedRelu2Rewriter>(stage));
@@ -507,13 +510,9 @@ void run_annc_constant_folding(GraphDef* graph, Session* session) {
 
 void run_annc_constant_folding(MetaGraphDef& meta_graph_def, Session* session) {
   run_annc_constant_folding(meta_graph_def.mutable_graph_def(), session);
-  const char* annc_cf_dump = getenv("ANNC_CF_DUMP");
-  const char* annc_cf_dump_text = getenv("ANNC_CF_DUMP_TEXT");
-  if (annc_cf_dump != nullptr) {
-    const std::string export_dir = annc_cf_dump;
-    bool dump_as_text =
-        (annc_cf_dump_text != nullptr && strcmp(annc_cf_dump_text, "1") == 0);
-    dump_saved_model(meta_graph_def, export_dir, dump_as_text);
+  if (!FLAGS_annc_cf_dump.empty()) {
+    const std::string export_dir = FLAGS_annc_cf_dump;
+    dump_saved_model(meta_graph_def, export_dir, FLAGS_annc_cf_dump_text);
   }
 }
 }  // namespace annc

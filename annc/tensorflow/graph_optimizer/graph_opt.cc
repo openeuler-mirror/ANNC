@@ -1,4 +1,23 @@
 #include "graph_opt.h"
+#include "gflags/gflags.h"
+
+DEFINE_bool(annc, false, "Enable ANNC optimizations.");
+DEFINE_bool(annc_fusion, false, "Enable graph fusion.");
+DEFINE_bool(annc_fused_dyn_stitch, false, "Enable fused dynamic stitch.");
+DEFINE_bool(annc_fused_seg_reduce, false,
+            "Enable fused sparse segment mean/sum.");
+DEFINE_bool(annc_fused_emd_padding, false, "Enable fused embedding padding.");
+DEFINE_bool(annc_fused_emd_padding_fast, false,
+            "Enable fused embedding padding.");
+DEFINE_bool(annc_fused_sparse_select, false,
+            "Enable fused fast embedding padding.");
+DEFINE_bool(annc_fused_gather, false, "Enable fused gather.");
+DEFINE_bool(annc_fused_sparse_reshape, false, "Enable fused sparse reshape.");
+DEFINE_bool(annc_fused_emd_actionid_gather, false,
+            "Enable fused embedding action_id gather.");
+DEFINE_bool(annc_fused_seg_reduce_nozero, false,
+            "Enable fused sparse segment reduce nozero.");
+DEFINE_bool(annc_fused_matmul, false, "Enable fused matmul.");
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;
@@ -45,8 +64,8 @@ std::string get_node_name(const std::string& name) {
 }
 
 void set_fusedop_attributes(NodeDef* fused,
-                          const absl::Span<const absl::string_view> fused_ops,
-                          int num_args = 1, float epsilon = 0.0) {
+                            const absl::Span<const absl::string_view> fused_ops,
+                            int num_args = 1, float epsilon = 0.0) {
   auto* attr = fused->mutable_attr();
   SetAttrValue(fused_ops, &(*attr)["fused_ops"]);
   SetAttrValue(num_args, &(*attr)["num_args"]);
@@ -594,60 +613,37 @@ bool enabled_aarch64_rewriters() {
 void run_graph_optimization(GraphDef* graph) {
   GraphOptimizer optimizer(graph);
   if (enabled_aarch64_rewriters()) {
-    const char* annc_fused_all = getenv("ANNC_FUSED_ALL");
-    const char* annc_fused_sps_stitch = getenv("ANNC_FUSED_SPS_STITCH");
-    const char* annc_fused_sps_reduce = getenv("ANNC_FUSED_SPS_REDUCE");
-    const char* annc_fused_emb_padding = getenv("ANNC_FUSED_EMD_PADDING");
-    const char* annc_fused_emb_padding_fast =
-        getenv("ANNC_FUSED_EMD_PADDING_FAST");
-    const char* annc_fused_sps_select = getenv("ANNC_FUSED_SPS_SELECT");
-    const char* annc_fused_gather = getenv("ANNC_FUSED_GATHER");
-    const char* annc_fused_sps_reshape = getenv("ANNC_FUSED_SPS_RESHAPE");
-    const char* annc_fused_emb_actionid_gather =
-        getenv("ANNC_FUSED_EMB_ACTIONID_GATHER");
-    const char* annc_fused_sps_reduce_nonzero =
-        getenv("ANNC_FUSED_SPS_REDUCE_NONZERO");
-    const char* annc_fused_matmul = getenv("ANNC_FUSED_MATMUL");
-
-    bool enable_all =
-        (annc_fused_all != nullptr) && strcmp(annc_fused_all, "1") == 0;
+    bool enable_all = FLAGS_annc || FLAGS_annc_fusion;
+    VLOG(0) << "FLAGS_annc: " << FLAGS_annc;
 
     // default enable all rewriters
-    if (enable_all || (annc_fused_sps_stitch != nullptr &&
-                       strcmp(annc_fused_sps_stitch, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_dyn_stitch)
       optimizer.register_rewriter(
           std::make_unique<KPFusedSparseDynamicStitchRewriter>());
-    if (enable_all || (annc_fused_sps_reduce != nullptr &&
-                       strcmp(annc_fused_sps_reduce, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_seg_reduce)
       optimizer.register_rewriter(
           std::make_unique<KPFusedSparseSegmentReduceRewriter>());
-    if (enable_all || (annc_fused_emb_padding_fast != nullptr &&
-                       strcmp(annc_fused_emb_padding_fast, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_emd_padding_fast)
       optimizer.register_rewriter(
           std::make_unique<KPFusedEmbeddingPaddingFastRewriter>());
-    if (enable_all || (annc_fused_emb_padding != nullptr &&
-                       strcmp(annc_fused_emb_padding, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_emd_padding)
       optimizer.register_rewriter(
           std::make_unique<KPFusedEmbeddingPaddingRewriter>());
-    if (enable_all || (annc_fused_sps_select != nullptr &&
-                       strcmp(annc_fused_sps_select, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_sparse_select)
       optimizer.register_rewriter(
           std::make_unique<KPFusedSparseSelectRewriter>());
-    if (enable_all ||
-        (annc_fused_gather != nullptr && strcmp(annc_fused_gather, "1") == 0))
+    if (enable_all || FLAGS_annc_fused_gather)
       optimizer.register_rewriter(std::make_unique<KPFusedGatherRewriter>());
-    if (enable_all || (annc_fused_sps_reshape != nullptr &&
-                       strcmp(annc_fused_sps_reshape, "1") == 0))
-      optimizer.register_rewriter(std::make_unique<KPFusedSparseReshapeRewriter>());
-    if (annc_fused_emb_actionid_gather != nullptr &&
-        strcmp(annc_fused_emb_actionid_gather, "1") == 0)
+    if (enable_all || FLAGS_annc_fused_sparse_reshape)
+      optimizer.register_rewriter(
+          std::make_unique<KPFusedSparseReshapeRewriter>());
+    if (FLAGS_annc_fused_emd_actionid_gather)  // default disbaled
       optimizer.register_rewriter(
           std::make_unique<KPFusedEmbeddingActionIdGatherRewriter>());
-    if (annc_fused_sps_reduce_nonzero != nullptr &&
-        strcmp(annc_fused_sps_reduce_nonzero, "1") == 0)
+    if (FLAGS_annc_fused_seg_reduce_nozero)  // default disbaled
       optimizer.register_rewriter(
           std::make_unique<KPFusedSparseSegmentReduceNonzeroRewriter>());
-    if (annc_fused_matmul != nullptr && strcmp(annc_fused_matmul, "1") == 0)
+    if (FLAGS_annc_fused_matmul)  // default disbaled
       optimizer.register_rewriter(std::make_unique<KPFusedMatMulRewriter>());
   }
   optimizer.optimize();
