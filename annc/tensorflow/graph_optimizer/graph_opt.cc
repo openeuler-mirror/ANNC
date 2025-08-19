@@ -1,23 +1,18 @@
 #include "graph_opt.h"
 #include "gflags/gflags.h"
 
-DEFINE_bool(annc, false, "Enable ANNC optimizations.");
-DEFINE_bool(annc_fusion, false, "Enable graph fusion.");
-DEFINE_bool(annc_fused_dyn_stitch, false, "Enable fused dynamic stitch.");
-DEFINE_bool(annc_fused_seg_reduce, false,
-            "Enable fused sparse segment mean/sum.");
-DEFINE_bool(annc_fused_emd_padding, false, "Enable fused embedding padding.");
-DEFINE_bool(annc_fused_emd_padding_fast, false,
-            "Enable fused embedding padding.");
-DEFINE_bool(annc_fused_sparse_select, false,
-            "Enable fused fast embedding padding.");
-DEFINE_bool(annc_fused_gather, false, "Enable fused gather.");
-DEFINE_bool(annc_fused_sparse_reshape, false, "Enable fused sparse reshape.");
-DEFINE_bool(annc_fused_emd_actionid_gather, false,
-            "Enable fused embedding action_id gather.");
-DEFINE_bool(annc_fused_seg_reduce_nozero, false,
-            "Enable fused sparse segment reduce nozero.");
-DEFINE_bool(annc_fused_matmul, false, "Enable fused matmul.");
+DECLARE_bool(annc);
+DECLARE_bool(annc_fusion);
+DECLARE_bool(annc_fused_dyn_stitch);
+DECLARE_bool(annc_fused_seg_reduce);
+DECLARE_bool(annc_fused_emd_padding);
+DECLARE_bool(annc_fused_emd_padding_fast);
+DECLARE_bool(annc_fused_sparse_select);
+DECLARE_bool(annc_fused_gather);
+DECLARE_bool(annc_fused_sparse_reshape);
+DECLARE_bool(annc_fused_emd_actionid_gather);
+DECLARE_bool(annc_fused_seg_reduce_nozero);
+DECLARE_bool(annc_fused_matmul);
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;

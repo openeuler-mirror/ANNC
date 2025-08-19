@@ -7,10 +7,10 @@
 using namespace tensorflow;
 using namespace tensorflow::grappler;
 
-DEFINE_int32(annc_cf_matmul_batchnorm, 0, "Enable BatchNorm folding.");
-DEFINE_bool(annc_cf_relu, false, "Enable Relu folding.");
-DEFINE_string(annc_cf_dump, "", "Enable dump constant folding result.");
-DEFINE_bool(annc_cf_dump_text, false, "Enable dump constant folding text result.");
+DECLARE_int32(annc_cf_matmul_batchnorm);
+DECLARE_bool(annc_cf_relu);
+DECLARE_string(annc_cf_dump);
+DECLARE_bool(annc_cf_dump_text);
 
 namespace annc {
 std::string get_cache_dir() {

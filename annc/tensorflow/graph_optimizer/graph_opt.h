@@ -5,20 +5,6 @@
 #include "tensorflow/core/grappler/graph_view.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/op_types.h"
-#include "gflags/gflags.h"
-
-DECLARE_bool(annc);
-DECLARE_bool(annc_fusion);
-DECLARE_bool(annc_fused_dyn_stitch);
-DECLARE_bool(annc_fused_seg_reduce);
-DECLARE_bool(annc_fused_emd_padding);
-DECLARE_bool(annc_fused_emd_padding_fast);
-DECLARE_bool(annc_fused_sparse_select);
-DECLARE_bool(annc_fused_gather);
-DECLARE_bool(annc_fused_sparse_reshape);
-DECLARE_bool(annc_fused_emd_actionid_gather);
-DECLARE_bool(annc_fused_seg_reduce_nozero);
-DECLARE_bool(annc_fused_matmul);
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;
