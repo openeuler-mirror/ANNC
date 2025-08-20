@@ -1,0 +1,444 @@
+diff --git a/xla/service/cpu/README_kernel_selector.md b/xla/service/cpu/README_kernel_selector.md
+index a20a24224a449d24a176d5bed5fcda562f6442b7..82a7be9bc1fa1e1918830126faf3ba097b42b233 100644
+--- a/xla/service/cpu/README_kernel_selector.md
++++ b/xla/service/cpu/README_kernel_selector.md
+@@ -22,5 +22,24 @@ This means that when M,N,K (in this order) are 6658,8,8 then the selector should
+ 
+ Where `P`,`Q`,`M`,`N`,`K` are replaced by integer values.
+ 
++# Special operators:
++
++- Use `*` as a wildcard for *any* size. The following means that the function `f` will be used to run a gemm whenever M=32 and K=8, while N can be any possible value.
++
++```
++[gemm](32,*,8) -> f
++```
++
++
++- Use `:` to define ranges. The following means that the function `g` will be used to run a gemv whenever M is between 23 and 42 (inclusive), and N is equal to 8.
++
++```
++[gemv](23:42,8) -> g
++```
++
++- Both special operators can be combined. The following calls the function `h` whenever M is greater than 256, N is equal to 100, and K is any value:
++```
++[gemm](256:*,100,*) -> h
++```
+ 
+ Whitespaces are ignored by the kernel selector. An example file (`example_kernel_map.txt`) is provided in the current directory.
+diff --git a/xla/service/cpu/kernel_selector_ops_rewriter.cc b/xla/service/cpu/kernel_selector_ops_rewriter.cc
+index 3e7582f0d05892ace7af898c5076b50a39c1de28..c7479878523a84d66a66defbee7a5fb0c1a54e1e 100644
+--- a/xla/service/cpu/kernel_selector_ops_rewriter.cc
++++ b/xla/service/cpu/kernel_selector_ops_rewriter.cc
+@@ -28,77 +28,163 @@ namespace cpu {
+ enum Operation { NONE, GEMV, GEMM, BATCH_MATMUL_3D, BATCH_MATMUL_4D };
+ enum KernelType { kGEMV, kGEMM, kBATCH3D, kBATCH4D, kARGMAX };
+ 
++using Range = std::pair<int, int>;
++using RangeSet = std::vector<Range>;
++
++Range maxRange = {0, INT_MAX};
++
++class IntervalMap {
++  using TypedRange = std::pair<KernelType, RangeSet>;
++  std::map<TypedRange, std::string> m_map;
++
++ public:
++  void insert(KernelType kTy, RangeSet& ranges, std::string& value) {
++    m_map[{kTy, ranges}] = value;
++  }
++
++  bool lookup(KernelType kTy, std::vector<int>& keys, std::string& outValue,
++              bool& fallback) const {
++    fallback = false;
++    for (const auto& entry : m_map) {
++      TypedRange typedRange = entry.first;
++      std::string value = entry.second;
++      if (typedRange.first != kTy) continue;
++
++      const RangeSet& ranges = typedRange.second;
++      if (ranges.size() != keys.size()) continue;
++
++      bool match = true;
++      for (size_t i = 0; i < ranges.size(); ++i) {
++        if (keys[i] < ranges[i].first || keys[i] > ranges[i].second) {
++          match = false;
++          break;
++        }
++        if (ranges[i] == maxRange) {
++          fallback = true;
++        }
++      }
++
++      if (match) {
++        outValue = value;
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void print() const {
++    for (const auto& entry : m_map) {
++      TypedRange typedRange = entry.first;
++      std::string value = entry.second;
++      int kTy = typedRange.first;
++      const RangeSet& ranges = typedRange.second;
++
++      DEBUG("[" << kTy << "](");
++      for (const auto& range : ranges) {
++        DEBUG("[" << range.first << ":" << range.second << "] ");
++      }
++      DEBUG(") -> " << value << "\n");
++    }
++  }
++
++  void clear() { m_map.clear(); }
++};
++
+ struct ParsedData {
+   std::string kernelName;
+-  std::vector<int> sizes;
++  RangeSet sizes;
+   std::string functionName;
+-  bool isFallback;
+   bool isValid;
+ };
+ 
+-std::map<std::string, int> kernelStringToType = {{"gemv", kGEMV},
+-                                                 {"gemm", kGEMM},
+-                                                 {"batch3d", kBATCH3D},
+-                                                 {"batch4d", kBATCH4D},
+-                                                 {"argmax", kARGMAX}};
+-std::map<int, std::string> kernelTypeToString;  // filled automatically.
++std::map<std::string, KernelType> kernelStringToType = {{"gemv", kGEMV},
++                                                        {"gemm", kGEMM},
++                                                        {"batch3d", kBATCH3D},
++                                                        {"batch4d", kBATCH4D},
++                                                        {"argmax", kARGMAX}};
++std::map<KernelType, std::string> kernelTypeToString;  // filled automatically.
+ 
+-std::map<int, std::string> kernelTypeToFallback = {
+-    {kGEMV, ""}, {kGEMM, ""}, {kBATCH3D, ""}, {kBATCH4D, ""}, {kARGMAX, ""},
+-};
+-
+-std::map<int, int> kernelTypeToSizeRank = {
++std::map<KernelType, int> kernelTypeToSizeRank = {
+     {kGEMV, 2}, {kGEMM, 3}, {kARGMAX, 3}, {kBATCH3D, 4}, {kBATCH4D, 5}};
+ 
+-int KS_ANY_SIZE = -1;
++int parseInt(const std::string& str) {
++  if (str == "*") return maxRange.second;
++
++  int size = std::stoi(str);
++  if (size < 0) {
++    LOG(ERROR) << "Found invalid size: " << size;
++    return -1;
++  }
++
++  return size;
++}
++
++Range parseRange(const std::string& str) {
++  size_t colonPos = str.find(':');
++
++  if (str == "*") {
++    return maxRange;
++  }
++
++  // For non-range strings like "1" we create a range {1,1}
++  if (colonPos == std::string::npos) {
++    int value = parseInt(str);
++    return {value, value};
++  }
++
++  auto left = str.substr(0, colonPos);
++  auto right = str.substr(colonPos + 1);
++
++  int start = parseInt(left);
++  int end = parseInt(right);
++
++  assert(start <= end);
++
++  return {start, end};
++}
+ 
+ // Parses line from the mapping file which look like [kernel](size1,size2,...)
+ // -> symbol
+ ParsedData parseLine(std::string& line) {
+   // Remove all whitespace from the line first.
+   line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
+-  // NOTE: Use https://regex101.com/ for better understanding
+-  std::regex pattern(R"(\[([^\]]+)\]\((((?:(?:\d+|\*),)*(?:\d+|\*))\)->(.+)))");
++  // A range looks like 23:29 or 12:*
++  std::string range = R"(\d+:(?:\d+|\*))";
++  // An element is either a number, a *, or a range
++  std::string element = R"((?:\d+|\*|)" + range + R"())";
++  // Sizes is a list of elements in parentheses
++  std::string sizes = R"(\(((?:)" + element + R"(,)*)" + element + R"()\))";
++  std::regex pattern(R"(^\[(.+)\])" + sizes + R"(->(.+))");
++
+   std::smatch matches;
+ 
+   ParsedData data;
+-  data.isFallback = false;
+   data.isValid = false;
+ 
+   if (std::regex_match(line, matches, pattern)) {
+     data.kernelName = matches[1];
+-    std::stringstream ss(matches[3]);
++    std::stringstream ss(matches[2]);
+     std::string token;
++
+     while (std::getline(ss, token, ',')) {
+-      if (token == "*") {
+-        data.sizes.push_back(KS_ANY_SIZE);
+-      } else {
+-        int size = std::stoi(token);
+-        if (size < 1) {
+-          LOG(ERROR) << "Found invalid size: " << size;
+-          return data;
+-        }
+-        data.sizes.push_back(std::stoi(token));
+-      }
++      auto range = parseRange(token);
++      if (range.first == -1 || range.second == -1) return data;
++      data.sizes.push_back(range);
+     }
+-    data.functionName = matches[4];
++    data.functionName = matches[3];
++    data.isValid = true;
+   } else {
+     XLA_VLOG_LINES(3, "KernelSelectorOpsRewriter::parseLine() : No match.\n");
+   }
+ 
+-  if (data.sizes.size() == 1 && data.sizes[0] == KS_ANY_SIZE)
+-    data.isFallback = true;
+-
+-  data.isValid = true;
+   return data;
+ }
+ 
+-std::map<std::vector<int>, std::string> sizesToSymbol;
++IntervalMap sizesToSymbol;
+ 
+ const char* kernel_map_file = std::getenv("KERNEL_MAP_FILE");
+ 
+-template <typename T1, typename T2>
+-void fill_map_from_file(const char* map_file, std::map<T1, T2>& map) {
++void fill_map_from_file(const char* map_file, IntervalMap& map) {
+   if (!map_file) {
+     XLA_VLOG_LINES(3, "NO MAP FILE\n");
+     return;
+@@ -131,33 +217,30 @@ void fill_map_from_file(const char* map_file, std::map<T1, T2>& map) {
+     if (!data.isValid) {
+       LOG(ERROR) << "Regex did not match on line " << lineno;
+     } else {
+-      std::vector<int> type_and_sizes;
+-
+       if (kernelStringToType.find(data.kernelName) ==
+           kernelStringToType.end()) {
+         LOG(ERROR) << data.kernelName << " is not a valid kernel type";
+         return;
+       }
+ 
+-      int kTy = kernelStringToType[data.kernelName];
+-      if (data.isFallback) {
+-        kernelTypeToFallback[kTy] = data.functionName;
+-      } else {
+-        type_and_sizes.push_back(kTy);
+-        type_and_sizes.insert(type_and_sizes.end(), data.sizes.begin(),
+-                              data.sizes.end());
+-        map[type_and_sizes] = data.functionName;
++      KernelType kTy = kernelStringToType[data.kernelName];
++      int expectedRank = kernelTypeToSizeRank[kTy];
+ 
+-        int expectedRank = kernelTypeToSizeRank[kTy];
+-        if (data.sizes.size() != expectedRank) {
+-          LOG(ERROR) << data.kernelName
+-                     << " expected to have an input size of rank "
+-                     << expectedRank << ", but got " << data.sizes.size()
+-                     << "(line " << lineno << ")";
+-        }
++      // Fallback case (i.e. lines like [gemm](*) -> symbol): store in the map
++      // the correct amount of "infinite" ranges:
++      if (data.sizes.size() == 1 && data.sizes[0] == maxRange) {
++        data.sizes.assign(expectedRank, maxRange);
++      }
++
++      if (data.sizes.size() != expectedRank) {
++        LOG(ERROR) << data.kernelName
++                   << " expected to have an input size of rank " << expectedRank
++                   << ", but got " << data.sizes.size() << "(line " << lineno
++                   << ")";
++      } else {
++        map.insert(kTy, data.sizes, data.functionName);
+       }
+     }
+-
+     lineno++;
+   }
+ 
+@@ -166,14 +249,10 @@ void fill_map_from_file(const char* map_file, std::map<T1, T2>& map) {
+ 
+ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+  private:
+-  void printDebugMessage(int kTy, std::vector<int> sizes) {
++  void printDebugMessage(KernelType kTy, std::vector<int> sizes) {
+     std::string debug_msg = "{";
+-    for (size_t i = 1; i < sizes.size(); ++i) {
+-      if (sizes[i] == KS_ANY_SIZE)
+-        debug_msg += "*";
+-      else
+-        debug_msg += std::to_string(sizes[i]);
+-
++    for (size_t i = 0; i < sizes.size(); ++i) {
++      debug_msg += std::to_string(sizes[i]);
+       if (i != sizes.size() - 1) {
+         debug_msg += ", ";
+       }
+@@ -185,49 +264,16 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+     DEBUG(debug_msg);
+   }
+ 
+-  // We need to implement a custom lookup logic to support the wildcard
+-  // (KS_ANY_SIZE). NB: Do not use std::optional for the return as it will break
+-  // compatiblity with TF 2.2 (gcc 5.2.0).
+-  bool getSymbolFromSizes(const std::map<std::vector<int>, std::string>& myMap,
+-                          const std::vector<int>& sizes, std::string& symbol) {
+-    for (const auto& [key, value] : myMap) {
+-      if (key.size() != sizes.size()) continue;
+-
+-      bool match = true;
+-      for (size_t i = 0; i < key.size(); ++i) {
+-        if (key[i] != KS_ANY_SIZE && key[i] != sizes[i]) {
+-          match = false;
+-          break;
+-        }
+-      }
+-
+-      if (match) {
+-        symbol = value;
+-        return match;
+-      }
+-    }
+-
+-    return false;
+-  }
+-
+-  std::string GetKernelSelectorFunction(int kTy, std::vector<int> sizes,
++  std::string GetKernelSelectorFunction(KernelType kTy, std::vector<int> sizes,
+                                         bool& fallback) {
+     std::string fun_name;
+-    bool found = getSymbolFromSizes(sizesToSymbol, sizes, fun_name);
++    bool found = sizesToSymbol.lookup(kTy, sizes, fun_name, fallback);
+     fallback = false;
+ 
+     if (!found) {
+-      // Input size is not defined in the map, select the fallback
+-      // backend.
+-      if (kernelTypeToFallback[kTy].empty()) {
+-// There is no fallback defined for this kernel; do not replace it.
+ #ifdef PRINT_DEBUG
+-        printDebugMessage(kTy, sizes);
++      printDebugMessage(kTy, sizes);
+ #endif
+-        return fun_name;
+-      }
+-      fun_name = kernelTypeToFallback[kTy];
+-      fallback = true;
+     }
+     return fun_name;
+   }
+@@ -278,7 +324,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+     // Collect all the operands for the CustomCall
+     switch (operation) {
+       case GEMM: {
+-        int kTy = kGEMM;
++        KernelType kTy = kGEMM;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -305,7 +351,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         HloInstruction* K = makeConstant(dot, k);
+ 
+         std::string fun_name =
+-            GetKernelSelectorFunction(kTy, {kTy, m, n, k}, fallbackSelected);
++            GetKernelSelectorFunction(kTy, {m, n, k}, fallbackSelected);
+         if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+@@ -333,7 +379,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case GEMV: {
+-        int kTy = kGEMV;
++        KernelType kTy = kGEMV;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+ 
+@@ -355,7 +401,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         HloInstruction* N = makeConstant(dot, n);
+ 
+         std::string fun_name =
+-            GetKernelSelectorFunction(kTy, {kTy, m, n}, fallbackSelected);
++            GetKernelSelectorFunction(kTy, {m, n}, fallbackSelected);
+         if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+@@ -382,7 +428,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case BATCH_MATMUL_3D: {
+-        int kTy = kBATCH3D;
++        KernelType kTy = kBATCH3D;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -411,7 +457,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         HloInstruction* K = makeConstant(dot, k);
+ 
+         std::string fun_name =
+-            GetKernelSelectorFunction(kTy, {kTy, p, m, n, k}, fallbackSelected);
++            GetKernelSelectorFunction(kTy, {p, m, n, k}, fallbackSelected);
+         if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+@@ -440,7 +486,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case BATCH_MATMUL_4D: {
+-        int kTy = kBATCH4D;
++        KernelType kTy = kBATCH4D;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -471,8 +517,8 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         int k = A->shape().dimensions(lhs_contracting_dims[0]);
+         HloInstruction* K = makeConstant(dot, k);
+ 
+-        std::string fun_name = GetKernelSelectorFunction(
+-            kTy, {kTy, q, p, m, n, k}, fallbackSelected);
++        std::string fun_name = GetKernelSelectorFunction(kTy, {q, p, m, n, k}, fallbackSelected);
++
+         if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+@@ -529,13 +575,13 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+       return OkStatus();
+     }
+ 
+-    int kTy = kARGMAX;
++    KernelType kTy = kARGMAX;
+     int b = dims[0];
+     int m = dims[1];
+     int n = dims[2];
+ 
+-    std::string fun_name =
+-        GetKernelSelectorFunction(kTy, {kTy, b, m, n}, fallbackSelected);
++    std::string fun_name = GetKernelSelectorFunction(kTy, {b, m, n}, fallbackSelected);
++
+     if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG

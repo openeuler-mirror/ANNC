@@ -1,0 +1,1779 @@
+diff --git a/WORKSPACE b/WORKSPACE
+index 868d0b603bb539c2611cb1b576e3304332d9c03f..1263818f03eb16814667cd045d6f34370f742b61 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -15,6 +15,7 @@ http_archive(
+     patches = [
+         "//install:openxla.patch",
+         "//install/xla:BUILD.patch",
++        "//install/xla:cpu_compiler.patch",
+         "//install/xla:cpu_runtime.cc.patch",
+         "//install/xla:cpu_runtime.h.patch",
+         "//install/xla:debug_options_flags.cc.patch",
+diff --git a/annc/service/cpu/BUILD b/annc/service/cpu/BUILD
+index 416bf1ddd41777c52c35466dc175f9a52e1049ce..afcc7947ce8f54c12e6c50104e3fbbbcd146283c 100644
+--- a/annc/service/cpu/BUILD
++++ b/annc/service/cpu/BUILD
+@@ -37,6 +37,7 @@ cc_library(
+             "xla/xnnpack_ops_rewriter.h",
+             "xla/xnnpack_pattern_utils.h",
+             ],
++    copts = ["-O3"],
+     linkstatic = True,
+     alwayslink = True,
+     visibility = ["//visibility:public"],
+@@ -51,6 +52,7 @@ cc_library(
+         "@xla//xla:executable_run_options",
+         "@xla//xla/service/cpu:ir_emitter",
+         "@xla//xla/service:pattern_matcher",
++        "@tsl//tsl/platform:blocking_counter",
+         ":libmlir",
+         ":libXNNPACK",
+     ],
+diff --git a/annc/service/cpu/xla/README_kernel_selector.md b/annc/service/cpu/xla/README_kernel_selector.md
+index 3a21359cea7d78fb5d773b46ea1229067419241a..afa14307d3baf7d1a27e50007a03dad51dbaa8a6 100644
+--- a/annc/service/cpu/xla/README_kernel_selector.md
++++ b/annc/service/cpu/xla/README_kernel_selector.md
+@@ -17,36 +17,27 @@ limitations under the License.
+ 
+ To dynamically map a set of input dimensions to a symbol for the kernel selector:
+ 
+-# For GEMM
++# Environment variable
+ 
+-Set the `GEMM_MAP_FILE` environment variable to point to a text file. This file must contains lines which look like the following:
++Set the `KERNEL_MAP_FILE` environment variable to point to a text file. This file must contain lines which look like the following:
+ 
+ ```
+-(6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM
++[gemm](6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM
+ ```
+ 
+-An example file (`gemm_map.txt`) is provided in the current directory.
++This means that when M,N,K (in this order) are 6658,8,8 then the selector should use the GEMM implemented by the symbol `__xla_cpu_runtime_KernelSelectorGEMM`.
+ 
+-This means that when m,n,k (in this order) are 6658,8,8 then the selector should use the GEMM implemented by the symbol (6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM.
+-
+-Be mindful of following the exact pattern. This is space-sensitive so will not work if spaces are added inside the tuple, for example.
+-
+-# For GEMV.
+-
+-Same as above, but set the `GEMV_MAP_FILE` environment variable. Its content should look like:
++# Possible options:
+ 
+ ```
+-(m,n) -> function_name
++[gemv](M,N) -> symbol
++[gemm](M,N,K) -> symbol
++[batch3d](P,M,N,K) -> symbol
++[batch4d](P,Q,M,N,K) -> symbol
++[argmax](M,N) -> symbol
+ ```
+ 
+-Where `m`, `n`, are integers for the input sizes.
++Where `P`,`Q`,`M`,`N`,`K` are replaced by integer values.
+ 
+-# For BATCH_MATMUL:
+ 
+-Same as above, but set the `BATCHMATMUL_MAP_FILE` environment variable. Its content should look like:
+-
+-```
+-(p,m,n,k) -> function_name
+-```
+-
+-Where `p`, `m`, `n`, `k` are integers for the input sizes.
+\ No newline at end of file
++Whitespaces are ignored by the kernel selector. An example file (`example_kernel_map.txt`) is provided in the current directory.
+diff --git a/annc/service/cpu/xla/example_kernel_map.txt b/annc/service/cpu/xla/example_kernel_map.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9691e67a4a1012b6fe49ebfcf058443f93ec6c24
+--- /dev/null
++++ b/annc/service/cpu/xla/example_kernel_map.txt
+@@ -0,0 +1,14 @@
++[gemv] (128, 256)               -> __xla_cpu_runtime_KernelSelectorGEMVMLIR
++[gemv] (256, 64)                -> __xla_cpu_runtime_KernelSelectorGEMVMLIR
++[gemv] (256, 256)               -> __xla_cpu_runtime_KernelSelectorGEMVMLIR
++[gemm] (6656, 8, 8)             -> __xla_cpu_runtime_KernelSelectorGEMMMLIR
++[gemm] (128, 1024, 416)         -> __xla_cpu_runtime_KernelSelectorGEMMSequential
++[gemm] (128, 512, 1024)         -> __xla_cpu_runtime_KernelSelectorGEMMSequential
++[gemm] (128, 256, 512)          -> __xla_cpu_runtime_KernelSelectorGEMMSequential
++[gemm] (1536, 21128, 768)       -> __xla_cpu_runtime_KernelSelectorGEMMParallel
++[gemm] (1536, 3072, 768)        -> __xla_cpu_runtime_KernelSelectorGEMMParallel
++[batch3d] (512, 26, 4, 26)      -> __xla_cpu_runtime_KernelSelectorBatch3DMLIR
++[batch3d] (512, 26, 26, 4)      -> __xla_cpu_runtime_KernelSelectorBatch3DMLIR
++[batch4d] (4, 12, 384, 64, 384) -> __xla_cpu_runtime_KernelSelectorBatch4DMLIR
++[batch4d] (4, 12, 384, 384, 64) -> __xla_cpu_runtime_KernelSelectorBatch4DMLIR
++[argmax] (4, 384, 21128)        -> __xla_cpu_runtime_ArgMax3DSequential
+\ No newline at end of file
+diff --git a/annc/service/cpu/xla/kernel_selector.cc b/annc/service/cpu/xla/kernel_selector.cc
+index e07ab9f5398069564e5ce4ab7570342645233dbc..0b72ac80d635d0f069220b73ea6cf9cce7c8df9e 100644
+--- a/annc/service/cpu/xla/kernel_selector.cc
++++ b/annc/service/cpu/xla/kernel_selector.cc
+@@ -15,13 +15,22 @@ limitations under the License.
+ 
+ #include "kernel_selector.h"
+ 
++#define EIGEN_USE_THREADS
++
++#include <string.h>
++
++#include "tsl/platform/blocking_counter.h"
++#include "unsupported/Eigen/CXX11/Tensor"
++#include "xla/executable_run_options.h"
++#include "xla/service/cpu/runtime_lightweight_check.h"
++
+ namespace xla {
+ namespace cpu {
+ 
+ // TODO: Need to test handling trA, trB
+-void __xla_cpu_runtime_KernelSelectorGEMM(bool trA, bool trB, const float* A,
+-                                          const float* B, int M, int N, int K,
+-                                          float alpha, float beta, float* C) {
++void __xla_cpu_runtime_KernelSelectorGEMMSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int M, int N, int K, float alpha, float beta, float* C) {
+   CBLAS_LAYOUT Order = CblasRowMajor;
+   CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
+   CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
+@@ -33,9 +42,63 @@ void __xla_cpu_runtime_KernelSelectorGEMM(bool trA, bool trB, const float* A,
+               ldc);
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch3D(bool trA, bool trB, const float* A,
+-                                             const float* B, int P, int M,
+-                                             int N, int K, float* C) {
++// TODO: Need to test handling trA, trB
++void __xla_cpu_runtime_KernelSelectorGEMMParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int M, int N, int K, float alpha, float beta, float* C) {
++  const xla::ExecutableRunOptions* run_options =
++      static_cast<const xla::ExecutableRunOptions*>(run_options_ptr);
++  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++  const Eigen::ThreadPoolDevice* thread_pool =
++      (Eigen::ThreadPoolDevice*)(run_options->intra_op_thread_pool());
++  Eigen::ThreadPoolInterface* eigen_interface_ = thread_pool->getPool();
++
++  CBLAS_LAYOUT Order = CblasRowMajor;
++  CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
++  CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
++  int lda = trA ? M : K;
++  int ldb = trB ? K : N;
++  int ldc = N;
++
++  float beta_v = beta;
++  if (beta == 0.0) {
++    beta_v = 1.0;
++    memset(C, 0.0, M * N * sizeof(float));
++  }
++
++  int njobs = eigen_interface_->NumThreads();
++
++  int sqrt_jobs = (int)sqrt(njobs);
++
++  tsl::BlockingCounter bc(njobs);
++
++  // TODO: Look at a more flexible way to distribute computation amongst
++  // threads.
++  for (int i = 0; i < sqrt_jobs; i++) {
++    for (int j = 0; j < sqrt_jobs; j++) {
++      int M_tile = M / sqrt_jobs;
++      int N_tile = N / sqrt_jobs;
++
++      int M_start = i * M_tile;
++      int N_start = j * N_tile;
++
++      int M_len = (i == sqrt_jobs - 1) ? (M - M_start) : M_tile;
++      int N_len = (j == sqrt_jobs - 1) ? (N - N_start) : N_tile;
++
++      eigen_interface_->Schedule([=, &bc]() {
++        cblas_sgemm(Order, TransA, TransB, M_len, N_len, K, alpha,
++                    &A[M_start * lda], lda, &B[N_start], ldb, beta_v,
++                    &C[M_start * ldc + N_start], ldc);
++        bc.DecrementCount();
++      });
++    }
++  }
++  bc.Wait();
++}
++
++void __xla_cpu_runtime_KernelSelectorBatch3DSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int P, int M, int N, int K, float* C) {
+   CBLAS_LAYOUT Order = CblasRowMajor;
+   CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
+   CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
+@@ -52,9 +115,60 @@ void __xla_cpu_runtime_KernelSelectorBatch3D(bool trA, bool trB, const float* A,
+   }
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMV(bool trA, const float* A,
+-                                          const float* X, int M, int N,
+-                                          float alpha, float beta, float* Y) {
++void __xla_cpu_runtime_KernelSelectorBatch3DParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int P, int M, int N, int K, float* C) {
++  const xla::ExecutableRunOptions* run_options =
++      static_cast<const xla::ExecutableRunOptions*>(run_options_ptr);
++  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++  const Eigen::ThreadPoolDevice* thread_pool =
++      (Eigen::ThreadPoolDevice*)(run_options->intra_op_thread_pool());
++  Eigen::ThreadPoolInterface* eigen_interface_ = thread_pool->getPool();
++
++  CBLAS_LAYOUT Order = CblasRowMajor;
++  CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
++  CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
++  int lda = trA ? M : K;
++  int ldb = trB ? K : N;
++  int ldc = N;
++
++  float alpha = 1.0;
++  float beta = 0.0;
++
++  int njobs = eigen_interface_->NumThreads();
++
++  int num_batches = P;
++
++  tsl::BlockingCounter bc(num_batches < njobs ? num_batches : njobs);
++
++  // parallelize batches
++  int PB = (num_batches) / njobs;
++  int rem = (num_batches) % njobs;
++
++  // TODO: Need to test handling trA
++  for (int batchIdx = 0, threadIdx = 0; batchIdx < num_batches; threadIdx++) {
++    int adjPB = PB + (threadIdx < rem ? 1 : 0);
++
++    eigen_interface_->Schedule([=, &bc]() {
++      for (int i = 0; i < adjPB; i++) {
++        const float* AA = &A[(batchIdx + i) * M * K];
++        const float* BB = &B[(batchIdx + i) * K * N];
++        float* CC = &C[(batchIdx + i) * M * N];
++        cblas_sgemm(Order, TransA, TransB, M, N, K, alpha, AA, lda, BB, ldb,
++                    beta, CC, ldc);
++      }
++      bc.DecrementCount();
++    });
++
++    batchIdx += adjPB;
++  }
++  bc.Wait();
++}
++
++void __xla_cpu_runtime_KernelSelectorGEMV(const void* run_options_ptr, bool trA,
++                                          const float* A, const float* X, int M,
++                                          int N, float alpha, float beta,
++                                          float* Y) {
+   int lda = trA ? M : N;
+   int incX = 1;
+   int incY = 1;
+@@ -63,7 +177,8 @@ void __xla_cpu_runtime_KernelSelectorGEMV(bool trA, const float* A,
+   cblas_sgemv(Order, TransA, M, N, alpha, A, lda, X, incX, beta, Y, incY);
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMMMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorGEMMMLIR(const void* run_options_ptr,
++                                              bool trA, bool trB,
+                                               const float* A, const float* B,
+                                               int M, int N, int K, float alpha,
+                                               float beta, float* C) {
+@@ -74,11 +189,18 @@ void __xla_cpu_runtime_KernelSelectorGEMMMLIR(bool trA, bool trB,
+   int ldb = trB ? K : N;
+   int ldc = N;
+ 
+-  cblas_sgemm_mlir(Order, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta,
+-                   C, ldc);
++  float beta_v = beta;
++  if (beta == 0.0) {
++    beta_v = 1.0;
++    memset(C, 0.0, M * N * sizeof(float));
++  }
++
++  cblas_sgemm_mlir(Order, TransA, TransB, M, N, K, alpha, A, lda, B, ldb,
++                   beta_v, C, ldc);
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(const void* run_options_ptr,
++                                                 bool trA, bool trB,
+                                                  const float* A, const float* B,
+                                                  int P, int M, int N, int K,
+                                                  float* C) {
+@@ -93,7 +215,8 @@ void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(bool trA, bool trB,
+                            ldc);
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(const void* run_options_ptr,
++                                                 bool trA, bool trB,
+                                                  const float* A, const float* B,
+                                                  int Q, int P, int M, int N,
+                                                  int K, float* C) {
+@@ -108,7 +231,77 @@ void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(bool trA, bool trB,
+                               ldb, C, ldc);
+ }
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMVMLIR(bool trA, const float* A,
++void __xla_cpu_runtime_KernelSelectorBatch4DSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C) {
++  CBLAS_LAYOUT Order = CblasRowMajor;
++  CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
++  CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
++  int lda = trA ? M : K;
++  int ldb = trB ? K : N;
++  int ldc = N;
++
++  float alpha = 1.0;
++  float beta = 0.0;
++
++  for (int i = 0; i < Q * P; ++i) {
++    cblas_sgemm(Order, TransA, TransB, M, N, K, alpha, &A[i * M * K], lda,
++                &B[i * K * N], ldb, beta, &C[i * M * N], ldc);
++  }
++}
++
++void __xla_cpu_runtime_KernelSelectorBatch4DParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C) {
++  CBLAS_LAYOUT Order = CblasRowMajor;
++  CBLAS_TRANSPOSE TransA = (trA) ? CblasTrans : CblasNoTrans;
++  CBLAS_TRANSPOSE TransB = (trB) ? CblasTrans : CblasNoTrans;
++  int lda = trA ? M : K;
++  int ldb = trB ? K : N;
++  int ldc = N;
++
++  float alpha = 1.0;
++  float beta = 0.0;
++
++  const xla::ExecutableRunOptions* run_options =
++      static_cast<const xla::ExecutableRunOptions*>(run_options_ptr);
++  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++  const Eigen::ThreadPoolDevice* thread_pool =
++      (Eigen::ThreadPoolDevice*)(run_options->intra_op_thread_pool());
++  Eigen::ThreadPoolInterface* eigen_interface_ = thread_pool->getPool();
++
++  int njobs = eigen_interface_->NumThreads();
++
++  int num_batches = P * Q;
++
++  tsl::BlockingCounter bc(num_batches < njobs ? num_batches : njobs);
++
++  // parallelize batches
++  int PB = (num_batches) / njobs;
++  int rem = (num_batches) % njobs;
++
++  // TODO: Need to test handling trA
++  for (int batchIdx = 0, threadIdx = 0; batchIdx < num_batches; threadIdx++) {
++    int adjPB = PB + (threadIdx < rem ? 1 : 0);
++
++    eigen_interface_->Schedule([=, &bc]() {
++      for (int i = 0; i < adjPB; i++) {
++        const float* AA = &A[(batchIdx + i) * M * K];
++        const float* BB = &B[(batchIdx + i) * K * N];
++        float* CC = &C[(batchIdx + i) * M * N];
++        cblas_sgemm(Order, TransA, TransB, M, N, K, alpha, AA, lda, BB, ldb,
++                    beta, CC, ldc);
++      }
++      bc.DecrementCount();
++    });
++
++    batchIdx += adjPB;
++  }
++  bc.Wait();
++}
++
++void __xla_cpu_runtime_KernelSelectorGEMVMLIR(const void* run_options_ptr,
++                                              bool trA, const float* A,
+                                               const float* X, int M, int N,
+                                               float alpha, float beta,
+                                               float* Y) {
+@@ -121,5 +314,106 @@ void __xla_cpu_runtime_KernelSelectorGEMVMLIR(bool trA, const float* A,
+   cblas_sgemv_mlir(Order, TransA, M, N, alpha, A, lda, X, incX, beta, Y, incY);
+ }
+ 
++void __xla_cpu_runtime_ArgMaxTask(size_t out_idx, int N, float* invals,
++                                  int32_t* inidxs, float init_value,
++                                  int32_t init_idx, float* outvals,
++                                  int32_t* outidxs) {
++  float maxval = init_value;
++  int32_t maxidx = init_idx;
++  size_t idx = (out_idx)*N;
++
++  for (int i = 0; i < N; i++) {
++    float val = invals[idx];
++    int32_t idx_val = inidxs[idx];
++
++    if (val >= maxval) {
++      maxval = val;
++      maxidx = idx_val;
++    }
++
++    idx++;
++  }
++
++  outvals[out_idx] = maxval;
++  outidxs[out_idx] = maxidx;
++}
++
++void __xla_cpu_runtime_ArgMax3DParallel(const void* run_options_ptr, int B,
++                                        int M, int N, float* invals,
++                                        int32_t* inidxs, float init_value,
++                                        int32_t init_idx, float* outvals,
++                                        int32_t* outidxs) {
++  const xla::ExecutableRunOptions* run_options =
++      static_cast<const xla::ExecutableRunOptions*>(run_options_ptr);
++  XLA_LIGHTWEIGHT_CHECK(run_options->intra_op_thread_pool() != nullptr);
++  const Eigen::ThreadPoolDevice* thread_pool =
++      (Eigen::ThreadPoolDevice*)(run_options->intra_op_thread_pool());
++  Eigen::ThreadPoolInterface* eigen_interface_ = thread_pool->getPool();
++
++  int BM = B * M;
++  int num_threads = eigen_interface_->NumThreads();
++  const int block_size = (BM + num_threads - 1) / num_threads;
++  tsl::BlockingCounter bc(num_threads);
++
++  for (size_t t = 0; t < num_threads; t++) {
++    size_t start = t * block_size;
++    size_t end = std::min<size_t>((t + 1) * block_size, BM);
++
++    eigen_interface_->ScheduleWithHint(
++        [=, &bc]() {
++          for (size_t bm = start; bm < end; bm++) {
++            __xla_cpu_runtime_ArgMaxTask(bm, N, invals, inidxs, init_value,
++                                         init_idx, outvals, outidxs);
++          }
++          bc.DecrementCount();
++        },
++        t, t + 1);
++  }
++
++  bc.Wait();
++}
++
++void __xla_cpu_runtime_ArgMax3DSequential(const void* run_options_ptr, int B,
++                                          int M, int N, float* invals,
++                                          int32_t* inidxs, float init_value,
++                                          int32_t init_idx, float* outvals,
++                                          int32_t* outidxs) {
++  // NB: run_options_ptr is ignored in the sequential version.
++  for (int b = 0; b < B; b++) {
++    for (int m = 0; m < M; m++) {
++      size_t out_idx = b * M + m;
++      __xla_cpu_runtime_ArgMaxTask(out_idx, N, invals, inidxs, init_value,
++                                   init_idx, outvals, outidxs);
++    }
++  }
++}
++
++void __xla_cpu_runtime_ArgMax3DEmpty(const void* run_options_ptr, int B, int M,
++                                     int N, float* invals, int32_t* inidxs,
++                                     float init_value, int32_t init_idx,
++                                     float* outvals, int32_t* outidxs) {}
++
++void __xla_cpu_runtime_KernelSelectorGEMVEmpty(const void* run_options_ptr,
++                                               bool trA, const float* A,
++                                               const float* X, int M, int N,
++                                               float alpha, float beta,
++                                               float* Y) {}
++
++void __xla_cpu_runtime_KernelSelectorGEMMEmpty(const void* run_options_ptr,
++                                               bool trA, bool trB,
++                                               const float* A, const float* B,
++                                               int m, int n, int k, float alpha,
++                                               float beta, float* C) {}
++
++void __xla_cpu_runtime_KernelSelectorBatch3DEmpty(const void* run_options_ptr,
++                                                  bool trA, bool trB,
++                                                  const float* A,
++                                                  const float* B, int P, int M,
++                                                  int N, int K, float* C) {}
++
++void __xla_cpu_runtime_KernelSelectorBatch4DEmpty(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C) {}
++
+ }  // namespace cpu
+ }  // namespace xla
+diff --git a/annc/service/cpu/xla/kernel_selector.h b/annc/service/cpu/xla/kernel_selector.h
+index 902dbba9a081d3d4d96b8f2923610672d737b7c7..5b63bef6f927ca1266462a7169962b90455db03c 100644
+--- a/annc/service/cpu/xla/kernel_selector.h
++++ b/annc/service/cpu/xla/kernel_selector.h
+@@ -12,9 +12,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ ==============================================================================*/
+-
+ #ifndef XLA_SERVICE_CPU_KERNEL_SELECTOR_H_
+ #define XLA_SERVICE_CPU_KERNEL_SELECTOR_H_
++#include <cstdint>
+ 
+ namespace xla {
+ namespace cpu {
+@@ -91,38 +91,97 @@ extern void cblas_sgemv_mlir(const enum CBLAS_ORDER Order,
+ 
+ }  // extern "C"
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMM(bool trA, bool trB, const float* A,
+-                                          const float* B, int m, int n, int k,
+-                                          float alpha, float beta, float* C);
++void __xla_cpu_runtime_KernelSelectorGEMMSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int M, int N, int K, float alpha, float beta, float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch3D(bool trA, bool trB, const float* A,
+-                                             const float* B, int P, int M,
+-                                             int N, int K, float* C);
++void __xla_cpu_runtime_KernelSelectorGEMMParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int m, int n, int k, float alpha, float beta, float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMV(bool trA, const float* A,
+-                                          const float* X, int M, int N,
+-                                          float alpha, float beta, float* Y);
++void __xla_cpu_runtime_KernelSelectorBatch3DSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int P, int M, int N, int K, float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMMMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorBatch3DParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int P, int M, int N, int K, float* C);
++
++void __xla_cpu_runtime_KernelSelectorBatch4DSequential(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C);
++
++void __xla_cpu_runtime_KernelSelectorBatch4DParallel(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C);
++
++void __xla_cpu_runtime_KernelSelectorGEMV(const void* run_options_ptr, bool trA,
++                                          const float* A, const float* X, int M,
++                                          int N, float alpha, float beta,
++                                          float* Y);
++
++void __xla_cpu_runtime_KernelSelectorGEMMMLIR(const void* run_options_ptr,
++                                              bool trA, bool trB,
+                                               const float* A, const float* B,
+                                               int m, int n, int k, float alpha,
+                                               float beta, float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(const void* run_options_ptr,
++                                                 bool trA, bool trB,
+                                                  const float* A, const float* B,
+                                                  int P, int M, int N, int K,
+                                                  float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(bool trA, bool trB,
++void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(const void* run_options_ptr,
++                                                 bool trA, bool trB,
+                                                  const float* A, const float* B,
+                                                  int Q, int P, int M, int N,
+                                                  int K, float* C);
+ 
+-void __xla_cpu_runtime_KernelSelectorGEMVMLIR(bool trA, const float* A,
++void __xla_cpu_runtime_KernelSelectorGEMVMLIR(const void* run_options_ptr,
++                                              bool trA, const float* A,
+                                               const float* X, int M, int N,
+                                               float alpha, float beta,
+                                               float* Y);
+ 
++void __xla_cpu_runtime_ArgMax3DParallel(const void* run_options_ptr, int B,
++                                        int M, int N, float* invals,
++                                        int32_t* inidxs, float init_value,
++                                        int32_t init_idx, float* outvals,
++                                        int32_t* outidxs);
++void __xla_cpu_runtime_ArgMax3DSequential(const void* run_options_ptr, int B,
++                                          int M, int N, float* invals,
++                                          int32_t* inidxs, float init_value,
++                                          int32_t init_idx, float* outvals,
++                                          int32_t* outidxs);
++
++void __xla_cpu_runtime_ArgMax3DEmpty(const void* run_options_ptr, int B, int M,
++                                     int N, float* invals, int32_t* inidxs,
++                                     float init_value, int32_t init_idx,
++                                     float* outvals, int32_t* outidxs);
++
++void __xla_cpu_runtime_KernelSelectorGEMVEmpty(const void* run_options_ptr,
++                                               bool trA, const float* A,
++                                               const float* X, int M, int N,
++                                               float alpha, float beta,
++                                               float* Y);
++
++void __xla_cpu_runtime_KernelSelectorGEMMEmpty(const void* run_options_ptr,
++                                               bool trA, bool trB,
++                                               const float* A, const float* B,
++                                               int m, int n, int k, float alpha,
++                                               float beta, float* C);
++
++void __xla_cpu_runtime_KernelSelectorBatch3DEmpty(const void* run_options_ptr,
++                                                  bool trA, bool trB,
++                                                  const float* A,
++                                                  const float* B, int P, int M,
++                                                  int N, int K, float* C);
++
++void __xla_cpu_runtime_KernelSelectorBatch4DEmpty(
++    const void* run_options_ptr, bool trA, bool trB, const float* A,
++    const float* B, int Q, int P, int M, int N, int K, float* C);
++
+ }  // namespace cpu
+ }  // namespace xla
+ 
+diff --git a/annc/service/cpu/xla/kernel_selector_ops_rewriter.cc b/annc/service/cpu/xla/kernel_selector_ops_rewriter.cc
+index 16c8fa6f47d7a9c16de7ca2fe88a305ce95fca9f..738805a07f26334f672e2ce635a92de63a6969ab 100644
+--- a/annc/service/cpu/xla/kernel_selector_ops_rewriter.cc
++++ b/annc/service/cpu/xla/kernel_selector_ops_rewriter.cc
+@@ -15,6 +15,7 @@ limitations under the License.
+ 
+ #include "kernel_selector_ops_rewriter.h"
+ 
++#include <cctype>
+ #include <fstream>
+ #include <regex>
+ #include <sstream>
+@@ -40,50 +41,74 @@ namespace cpu {
+ #endif
+ 
+ enum Operation { NONE, GEMV, GEMM, BATCH_MATMUL_3D, BATCH_MATMUL_4D };
++enum KernelType { kGEMV, kGEMM, kBATCH3D, kBATCH4D, kARGMAX };
+ 
+ struct ParsedData {
++  std::string kernelName;
+   std::vector<int> sizes;
+   std::string functionName;
++  bool isFallback;
++  bool isValid;
+ };
+ 
+-// Parses line from the mapping file which look like (m,n,k) -> symbol
+-ParsedData parseLine(const std::string& line) {
+-  std::regex pattern(R"(\(((\d+,)*\d+)\) -> (.+))");
+-  ParsedData data;
++std::map<std::string, int> kernelStringToType = {{"gemv", kGEMV},
++                                                 {"gemm", kGEMM},
++                                                 {"batch3d", kBATCH3D},
++                                                 {"batch4d", kBATCH4D},
++                                                 {"argmax", kARGMAX}};
++std::map<int, std::string> kernelTypeToString;  // filled automatically.
++
++std::map<int, std::string> kernelTypeToFallback = {
++    {kGEMV, ""}, {kGEMM, ""}, {kBATCH3D, ""}, {kBATCH4D, ""}, {kARGMAX, ""},
++};
++
++std::map<int, int> kernelTypeToSizeRank = {
++    {kGEMV, 2}, {kGEMM, 3}, {kARGMAX, 3}, {kBATCH3D, 4}, {kBATCH4D, 5}};
++
++int KS_ANY_SIZE = -1;
++
++// Parses line from the mapping file which look like [kernel](size1,size2,...)
++// -> symbol
++ParsedData parseLine(std::string& line) {
++  // Remove all whitespace from the line first.
++  line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
++  // NOTE: Use https://regex101.com/ for better understanding
++  std::regex pattern(R"(\[([^\]]+)\]\((((?:(?:\d+|\*),)*(?:\d+|\*))\)->(.+)))");
+   std::smatch matches;
++
++  ParsedData data;
++  data.isFallback = false;
++  data.isValid = false;
++
+   if (std::regex_match(line, matches, pattern)) {
+-    std::stringstream ss(matches[1]);
++    data.kernelName = matches[1];
++    std::stringstream ss(matches[3]);
+     std::string token;
+     while (std::getline(ss, token, ',')) {
+-      data.sizes.push_back(std::stoi(token));
++      if (token == "*") {
++        data.sizes.push_back(KS_ANY_SIZE);
++      } else {
++        int size = std::stoi(token);
++        if (size < 1) {
++          LOG(ERROR) << "Found invalid size: " << size;
++          return data;
++        }
++        data.sizes.push_back(std::stoi(token));
++      }
+     }
+-    data.functionName = matches[3];
++    data.functionName = matches[4];
+   } else {
+-    XLA_VLOG_LINES(3, "KernelSelectorOpsRewriter::parseLine() : No match. \n");
++    XLA_VLOG_LINES(3, "KernelSelectorOpsRewriter::parseLine() : No match.\n");
+   }
++
++  if (data.sizes.size() == 1 && data.sizes[0] == KS_ANY_SIZE)
++    data.isFallback = true;
++
++  data.isValid = true;
+   return data;
+ }
+ 
+-std::map<std::vector<int>, std::string> sizesToSymbol = {
+-    // GEMV
+-    {{256, 256}, runtime::kKernelSelectorGEMVMLIRSymbolName},
+-    {{128, 256}, runtime::kKernelSelectorGEMVMLIRSymbolName},
+-    {{256, 64}, runtime::kKernelSelectorGEMVMLIRSymbolName},
+-    // GEMM
+-    {{6656, 8, 8}, runtime::kKernelSelectorGEMMMLIRSymbolName},
+-    {{128, 1024, 416}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{128, 512, 1024}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{128, 256, 512}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{1536, 768, 3072}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{1536, 21128, 768}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{1536, 3072, 768}, runtime::kKernelSelectorGEMMSymbolName},
+-    {{1536, 768, 768}, runtime::kKernelSelectorGEMMSymbolName},
+-    // BATCH3D
+-    {{512, 26, 4, 26}, runtime::kKernelSelectorBatch3DMLIRSymbolName},
+-    {{512, 26, 26, 4}, runtime::kKernelSelectorBatch3DMLIRSymbolName},
+-    // BATCH4D
+-    {{4, 12, 384, 64, 384}, runtime::kKernelSelectorBatch4DMLIRSymbolName},
+-    {{4, 12, 384, 384, 64}, runtime::kKernelSelectorBatch4DMLIRSymbolName}};
++std::map<std::vector<int>, std::string> sizesToSymbol;
+ 
+ const char* kernel_map_file = std::getenv("KERNEL_MAP_FILE");
+ 
+@@ -108,11 +133,47 @@ void fill_map_from_file(const char* map_file, std::map<T1, T2>& map) {
+   map.clear();
+ 
+   std::string line;
++  int lineno = 1;
+   while (std::getline(file, line)) {
+-    ParsedData data = parseLine(line);
+-    if (!data.functionName.empty()) {
+-      map[data.sizes] = data.functionName;
++    // If the file we are reading has Windows line endings, make sure
++    // we remove the `\r` before processing the regex, otherwise it will
++    // not match.
++    if (!line.empty() && line.back() == '\r') {
++      line.pop_back();
+     }
++
++    ParsedData data = parseLine(line);
++    if (!data.isValid) {
++      LOG(ERROR) << "Regex did not match on line " << lineno;
++    } else {
++      std::vector<int> type_and_sizes;
++
++      if (kernelStringToType.find(data.kernelName) ==
++          kernelStringToType.end()) {
++        LOG(ERROR) << data.kernelName << " is not a valid kernel type";
++        return;
++      }
++
++      int kTy = kernelStringToType[data.kernelName];
++      if (data.isFallback) {
++        kernelTypeToFallback[kTy] = data.functionName;
++      } else {
++        type_and_sizes.push_back(kTy);
++        type_and_sizes.insert(type_and_sizes.end(), data.sizes.begin(),
++                              data.sizes.end());
++        map[type_and_sizes] = data.functionName;
++
++        int expectedRank = kernelTypeToSizeRank[kTy];
++        if (data.sizes.size() != expectedRank) {
++          LOG(ERROR) << data.kernelName
++                     << " expected to have an input size of rank "
++                     << expectedRank << ", but got " << data.sizes.size()
++                     << "(line " << lineno << ")";
++        }
++      }
++    }
++
++    lineno++;
+   }
+ 
+   return;
+@@ -120,6 +181,72 @@ void fill_map_from_file(const char* map_file, std::map<T1, T2>& map) {
+ 
+ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+  private:
++  void printDebugMessage(int kTy, std::vector<int> sizes) {
++    std::string debug_msg = "{";
++    for (size_t i = 1; i < sizes.size(); ++i) {
++      if (sizes[i] == KS_ANY_SIZE)
++        debug_msg += "*";
++      else
++        debug_msg += std::to_string(sizes[i]);
++
++      if (i != sizes.size() - 1) {
++        debug_msg += ", ";
++      }
++    }
++    debug_msg +=
++        "} -> Is not on the map and a fallback was not specified. The " +
++        kernelTypeToString[kTy] + " will not be replaced.";
++
++    DEBUG(debug_msg);
++  }
++
++  // We need to implement a custom lookup logic to support the wildcard
++  // (KS_ANY_SIZE). NB: Do not use std::optional for the return as it will break
++  // compatiblity with TF 2.2 (gcc 5.2.0).
++  bool getSymbolFromSizes(const std::map<std::vector<int>, std::string>& myMap,
++                          const std::vector<int>& sizes, std::string& symbol) {
++    for (const auto& [key, value] : myMap) {
++      if (key.size() != sizes.size()) continue;
++
++      bool match = true;
++      for (size_t i = 0; i < key.size(); ++i) {
++        if (key[i] != KS_ANY_SIZE && key[i] != sizes[i]) {
++          match = false;
++          break;
++        }
++      }
++
++      if (match) {
++        symbol = value;
++        return match;
++      }
++    }
++
++    return false;
++  }
++
++  std::string GetKernelSelectorFunction(int kTy, std::vector<int> sizes,
++                                        bool& fallback) {
++    std::string fun_name;
++    bool found = getSymbolFromSizes(sizesToSymbol, sizes, fun_name);
++    fallback = false;
++
++    if (!found) {
++      // Input size is not defined in the map, select the fallback
++      // backend.
++      if (kernelTypeToFallback[kTy].empty()) {
++// There is no fallback defined for this kernel; do not replace it.
++#ifdef PRINT_DEBUG
++        printDebugMessage(kTy, sizes);
++#endif
++        return fun_name;
++      }
++      fun_name = kernelTypeToFallback[kTy];
++      fallback = true;
++    }
++    return fun_name;
++  }
++
+   Operation getOperation(HloInstruction* instr) {
+     if (auto* dot = DynCast<HloDotInstruction>(instr)) {
+       auto batch_dims = dot->dot_dimension_numbers().lhs_batch_dimensions();
+@@ -152,6 +279,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+   std::map<std::vector<int>, std::string> AllocatedGemvSizes;
+   std::map<std::vector<int>, std::string> AllocatedBatchMatmul3DSizes;
+   std::map<std::vector<int>, std::string> AllocatedBatchMatmul4DSizes;
++  std::map<std::vector<int>, std::string> AllocatedArgMax3DSizes;
+ #endif
+ 
+  public:
+@@ -160,10 +288,12 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+     if (operation == Operation::NONE) {
+       return OkStatus();
+     }
++    bool fallbackSelected;
+ 
+     // Collect all the operands for the CustomCall
+     switch (operation) {
+       case GEMM: {
++        int kTy = kGEMM;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -189,21 +319,15 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         int k = A->shape().dimensions(lhs_contracting_dims[0]);
+         HloInstruction* K = makeConstant(dot, k);
+ 
+-        if (sizesToSymbol.find({m, n, k}) == sizesToSymbol.end()) {
+-#ifdef PRINT_DEBUG
+-          DEBUG("{m: " << m << ", n: " << n << ", k: " << k << "} -> "
+-                       << "Is not on the map. The dot will not be replaced.");
+-#endif
+-          return OkStatus();
+-        }
+-
+-        auto fun_name = sizesToSymbol[{m, n, k}];
++        std::string fun_name =
++            GetKernelSelectorFunction(kTy, {kTy, m, n, k}, fallbackSelected);
++        if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+         if (AllocatedGemmSizes.find({m, n, k}) == AllocatedGemmSizes.end()) {
+           AllocatedGemmSizes[{m, n, k}] = fun_name;
+           DEBUG("{m: " << m << ", n: " << n << ", k: " << k << "} -> "
+-                       << fun_name);
++                       << fun_name << (fallbackSelected ? " (fallback)" : ""));
+         }
+ #endif
+ 
+@@ -212,7 +336,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+ 
+         HloInstruction* kernel_selector_call =
+             dot->AddInstruction(HloInstruction::CreateCustomCall(
+-                dot->shape(), operands, "KernelSelector"));
++                dot->shape(), operands, runtime::kCustomCallKernelSelector));
+ 
+         // Add metadata
+         OpMetadata metadata = dot->metadata();
+@@ -224,6 +348,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case GEMV: {
++        int kTy = kGEMV;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+ 
+@@ -244,21 +369,15 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         int n = A->shape().dimensions(is_trA ? 0 : 1);
+         HloInstruction* N = makeConstant(dot, n);
+ 
+-        // If (m,n) is not in the map, do not do anything.
+-        if (sizesToSymbol.find({m, n}) == sizesToSymbol.end()) {
+-#ifdef PRINT_DEBUG
+-          DEBUG("{m: " << m << ", n: " << n << "} -> "
+-                       << "Is not on the map. The dot will not be replaced.");
+-#endif
+-          return OkStatus();
+-        }
+-
+-        auto fun_name = sizesToSymbol[{m, n}];
++        std::string fun_name =
++            GetKernelSelectorFunction(kTy, {kTy, m, n}, fallbackSelected);
++        if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+         if (AllocatedGemvSizes.find({m, n}) == AllocatedGemvSizes.end()) {
+           AllocatedGemvSizes[{m, n}] = fun_name;
+-          DEBUG("{m: " << m << ", n: " << n << "} -> " << fun_name);
++          DEBUG("{m: " << m << ", n: " << n << "} -> " << fun_name
++                       << (fallbackSelected ? " (fallback)" : ""));
+         }
+ #endif
+ 
+@@ -266,7 +385,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+ 
+         HloInstruction* kernel_selector_call =
+             dot->AddInstruction(HloInstruction::CreateCustomCall(
+-                dot->shape(), operands, "KernelSelector"));
++                dot->shape(), operands, runtime::kCustomCallKernelSelector));
+ 
+         // Add metadata
+         OpMetadata metadata = dot->metadata();
+@@ -278,6 +397,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case BATCH_MATMUL_3D: {
++        int kTy = kBATCH3D;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -305,24 +425,17 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         int k = A->shape().dimensions(lhs_contracting_dims[0]);
+         HloInstruction* K = makeConstant(dot, k);
+ 
+-        // If (p,m,n,k) is not in the map, do not do anything.
+-        if (sizesToSymbol.find({p, m, n, k}) == sizesToSymbol.end()) {
+-#ifdef PRINT_DEBUG
+-          DEBUG("{p: " << p << ", m: " << m << ", n: " << n << ", k: " << k
+-                       << "} -> "
+-                       << "  Is not on the map. The dot will not be replaced.");
+-#endif
+-          return OkStatus();
+-        }
+-
+-        auto fun_name = sizesToSymbol[{p, m, n, k}];
++        std::string fun_name =
++            GetKernelSelectorFunction(kTy, {kTy, p, m, n, k}, fallbackSelected);
++        if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+         if (AllocatedBatchMatmul3DSizes.find({p, m, n, k}) ==
+             AllocatedBatchMatmul3DSizes.end()) {
+           AllocatedBatchMatmul3DSizes[{p, m, n, k}] = fun_name;
+           DEBUG("{p: " << p << ", m: " << m << ", n: " << n << ", k: " << k
+-                       << "} -> " << fun_name);
++                       << "} -> " << fun_name
++                       << (fallbackSelected ? " (fallback)" : ""));
+         }
+ #endif
+ 
+@@ -330,7 +443,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+ 
+         HloInstruction* kernel_selector_call =
+             dot->AddInstruction(HloInstruction::CreateCustomCall(
+-                dot->shape(), operands, "KernelSelector"));
++                dot->shape(), operands, runtime::kCustomCallKernelSelector));
+ 
+         // Add metadata
+         OpMetadata metadata = dot->metadata();
+@@ -342,6 +455,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         break;
+       }
+       case BATCH_MATMUL_4D: {
++        int kTy = kBATCH4D;
+         auto dnums = dot->dot_dimension_numbers();
+         auto lhs_contracting_dims = dnums.lhs_contracting_dimensions();
+         auto rhs_contracting_dims = dnums.rhs_contracting_dimensions();
+@@ -372,24 +486,17 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+         int k = A->shape().dimensions(lhs_contracting_dims[0]);
+         HloInstruction* K = makeConstant(dot, k);
+ 
+-        // If (q,p,m,n,k) is not in the map, do not do anything.
+-        if (sizesToSymbol.find({q, p, m, n, k}) == sizesToSymbol.end()) {
+-#ifdef PRINT_DEBUG
+-          DEBUG("{q: " << q << ", p: " << p << ", m: " << m << ", n: " << n
+-                       << ", k: " << k << "} -> "
+-                       << "Is not on the map. The dot will not be replaced.");
+-#endif
+-          return OkStatus();
+-        }
+-
+-        auto fun_name = sizesToSymbol[{q, p, m, n, k}];
++        std::string fun_name = GetKernelSelectorFunction(
++            kTy, {kTy, q, p, m, n, k}, fallbackSelected);
++        if (fun_name.empty()) return OkStatus();
+ 
+ #ifdef PRINT_DEBUG
+         if (AllocatedBatchMatmul4DSizes.find({q, p, m, n, k}) ==
+             AllocatedBatchMatmul4DSizes.end()) {
+           AllocatedBatchMatmul4DSizes[{q, p, m, n, k}] = fun_name;
+           DEBUG("{q: " << q << ", p: " << p << ", m: " << m << ", n: " << n
+-                       << ", k: " << k << "} -> " << fun_name);
++                       << ", k: " << k << "} -> " << fun_name
++                       << (fallbackSelected ? " (fallback)" : ""));
+         }
+ #endif
+ 
+@@ -397,7 +504,7 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+ 
+         HloInstruction* kernel_selector_call =
+             dot->AddInstruction(HloInstruction::CreateCustomCall(
+-                dot->shape(), operands, "KernelSelector"));
++                dot->shape(), operands, runtime::kCustomCallKernelSelector));
+ 
+         // Add metadata
+         OpMetadata metadata = dot->metadata();
+@@ -415,6 +522,62 @@ class KernelSelectorOpsRewriterVisitor : public DfsHloRewriteVisitor {
+ 
+     return OkStatus();
+   }
++
++  Status HandleReduce(HloInstruction* reduce) override {
++    bool fallbackSelected;
++    std::string op_type = reduce->metadata().op_type();
++    // TODO: Is this reliable way to check for ArgMax?
++    // Works for BERT but its unclear if this is the proper way.
++    if (op_type != "ArgMax") {
++      return OkStatus();
++    }
++
++    auto reduceOpr = reduce->operands();
++    // The ArgMax pattern we support has exactly 4 operands.
++    if (reduceOpr.size() != 4) {
++      return OkStatus();
++    }
++
++    // We currently only support 3D ArgMax.
++    auto dims = reduceOpr[0]->shape().dimensions();
++    if (dims.size() != 3) {
++      return OkStatus();
++    }
++
++    int kTy = kARGMAX;
++    int b = dims[0];
++    int m = dims[1];
++    int n = dims[2];
++
++    std::string fun_name =
++        GetKernelSelectorFunction(kTy, {kTy, b, m, n}, fallbackSelected);
++    if (fun_name.empty()) return OkStatus();
++
++#ifdef PRINT_DEBUG
++    if (AllocatedArgMax3DSizes.find({b, m, n}) ==
++        AllocatedArgMax3DSizes.end()) {
++      AllocatedArgMax3DSizes[{b, m, n}] = fun_name;
++      DEBUG("{b: " << b << ", m: " << m << ", n: " << n << "} -> " << fun_name
++                   << (fallbackSelected ? " (fallback)" : ""));
++    }
++#endif
++
++    std::vector<HloInstruction*> operands;
++    for (int i = 0; i < 4; i++) operands.push_back(reduceOpr[i]);
++
++    HloInstruction* kernel_selector_call =
++        reduce->AddInstruction(HloInstruction::CreateCustomCall(
++            reduce->shape(), operands, runtime::kCustomCallKernelSelector));
++
++    // Add metadata
++    OpMetadata metadata = reduce->metadata();
++    metadata.set_op_name(fun_name);
++    metadata.set_op_type(runtime::kKernelSelectorOperationARGMAX);
++    kernel_selector_call->set_metadata(metadata);
++    TF_RETURN_IF_ERROR(ReplaceInstruction(reduce, kernel_selector_call));
++
++    return OkStatus();
++  }
+ };  // namespace cpu
+ 
+ absl::StatusOr<bool> KernelSelectorOpsRewriter::Run(
+@@ -423,6 +586,18 @@ absl::StatusOr<bool> KernelSelectorOpsRewriter::Run(
+   XLA_VLOG_LINES(
+       3, "KernelSelectorOpsRewriter::Run(), before:\n" + module->ToString());
+ 
++  if (!kernel_map_file) {
++    LOG(INFO) << "KERNEL_MAP_FILE is not set. The kernel selector will not "
++                 "run.\n Check xla/service/cpu/example_kernel_map.txt for an "
++                 "example of kernel map file";
++    return OkStatus();
++  }
++
++  // Build the reverse map.
++  for (const auto& pair : kernelStringToType) {
++    kernelTypeToString[pair.second] = pair.first;
++  }
++
+   fill_map_from_file(kernel_map_file, sizesToSymbol);
+ 
+   KernelSelectorOpsRewriterVisitor visitor;
+diff --git a/annc/service/cpu/xla/libs/libblas_920b_single_mlir.so b/annc/service/cpu/xla/libs/libblas_920b_single_mlir.so
+index 838e0c70fac2f32ded34f3d48836c7fde7f5ad17..d991529d23dae68a8d703096bad4b51796e5fb0e 100755
+Binary files a/annc/service/cpu/xla/libs/libblas_920b_single_mlir.so and b/annc/service/cpu/xla/libs/libblas_920b_single_mlir.so differ
+diff --git a/diff.patch b/diff.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..030f894ce3a5af9c1cff6916e95bbe9cff788307
+--- /dev/null
++++ b/diff.patch
+@@ -0,0 +1,254 @@
++diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
++index f29b02e8b1..ed67e15c08 100644
++--- a/xla/service/cpu/cpu_runtime.cc
+++++ b/xla/service/cpu/cpu_runtime.cc
++@@ -151,24 +151,48 @@ extern const char* const kOneDnnMatMulSymbolName =
++     "__xla_cpu_runtime_OneDnnMatMul";
++ extern const char* const kXnnPackSoftMaxNDSymbolName =
++     "__xla_cpu_runtime_XnnPackSoftMaxND";
+++extern const char* const kArgMax3DParallelSymbolName =
+++    "__xla_cpu_runtime_ArgMax3DParallel";
+++extern const char* const kArgMax3DSequentialSymbolName =
+++    "__xla_cpu_runtime_ArgMax3DSequential";
++ extern const char* const kKernelSelectorGEMVSymbolName =
++     "__xla_cpu_runtime_KernelSelectorGEMV";
++-extern const char* const kKernelSelectorGEMMSymbolName =
++-    "__xla_cpu_runtime_KernelSelectorGEMM";
++-extern const char* const kKernelSelectorBatch3DSymbolName =
++-    "__xla_cpu_runtime_KernelSelectorBatch3D";
+++extern const char* const kKernelSelectorGEMMSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMSequential";
+++extern const char* const kKernelSelectorGEMMParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMParallel";
+++extern const char* const kKernelSelectorBatch3DSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DSequential";
+++extern const char* const kKernelSelectorBatch3DParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DParallel";
++ extern const char* const kKernelSelectorGEMVMLIRSymbolName =
++     "__xla_cpu_runtime_KernelSelectorGEMVMLIR";
+++extern const char* const kKernelSelectorBatch4DSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DSequential";
+++extern const char* const kKernelSelectorBatch4DParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DParallel";
++ extern const char* const kKernelSelectorGEMMMLIRSymbolName =
++     "__xla_cpu_runtime_KernelSelectorGEMMMLIR";
++ extern const char* const kKernelSelectorBatch3DMLIRSymbolName =
++     "__xla_cpu_runtime_KernelSelectorBatch3DMLIR";
++ extern const char* const kKernelSelectorBatch4DMLIRSymbolName =
++     "__xla_cpu_runtime_KernelSelectorBatch4DMLIR";
+++extern const char* const kKernelSelectorGEMVEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMVEmpty";
+++extern const char* const kKernelSelectorGEMMEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMEmpty";
+++extern const char* const kKernelSelectorBatch3DEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DEmpty";
+++extern const char* const kKernelSelectorBatch4DEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DEmpty";
+++extern const char* const kArgMax3DEmptySymbolName =
+++    "__xla_cpu_runtime_ArgMax3DEmpty";
++ extern const char* const kKernelSelectorOperationGEMV = "GEMV";
++ extern const char* const kKernelSelectorOperationGEMM = "GEMM";
++ extern const char* const kKernelSelectorOperationBATCH3D = "BATCH3D";
++ extern const char* const kKernelSelectorOperationBATCH4D = "BATCH4D";
+++extern const char* const kKernelSelectorOperationARGMAX = "ARGMAX";
+++extern const char* const kCustomCallKernelSelector = "KernelSelector";
++ 
++ namespace {
++ 
++diff --git a/xla/service/cpu/cpu_runtime.h b/xla/service/cpu/cpu_runtime.h
++index 467022460e..ce09aeadd5 100644
++--- a/xla/service/cpu/cpu_runtime.h
+++++ b/xla/service/cpu/cpu_runtime.h
++@@ -86,19 +86,33 @@ extern const char* const kTracingEndSymbolName;
++ extern const char* const kAllToAllSymbolName;
++ extern const char* const kOneDnnMatMulSymbolName;
++ extern const char* const kXnnPackSoftMaxNDSymbolName;
+++extern const char* const kArgMax3DParallelSymbolName;
+++extern const char* const kArgMax3DSequentialSymbolName;
++ extern const char* const kKernelSelectorGEMVSymbolName;
++-extern const char* const kKernelSelectorGEMMSymbolName;
++-extern const char* const kKernelSelectorBatch3DSymbolName;
+++extern const char* const kKernelSelectorGEMMSequentialSymbolName;
+++extern const char* const kKernelSelectorGEMMParallelSymbolName;
+++extern const char* const kKernelSelectorBatch3DSequentialSymbolName;
+++extern const char* const kKernelSelectorBatch3DParallelSymbolName;
+++extern const char* const kKernelSelectorBatch4DSequentialSymbolName;
+++extern const char* const kKernelSelectorBatch4DParallelSymbolName;
++ extern const char* const kKernelSelectorGEMVMLIRSymbolName;
++ extern const char* const kKernelSelectorGEMMMLIRSymbolName;
++ extern const char* const kKernelSelectorBatch3DMLIRSymbolName;
++ extern const char* const kKernelSelectorBatch4DMLIRSymbolName;
+++extern const char* const kKernelSelectorGEMVEmptySymbolName;
+++extern const char* const kKernelSelectorGEMMEmptySymbolName;
+++extern const char* const kKernelSelectorBatch3DEmptySymbolName;
+++extern const char* const kKernelSelectorBatch4DEmptySymbolName;
+++extern const char* const kArgMax3DEmptySymbolName;
++ 
++ // Kernel selector operation names.
++ extern const char* const kKernelSelectorOperationGEMV;
++ extern const char* const kKernelSelectorOperationGEMM;
++ extern const char* const kKernelSelectorOperationBATCH3D;
++ extern const char* const kKernelSelectorOperationBATCH4D;
+++extern const char* const kKernelSelectorOperationARGMAX;
+++
+++extern const char* const kCustomCallKernelSelector;
++ 
++ // All symbol names for XLA CPU runtime functions need to start with this
++ // prefix.
++diff --git a/xla/service/cpu/ir_emitter.cc b/xla/service/cpu/ir_emitter.cc
++index 21f7428bd4..5941c78baf 100644
++--- a/xla/service/cpu/ir_emitter.cc
+++++ b/xla/service/cpu/ir_emitter.cc
++@@ -2506,7 +2506,58 @@ Status IrEmitter::HandleXnnPackSoftMax(HloInstruction* hlo) {
++   return OkStatus();
++ }
++ 
++-Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
+++Status IrEmitter::HandleKernelSelectorArgMax(HloInstruction* hlo) {
+++  OpMetadata metadata = hlo->metadata();
+++
+++  const HloInstruction* in1 = hlo->operand(0);
+++  const HloInstruction* in2 = hlo->operand(1);
+++  const HloInstruction* in3 = hlo->operand(2);
+++  const HloInstruction* in4 = hlo->operand(3);
+++
+++  Shape shape = in1->shape();
+++  TF_RET_CHECK(shape.rank() == 3);
+++
+++  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(hlo));
+++
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input1_slice,
+++                      assignment_.GetUniqueSlice(in1, {}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input2_slice,
+++                      assignment_.GetUniqueSlice(in2, {}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_values_slice,
+++                      assignment_.GetUniqueSlice(hlo, {0}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_indices_slice,
+++                      assignment_.GetUniqueSlice(hlo, {1}));
+++
+++  llvm::Value* values1_ptr = EmitBufferPointer(input1_slice, in1->shape());
+++  llvm::Value* values2_ptr = EmitBufferPointer(input2_slice, in2->shape());
+++  llvm::Value* out_values_ptr =
+++      EmitBufferPointer(out_values_slice, hlo->shape().tuple_shapes(0));
+++  llvm::Value* out_indices_ptr =
+++      EmitBufferPointer(out_indices_slice, hlo->shape().tuple_shapes(1));
+++
+++  float cst1_val = in3->literal().Get<float>({});
+++  llvm::Constant* cst1 = llvm::ConstantFP::get(b_.getFloatTy(), cst1_val);
+++
+++  EmitCallToFunc(
+++      metadata.op_name(),
+++      {/*run_options=*/GetExecutableRunOptionsArgument(),
+++       /*B*/ b_.getInt64(shape.dimensions(0)),
+++       /*M*/ b_.getInt64(shape.dimensions(1)),
+++       /*N*/ b_.getInt64(shape.dimensions(2)),
+++       /*invals*/ BitCast(values1_ptr, b_.getInt32Ty()->getPointerTo()),
+++       /*inidxs*/ BitCast(values2_ptr, b_.getInt32Ty()->getPointerTo()),
+++       /*init_value*/ cst1,
+++       /*init_idx*/ b_.getInt32(in4->literal().Get<int>({})),
+++       /*outvals*/ BitCast(out_values_ptr, b_.getFloatTy()->getPointerTo()),
+++       /*outidxs*/ BitCast(out_indices_ptr, b_.getInt32Ty()->getPointerTo())},
+++      b_.getVoidTy());
+++
+++  llvm_ir::EmitTuple(GetIrArrayFor(hlo), {out_values_ptr, out_indices_ptr},
+++                     &b_);
+++  return OkStatus();
+++}
+++
+++Status IrEmitter::HandleKernelSelectorBlas(HloInstruction* custom_call) {
++   OpMetadata metadata = custom_call->metadata();
++ 
++   bool isGEMV = (metadata.op_type() == runtime::kKernelSelectorOperationGEMV);
++@@ -2535,6 +2586,8 @@ Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
++   //  |  alpha |          |          |  alpha |
++   //  |  beta  |          |          |  beta  |
++ 
+++  arguments.push_back(/*run_options=*/GetExecutableRunOptionsArgument());
+++
++   // trA
++   HloInstruction const* trA = custom_call->operand(operand++);
++   bool tranA = trA->literal().Get<bool>({});
++@@ -2622,6 +2675,15 @@ Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
++   return OkStatus();
++ }
++ 
+++Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
+++  OpMetadata metadata = custom_call->metadata();
+++
+++  if (metadata.op_type() == runtime::kKernelSelectorOperationARGMAX)
+++    return HandleKernelSelectorArgMax(custom_call);
+++  else
+++    return HandleKernelSelectorBlas(custom_call);
+++}
+++
++ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
++   if (custom_call->custom_call_target() == "PadToStatic") {
++     return HandlePadToStatic(custom_call);
++@@ -2629,7 +2691,7 @@ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
++   if (custom_call->custom_call_target() == "SliceToDynamic") {
++     return HandleSliceToDynamic(custom_call);
++   }
++-  if (custom_call->custom_call_target() == "KernelSelector") {
+++  if (custom_call->custom_call_target() == runtime::kCustomCallKernelSelector) {
++     return HandleKernelSelector(custom_call);
++   }
++   if (custom_call->custom_call_target() == "TopK") {
++diff --git a/xla/service/cpu/ir_emitter.h b/xla/service/cpu/ir_emitter.h
++index 1ea0bbaca8..de82946989 100644
++--- a/xla/service/cpu/ir_emitter.h
+++++ b/xla/service/cpu/ir_emitter.h
++@@ -191,6 +191,8 @@ class IrEmitter : public DfsHloVisitorWithDefault,
++   Status HandlePadToStatic(HloInstruction* hlo);
++   Status HandleTopK(HloInstruction* hlo);
++   Status HandleKernelSelector(HloInstruction* hlo);
+++  Status HandleKernelSelectorBlas(HloInstruction* hlo);
+++  Status HandleKernelSelectorArgMax(HloInstruction* hlo);
++   Status HandleAllReduceSingleReplica(HloInstruction* crs);
++   Status HandleAllReduceMultipleReplica(HloInstruction* crs);
++   Status HandleXnnPackSoftMax(HloInstruction* hlo);
++diff --git a/xla/service/cpu/simple_orc_jit.cc b/xla/service/cpu/simple_orc_jit.cc
++index a6ffb8a485..763a833f73 100644
++--- a/xla/service/cpu/simple_orc_jit.cc
+++++ b/xla/service/cpu/simple_orc_jit.cc
++@@ -16,6 +16,7 @@ limitations under the License.
++ #include "xla/service/cpu/simple_orc_jit.h"
++ 
++ #include <stdint.h>
+++#include <xnnpack_ops.h>
++ 
++ #include <algorithm>
++ #include <cstdint>
++@@ -518,6 +519,8 @@ bool RegisterKnownJITSymbols() {
++   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC128);
++   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulS32);
++   REGISTER_CPU_RUNTIME_SYMBOL(XnnPackSoftMaxND);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DSequential);
++   REGISTER_CPU_RUNTIME_SYMBOL(ParallelForkJoin);
++   REGISTER_CPU_RUNTIME_SYMBOL(PrintfToStderr);
++   REGISTER_CPU_RUNTIME_SYMBOL(ReleaseInfeedBufferAfterDequeue);
++@@ -530,13 +533,22 @@ bool RegisterKnownJITSymbols() {
++ #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
++   REGISTER_CPU_RUNTIME_SYMBOL(OneDnnMatMul);
++ #endif  // INTEL_MKL && ENABLE_ONEDNN_V3
++-  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMM);
++-  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3D);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DParallel);
++   REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMV);
++   REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMMLIR);
++   REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DMLIR);
++   REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DMLIR);
++   REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVMLIR);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DEmpty);
++ 
++   registry->Register("__gnu_f2h_ieee", reinterpret_cast<void*>(__gnu_f2h_ieee),
++                      "Host");
+diff --git a/install/xla/cpu_compiler.patch b/install/xla/cpu_compiler.patch
+index 031928f603334403ccc2948701da172640ca6872..76b633724ce12f07fa019e6f7aaa33d7d3b98ae9 100644
+--- a/install/xla/cpu_compiler.patch
++++ b/install/xla/cpu_compiler.patch
+@@ -1,5 +1,5 @@
+ diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+-index e519cf0..9f34fb8 100644
++index e519cf051f..9f34fb8433 100644
+ --- a/xla/service/cpu/cpu_compiler.cc
+ +++ b/xla/service/cpu/cpu_compiler.cc
+ @@ -238,6 +238,11 @@ limitations under the License.
+diff --git a/install/xla/cpu_runtime.cc.patch b/install/xla/cpu_runtime.cc.patch
+index e9f14f8256ef05c3c80a0d358008252cfa9d9aea..a28fae5b07480af278b91987ea9ca7db740f86fb 100644
+--- a/install/xla/cpu_runtime.cc.patch
++++ b/install/xla/cpu_runtime.cc.patch
+@@ -1,5 +1,5 @@
+ diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
+-index 84879eaf0f..f29b02e8b1 100644
++index 84879eaf0f..ed67e15c08 100644
+ --- a/xla/service/cpu/cpu_runtime.cc
+ +++ b/xla/service/cpu/cpu_runtime.cc
+ @@ -34,6 +34,9 @@ limitations under the License.
+@@ -22,30 +22,54 @@ index 84879eaf0f..f29b02e8b1 100644
+  
+  namespace xla {
+  namespace cpu {
+-@@ -149,6 +149,26 @@ extern const char* const kPartitionIdSymbolName =
++@@ -149,6 +149,50 @@ extern const char* const kPartitionIdSymbolName =
+  extern const char* const kReplicaIdSymbolName = "__xla_cpu_runtime_ReplicaId";
+  extern const char* const kOneDnnMatMulSymbolName =
+      "__xla_cpu_runtime_OneDnnMatMul";
+ +extern const char* const kXnnPackSoftMaxNDSymbolName =
+ +    "__xla_cpu_runtime_XnnPackSoftMaxND";
+++extern const char* const kArgMax3DParallelSymbolName =
+++    "__xla_cpu_runtime_ArgMax3DParallel";
+++extern const char* const kArgMax3DSequentialSymbolName =
+++    "__xla_cpu_runtime_ArgMax3DSequential";
+ +extern const char* const kKernelSelectorGEMVSymbolName =
+ +    "__xla_cpu_runtime_KernelSelectorGEMV";
+-+extern const char* const kKernelSelectorGEMMSymbolName =
+-+    "__xla_cpu_runtime_KernelSelectorGEMM";
+-+extern const char* const kKernelSelectorBatch3DSymbolName =
+-+    "__xla_cpu_runtime_KernelSelectorBatch3D";
+++extern const char* const kKernelSelectorGEMMSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMSequential";
+++extern const char* const kKernelSelectorGEMMParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMParallel";
+++extern const char* const kKernelSelectorBatch3DSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DSequential";
+++extern const char* const kKernelSelectorBatch3DParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DParallel";
+ +extern const char* const kKernelSelectorGEMVMLIRSymbolName =
+ +    "__xla_cpu_runtime_KernelSelectorGEMVMLIR";
+++extern const char* const kKernelSelectorBatch4DSequentialSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DSequential";
+++extern const char* const kKernelSelectorBatch4DParallelSymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DParallel";
+ +extern const char* const kKernelSelectorGEMMMLIRSymbolName =
+ +    "__xla_cpu_runtime_KernelSelectorGEMMMLIR";
+ +extern const char* const kKernelSelectorBatch3DMLIRSymbolName =
+ +    "__xla_cpu_runtime_KernelSelectorBatch3DMLIR";
+ +extern const char* const kKernelSelectorBatch4DMLIRSymbolName =
+ +    "__xla_cpu_runtime_KernelSelectorBatch4DMLIR";
+++extern const char* const kKernelSelectorGEMVEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMVEmpty";
+++extern const char* const kKernelSelectorGEMMEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorGEMMEmpty";
+++extern const char* const kKernelSelectorBatch3DEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch3DEmpty";
+++extern const char* const kKernelSelectorBatch4DEmptySymbolName =
+++    "__xla_cpu_runtime_KernelSelectorBatch4DEmpty";
+++extern const char* const kArgMax3DEmptySymbolName =
+++    "__xla_cpu_runtime_ArgMax3DEmpty";
+ +extern const char* const kKernelSelectorOperationGEMV = "GEMV";
+ +extern const char* const kKernelSelectorOperationGEMM = "GEMM";
+ +extern const char* const kKernelSelectorOperationBATCH3D = "BATCH3D";
+ +extern const char* const kKernelSelectorOperationBATCH4D = "BATCH4D";
+++extern const char* const kKernelSelectorOperationARGMAX = "ARGMAX";
+++extern const char* const kCustomCallKernelSelector = "KernelSelector";
+  
+  namespace {
+  
+diff --git a/install/xla/cpu_runtime.h.patch b/install/xla/cpu_runtime.h.patch
+index 5143ba489233195c08faac00238b228810136a21..5bebcd50339be48347c4d40564caa5094b4f3eb3 100644
+--- a/install/xla/cpu_runtime.h.patch
++++ b/install/xla/cpu_runtime.h.patch
+@@ -1,25 +1,39 @@
+ diff --git a/xla/service/cpu/cpu_runtime.h b/xla/service/cpu/cpu_runtime.h
+-index e483b8c9e8..467022460e 100644
++index e483b8c9e8..ce09aeadd5 100644
+ --- a/xla/service/cpu/cpu_runtime.h
+ +++ b/xla/service/cpu/cpu_runtime.h
+-@@ -85,6 +85,20 @@ extern const char* const kTracingStartSymbolName;
++@@ -85,6 +85,34 @@ extern const char* const kTracingStartSymbolName;
+  extern const char* const kTracingEndSymbolName;
+  extern const char* const kAllToAllSymbolName;
+  extern const char* const kOneDnnMatMulSymbolName;
+ +extern const char* const kXnnPackSoftMaxNDSymbolName;
+++extern const char* const kArgMax3DParallelSymbolName;
+++extern const char* const kArgMax3DSequentialSymbolName;
+ +extern const char* const kKernelSelectorGEMVSymbolName;
+-+extern const char* const kKernelSelectorGEMMSymbolName;
+-+extern const char* const kKernelSelectorBatch3DSymbolName;
+++extern const char* const kKernelSelectorGEMMSequentialSymbolName;
+++extern const char* const kKernelSelectorGEMMParallelSymbolName;
+++extern const char* const kKernelSelectorBatch3DSequentialSymbolName;
+++extern const char* const kKernelSelectorBatch3DParallelSymbolName;
+++extern const char* const kKernelSelectorBatch4DSequentialSymbolName;
+++extern const char* const kKernelSelectorBatch4DParallelSymbolName;
+ +extern const char* const kKernelSelectorGEMVMLIRSymbolName;
+ +extern const char* const kKernelSelectorGEMMMLIRSymbolName;
+ +extern const char* const kKernelSelectorBatch3DMLIRSymbolName;
+ +extern const char* const kKernelSelectorBatch4DMLIRSymbolName;
+++extern const char* const kKernelSelectorGEMVEmptySymbolName;
+++extern const char* const kKernelSelectorGEMMEmptySymbolName;
+++extern const char* const kKernelSelectorBatch3DEmptySymbolName;
+++extern const char* const kKernelSelectorBatch4DEmptySymbolName;
+++extern const char* const kArgMax3DEmptySymbolName;
+ +
+ +// Kernel selector operation names.
+ +extern const char* const kKernelSelectorOperationGEMV;
+ +extern const char* const kKernelSelectorOperationGEMM;
+ +extern const char* const kKernelSelectorOperationBATCH3D;
+ +extern const char* const kKernelSelectorOperationBATCH4D;
+++extern const char* const kKernelSelectorOperationARGMAX;
+++
+++extern const char* const kCustomCallKernelSelector;
+  
+  // All symbol names for XLA CPU runtime functions need to start with this
+  // prefix.
+diff --git a/install/xla/debug_options_flags.cc.patch b/install/xla/debug_options_flags.cc.patch
+index 8ea686943b5603fe7ec7e6cb8965bfdec66552e6..d0cdf175e0c8526db7128cd1750d85940f376d33 100644
+--- a/install/xla/debug_options_flags.cc.patch
++++ b/install/xla/debug_options_flags.cc.patch
+@@ -1,8 +1,8 @@
+ diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
+-index 7982ab2590..e2706e6fda 100644
++index 6063f173a5..184e74baed 100644
+ --- a/xla/debug_options_flags.cc
+ +++ b/xla/debug_options_flags.cc
+-@@ -171,6 +171,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
++@@ -168,6 +168,10 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+    opts.set_xla_cpu_matmul_tiling_k_dim(8);
+    opts.set_xla_cpu_enable_mlir_fusion_outlining(true);
+    opts.set_xla_cpu_enable_experimental_deallocation(true);
+@@ -10,10 +10,10 @@ index 7982ab2590..e2706e6fda 100644
+ +
+ +  // Kernel Selector
+ +  opts.set_xla_cpu_use_kernel_selector(false);
+-
++ 
+    opts.set_xla_partitioning_algorithm(
+        DebugOptions::PARTITIONING_ALGORITHM_NOOP);
+-@@ -1143,6 +1147,16 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
++@@ -1113,6 +1117,16 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+                      &DebugOptions::set_xla_gpu_enable_latency_hiding_scheduler),
+                  debug_options->xla_gpu_enable_latency_hiding_scheduler(),
+                  "Enable latency-hiding scheduler for XLA:GPU"));
+@@ -29,4 +29,4 @@ index 7982ab2590..e2706e6fda 100644
+ +      "Replace dot with custom call to libraries."));
+    flag_list->push_back(tsl::Flag(
+        "xla_gpu_enable_analytical_latency_estimator",
+-       bool_setter_for(
+\ No newline at end of file
++       bool_setter_for(
+diff --git a/install/xla/ir_emitter.cc.patch b/install/xla/ir_emitter.cc.patch
+index c369b21ab0d0840d6c3db58559ef62595cf77d80..21fb292b1dc515d022a2dabf69e5020a912e7d16 100644
+--- a/install/xla/ir_emitter.cc.patch
++++ b/install/xla/ir_emitter.cc.patch
+@@ -1,5 +1,5 @@
+ diff --git a/xla/service/cpu/ir_emitter.cc b/xla/service/cpu/ir_emitter.cc
+-index 7013a45f1e..0043e144f6 100644
++index 7013a45f1e..5941c78baf 100644
+ --- a/xla/service/cpu/ir_emitter.cc
+ +++ b/xla/service/cpu/ir_emitter.cc
+ @@ -46,6 +46,9 @@ limitations under the License.
+@@ -31,7 +31,7 @@ index 7013a45f1e..0043e144f6 100644
+  
+  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+  #include "xla/service/cpu/onednn_memory_util.h"
+-@@ -2471,6 +2473,155 @@ Status IrEmitter::HandleOneDnnMatMul(HloInstruction* custom_call) {
++@@ -2471,6 +2473,217 @@ Status IrEmitter::HandleOneDnnMatMul(HloInstruction* custom_call) {
+  }
+  #endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+  
+@@ -68,7 +68,58 @@ index 7013a45f1e..0043e144f6 100644
+ +  return OkStatus();
+ +}
+ +
+-+Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
+++Status IrEmitter::HandleKernelSelectorArgMax(HloInstruction* hlo) {
+++  OpMetadata metadata = hlo->metadata();
+++
+++  const HloInstruction* in1 = hlo->operand(0);
+++  const HloInstruction* in2 = hlo->operand(1);
+++  const HloInstruction* in3 = hlo->operand(2);
+++  const HloInstruction* in4 = hlo->operand(3);
+++
+++  Shape shape = in1->shape();
+++  TF_RET_CHECK(shape.rank() == 3);
+++
+++  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(hlo));
+++
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input1_slice,
+++                      assignment_.GetUniqueSlice(in1, {}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input2_slice,
+++                      assignment_.GetUniqueSlice(in2, {}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_values_slice,
+++                      assignment_.GetUniqueSlice(hlo, {0}));
+++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_indices_slice,
+++                      assignment_.GetUniqueSlice(hlo, {1}));
+++
+++  llvm::Value* values1_ptr = EmitBufferPointer(input1_slice, in1->shape());
+++  llvm::Value* values2_ptr = EmitBufferPointer(input2_slice, in2->shape());
+++  llvm::Value* out_values_ptr =
+++      EmitBufferPointer(out_values_slice, hlo->shape().tuple_shapes(0));
+++  llvm::Value* out_indices_ptr =
+++      EmitBufferPointer(out_indices_slice, hlo->shape().tuple_shapes(1));
+++
+++  float cst1_val = in3->literal().Get<float>({});
+++  llvm::Constant* cst1 = llvm::ConstantFP::get(b_.getFloatTy(), cst1_val);
+++
+++  EmitCallToFunc(
+++      metadata.op_name(),
+++      {/*run_options=*/GetExecutableRunOptionsArgument(),
+++       /*B*/ b_.getInt64(shape.dimensions(0)),
+++       /*M*/ b_.getInt64(shape.dimensions(1)),
+++       /*N*/ b_.getInt64(shape.dimensions(2)),
+++       /*invals*/ BitCast(values1_ptr, b_.getInt32Ty()->getPointerTo()),
+++       /*inidxs*/ BitCast(values2_ptr, b_.getInt32Ty()->getPointerTo()),
+++       /*init_value*/ cst1,
+++       /*init_idx*/ b_.getInt32(in4->literal().Get<int>({})),
+++       /*outvals*/ BitCast(out_values_ptr, b_.getFloatTy()->getPointerTo()),
+++       /*outidxs*/ BitCast(out_indices_ptr, b_.getInt32Ty()->getPointerTo())},
+++      b_.getVoidTy());
+++
+++  llvm_ir::EmitTuple(GetIrArrayFor(hlo), {out_values_ptr, out_indices_ptr},
+++                     &b_);
+++  return OkStatus();
+++}
+++
+++Status IrEmitter::HandleKernelSelectorBlas(HloInstruction* custom_call) {
+ +  OpMetadata metadata = custom_call->metadata();
+ +
+ +  bool isGEMV = (metadata.op_type() == runtime::kKernelSelectorOperationGEMV);
+@@ -97,6 +148,8 @@ index 7013a45f1e..0043e144f6 100644
+ +  //  |  alpha |          |          |  alpha |
+ +  //  |  beta  |          |          |  beta  |
+ +
+++  arguments.push_back(/*run_options=*/GetExecutableRunOptionsArgument());
+++
+ +  // trA
+ +  HloInstruction const* trA = custom_call->operand(operand++);
+ +  bool tranA = trA->literal().Get<bool>({});
+@@ -183,15 +236,24 @@ index 7013a45f1e..0043e144f6 100644
+ +
+ +  return OkStatus();
+ +}
+++
+++Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
+++  OpMetadata metadata = custom_call->metadata();
+++
+++  if (metadata.op_type() == runtime::kKernelSelectorOperationARGMAX)
+++    return HandleKernelSelectorArgMax(custom_call);
+++  else
+++    return HandleKernelSelectorBlas(custom_call);
+++}
+ +
+  Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
+    if (custom_call->custom_call_target() == "PadToStatic") {
+      return HandlePadToStatic(custom_call);
+-@@ -2478,9 +2629,15 @@ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
++@@ -2478,9 +2691,15 @@ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
+    if (custom_call->custom_call_target() == "SliceToDynamic") {
+      return HandleSliceToDynamic(custom_call);
+    }
+-+  if (custom_call->custom_call_target() == "KernelSelector") {
+++  if (custom_call->custom_call_target() == runtime::kCustomCallKernelSelector) {
+ +    return HandleKernelSelector(custom_call);
+ +  }
+    if (custom_call->custom_call_target() == "TopK") {
+diff --git a/install/xla/ir_emitter.h.patch b/install/xla/ir_emitter.h.patch
+index bdf9ebf4c52342e68142a6466c53fee5b6adee6b..033874f88de31231efff528843ab7ccdec2d7005 100644
+--- a/install/xla/ir_emitter.h.patch
++++ b/install/xla/ir_emitter.h.patch
+@@ -1,12 +1,14 @@
+ diff --git a/xla/service/cpu/ir_emitter.h b/xla/service/cpu/ir_emitter.h
+-index c4534fa619..1ea0bbaca8 100644
++index c4534fa619..de82946989 100644
+ --- a/xla/service/cpu/ir_emitter.h
+ +++ b/xla/service/cpu/ir_emitter.h
+-@@ -190,8 +190,10 @@ class IrEmitter : public DfsHloVisitorWithDefault,
++@@ -190,8 +190,12 @@ class IrEmitter : public DfsHloVisitorWithDefault,
+    Status HandleSliceToDynamic(HloInstruction* hlo);
+    Status HandlePadToStatic(HloInstruction* hlo);
+    Status HandleTopK(HloInstruction* hlo);
+ +  Status HandleKernelSelector(HloInstruction* hlo);
+++  Status HandleKernelSelectorBlas(HloInstruction* hlo);
+++  Status HandleKernelSelectorArgMax(HloInstruction* hlo);
+    Status HandleAllReduceSingleReplica(HloInstruction* crs);
+    Status HandleAllReduceMultipleReplica(HloInstruction* crs);
+ +  Status HandleXnnPackSoftMax(HloInstruction* hlo);
+diff --git a/install/xla/simple_orc_jit.cc.patch b/install/xla/simple_orc_jit.cc.patch
+index 656218c1e45ad42995963a46dc7fc4524e821dd7..2f33d2571e0780bced94c69ca61e795708d7dd18 100644
+--- a/install/xla/simple_orc_jit.cc.patch
++++ b/install/xla/simple_orc_jit.cc.patch
+@@ -1,8 +1,16 @@
+ diff --git a/xla/service/cpu/simple_orc_jit.cc b/xla/service/cpu/simple_orc_jit.cc
+-index be8741a40f..d1d1bd56e0 100644
++index be8741a40f..33abb48fbd 100644
+ --- a/xla/service/cpu/simple_orc_jit.cc
+ +++ b/xla/service/cpu/simple_orc_jit.cc
+-@@ -38,6 +38,7 @@ limitations under the License.
++@@ -16,6 +16,7 @@ limitations under the License.
++ #include "xla/service/cpu/simple_orc_jit.h"
++ 
++ #include <stdint.h>
+++#include <xnnpack_ops.h>
++ 
++ #include <algorithm>
++ #include <cstdint>
++@@ -38,6 +39,7 @@ limitations under the License.
+  #include "llvm/Support/Process.h"
+  #include "llvm/TargetParser/Host.h"
+  #include "mlir/ExecutionEngine/CRunnerUtils.h"  // from @llvm-project
+@@ -10,11 +18,7 @@ index be8741a40f..d1d1bd56e0 100644
+  #include "xla/service/cpu/cpu_runtime.h"
+  #include "xla/service/cpu/orc_jit_memory_mapper.h"
+  #include "xla/service/cpu/runtime_conv2d.h"
+-@@ -58,15 +59,17 @@ limitations under the License.
+- #include "xla/service/cpu/runtime_single_threaded_matmul.h"
+- #include "xla/service/cpu/runtime_topk.h"
+- #include "xla/service/cpu/windows_compatibility.h"
+-+#include <xnnpack_ops.h>
++@@ -61,12 +63,13 @@ limitations under the License.
+  #include "xla/service/custom_call_target_registry.h"
+  #include "xla/types.h"
+  #include "xla/util.h"
+@@ -29,25 +33,36 @@ index be8741a40f..d1d1bd56e0 100644
+  // Provided by compiler-rt and MLIR.
+  // Converts an F32 value to a BF16.
+  extern "C" uint16_t __truncsfbf2(float);
+-@@ -514,6 +517,7 @@ bool RegisterKnownJITSymbols() {
++@@ -514,6 +517,9 @@ bool RegisterKnownJITSymbols() {
+    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC64);
+    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC128);
+    REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulS32);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(XnnPackSoftMaxND);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DSequential);
+    REGISTER_CPU_RUNTIME_SYMBOL(ParallelForkJoin);
+    REGISTER_CPU_RUNTIME_SYMBOL(PrintfToStderr);
+    REGISTER_CPU_RUNTIME_SYMBOL(ReleaseInfeedBufferAfterDequeue);
+-@@ -526,6 +530,13 @@ bool RegisterKnownJITSymbols() {
++@@ -526,6 +532,22 @@ bool RegisterKnownJITSymbols() {
+  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+    REGISTER_CPU_RUNTIME_SYMBOL(OneDnnMatMul);
+  #endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+-+  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMM);
+-+  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3D);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DParallel);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DSequential);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DParallel);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMV);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMMLIR);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DMLIR);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DMLIR);
+ +  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVMLIR);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DEmpty);
+++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DEmpty);
+  
+    registry->Register("__gnu_f2h_ieee", reinterpret_cast<void*>(__gnu_f2h_ieee),
+                       "Host");
