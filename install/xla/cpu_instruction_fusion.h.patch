@@ -1,15 +1,18 @@
 diff --git a/xla/service/cpu/cpu_instruction_fusion.h b/xla/service/cpu/cpu_instruction_fusion.h
-index 1e090cb6..c2a1d891 100644
+index 1e090cb6..d5f8233b 100644
 --- a/xla/service/cpu/cpu_instruction_fusion.h
 +++ b/xla/service/cpu/cpu_instruction_fusion.h
-@@ -26,8 +26,8 @@ namespace cpu {
+@@ -26,8 +26,13 @@ namespace cpu {
  
  class CpuInstructionFusion : public InstructionFusion {
   public:
--  CpuInstructionFusion()
--      : InstructionFusion(CpuInstructionFusion::IsExpensive) {}
++#ifdef ENABLE_ANNC
 +  CpuInstructionFusion(bool may_duplicate)
 +      : InstructionFusion(CpuInstructionFusion::IsExpensive, may_duplicate) {}
++#else
+   CpuInstructionFusion()
+       : InstructionFusion(CpuInstructionFusion::IsExpensive) {}
++#endif
    ~CpuInstructionFusion() override = default;
  
    using HloPassInterface::Run;

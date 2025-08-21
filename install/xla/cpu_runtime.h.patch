@@ -1,12 +1,14 @@
 diff --git a/xla/service/cpu/cpu_runtime.h b/xla/service/cpu/cpu_runtime.h
-index e483b8c9..0d9afb06 100644
+index e483b8c9..787e7476 100644
 --- a/xla/service/cpu/cpu_runtime.h
 +++ b/xla/service/cpu/cpu_runtime.h
-@@ -85,6 +85,7 @@ extern const char* const kTracingStartSymbolName;
+@@ -85,6 +85,9 @@ extern const char* const kTracingStartSymbolName;
  extern const char* const kTracingEndSymbolName;
  extern const char* const kAllToAllSymbolName;
  extern const char* const kOneDnnMatMulSymbolName;
++#ifdef ENABLE_ANNC
 +extern const char* const kXnnPackSoftMaxNDSymbolName;
++#endif
  
  // All symbol names for XLA CPU runtime functions need to start with this
  // prefix.

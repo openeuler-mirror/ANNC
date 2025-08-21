@@ -1,12 +1,14 @@
 diff --git a/xla/service/cpu/ir_emitter.h b/xla/service/cpu/ir_emitter.h
-index c4534fa6..ef47a738 100644
+index c4534fa6..95e699a9 100644
 --- a/xla/service/cpu/ir_emitter.h
 +++ b/xla/service/cpu/ir_emitter.h
-@@ -192,6 +192,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
+@@ -192,6 +192,9 @@ class IrEmitter : public DfsHloVisitorWithDefault,
    Status HandleTopK(HloInstruction* hlo);
    Status HandleAllReduceSingleReplica(HloInstruction* crs);
    Status HandleAllReduceMultipleReplica(HloInstruction* crs);
++#ifdef ENABLE_ANNC
 +  Status HandleXnnPackSoftMax(HloInstruction* hlo);
++#endif
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    Status HandleOneDnnMatMul(HloInstruction* hlo);
  #endif  // INTEL_MKL && ENABLE_ONEDNN_V3

@@ -1,15 +1,15 @@
 diff --git a/xla/xla.proto b/xla/xla.proto
-index 57935c98c0..64998d5f91 100644
+index 7e01954d..ea3a61d4 100644
 --- a/xla/xla.proto
 +++ b/xla/xla.proto
-@@ -546,6 +546,10 @@ message DebugOptions {
-
+@@ -540,6 +540,10 @@ message DebugOptions {
+ 
    bool xla_cpu_enable_mlir_fusion_outlining = 192;
-
+ 
 +  bool xla_cpu_enable_xnnpack = 266;
 +
 +  bool xla_cpu_use_kernel_selector = 267;
 +
    // If set, use the experimental deallocation pass from mlir-hlo.
    bool xla_cpu_enable_experimental_deallocation = 191;
-
+ 

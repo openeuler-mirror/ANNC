@@ -1,0 +1,68 @@
+diff -git a/xla/service/cpu/BUILD b/xla/service/cpu/BUILD
+index be5a9d57..120c5ae3 100644
+--- a/xla/service/cpu/BUILD
++++ b/xla/service/cpu/BUILD
+@@ -499,6 +499,11 @@ cc_library(
+     srcs = ["hlo_xla_runtime_pipeline.cc"],
+     hdrs = ["hlo_xla_runtime_pipeline.h"],
+     visibility = ["//visibility:public"],
++    copts = select({
++        ":aarch64_and_annc_disabled": [],
++        ":is_aarch64": ["-DENABLE_ANNC"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//xla:status",
+         "//xla/mlir/backends/cpu/transforms:passes",
+@@ -545,7 +550,11 @@ cc_library(
+         "windows_compatibility.h",
+     ],
+     hdrs = ["simple_orc_jit.h"],
+-    copts = if_enable_acl(["-DXLA_CPU_USE_ACL=1"]) + tsl_copts(),
++    copts = if_enable_acl(["-DXLA_CPU_USE_ACL=1"]) + tsl_copts() + select({
++        ":aarch64_and_annc_disabled": [],
++        ":is_aarch64": ["-DENABLE_ANNC"],
++        "//conditions:default": [],
++    }),
+     visibility = ["//visibility:public"],
+     deps = [
+         ":compiler_functor",
+@@ -682,7 +691,11 @@ cc_library(
+         "elemental_ir_emitter.h",
+         "ir_emitter.h",
+     ],
+-    copts = tsl_copts(),
++    copts = tsl_copts() + select({
++        ":aarch64_and_annc_disabled": [],
++        ":is_aarch64": ["-DENABLE_ANNC"],
++        "//conditions:default": [],
++    }),
+     visibility = ["//visibility:public"],
+     deps = [
+         ":backend_config_proto_cc",
+@@ -922,7 +935,11 @@ cc_library(
+         "cpu_runtime.h",
+         "xfeed_manager.h",
+     ],
+-    copts = runtime_copts(),
++    copts = runtime_copts() + select({
++        ":aarch64_and_annc_disabled": [],
++        ":is_aarch64": ["-DENABLE_ANNC"],
++        "//conditions:default": [],
++    }),
+     visibility = ["//visibility:public"],
+     deps = [
+         "//xla:executable_run_options",
+@@ -1355,6 +1372,11 @@ cc_library(
+     srcs = ["cpu_instruction_fusion.cc"],
+     hdrs = ["cpu_instruction_fusion.h"],
+     visibility = ["//visibility:public"],
++    copts = select({
++        ":aarch64_and_annc_disabled": [],
++        ":is_aarch64": ["-DENABLE_ANNC"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         ":ir_emission_utils",
+         "//xla/hlo/ir:hlo",
+
