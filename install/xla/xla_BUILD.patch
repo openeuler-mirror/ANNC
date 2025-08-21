@@ -1,7 +1,7 @@
 diff --git a/xla/BUILD b/xla/BUILD
 index 67e522fa..1825ebf1 100644
---- a/third_party/xla/xla/BUILD
-+++ b/third_party/xla/xla/BUILD
+--- a/xla/BUILD
++++ b/xla/BUILD
 @@ -1052,6 +1052,18 @@ xla_cc_test(
          ],
  )
