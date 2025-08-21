@@ -22,3 +22,5 @@ patch -p1 < $PATH_OF_PATCHES/cpu_runtime.cc.patch
 patch -p1 < $PATH_OF_PATCHES/ir_emitter.h.patch
 patch -p1 < $PATH_OF_PATCHES/ir_emitter.cc.patch
 patch -p1 < $PATH_OF_PATCHES/cpu_instruction_fusion.h.patch
+patch -p1 < $PATH_OF_PATCHES/cpu_BUILD.patch
+patch -p1 < $PATH_OF_PATCHES/xla_BUILD.patch
