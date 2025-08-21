@@ -1,9 +1,9 @@
 diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
-index d1e57621..8dba4d0b 100644
+index 811f873b..d12d2367 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
-@@ -242,6 +242,10 @@ limitations under the License.
- #ifdef __aarch64__
+@@ -241,6 +241,10 @@ limitations under the License.
+ #ifdef ENABLE_ANNC
  #include <annc/kdnn_rewriter.h>
  #include <annc/annc_flags.h>
 +#include <xnnpack_ops_rewriter.h>
@@ -11,13 +11,13 @@ index d1e57621..8dba4d0b 100644
 +#include <bisheng-cpu/concat_partition.h>
 +#include <bisheng-cpu/reduce_combine.h>
  #endif
- #endif
  
-@@ -709,6 +713,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+ namespace {
+@@ -705,6 +709,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
    pipeline.AddPass<BatchDotSimplification>();
    pipeline.AddPass<DotDecomposer>();
  
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +  // Rewrite to custom calls with XNNPACK targets.
 +  bool enable_xnnpack =
 +      xla::GetDebugOptionsFromFlags().xla_cpu_enable_xnnpack();
@@ -28,10 +28,10 @@ index d1e57621..8dba4d0b 100644
    // Rewrite to custom calls with target as oneDNN library calls.
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    // AOT compiled code runs in single thread.
-@@ -869,6 +881,13 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+@@ -865,6 +877,13 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+ 
  
  #ifdef ENABLE_ANNC
- #ifdef __aarch64__
 +  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
 +    pipeline.AddPass<ConcatPartition>();
 +    pipeline.AddPass<EmbeddingSimplify>();
@@ -42,11 +42,11 @@ index d1e57621..8dba4d0b 100644
    auto& flags = annc::get_annc_flags();
    if (flags.is_enabled("annc-pass")) {
      VLOG(1) << "#### Run KDnnFusion Pass" ;
-@@ -909,7 +928,14 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+@@ -904,7 +923,14 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
    pipeline.AddPass<ReshapeDecomposer>();
  
    // Add a fusion pass now that layout assignment is done.
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL)
 +    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/false);
 +  else
@@ -57,4 +57,3 @@ index d1e57621..8dba4d0b 100644
  
    // The LayoutAssignment pass may leave behind kCopy instructions which are
    // duplicate or NOPs, so remove them with algebraic simplification and CSE.
-
