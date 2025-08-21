@@ -1,12 +1,12 @@
 diff --git a/xla/service/cpu/ir_emitter.cc b/xla/service/cpu/ir_emitter.cc
-index 7013a45f..767eacec 100644
+index 7013a45f..0fe18cf6 100644
 --- a/xla/service/cpu/ir_emitter.cc
 +++ b/xla/service/cpu/ir_emitter.cc
 @@ -63,6 +63,10 @@ limitations under the License.
  #include "xla/service/cpu/ir_emission_utils.h"
  #include "xla/service/cpu/ir_function.h"
  #include "xla/service/cpu/parallel_loop_emitter.h"
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +#include <xnnpack_ops.h>
 +#include <xnnpack_ops_rewriter.h>
 +#endif
@@ -17,7 +17,7 @@ index 7013a45f..767eacec 100644
  }
  #endif  // INTEL_MKL && ENABLE_ONEDNN_V3
  
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +Status IrEmitter::HandleXnnPackSoftMax(HloInstruction* hlo) {
 +  const HloInstruction* input = hlo->operand(0);
 +  Shape shape = input->shape();
@@ -59,7 +59,7 @@ index 7013a45f..767eacec 100644
    if (custom_call->custom_call_target() == "TopK") {
      return HandleTopK(custom_call);
    }
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +  if (custom_call->custom_call_target() == kCustomCallXnnPackSoftMax) {
 +    return HandleXnnPackSoftMax(custom_call);
 +  }
@@ -67,4 +67,3 @@ index 7013a45f..767eacec 100644
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    if (custom_call->custom_call_target() == "__onednn$matmul") {
      return HandleOneDnnMatMul(custom_call);
-
