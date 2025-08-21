@@ -1,16 +1,15 @@
 diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
-index 84879eaf..cbb0d2ee 100644
+index 84879eaf..0617c897 100644
 --- a/xla/service/cpu/cpu_runtime.cc
 +++ b/xla/service/cpu/cpu_runtime.cc
 @@ -149,6 +149,10 @@ extern const char* const kPartitionIdSymbolName =
  extern const char* const kReplicaIdSymbolName = "__xla_cpu_runtime_ReplicaId";
  extern const char* const kOneDnnMatMulSymbolName =
      "__xla_cpu_runtime_OneDnnMatMul";
-+#if defined(ENABLE_ANNC) && defined(__aarch64__)
++#ifdef ENABLE_ANNC
 +extern const char* const kXnnPackSoftMaxNDSymbolName =
 +    "__xla_cpu_runtime_XnnPackSoftMaxND";
 +#endif
  
  namespace {
  
-
