@@ -3,7 +3,7 @@ workspace(name = "aicompiler")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//tools:version_check.bzl", "check_bazel_version_at_least")
 
-check_bazel_version_at_least("5.3.0")
+check_bazel_version_at_least("5.1.1")
 
 load("//third_party:repo.bzl", "load_openblas")
 
