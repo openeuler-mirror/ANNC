@@ -17,36 +17,46 @@ limitations under the License.
 
 To dynamically map a set of input dimensions to a symbol for the kernel selector:
 
-# For GEMM
+# Environment variable
 
-Set the `GEMM_MAP_FILE` environment variable to point to a text file. This file must contains lines which look like the following:
-
-```
-(6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM
-```
-
-An example file (`gemm_map.txt`) is provided in the current directory.
-
-This means that when m,n,k (in this order) are 6658,8,8 then the selector should use the GEMM implemented by the symbol (6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM.
-
-Be mindful of following the exact pattern. This is space-sensitive so will not work if spaces are added inside the tuple, for example.
-
-# For GEMV.
-
-Same as above, but set the `GEMV_MAP_FILE` environment variable. Its content should look like:
+Set the `KERNEL_MAP_FILE` environment variable to point to a text file. This file must contain lines which look like the following:
 
 ```
-(m,n) -> function_name
+[gemm](6656,8,8) -> __xla_cpu_runtime_KernelSelectorGEMM
 ```
 
-Where `m`, `n`, are integers for the input sizes.
+This means that when M,N,K (in this order) are 6658,8,8 then the selector should use the GEMM implemented by the symbol `__xla_cpu_runtime_KernelSelectorGEMM`.
 
-# For BATCH_MATMUL:
-
-Same as above, but set the `BATCHMATMUL_MAP_FILE` environment variable. Its content should look like:
+# Possible options:
 
 ```
-(p,m,n,k) -> function_name
+[gemv](M,N) -> symbol
+[gemm](M,N,K) -> symbol
+[batch3d](P,M,N,K) -> symbol
+[batch4d](P,Q,M,N,K) -> symbol
+[argmax](M,N) -> symbol
 ```
 
-Where `p`, `m`, `n`, `k` are integers for the input sizes.
+Where `P`,`Q`,`M`,`N`,`K` are replaced by integer values.
+
+# Special operators:
+
+- Use `*` as a wildcard for *any* size. The following means that the function `f` will be used to run a gemm whenever M=32 and K=8, while N can be any possible value.
+
+```
+[gemm](32,*,8) -> f
+```
+
+
+- Use `:` to define ranges. The following means that the function `g` will be used to run a gemv whenever M is between 23 and 42 (inclusive), and N is equal to 8.
+
+```
+[gemv](23:42,8) -> g
+```
+
+- Both special operators can be combined. The following calls the function `h` whenever M is greater than 256, N is equal to 100, and K is any value:
+```
+[gemm](256:*,100,*) -> h
+```
+
+Whitespaces are ignored by the kernel selector. An example file (`example_kernel_map.txt`) is provided in the current directory.

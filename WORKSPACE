@@ -23,6 +23,7 @@ http_archive(
         "//install/xla:ir_emitter.h.patch",
         "//install/xla:simple_orc_jit.cc.patch",
         "//install/xla:xla.proto.patch",
+        "//install/xla:kernel_selector_xla.patch",
     ],
     sha256 = "90e72fa3558a69cf2562e4600e62c478d22c3986c642d7dcdc7ef0841ded52c5",
     strip_prefix = "xla-40008cb2c85749ae436be61c40d3279cb24705c7",

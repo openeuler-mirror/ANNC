@@ -12,9 +12,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #ifndef XLA_SERVICE_CPU_KERNEL_SELECTOR_H_
 #define XLA_SERVICE_CPU_KERNEL_SELECTOR_H_
+#include <cstdint>
 
 namespace xla {
 namespace cpu {
@@ -91,37 +91,96 @@ extern void cblas_sgemv_mlir(const enum CBLAS_ORDER Order,
 
 }  // extern "C"
 
-void __xla_cpu_runtime_KernelSelectorGEMM(bool trA, bool trB, const float* A,
-                                          const float* B, int m, int n, int k,
-                                          float alpha, float beta, float* C);
+void __xla_cpu_runtime_KernelSelectorGEMMSequential(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int M, int N, int K, float alpha, float beta, float* C);
 
-void __xla_cpu_runtime_KernelSelectorBatch3D(bool trA, bool trB, const float* A,
-                                             const float* B, int P, int M,
-                                             int N, int K, float* C);
+void __xla_cpu_runtime_KernelSelectorGEMMParallel(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int m, int n, int k, float alpha, float beta, float* C);
 
-void __xla_cpu_runtime_KernelSelectorGEMV(bool trA, const float* A,
-                                          const float* X, int M, int N,
-                                          float alpha, float beta, float* Y);
+void __xla_cpu_runtime_KernelSelectorBatch3DSequential(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int P, int M, int N, int K, float* C);
 
-void __xla_cpu_runtime_KernelSelectorGEMMMLIR(bool trA, bool trB,
+void __xla_cpu_runtime_KernelSelectorBatch3DParallel(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int P, int M, int N, int K, float* C);
+
+void __xla_cpu_runtime_KernelSelectorBatch4DSequential(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int Q, int P, int M, int N, int K, float* C);
+
+void __xla_cpu_runtime_KernelSelectorBatch4DParallel(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int Q, int P, int M, int N, int K, float* C);
+
+void __xla_cpu_runtime_KernelSelectorGEMV(const void* run_options_ptr, bool trA,
+                                          const float* A, const float* X, int M,
+                                          int N, float alpha, float beta,
+                                          float* Y);
+
+void __xla_cpu_runtime_KernelSelectorGEMMMLIR(const void* run_options_ptr,
+                                              bool trA, bool trB,
                                               const float* A, const float* B,
                                               int m, int n, int k, float alpha,
                                               float beta, float* C);
 
-void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(bool trA, bool trB,
+void __xla_cpu_runtime_KernelSelectorBatch3DMLIR(const void* run_options_ptr,
+                                                 bool trA, bool trB,
                                                  const float* A, const float* B,
                                                  int P, int M, int N, int K,
                                                  float* C);
 
-void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(bool trA, bool trB,
+void __xla_cpu_runtime_KernelSelectorBatch4DMLIR(const void* run_options_ptr,
+                                                 bool trA, bool trB,
                                                  const float* A, const float* B,
                                                  int Q, int P, int M, int N,
                                                  int K, float* C);
 
-void __xla_cpu_runtime_KernelSelectorGEMVMLIR(bool trA, const float* A,
+void __xla_cpu_runtime_KernelSelectorGEMVMLIR(const void* run_options_ptr,
+                                              bool trA, const float* A,
                                               const float* X, int M, int N,
                                               float alpha, float beta,
                                               float* Y);
+
+void __xla_cpu_runtime_ArgMax3DParallel(const void* run_options_ptr, int B,
+                                        int M, int N, float* invals,
+                                        int32_t* inidxs, float init_value,
+                                        int32_t init_idx, float* outvals,
+                                        int32_t* outidxs);
+void __xla_cpu_runtime_ArgMax3DSequential(const void* run_options_ptr, int B,
+                                          int M, int N, float* invals,
+                                          int32_t* inidxs, float init_value,
+                                          int32_t init_idx, float* outvals,
+                                          int32_t* outidxs);
+
+void __xla_cpu_runtime_ArgMax3DEmpty(const void* run_options_ptr, int B, int M,
+                                     int N, float* invals, int32_t* inidxs,
+                                     float init_value, int32_t init_idx,
+                                     float* outvals, int32_t* outidxs);
+
+void __xla_cpu_runtime_KernelSelectorGEMVEmpty(const void* run_options_ptr,
+                                               bool trA, const float* A,
+                                               const float* X, int M, int N,
+                                               float alpha, float beta,
+                                               float* Y);
+
+void __xla_cpu_runtime_KernelSelectorGEMMEmpty(const void* run_options_ptr,
+                                               bool trA, bool trB,
+                                               const float* A, const float* B,
+                                               int m, int n, int k, float alpha,
+                                               float beta, float* C);
+
+void __xla_cpu_runtime_KernelSelectorBatch3DEmpty(const void* run_options_ptr,
+                                                  bool trA, bool trB,
+                                                  const float* A,
+                                                  const float* B, int P, int M,
+                                                  int N, int K, float* C);
+
+void __xla_cpu_runtime_KernelSelectorBatch4DEmpty(
+    const void* run_options_ptr, bool trA, bool trB, const float* A,
+    const float* B, int Q, int P, int M, int N, int K, float* C);
 
 }  // namespace cpu
 }  // namespace xla
