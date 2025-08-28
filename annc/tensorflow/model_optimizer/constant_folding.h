@@ -14,12 +14,6 @@
 #include "tensorflow/core/protobuf/saved_model.pb.h"
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/util/tensor_bundle/tensor_bundle.h"
-#include "gflags/gflags.h"
-
-DECLARE_int32(annc_cf_matmul_batchnorm);
-DECLARE_bool(annc_cf_relu);
-DECLARE_string(annc_cf_dump);
-DECLARE_bool(annc_cf_dump_text);
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;

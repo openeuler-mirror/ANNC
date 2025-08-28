@@ -20,7 +20,6 @@ cc_library(
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/util/tensor_bundle",
-        "//tensorflow:gflags",
     ],
 )
 
@@ -36,6 +35,5 @@ cc_binary(
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/util/tensor_bundle",
-        "//tensorflow:gflags",
     ],
 )
