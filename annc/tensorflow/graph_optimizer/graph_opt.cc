@@ -50,7 +50,7 @@ void GraphOptimizer::optimize() {
 }
 
 std::string get_node_name(const std::string& name) {
-  size_t colon_pos = name.find(':');
+  size_t colon_pos = name.find_last_of(':');
   std::string node_name = name;
   if (colon_pos != std::string::npos) {
     node_name = name.substr(0, colon_pos);
@@ -134,14 +134,30 @@ class KPFusedSparseDynamicStitchRewriter : public PatternRewriter {
     CHECK_NODE_OK(node->op() == "ParallelDynamicStitch" &&
                   node->input_size() % 2 == 0)
     int num_inputs = node->input_size();
+    int num_partitions = num_inputs / 2;
     // left branch
     const NodeDef* partition = get_node(node->input(0));
     CHECK_NODE_OK(partition->op() == "DynamicPartition" &&
                   partition->input_size() == 2)
     const NodeDef* range = get_node(partition->input(0));
     CHECK_NODE_OK(range->op() == "Range" && range->input_size() == 3)
+    // Range start=0, delta=1
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(range->input(0)), {0}))
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(range->input(2)), {1}))
     const NodeDef* size = get_node(range->input(1));
     CHECK_NODE_OK(IsSize(*size) && size->input_size() == 1)
+    const NodeDef* cast = get_node(partition->input(1));
+    CHECK_NODE_OK(IsCast(*cast) && cast->input_size() == 1)
+    const NodeDef* floor_mod = get_node(cast->input(0));
+    CHECK_NODE_OK(floor_mod->op() == "FloorMod" && floor_mod->input_size() == 2)
+    CHECK_NODE_OK(check_const_value<int64_t>(
+        get_mutable_node(floor_mod->input(1)), {num_partitions}))
+
+    CHECK_NODE_OK(check_int_attr(node, "N", {num_partitions}))
+    CHECK_NODE_OK(check_int_attr(partition, "num_partitions", {num_partitions}))
+
     auto nodes = graph->mutable_node();
     NodeDef* fused_node = nodes->Add();
     fused_node->set_name(node->name() + fusion_appendix);
@@ -149,14 +165,25 @@ class KPFusedSparseDynamicStitchRewriter : public PatternRewriter {
     fused_node->set_device(node->device());
     fused_node->add_input(size->input(0));
     // right branch
-    for (int i = num_inputs / 2; i < num_inputs; ++i) {
+    for (int i = num_partitions; i < num_inputs; ++i) {
       const NodeDef* gather = get_node(node->input(i));
       CHECK_NODE_OK(gather->op() == "GatherV2" && gather->input_size() == 3)
-      const NodeDef* identity = get_node(gather->input(0));
-      CHECK_NODE_OK(identity->op() == "Identity" && identity->input_size() == 1)
+      // Gather axis=0
+      CHECK_NODE_OK(
+          check_const_value<int>(get_mutable_node(gather->input(2)), {0}))
+      const NodeDef* partition_1 = get_node(gather->input(1));
+      CHECK_NODE_OK(partition_1->op() == "DynamicPartition" &&
+                    partition_1->input_size() == 2)
+      CHECK_NODE_OK(
+          check_int_attr(partition_1, "num_partitions", {num_partitions}))
+      const NodeDef* floor_div = get_node(partition_1->input(0));
+      CHECK_NODE_OK(floor_div->op() == "FloorDiv" &&
+                    floor_div->input_size() == 2)
+      CHECK_NODE_OK(check_const_value<int64_t>(
+          get_mutable_node(floor_div->input(1)), {num_partitions}))
       fused_node->add_input(gather->input(0));
     }
-    (*fused_node->mutable_attr())["N"].set_i(num_inputs / 2);
+    (*fused_node->mutable_attr())["N"].set_i(num_partitions);
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
@@ -181,17 +208,26 @@ class KPFusedSparseSegmentReduceRewriter : public PatternRewriter {
     const NodeDef* ss_reduce = get_node(shape->input(0));
     CHECK_NODE_OK(ss_reduce->input_size() == 3)
     AttrValue combiner;
-    if (ss_reduce->op() == "SparseSegmentMean") {
+    if (ss_reduce->op() == "SparseSegmentMean")
       combiner.set_i(1);
-    } else if (ss_reduce->op() == "SparseSegmentSum") {
+    else if (ss_reduce->op() == "SparseSegmentSum")
       combiner.set_i(0);
-    } else {
+    else
       return false;
-    }
     const NodeDef* cast = get_node(ss_reduce->input(2));
     CHECK_NODE_OK(IsCast(*cast) && cast->input_size() == 1)
     const NodeDef* strided_slice = get_node(cast->input(0));
-    CHECK_NODE_OK(IsStridedSlice(*strided_slice))
+    CHECK_NODE_OK(IsStridedSlice(*strided_slice) &&
+                  strided_slice->input_size() == 4)
+
+    // check fusion conditions
+    CHECK_NODE_OK(
+        check_const_shape(get_mutable_node(strided_slice->input(1)), {2}))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "shrink_axis_mask", 2))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "begin_mask", 1))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "end_mask", 1))
+    CHECK_NODE_OK(check_const_shape(get_mutable_node(node->input(1)), {1}))
+    CHECK_NODE_OK(check_int_attr(node, "shrink_axis_mask", 1))
 
     auto nodes = graph->mutable_node();
     NodeDef* fused_node = nodes->Add();
@@ -202,8 +238,7 @@ class KPFusedSparseSegmentReduceRewriter : public PatternRewriter {
     fused_node->add_input(ss_reduce->input(1));
     fused_node->add_input(strided_slice->input(0));
     fused_node->add_input(strided_slice->input(1));
-    fused_node->add_input(strided_slice->input(2));
-    fused_node->add_input(strided_slice->input(3));
+    fused_node->add_input(node->input(1));
     AddNodeAttr("combiner", combiner, fused_node);
 
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
@@ -257,6 +292,12 @@ class KPFusedSparseSegmentReduceNonzeroRewriter : public PatternRewriter {
     const NodeDef* cast_2 = get_user(shape, 0, "Cast");  // output: 0
     CHECK_NODE_OK(cast_2 != nullptr)
 
+    CHECK_NODE_OK(
+        check_const_shape(get_mutable_node(strided_slice->input(1)), {2}))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "shrink_axis_mask", 2))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "begin_mask", 1))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "end_mask", 1))
+
     auto nodes = graph->mutable_node();
     NodeDef* fused_node = nodes->Add();
     fused_node->set_name(node->name() + fusion_appendix);
@@ -266,8 +307,6 @@ class KPFusedSparseSegmentReduceNonzeroRewriter : public PatternRewriter {
     fused_node->add_input(ss_reduce->input(1));
     fused_node->add_input(strided_slice->input(0));
     fused_node->add_input(strided_slice->input(1));
-    fused_node->add_input(strided_slice->input(2));
-    fused_node->add_input(strided_slice->input(3));
     AddNodeAttr("combiner", combiner, fused_node);
 
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
@@ -295,12 +334,17 @@ class KPFusedEmbeddingPaddingRewriter : public PatternRewriter {
     CHECK_NODE_OK(user != nullptr)
     const NodeDef* concat = get_node(node->input(0));
     CHECK_NODE_OK(IsConcat(*concat) && concat->input_size() == 3)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(concat->input(2)), {0}))
     const NodeDef* fill = get_node(concat->input(1));
     CHECK_NODE_OK(IsFill(*fill) && fill->input_size() == 2)
-    const NodeDef* pack = get_node(fill->input(0));
-    CHECK_NODE_OK(IsPack(*pack) && pack->input_size() == 2)
-    const NodeDef* sub = get_node(pack->input(0));
-    CHECK_NODE_OK(IsSub(*sub) && sub->input_size() == 2)
+    NodeDef* pack = get_operand(fill, "Pack");
+    CHECK_NODE_OK(pack != nullptr && IsPack(*pack) && pack->input_size() == 2)
+    NodeDef* fill_const = get_operand(fill, "Const");
+    CHECK_NODE_OK(fill_const != nullptr &&
+                  check_const_value<int>(fill_const, {0}))
+    NodeDef* sub = get_operand(pack, "Sub");
+    CHECK_NODE_OK(sub != nullptr && IsSub(*sub) && sub->input_size() == 2)
     const NodeDef* strided_slice = get_node(sub->input(0));
     CHECK_NODE_OK(IsStridedSlice(*strided_slice) &&
                   strided_slice->input_size() == 4)
@@ -316,6 +360,15 @@ class KPFusedEmbeddingPaddingRewriter : public PatternRewriter {
     fused_node->add_input(concat->input(0));
     fused_node->add_input(sub->input(1));
     fused_node->add_input(node->input(1));
+    const NodeDef* pack_left = get_node(pack->input(0));
+    const NodeDef* pack_right = get_node(pack->input(1));
+    if (IsConstant(*pack_left) || IsHostConstant(*pack_left)) {
+      fused_node->add_input(pack->input(0));
+    } else if (IsConstant(*pack_right) || IsHostConstant(*pack_right)) {
+      fused_node->add_input(pack->input(1));
+    } else {
+      return false;
+    }
 
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
@@ -337,6 +390,10 @@ class KPFusedEmbeddingPaddingFastRewriter : public PatternRewriter {
     graph_ = graph;
     indexes_ = &node_indexes;
     CHECK_NODE_OK(IsStridedSlice(*node) && node->input_size() == 4)
+    CHECK_NODE_OK(check_const_shape(get_mutable_node(node->input(1)), {0}))
+    CHECK_NODE_OK(check_const_shape(get_mutable_node(node->input(2)), {1}))
+    CHECK_NODE_OK(check_const_shape(get_mutable_node(node->input(3)), {1}))
+    CHECK_NODE_OK(check_int_attr(node, "shrink_axis_mask", 1))
     const NodeDef* shape = get_node(node->input(0));
     CHECK_NODE_OK(IsShape(*shape) && shape->input_size() == 1)
     const NodeDef* reshape = get_node(shape->input(0));
@@ -389,24 +446,42 @@ class KPFusedSparseSelectRewriter : public PatternRewriter {
     CHECK_NODE_OK(IsSelect(*select_0) && select_0->input_size() == 3)
     const NodeDef* select_1 = get_node(select_0->input(2));
     CHECK_NODE_OK(IsSelect(*select_1) && select_1->input_size() == 3)
+    const NodeDef* fill = get_node(select_1->input(1));
+    CHECK_NODE_OK(IsFill(*fill) && fill->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<float>(get_mutable_node(fill->input(1)), {1.0f}))
     const NodeDef* cast = get_node(select_1->input(2));
     CHECK_NODE_OK(IsCast(*cast) && cast->input_size() == 1)
+    const NodeDef* equal = get_node(select_1->input(0));
+    CHECK_NODE_OK(IsEqual(*equal) && equal->input_size() == 2)
+    NodeDef* reshape = get_operand(equal, "Reshape");
+    CHECK_NODE_OK(reshape != nullptr && IsReshape(*reshape))
     const NodeDef* greater = get_node(cast->input(0));
     CHECK_NODE_OK(IsGreater(*greater) && greater->input_size() == 2)
-    const NodeDef* reshape = get_node(greater->input(0));
-    CHECK_NODE_OK(IsReshape(*reshape) && reshape->input_size() == 2)
-    const NodeDef* equal = get_node(select_0->input(0));
-    CHECK_NODE_OK(IsEqual(*equal) && equal->input_size() == 2)
-    NodeDef* reshape_1 = get_operand(equal, "Reshape");
+    const NodeDef* reshape_4 = get_node(greater->input(0));
+    CHECK_NODE_OK(IsReshape(*reshape_4) && reshape_4->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(reshape_4->input(1)), {-1, 1}))
+    const NodeDef* equal_1 = get_node(select_0->input(0));
+    CHECK_NODE_OK(IsEqual(*equal_1) && equal_1->input_size() == 2)
+    NodeDef* reshape_1 = get_operand(equal_1, "Reshape");
     CHECK_NODE_OK(reshape_1 != nullptr && IsReshape(*reshape_1))
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(reshape_1->input(1)), {-1, 1}))
 
     // right branch
     const NodeDef* select_2 = get_node(node->input(1));
     CHECK_NODE_OK(IsSelect(*select_2) && select_2->input_size() == 3)
-    const NodeDef* equal_1 = get_node(select_2->input(0));
-    CHECK_NODE_OK(IsEqual(*equal_1) && equal_1->input_size() == 2)
-    const NodeDef* reshape_2 = get_operand(equal_1, "Reshape");
+    const NodeDef* equal_2 = get_node(select_2->input(0));
+    CHECK_NODE_OK(IsEqual(*equal_2) && equal_2->input_size() == 2)
+    const NodeDef* fill_1 = get_node(select_2->input(2));
+    CHECK_NODE_OK(IsFill(*fill_1) && fill_1->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<float>(get_mutable_node(fill_1->input(1)), {1.0f}))
+    const NodeDef* reshape_2 = get_operand(equal_2, "Reshape");
     CHECK_NODE_OK(reshape_2 != nullptr && IsReshape(*reshape_2))
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(reshape_2->input(1)), {-1, 1}))
 
     auto nodes = graph->mutable_node();
     NodeDef* fused_node = nodes->Add();
@@ -416,6 +491,19 @@ class KPFusedSparseSelectRewriter : public PatternRewriter {
     fused_node->add_input(reshape->input(0));
     fused_node->add_input(reshape_1->input(0));
     fused_node->add_input(reshape_2->input(0));
+    std::vector<const NodeDef*> const_inputs = {equal, equal_1, equal_2,
+                                                greater};
+    for (const NodeDef* const_node : const_inputs) {
+      const NodeDef* left = get_node(const_node->input(0));
+      const NodeDef* right = get_node(const_node->input(1));
+      if (IsConstant(*left) || IsHostConstant(*left)) {
+        fused_node->add_input(const_node->input(0));
+      } else if (IsConstant(*right) || IsHostConstant(*right)) {
+        fused_node->add_input(const_node->input(1));
+      } else {
+        return false;
+      }
+    }
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
@@ -437,15 +525,21 @@ class KPFusedGatherRewriter : public PatternRewriter {
     graph_ = graph;
     indexes_ = &node_indexes;
     CHECK_NODE_OK(node->op() == "GatherV2" && node->input_size() == 3)
+    CHECK_NODE_OK(check_const_value<int>(get_mutable_node(node->input(2)), {0}))
     const NodeDef* gather = get_node(node->input(0));
     CHECK_NODE_OK(gather->op() == "GatherV2" &&
                   gather->input_size() == 3)           // input:0
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(gather->input(2)), {0}))
     const NodeDef* unique = get_node(node->input(1));  // output:1
     CHECK_NODE_OK(unique->op() == "Unique" && unique->input_size() == 1)
     const NodeDef* unique_1 = get_node(unique->input(0));
     CHECK_NODE_OK(unique_1->op() == "Unique" && unique_1->input_size() == 1)
     const NodeDef* strided_slice = get_node(unique_1->input(0));
     CHECK_NODE_OK(IsStridedSlice(*strided_slice))  // input:1 2
+    CHECK_NODE_OK(check_int_attr(strided_slice, "shrink_axis_mask", 2))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "begin_mask", 1))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "end_mask", 1))
 
     auto nodes = graph->mutable_node();
     NodeDef* fused_node = nodes->Add();
@@ -478,11 +572,31 @@ class KPFusedSparseReshapeRewriter : public PatternRewriter {
     CHECK_NODE_OK(node->op() == "SparseReshape" && node->input_size() == 3)
     const NodeDef* concat = get_node(node->input(0));
     CHECK_NODE_OK(IsConcat(*concat) && concat->input_size() == 3)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(concat->input(2)), {-1}))
     const NodeDef* reshape = get_node(concat->input(1));
     CHECK_NODE_OK(IsReshape(*reshape) && reshape->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(reshape->input(1)), {-1, 1}))
     const NodeDef* strided_slice = get_node(reshape->input(0));
     CHECK_NODE_OK(IsStridedSlice(*strided_slice) &&
                   strided_slice->input_size() == 4)
+    CHECK_NODE_OK(check_int_attr(strided_slice, "shrink_axis_mask", 2))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "begin_mask", 1))
+    CHECK_NODE_OK(check_int_attr(strided_slice, "end_mask", 1))
+    const NodeDef* cast_1 = get_node(concat->input(0));
+    CHECK_NODE_OK(IsCast(*cast_1) && cast_1->input_size() == 1)
+    const NodeDef* reshape_1 = get_node(cast_1->input(0));
+    CHECK_NODE_OK(IsReshape(*reshape_1) && reshape_1->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(reshape_1->input(1)), {-1, 1}))
+    const NodeDef* range = get_node(reshape_1->input(0));
+    CHECK_NODE_OK(range->op() == "Range" && range->input_size() == 3)
+    // Range start=0, delta=1
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(range->input(0)), {0}))
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(range->input(2)), {1}))
     const NodeDef* cast = get_node(node->input(1));
     CHECK_NODE_OK(IsCast(*cast) && cast->input_size() == 1)
     const NodeDef* pack = get_node(cast->input(0));
@@ -490,6 +604,13 @@ class KPFusedSparseReshapeRewriter : public PatternRewriter {
     const NodeDef* strided_slice_1 = get_node(pack->input(0));
     CHECK_NODE_OK(IsStridedSlice(*strided_slice_1) &&
                   strided_slice_1->input_size() == 4)
+    CHECK_NODE_OK(check_const_value<int>(
+        get_mutable_node(strided_slice_1->input(1)), {0}))
+    CHECK_NODE_OK(check_const_value<int>(
+        get_mutable_node(strided_slice_1->input(2)), {1}))
+    CHECK_NODE_OK(check_const_value<int>(
+        get_mutable_node(strided_slice_1->input(3)), {1}))
+    CHECK_NODE_OK(check_int_attr(strided_slice_1, "shrink_axis_mask", 1))
     const NodeDef* shape = get_node(strided_slice_1->input(0));
     CHECK_NODE_OK(IsShape(*shape) && shape->input_size() == 1)
 
@@ -501,6 +622,7 @@ class KPFusedSparseReshapeRewriter : public PatternRewriter {
     fused_node->add_input(shape->input(0));
     fused_node->add_input(strided_slice->input(1));
     fused_node->add_input(node->input(2));
+    fused_node->add_input(pack->input(1));
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
@@ -521,14 +643,25 @@ class KPFusedEmbeddingActionIdGatherRewriter : public PatternRewriter {
     graph_ = graph;
     indexes_ = &node_indexes;
     CHECK_NODE_OK(IsConcat(*node) && node->input_size() == 3)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(node->input(2)), {-1}))
     const NodeDef* reshape = get_node(node->input(0));
     CHECK_NODE_OK(IsReshape(*reshape) && reshape->input_size() == 2)
     const NodeDef* gather = get_node(reshape->input(0));
+    const NodeDef* pack_1 = get_node(reshape->input(1));
+    CHECK_NODE_OK(IsPack(*pack_1) && pack_1->input_size() == 2)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(pack_1->input(1)), {-1}))
     CHECK_NODE_OK(gather->op() == "GatherV2" && gather->input_size() == 3)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(gather->input(2)), {0}))
     const NodeDef* gather_1 = get_node(gather->input(0));
     CHECK_NODE_OK(gather_1->op() == "GatherV2" && gather_1->input_size() == 3)
+    CHECK_NODE_OK(
+        check_const_value<int>(get_mutable_node(gather_1->input(2)), {0}))
     const NodeDef* fill = get_node(node->input(1));
     CHECK_NODE_OK(IsFill(*fill) && fill->input_size() == 2)
+    CHECK_NODE_OK(check_const_value<int>(get_mutable_node(fill->input(1)), {0}))
     const NodeDef* pack = get_node(fill->input(0));
     CHECK_NODE_OK(IsPack(*pack) && pack->input_size() == 2)
 
@@ -541,6 +674,7 @@ class KPFusedEmbeddingActionIdGatherRewriter : public PatternRewriter {
     fused_node->add_input(gather_1->input(0));
     fused_node->add_input(gather->input(1));
     fused_node->add_input(pack->input(0));
+    fused_node->add_input(pack->input(1));
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
