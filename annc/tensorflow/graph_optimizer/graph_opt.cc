@@ -421,7 +421,15 @@ class KPFusedEmbeddingPaddingFastRewriter : public PatternRewriter {
     fused_node->add_input(concat->input(0));
     fused_node->add_input(sub->input(1));
     fused_node->add_input(reshape->input(1));
-
+    const NodeDef* pack_left = get_node(pack->input(0));
+    const NodeDef* pack_right = get_node(pack->input(1));
+    if (IsConstant(*pack_left) || IsHostConstant(*pack_left)) {
+      fused_node->add_input(pack->input(0));
+    } else if (IsConstant(*pack_right) || IsHostConstant(*pack_right)) {
+      fused_node->add_input(pack->input(1));
+    } else {
+      return false;
+    }
     nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
 
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
@@ -554,7 +562,7 @@ class KPFusedGatherRewriter : public PatternRewriter {
     VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
             << fused_node->name();
     replace_all_users_with(unique_1, 0, fused_node, 0, graph);
-    replace_all_users_with(unique, 0, fused_node, 1, graph);
+    replace_all_users_with(unique_1, 1, fused_node, 1, graph);
     replace_all_users_with(node, 0, fused_node, 2, graph);
     return true;
   }
