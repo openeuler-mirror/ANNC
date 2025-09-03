@@ -1,5 +1,4 @@
 exports_files(["libXNNPACK.so"])
-exports_files(["libopenblas.so"])
 
 cc_binary(
     name = "libblas_mlir.so",

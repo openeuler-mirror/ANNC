@@ -66,13 +66,6 @@ cc_import(
 )
 
 cc_import(
-    name = "libopenblas",
-    visibility = ["//visibility:public"],
-    shared_library = "//annc/service/cpu/xla/libs:libopenblas.so",
-    system_provided = 0
-)
-
-cc_import(
     name = "libmlir",
     visibility = ["//visibility:public"],
     shared_library = "//annc/service/cpu/xla/libs:libblas_mlir.so",

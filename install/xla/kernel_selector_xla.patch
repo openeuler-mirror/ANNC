@@ -1,5 +1,5 @@
 diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
-index e519cf05..19ad7168 100644
+index e519cf05..ece02659 100644
 --- a/xla/service/cpu/cpu_compiler.cc
 +++ b/xla/service/cpu/cpu_compiler.cc
 @@ -238,6 +238,14 @@ limitations under the License.
@@ -17,18 +17,7 @@ index e519cf05..19ad7168 100644
  namespace {
  
  // We need to explicitly load all the dialects we will involved in emitting the
-@@ -259,6 +267,10 @@ void LoadMLIRDialects(mlir::MLIRContext& context) {
- xla::cpu::HloXlaRuntimePipelineOptions GetHloXlaRuntimePipelineOptions(
-     llvm::Triple target_triple, llvm::StringRef cpu_name) {
-   xla::cpu::HloXlaRuntimePipelineOptions options;
-+#ifdef ENABLE_ANNC
-+  options.use_kernel_selector =
-+      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
-+#endif
-   options.enable_tiling_and_fusion =
-       xla::GetDebugOptionsFromFlags().xla_cpu_enable_mlir_tiling_and_fusion();
-   if (xla::GetDebugOptionsFromFlags().xla_cpu_enable_custom_matmul_tiling()) {
-@@ -686,6 +698,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+@@ -686,6 +694,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
    pipeline.AddPass<BatchDotSimplification>();
    pipeline.AddPass<DotDecomposer>();
  
@@ -43,11 +32,10 @@ index e519cf05..19ad7168 100644
    // Rewrite to custom calls with target as oneDNN library calls.
  #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
    // AOT compiled code runs in single thread.
-@@ -844,6 +864,16 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+@@ -844,6 +860,15 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
          &layout_constraints);
    }
  
-+
 +#ifdef ENABLE_ANNC
 +  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
 +    pipeline.AddPass<ConcatPartition>();
@@ -60,7 +48,7 @@ index e519cf05..19ad7168 100644
    return pipeline.Run(module).status();
  }
  
-@@ -875,8 +905,24 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+@@ -875,8 +900,24 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
  
    pipeline.AddPass<ReshapeDecomposer>();
  
