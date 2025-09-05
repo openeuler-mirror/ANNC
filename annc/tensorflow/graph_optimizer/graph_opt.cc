@@ -702,9 +702,23 @@ class KPFusedMatMulRewriter : public PatternRewriter {
       std::unordered_map<std::string, int>& node_indexes) override {
     graph_ = graph;
     indexes_ = &node_indexes;
-    CHECK_NODE_OK(IsRelu(*node) && node->input_size() == 1)
-    const NodeDef* add_1 = get_operand(node, "AddV2");
-    CHECK_NODE_OK(add_1 != nullptr);
+
+    CHECK_NODE_OK(IsMul(*node) && node->input_size() == 2)
+    NodeDef* vmul = get_operand(node, "Const");
+    NodeDef* add = get_operand(node, "AddV2");
+    CHECK_NODE_OK(vmul != nullptr && add != nullptr);
+    CHECK_NODE_OK(HasNodeAttr(*vmul, "value"))
+    TensorProto* vmul_tensor =
+        (*vmul->mutable_attr())["value"].mutable_tensor();
+    const float* data = vmul_tensor->mutable_float_val()->data();
+    if (data == nullptr)
+      data = reinterpret_cast<const float*>(vmul_tensor->tensor_content().data());
+    CHECK_NODE_OK(data != nullptr && std::fabs(data[0] - 0.5f) <= 1e-5f)
+    NodeDef* abs = get_operand(add, "Abs");
+    NodeDef* add_1 = get_operand(add, "AddV2");
+    CHECK_NODE_OK(abs != nullptr && add_1 != nullptr);
+    CHECK_NODE_OK(get_mutable_node(abs->input(0)) == add_1)
+
     NodeDef* bias_weight = get_operand(add_1, "Const");
     CHECK_NODE_OK(bias_weight != nullptr);
     CHECK_NODE_OK(check_const_dims(bias_weight, 1));
@@ -721,7 +735,6 @@ class KPFusedMatMulRewriter : public PatternRewriter {
     fused_node->add_input(bias_weight->name());
 
     auto& src_attr = matmul->attr();
-
     CHECK_NODE_OK(!src_attr.at("transpose_a").b());
     CHECK_NODE_OK(!src_attr.at("transpose_b").b());
 
