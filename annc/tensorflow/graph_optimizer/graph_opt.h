@@ -62,6 +62,17 @@ class PatternRewriter {
     return false;
   }
 
+  bool check_const_dims(NodeDef* op, int dim_size) {
+    if (!((IsConstant(*op) || IsHostConstant(*op)) &&
+          HasNodeAttr(*op, "value")))
+      return false;
+
+    TensorProto* tensor = (*op->mutable_attr())["value"].mutable_tensor();
+    const auto& shape = tensor->tensor_shape();
+    if (shape.dim_size() != static_cast<int>(dim_size)) return false;
+    return true;
+  }
+
   bool check_const_shape(NodeDef* op, std::vector<int> dims) {
     if (!((IsConstant(*op) || IsHostConstant(*op)) &&
           HasNodeAttr(*op, "value")))

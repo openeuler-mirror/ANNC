@@ -43,7 +43,8 @@ void load_variables_from_proto_file(const size_t& hash) {
     if (!reader.Lookup(name, &tensor).ok()) {
       continue;
     }
-    g_variable_tensors[name] = tensor;
+    if (g_variable_tensors.find(name) == g_variable_tensors.end())
+      g_variable_tensors[name] = tensor;
   }
 }
 
@@ -152,6 +153,7 @@ size_t compute_vars_hash(const std::vector<const NodeDef*>& vars) {
   for (const NodeDef* var : vars) {
     if (!var->attr().count("_output_shapes")) continue;
     const auto& shape_attr = var->attr().at("_output_shapes");
+    if (shape_attr.list().shape_size() == 0) continue;
     const TensorShapeProto& shape = shape_attr.list().shape(0);
     for (const auto& dim : shape.dim()) {
       hash ^= hasher(dim.size()) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
@@ -328,18 +330,20 @@ class KPFusedMatMulBiasAddBNRewriter : public ConstantFoldingRewritter {
     if (!lhs->attr().count("_output_shapes")) return false;
     std::string lhs_name = matmul->input(0);
     int pos_index = 0;
-    size_t lhs_in_pos = lhs_name.find(':');
+    size_t lhs_in_pos = lhs_name.find_last_of(':');
     if (lhs_in_pos != std::string::npos) {
       pos_index = std::stoi(lhs_name.substr(lhs_in_pos + 1));
     }
-    const TensorShapeProto& lhs_shape =
+    if (lhs->attr().at("_output_shapes").list().shape_size() >= pos_index + 1) {
+      const TensorShapeProto& lhs_shape =
         lhs->attr().at("_output_shapes").list().shape(pos_index);
-    if (lhs_shape.dim_size() > 1) {
-      lhs_dim1 = lhs_shape.dim(1).size();
+      if (lhs_shape.dim_size() > 1) {
+        lhs_dim1 = lhs_shape.dim(1).size();
+      }
     }
     if (tensors[5].dim_size(0) != lhs_dim1) {
-      VLOG(0) << "ERROR: [" << matmul->name() << "]" << tensors[5].dim_size(0)
-              << " != " << lhs_dim1;
+      VLOG(0) << "WARN: [" << matmul->name() << "] " << tensors[5].dim_size(0)
+              << " != " << lhs_dim1 << ". Unknown input shape, disable constant folding.";
       return false;
     }
 

@@ -1,4 +1,5 @@
 #include "graph_opt.h"
+
 #include "gflags/gflags.h"
 
 DECLARE_bool(annc);
@@ -536,7 +537,7 @@ class KPFusedGatherRewriter : public PatternRewriter {
     CHECK_NODE_OK(check_const_value<int>(get_mutable_node(node->input(2)), {0}))
     const NodeDef* gather = get_node(node->input(0));
     CHECK_NODE_OK(gather->op() == "GatherV2" &&
-                  gather->input_size() == 3)           // input:0
+                  gather->input_size() == 3)  // input:0
     CHECK_NODE_OK(
         check_const_value<int>(get_mutable_node(gather->input(2)), {0}))
     const NodeDef* unique = get_node(node->input(1));  // output:1
@@ -694,7 +695,7 @@ class KPFusedEmbeddingActionIdGatherRewriter : public PatternRewriter {
 
 class KPFusedMatMulRewriter : public PatternRewriter {
  public:
-  std::string name() const override { return "_FusedMatMul"; }
+  std::string name() const override { return "_KdnnFusedMatMul"; }
 
   bool match_and_rewrite(
       const NodeDef* node, GraphDef* graph,
@@ -704,8 +705,9 @@ class KPFusedMatMulRewriter : public PatternRewriter {
     CHECK_NODE_OK(IsRelu(*node) && node->input_size() == 1)
     const NodeDef* add_1 = get_operand(node, "AddV2");
     CHECK_NODE_OK(add_1 != nullptr);
-    const NodeDef* bias_weight = get_operand(add_1, "Const");
+    NodeDef* bias_weight = get_operand(add_1, "Const");
     CHECK_NODE_OK(bias_weight != nullptr);
+    CHECK_NODE_OK(check_const_dims(bias_weight, 1));
     const NodeDef* matmul = get_operand(add_1, "MatMul");
     CHECK_NODE_OK(matmul != nullptr);
 
@@ -720,9 +722,14 @@ class KPFusedMatMulRewriter : public PatternRewriter {
     auto* attr = fused_node->mutable_attr();
     auto& src_attr = matmul->attr();
 
+    bool transpose_a = src_attr.at("transpose_a").b();
+    bool transpose_b = src_attr.at("transpose_b").b();
+    CHECK_NODE_OK(!transpose_a);
+    CHECK_NODE_OK(!transpose_b);
+
     (*attr)["T"] = src_attr.at("T");
-    (*attr)["transpose_a"] = src_attr.at("transpose_a");
-    (*attr)["transpose_b"] = src_attr.at("transpose_b");
+    (*attr)["transpose_a"] = transpose_a;
+    (*attr)["transpose_b"] = transpose_b;
 
     set_fusedop_attributes(fused_node, {"BiasAdd", "Relu"}, 1);
 
