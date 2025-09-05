@@ -719,17 +719,16 @@ class KPFusedMatMulRewriter : public PatternRewriter {
     fused_node->add_input(matmul->input(0));
     fused_node->add_input(matmul->input(1));
     fused_node->add_input(bias_weight->name());
-    auto* attr = fused_node->mutable_attr();
+
     auto& src_attr = matmul->attr();
 
-    bool transpose_a = src_attr.at("transpose_a").b();
-    bool transpose_b = src_attr.at("transpose_b").b();
-    CHECK_NODE_OK(!transpose_a);
-    CHECK_NODE_OK(!transpose_b);
+    CHECK_NODE_OK(!src_attr.at("transpose_a").b());
+    CHECK_NODE_OK(!src_attr.at("transpose_b").b());
 
+    auto* attr = fused_node->mutable_attr();
     (*attr)["T"] = src_attr.at("T");
-    (*attr)["transpose_a"] = transpose_a;
-    (*attr)["transpose_b"] = transpose_b;
+    (*attr)["transpose_a"] = src_attr.at("transpose_a");
+    (*attr)["transpose_b"] = src_attr.at("transpose_b");
 
     set_fusedop_attributes(fused_node, {"BiasAdd", "Relu"}, 1);
 
