@@ -34,6 +34,5 @@ setup(name=project,
       entry_points={
           'console_scripts': [
               f'{project}-opt = {project}.main:opt',
-              f'{project}-apply-tf = scripts.install:tf_install',
           ],
       })

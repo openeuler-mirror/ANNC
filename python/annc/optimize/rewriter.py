@@ -46,15 +46,18 @@ class BaseRewriter(ABC):
         :param users: expected list of user types and names
         :param expected_num_users: expected number of users (optional)
         """
-        if user_num is not None and len(node.users) != user_num:
-            raise CheckFailed
-        if len(users) > len(node.users):
-            raise CheckFailed
-        for i, (type, name) in enumerate(users):
-            if type is not None and node.users[i].type != type:
+        if self.graph.check_node_exist(node):
+            if user_num is not None and len(node.users) != user_num:
                 raise CheckFailed
-            if name is not None and node.users[i].name != name:
+            if len(users) > len(node.users):
                 raise CheckFailed
+            for i, (type, name) in enumerate(users):
+                if type is not None and node.users[i].type != type:
+                    raise CheckFailed
+                if name is not None and node.users[i].name != name:
+                    raise CheckFailed
+        else:
+            raise CheckFailed
 
     def check_operands(self,
                        node: Node,
