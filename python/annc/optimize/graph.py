@@ -255,6 +255,12 @@ class Graph:
 
         self.versions['producer'] = graph_def.versions.producer
 
+    def check_node_exist(self, node: Node) -> bool:
+        for i, n in enumerate(self.nodes):
+            if n.name == node.name:
+                return True
+        return False
+
     def get_node(self, name: str) -> Node:
         for node in self.nodes:
             if node.name == name:
