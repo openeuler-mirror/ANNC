@@ -55,6 +55,7 @@ fi
 # This is needed so files included by us which are used in xla can be found.
 CPLUS_INCLUDE_PATH+="$ANNC/annc/service/cpu/xla/:"
 CPLUS_INCLUDE_PATH+="$ANNC/annc/service/:"
+CPLUS_INCLUDE_PATH+="$ANNC/annc/service/cpu/xla/libs/libblas_mlir/include/:"
 
 # This is the location where the files included are in the main repo
 # Ideally the XNNPACK repository should be downloaded and compiled by bazel so

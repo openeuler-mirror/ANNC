@@ -1,0 +1,421 @@
+diff --git a/xla/service/cpu/cpu_compiler.cc b/xla/service/cpu/cpu_compiler.cc
+index e519cf05..ece02659 100644
+--- a/xla/service/cpu/cpu_compiler.cc
++++ b/xla/service/cpu/cpu_compiler.cc
+@@ -238,6 +238,14 @@ limitations under the License.
+ #include "xla/service/cpu/onednn_rewriter.h"
+ #endif
+ 
++#ifdef ENABLE_ANNC
++#include <xnnpack_ops_rewriter.h>
++#include <bisheng-cpu/embedding_simplify.h>
++#include <bisheng-cpu/concat_partition.h>
++#include <bisheng-cpu/reduce_combine.h>
++#include <kernel_selector_ops_rewriter.h>
++#endif
++
+ namespace {
+ 
+ // We need to explicitly load all the dialects we will involved in emitting the
+@@ -686,6 +694,14 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+   pipeline.AddPass<BatchDotSimplification>();
+   pipeline.AddPass<DotDecomposer>();
+ 
++#ifdef ENABLE_ANNC
++  // Rewrite to custom calls with XNNPACK targets.
++  bool enable_xnnpack =
++      xla::GetDebugOptionsFromFlags().xla_cpu_enable_xnnpack();
++  if (enable_xnnpack)
++    pipeline.AddPass<XnnPackOpsRewriter>();
++#endif
++
+   // Rewrite to custom calls with target as oneDNN library calls.
+ #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+   // AOT compiled code runs in single thread.
+@@ -844,6 +860,15 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
+         &layout_constraints);
+   }
+ 
++#ifdef ENABLE_ANNC
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL) {
++    pipeline.AddPass<ConcatPartition>();
++    pipeline.AddPass<EmbeddingSimplify>();
++    pipeline.AddPass<ReduceCombine>();
++    pipeline.AddPass<HloDCE>();
++  }
++#endif
++
+   return pipeline.Run(module).status();
+ }
+ 
+@@ -875,8 +900,24 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
+ 
+   pipeline.AddPass<ReshapeDecomposer>();
+ 
++#ifdef ENABLE_ANNC
++  bool use_kernel_selector =
++      xla::GetDebugOptionsFromFlags().xla_cpu_use_kernel_selector();
++  if (use_kernel_selector) {
++    // This pass rewrites hlo.dot into custom calls.
++    pipeline.AddPass<KernelSelectorOpsRewriter>();
++  }
++#endif
++
+   // Add a fusion pass now that layout assignment is done.
++#ifdef ENABLE_ANNC
++  if (getenv("ENABLE_BISHENG_GRAPH_OPT") != NULL)
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/false);
++  else
++    pipeline.AddPass<CpuInstructionFusion>(/*may_duplicate=*/true);
++#else
+   pipeline.AddPass<CpuInstructionFusion>();
++#endif
+ 
+   // The LayoutAssignment pass may leave behind kCopy instructions which are
+   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
+diff --git a/xla/service/cpu/cpu_runtime.cc b/xla/service/cpu/cpu_runtime.cc
+index 0617c897..66ce6ade 100644
+--- a/xla/service/cpu/cpu_runtime.cc
++++ b/xla/service/cpu/cpu_runtime.cc
+@@ -152,6 +152,48 @@ extern const char* const kOneDnnMatMulSymbolName =
+ #ifdef ENABLE_ANNC
+ extern const char* const kXnnPackSoftMaxNDSymbolName =
+     "__xla_cpu_runtime_XnnPackSoftMaxND";
++extern const char* const kArgMax3DParallelSymbolName =
++    "__xla_cpu_runtime_ArgMax3DParallel";
++extern const char* const kArgMax3DSequentialSymbolName =
++    "__xla_cpu_runtime_ArgMax3DSequential";
++extern const char* const kKernelSelectorGEMVSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMV";
++extern const char* const kKernelSelectorGEMMSequentialSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMMSequential";
++extern const char* const kKernelSelectorGEMMParallelSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMMParallel";
++extern const char* const kKernelSelectorBatch3DSequentialSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3DSequential";
++extern const char* const kKernelSelectorBatch3DParallelSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3DParallel";
++extern const char* const kKernelSelectorGEMVMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMVMLIR";
++extern const char* const kKernelSelectorBatch4DSequentialSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch4DSequential";
++extern const char* const kKernelSelectorBatch4DParallelSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch4DParallel";
++extern const char* const kKernelSelectorGEMMMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMMMLIR";
++extern const char* const kKernelSelectorBatch3DMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3DMLIR";
++extern const char* const kKernelSelectorBatch4DMLIRSymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch4DMLIR";
++extern const char* const kKernelSelectorGEMVEmptySymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMVEmpty";
++extern const char* const kKernelSelectorGEMMEmptySymbolName =
++    "__xla_cpu_runtime_KernelSelectorGEMMEmpty";
++extern const char* const kKernelSelectorBatch3DEmptySymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch3DEmpty";
++extern const char* const kKernelSelectorBatch4DEmptySymbolName =
++    "__xla_cpu_runtime_KernelSelectorBatch4DEmpty";
++extern const char* const kArgMax3DEmptySymbolName =
++    "__xla_cpu_runtime_ArgMax3DEmpty";
++extern const char* const kKernelSelectorOperationGEMV = "GEMV";
++extern const char* const kKernelSelectorOperationGEMM = "GEMM";
++extern const char* const kKernelSelectorOperationBATCH3D = "BATCH3D";
++extern const char* const kKernelSelectorOperationBATCH4D = "BATCH4D";
++extern const char* const kKernelSelectorOperationARGMAX = "ARGMAX";
++extern const char* const kCustomCallKernelSelector = "KernelSelector";
+ #endif
+ 
+ namespace {
+diff --git a/xla/service/cpu/cpu_runtime.h b/xla/service/cpu/cpu_runtime.h
+index 787e7476..8f5f3388 100644
+--- a/xla/service/cpu/cpu_runtime.h
++++ b/xla/service/cpu/cpu_runtime.h
+@@ -87,6 +87,33 @@ extern const char* const kAllToAllSymbolName;
+ extern const char* const kOneDnnMatMulSymbolName;
+ #ifdef ENABLE_ANNC
+ extern const char* const kXnnPackSoftMaxNDSymbolName;
++extern const char* const kArgMax3DParallelSymbolName;
++extern const char* const kArgMax3DSequentialSymbolName;
++extern const char* const kKernelSelectorGEMVSymbolName;
++extern const char* const kKernelSelectorGEMMSequentialSymbolName;
++extern const char* const kKernelSelectorGEMMParallelSymbolName;
++extern const char* const kKernelSelectorBatch3DSequentialSymbolName;
++extern const char* const kKernelSelectorBatch3DParallelSymbolName;
++extern const char* const kKernelSelectorBatch4DSequentialSymbolName;
++extern const char* const kKernelSelectorBatch4DParallelSymbolName;
++extern const char* const kKernelSelectorGEMVMLIRSymbolName;
++extern const char* const kKernelSelectorGEMMMLIRSymbolName;
++extern const char* const kKernelSelectorBatch3DMLIRSymbolName;
++extern const char* const kKernelSelectorBatch4DMLIRSymbolName;
++extern const char* const kKernelSelectorGEMVEmptySymbolName;
++extern const char* const kKernelSelectorGEMMEmptySymbolName;
++extern const char* const kKernelSelectorBatch3DEmptySymbolName;
++extern const char* const kKernelSelectorBatch4DEmptySymbolName;
++extern const char* const kArgMax3DEmptySymbolName;
++
++// Kernel selector operation names.
++extern const char* const kKernelSelectorOperationGEMV;
++extern const char* const kKernelSelectorOperationGEMM;
++extern const char* const kKernelSelectorOperationBATCH3D;
++extern const char* const kKernelSelectorOperationBATCH4D;
++extern const char* const kKernelSelectorOperationARGMAX;
++
++extern const char* const kCustomCallKernelSelector;
+ #endif
+ 
+ // All symbol names for XLA CPU runtime functions need to start with this
+diff --git a/xla/service/cpu/ir_emitter.cc b/xla/service/cpu/ir_emitter.cc
+index 0fe18cf6..6231551a 100644
+--- a/xla/service/cpu/ir_emitter.cc
++++ b/xla/service/cpu/ir_emitter.cc
+@@ -2508,6 +2508,184 @@ Status IrEmitter::HandleXnnPackSoftMax(HloInstruction* hlo) {
+ 
+   return OkStatus();
+ }
++
++Status IrEmitter::HandleKernelSelectorArgMax(HloInstruction* hlo) {
++  OpMetadata metadata = hlo->metadata();
++
++  const HloInstruction* in1 = hlo->operand(0);
++  const HloInstruction* in2 = hlo->operand(1);
++  const HloInstruction* in3 = hlo->operand(2);
++  const HloInstruction* in4 = hlo->operand(3);
++
++  Shape shape = in1->shape();
++  TF_RET_CHECK(shape.rank() == 3);
++
++  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(hlo));
++
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input1_slice,
++                      assignment_.GetUniqueSlice(in1, {}));
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice input2_slice,
++                      assignment_.GetUniqueSlice(in2, {}));
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_values_slice,
++                      assignment_.GetUniqueSlice(hlo, {0}));
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice out_indices_slice,
++                      assignment_.GetUniqueSlice(hlo, {1}));
++
++  llvm::Value* values1_ptr = EmitBufferPointer(input1_slice, in1->shape());
++  llvm::Value* values2_ptr = EmitBufferPointer(input2_slice, in2->shape());
++  llvm::Value* out_values_ptr =
++      EmitBufferPointer(out_values_slice, hlo->shape().tuple_shapes(0));
++  llvm::Value* out_indices_ptr =
++      EmitBufferPointer(out_indices_slice, hlo->shape().tuple_shapes(1));
++
++  float cst1_val = in3->literal().Get<float>({});
++  llvm::Constant* cst1 = llvm::ConstantFP::get(b_.getFloatTy(), cst1_val);
++
++  EmitCallToFunc(
++      metadata.op_name(),
++      {/*run_options=*/GetExecutableRunOptionsArgument(),
++       /*B*/ b_.getInt64(shape.dimensions(0)),
++       /*M*/ b_.getInt64(shape.dimensions(1)),
++       /*N*/ b_.getInt64(shape.dimensions(2)),
++       /*invals*/ BitCast(values1_ptr, b_.getInt32Ty()->getPointerTo()),
++       /*inidxs*/ BitCast(values2_ptr, b_.getInt32Ty()->getPointerTo()),
++       /*init_value*/ cst1,
++       /*init_idx*/ b_.getInt32(in4->literal().Get<int>({})),
++       /*outvals*/ BitCast(out_values_ptr, b_.getFloatTy()->getPointerTo()),
++       /*outidxs*/ BitCast(out_indices_ptr, b_.getInt32Ty()->getPointerTo())},
++      b_.getVoidTy());
++
++  llvm_ir::EmitTuple(GetIrArrayFor(hlo), {out_values_ptr, out_indices_ptr},
++                     &b_);
++  return OkStatus();
++}
++
++Status IrEmitter::HandleKernelSelectorBlas(HloInstruction* custom_call) {
++  OpMetadata metadata = custom_call->metadata();
++
++  bool isGEMV = (metadata.op_type() == runtime::kKernelSelectorOperationGEMV);
++  bool isGEMM = (metadata.op_type() == runtime::kKernelSelectorOperationGEMM);
++  bool isBATCHMATMUL3D =
++      (metadata.op_type() == runtime::kKernelSelectorOperationBATCH3D);
++  bool isBATCHMATMUL4D =
++      (metadata.op_type() == runtime::kKernelSelectorOperationBATCH4D);
++  bool isBATCHMATMUL = isBATCHMATMUL3D | isBATCHMATMUL4D;
++
++  int operand = 0;
++  std::vector<llvm::Value*> arguments;
++
++  //  |               arguments               |
++  //  |  gemm  |  batch3d |  batch4d | gemv   |
++  //  -----------------------------------------
++  //  |  trA   |  trA     |  trA     |  trA   |
++  //  |  trB   |  trB     |  trB     |        |
++  //  |  A     |  A       |  A       |  A     |
++  //  |  B     |  B       |  B       |  X     |
++  //  |        |          |  Q       |        |
++  //  |        |  P       |  P       |        |
++  //  |  M     |  M       |  M       |  M     |
++  //  |  N     |  N       |  N       |  N     |
++  //  |  K     |  K       |  K       |        |
++  //  |  alpha |          |          |  alpha |
++  //  |  beta  |          |          |  beta  |
++
++  arguments.push_back(/*run_options=*/GetExecutableRunOptionsArgument());
++
++  // trA
++  HloInstruction const* trA = custom_call->operand(operand++);
++  bool tranA = trA->literal().Get<bool>({});
++  arguments.push_back(b_.getInt1(tranA));
++
++  if (isGEMM || isBATCHMATMUL) {
++    // trB
++    HloInstruction const* trB = custom_call->operand(operand++);
++    bool tranB = trB->literal().Get<bool>({});
++    arguments.push_back(b_.getInt1(tranB));
++  }
++
++  // A
++  HloInstruction const* A = custom_call->operand(operand++);
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice a_slice,
++                      assignment_.GetUniqueSlice(A, {}));
++  llvm::Value* A_ptr = EmitBufferPointer(a_slice, A->shape());
++  arguments.push_back(A_ptr);
++
++  // B (or X in GEMV)
++  HloInstruction const* B = custom_call->operand(operand++);
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice b_slice,
++                      assignment_.GetUniqueSlice(B, {}));
++  llvm::Value* B_ptr = EmitBufferPointer(b_slice, B->shape());
++  arguments.push_back(B_ptr);
++
++  if (isBATCHMATMUL) {
++    // Q
++    if (isBATCHMATMUL4D) {
++      HloInstruction const* Q = custom_call->operand(operand++);
++      int q = Q->literal().Get<int>({});
++      arguments.push_back(b_.getInt32(q));
++    }
++
++    // P
++    HloInstruction const* P = custom_call->operand(operand++);
++    int p = P->literal().Get<int>({});
++    arguments.push_back(b_.getInt32(p));
++  }
++
++  // M
++  HloInstruction const* M = custom_call->operand(operand++);
++  int m = M->literal().Get<int>({});
++  arguments.push_back(b_.getInt32(m));
++
++  // N
++  HloInstruction const* N = custom_call->operand(operand++);
++  int n = N->literal().Get<int>({});
++  arguments.push_back(b_.getInt32(n));
++
++  if (isGEMM || isBATCHMATMUL) {
++    // K
++    HloInstruction const* K = custom_call->operand(operand++);
++    int k = K->literal().Get<int>({});
++    arguments.push_back(b_.getInt32(k));
++  }
++
++  float beta = 0.0;
++  if (isGEMM || isGEMV) {
++    // Alpha
++    HloInstruction const* Alpha = custom_call->operand(operand++);
++    float alpha = Alpha->literal().Get<float>({});
++    llvm::Constant* alphaConst = llvm::ConstantFP::get(b_.getFloatTy(), alpha);
++    arguments.push_back(alphaConst);
++
++    // Beta
++    HloInstruction const* Beta = custom_call->operand(operand++);
++    beta = Beta->literal().Get<float>({});
++    llvm::Constant* betaConst = llvm::ConstantFP::get(b_.getFloatTy(), beta);
++    arguments.push_back(betaConst);
++  }
++
++  // C (or Y in GEMV)
++  HloInstruction const* C = custom_call;
++
++  TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice c_slice,
++                      assignment_.GetUniqueSlice(C, {}));
++  llvm::Value* C_ptr = EmitBufferPointer(c_slice, C->shape());
++  arguments.push_back(C_ptr);
++
++  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(custom_call));
++
++  EmitCallToFunc(metadata.op_name(), arguments, b_.getVoidTy());
++
++  return OkStatus();
++}
++
++Status IrEmitter::HandleKernelSelector(HloInstruction* custom_call) {
++  OpMetadata metadata = custom_call->metadata();
++
++  if (metadata.op_type() == runtime::kKernelSelectorOperationARGMAX)
++    return HandleKernelSelectorArgMax(custom_call);
++  else
++    return HandleKernelSelectorBlas(custom_call);
++}
+ #endif
+ 
+ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
+@@ -2521,6 +2699,9 @@ Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
+     return HandleTopK(custom_call);
+   }
+ #ifdef ENABLE_ANNC
++  if (custom_call->custom_call_target() == runtime::kCustomCallKernelSelector) {
++    return HandleKernelSelector(custom_call);
++  }
+   if (custom_call->custom_call_target() == kCustomCallXnnPackSoftMax) {
+     return HandleXnnPackSoftMax(custom_call);
+   }
+diff --git a/xla/service/cpu/ir_emitter.h b/xla/service/cpu/ir_emitter.h
+index 95e699a9..1c18ea90 100644
+--- a/xla/service/cpu/ir_emitter.h
++++ b/xla/service/cpu/ir_emitter.h
+@@ -193,6 +193,9 @@ class IrEmitter : public DfsHloVisitorWithDefault,
+   Status HandleAllReduceSingleReplica(HloInstruction* crs);
+   Status HandleAllReduceMultipleReplica(HloInstruction* crs);
+ #ifdef ENABLE_ANNC
++  Status HandleKernelSelector(HloInstruction* hlo);
++  Status HandleKernelSelectorBlas(HloInstruction* hlo);
++  Status HandleKernelSelectorArgMax(HloInstruction* hlo);
+   Status HandleXnnPackSoftMax(HloInstruction* hlo);
+ #endif
+ #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+diff --git a/xla/service/cpu/simple_orc_jit.cc b/xla/service/cpu/simple_orc_jit.cc
+index cdc2a485..0728aa7e 100644
+--- a/xla/service/cpu/simple_orc_jit.cc
++++ b/xla/service/cpu/simple_orc_jit.cc
+@@ -60,6 +60,11 @@ limitations under the License.
+ #include "xla/service/cpu/windows_compatibility.h"
+ #ifdef ENABLE_ANNC
+ #include <xnnpack_ops.h>
++#include "xla/service/cpu/simple_orc_jit.h"
++#include <stdint.h>
++#include <algorithm>
++#include <cstdint>
++#include <kernel_selector.h>
+ #endif
+ #include "xla/service/custom_call_target_registry.h"
+ #include "xla/types.h"
+@@ -519,6 +524,24 @@ bool RegisterKnownJITSymbols() {
+   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulS32);
+ #ifdef ENABLE_ANNC
+   REGISTER_CPU_RUNTIME_SYMBOL(XnnPackSoftMaxND);
++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DParallel);
++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DSequential);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMSequential);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMParallel);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DSequential);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DParallel);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DSequential);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DParallel);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMV);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMMLIR);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DMLIR);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DMLIR);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVMLIR);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMVEmpty);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorGEMMEmpty);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch3DEmpty);
++  REGISTER_CPU_RUNTIME_SYMBOL(KernelSelectorBatch4DEmpty);
++  REGISTER_CPU_RUNTIME_SYMBOL(ArgMax3DEmpty);
+ #endif
+   REGISTER_CPU_RUNTIME_SYMBOL(ParallelForkJoin);
+   REGISTER_CPU_RUNTIME_SYMBOL(PrintfToStderr);
+
