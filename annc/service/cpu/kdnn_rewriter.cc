@@ -13,6 +13,8 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
   if (instr->operand_count() < pattern.dims.size()) return false;
   bool should_rewrite = true;
   for (size_t i = 0; i < pattern.dims.size(); i++) {
+    const HloInstruction* operand = instr->operand(i);
+    if (!operand) return false;
     const Shape& shape = instr->operand(i)->shape();
     should_rewrite &= LayoutUtil::IsMonotonicWithDim0Major(shape.layout());
     should_rewrite &= (shape.rank() == pattern.dims[i]);
@@ -29,7 +31,10 @@ bool match_op_pattern(HloInstruction* instr, RewritePattern& pattern,
     }
   }
   auto& users = instr->users();
+  if (users.size() < pattern.next_patterns.size()) return false;
   for (size_t i = 0; i < pattern.next_patterns.size(); i++) {
+    HloInstruction* user = users[i];
+    if (!user) return false;
     if (!match_op_pattern(users[i], pattern.next_patterns[i], fused_instrs))
       return false;
   }
@@ -47,6 +52,7 @@ bool KDnnRewriter::execute(HloInstruction* instr) {
   if (!match_op_pattern(instr, pattern_, fused_instrs)) return false;
 
   HloComputation* parent = instr->parent();
+  if (!parent) return false;
   HloInstruction* fusion = parent->CreateFusionInstruction(
       fused_instrs, HloInstruction::FusionKind::kInput);
 
