@@ -14,6 +14,7 @@ DECLARE_bool(annc_fused_sparse_reshape);
 DECLARE_bool(annc_fused_emd_actionid_gather);
 DECLARE_bool(annc_fused_seg_reduce_nozero);
 DECLARE_bool(annc_fused_matmul);
+DECLARE_bool(annc_fused_topk_segment_min);
 
 using namespace tensorflow;
 using namespace tensorflow::grappler;
@@ -890,6 +891,9 @@ void run_graph_optimization(GraphDef* graph) {
           std::make_unique<KPFusedSparseSegmentReduceNonzeroRewriter>());
     if (FLAGS_annc_fused_matmul)  // default disbaled
       optimizer.register_rewriter(std::make_unique<KPFusedMatMulRewriter>());
+    if (FLAGS_annc_fused_topk_segment_min)
+      optimizer.register_rewriter(
+          std::make_unique<KPFusedTopKSegmentMinRewriter>());
   }
   optimizer.optimize();
 }
