@@ -754,6 +754,95 @@ class KPFusedMatMulRewriter : public PatternRewriter {
   }
 };
 
+class KPFusedTopKSegmentMinRewriter : public PatternRewriter {
+ public:
+  std::string name() const override { return "KPFusedTopKSegmentMin"; }
+
+  bool match_and_rewrite(
+      const NodeDef* node, GraphDef* graph,
+      std::unordered_map<std::string, int>& node_indexes) override {
+    graph_ = graph;
+    indexes_ = &node_indexes;
+    CHECK_NODE_OK(node->op() == "UnsortedSegmentMin" && node->input_size() == 3)
+    NodeDef* range = get_mutable_node(node->input(0));
+    NodeDef* unique = get_mutable_node(node->input(1));
+    NodeDef* strided_slice = get_mutable_node(node->input(2));
+    CHECK_NODE_OK(range->op() == "Range" && range->input_size() == 3)
+    CHECK_NODE_OK(unique->op() == "Unique" && unique->input_size() == 1)
+    CHECK_NODE_OK(strided_slice->op() == "StridedSlice" &&
+                  strided_slice->input_size() == 4)
+    NodeDef* strided_slice_1 = get_mutable_node(range->input(1));
+    CHECK_NODE_OK(strided_slice_1->op() == "StridedSlice" &&
+                  strided_slice_1->input_size() == 4)
+    NodeDef* shape_1 = get_mutable_node(strided_slice_1->input(0));
+    CHECK_NODE_OK(shape_1->op() == "Shape" && shape_1->input_size() == 1)
+    NodeDef* shape = get_mutable_node(strided_slice->input(0));
+    CHECK_NODE_OK(shape->op() == "Shape" && shape->input_size() == 1)
+    CHECK_NODE_OK(get_mutable_node(shape->input(0)) == unique)
+    NodeDef* reshape = get_mutable_node(unique->input(0));
+    CHECK_NODE_OK(get_mutable_node(shape_1->input(0)) == reshape)
+
+    NodeDef* gather_1 = get_mutable_node(reshape->input(0));
+
+    CHECK_NODE_OK(gather_1->op() == "GatherV2" && gather_1->input_size() == 3)
+    NodeDef* gather1_input0 = get_mutable_node(gather_1->input(0));
+    CHECK_NODE_OK(check_input_dims(gather1_input0, gather_1->input(0), 2));
+    CHECK_NODE_OK(
+        check_input_dim_size(gather1_input0, gather_1->input(0), 0, 1));
+
+    NodeDef* topk = get_mutable_node(gather_1->input(1));
+
+    CHECK_NODE_OK(topk->op() == "TopKV2" && topk->input_size() == 2)
+    NodeDef* topk_input0 = get_mutable_node(topk->input(0));
+    CHECK_NODE_OK(check_input_dims(topk_input0, topk->input(0), 2));
+    CHECK_NODE_OK(check_input_dim_size(topk_input0, topk->input(0), 0, 1));
+
+    NodeDef *gather_2{nullptr}, *gather_3{nullptr};
+    for (int i = 0; i < graph_->node_size(); ++i) {
+      NodeDef* n = graph_->mutable_node(i);
+      for (int j = 0; j < n->input_size(); ++j) {
+        if (get_mutable_node(n->input(j)) == topk && n->op() == "GatherV2" &&
+            n != gather_1) {
+          if (n->input(0) == topk->input(0))
+            gather_2 = n;
+          else
+            gather_3 = n;
+        }
+      }
+      if (gather_2 != nullptr && gather_3 != nullptr) break;
+    }
+    CHECK_NODE_OK(gather_2 != nullptr && gather_3 != nullptr)
+
+    NodeDef* gather2_input0 = get_mutable_node(gather_2->input(0));
+    CHECK_NODE_OK(check_input_dims(gather2_input0, gather_2->input(0), 2));
+    CHECK_NODE_OK(
+        check_input_dim_size(gather2_input0, gather_2->input(0), 0, 1));
+
+    NodeDef* gather3_input0 = get_mutable_node(gather_3->input(0));
+    CHECK_NODE_OK(check_input_dims(gather3_input0, gather_3->input(0), 2));
+    CHECK_NODE_OK(
+        check_input_dim_size(gather3_input0, gather_3->input(0), 0, 1));
+
+    auto nodes = graph->mutable_node();
+    NodeDef* fused_node = nodes->Add();
+    fused_node->set_name(node->name() + fusion_appendix);
+    fused_node->set_op(name());
+    fused_node->set_device(node->device());
+    fused_node->add_input(topk->input(0));
+    fused_node->add_input(topk->input(1));
+    fused_node->add_input(gather_1->input(0));
+    fused_node->add_input(gather_3->input(0));
+    nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
+
+    VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
+            << fused_node->name();
+    replace_all_users_with(node, 0, fused_node, 0, graph);
+    replace_all_users_with(gather_2, 0, fused_node, 1, graph);
+    replace_all_users_with(gather_3, 0, fused_node, 2, graph);
+    return true;
+  }
+};
+
 bool enabled_aarch64_rewriters() {
   unsigned arch_id;
   __asm__("mrs %0, MIDR_EL1" : "=r"(arch_id));
