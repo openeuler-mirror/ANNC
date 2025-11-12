@@ -1,5 +1,5 @@
 diff --git a/tensorflow/core/BUILD b/tensorflow/core/BUILD
-index 538574360ba..b43e0455802 100644
+index 538574360ba..3864064d18c 100644
 --- a/tensorflow/core/BUILD
 +++ b/tensorflow/core/BUILD
 @@ -629,6 +629,7 @@ cc_library(
@@ -10,6 +10,14 @@ index 538574360ba..b43e0455802 100644
      ] + if_mkl([
          "//tensorflow/core/kernels/mkl:mkl_concat_op",
          "//tensorflow/core/kernels/mkl:mkl_dequantize_op",
+@@ -907,6 +908,7 @@ filegroup(
+         "candidate_sampling_ops_op_lib",
+         "checkpoint_ops_op_lib",
+         "clustering_ops_op_lib",
++        "embedding_fused_ops_op_lib",
+         "collective_ops_op_lib",
+         "control_flow_ops_op_lib",
+         "count_ops_op_lib",
 diff --git a/tensorflow/core/grappler/optimizers/BUILD b/tensorflow/core/grappler/optimizers/BUILD
 index ecd559734ea..97a918ead6d 100644
 --- a/tensorflow/core/grappler/optimizers/BUILD
@@ -189,6 +197,45 @@ index 91d80b6c2b5..b00b2a5d027 100644
      ] + select({
          # Non-tpu platforms don't need tpu dependency.
          "//tensorflow:chromiumos": [],
+diff --git a/tensorflow/python/BUILD b/tensorflow/python/BUILD
+index 9810f8acd2e..3b0b23fec0a 100644
+--- a/tensorflow/python/BUILD
++++ b/tensorflow/python/BUILD
+@@ -269,6 +269,7 @@ py_strict_library(
+         "//tensorflow/python/ops/signal:util_ops",
+         "//tensorflow/python/ops/signal:window_ops",
+         "//tensorflow/python/ops/structured:structured_ops",
++        "//tensorflow/python/ops:embedding_fused_ops_gen",
+         "//tensorflow/python/platform:_pywrap_stacktrace_handler",
+         "//tensorflow/python/platform:app",
+         "//tensorflow/python/platform:client_testlib",
+@@ -389,6 +390,7 @@ py_strict_library(
+         "//tensorflow/python/ops:bitwise_ops",
+         "//tensorflow/python/ops:boosted_trees_ops_gen",
+         "//tensorflow/python/ops:clustering_ops_gen",
++        "//tensorflow/python/ops:embedding_fused_ops_gen",
+         "//tensorflow/python/ops:composite_tensor_ops",
+         "//tensorflow/python/ops:cond_v2",
+         "//tensorflow/python/ops:cudnn_rnn_ops_gen",
+diff --git a/tensorflow/python/ops/BUILD b/tensorflow/python/ops/BUILD
+index b3a3d612a01..185da7da4a8 100644
+--- a/tensorflow/python/ops/BUILD
++++ b/tensorflow/python/ops/BUILD
+@@ -228,6 +228,14 @@ tf_gen_op_strict_wrapper_private_py(
+     ],
+ )
+
++tf_gen_op_strict_wrapper_private_py(
++    name = "embedding_fused_ops_gen",
++    visibility = ["//tensorflow:internal"],
++    deps = [
++        "//tensorflow/core:embedding_fused_ops_op_lib",
++    ],
++)
++
+ tf_gen_op_strict_wrapper_private_py(
+     name = "collective_ops_gen",
+     visibility = ["//tensorflow:internal"],
 diff --git a/third_party/xla/xla/service/cpu/BUILD b/third_party/xla/xla/service/cpu/BUILD
 index 6e0ea613435..47c346b4e93 100644
 --- a/third_party/xla/xla/service/cpu/BUILD
@@ -217,5 +264,3 @@ index 6e0ea613435..47c346b4e93 100644
  cc_library(
      name = "cpu_compiler_pure",
      srcs = ["cpu_compiler.cc"],
-
-
