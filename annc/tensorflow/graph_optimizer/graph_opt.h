@@ -62,6 +62,24 @@ class PatternRewriter {
     return false;
   }
 
+  bool check_input_dim_size(NodeDef* op, const std::string& output_name,
+                            int idx, int value) {
+    if (op->attr().count("_output_shapes")) {
+      int pos_index = 0;
+      size_t pos = output_name.find_last_of(':');
+      if (pos != std::string::npos) {
+        pos_index = std::stoi(output_name.substr(pos + 1));
+      }
+      const TensorShapeProto& shape =
+          op->attr().at("_output_shapes").list().shape(pos_index);
+      if (shape.dim_size() > idx && shape.dim(idx).size() == value) return true;
+    } else if (op->attr().count("shape")) {
+      const TensorShapeProto& shape = op->attr().at("shape").shape();
+      if (shape.dim_size() > idx && shape.dim(idx).size() == value) return true;
+    }
+    return false;
+  }
+
   bool check_const_dims(NodeDef* op, int dim_size) {
     if (!((IsConstant(*op) || IsHostConstant(*op)) &&
           HasNodeAttr(*op, "value")))
