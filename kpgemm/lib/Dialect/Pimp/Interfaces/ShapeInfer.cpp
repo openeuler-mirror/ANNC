@@ -172,4 +172,95 @@ void ConcatOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 
 void LoadOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 
+void ExpandDimsOp::inferShape() {
+  auto inputType = getInput().getType();
+  if (!inputType) {
+    emitError("ExpandDims input must have defining op");
+    return;
+  }
+
+  auto inputTensorType = dyn_cast<pimp::TensorType>(inputType);
+  if (!inputTensorType) {
+    emitError("Expected TensorType for input, got: ") << inputType;
+    return;
+  }
+
+  llvm::ArrayRef<int64_t> inputShape = inputTensorType.getShape();
+  int32_t axisAttr = getAxis();
+  int64_t axis = axisAttr;
+  int64_t rank = inputShape.size();
+
+  // 
+  if (axis < 0) axis = rank + axis + 1;
+  
+  // 
+  if (axis < 0 || axis > rank) {
+    emitError("axis must be in range [0, ") << rank << "]";
+    return;
+  }
+
+  // axis1
+  llvm::SmallVector<int64_t> outputShape;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (i == axis) outputShape.push_back(1);  // 
+    outputShape.push_back(inputShape[i]);
+  }
+  if (axis == rank) outputShape.push_back(1);  // 
+  
+  auto result = this->getResult();
+  auto resultType = result.getType();
+  
+  pimp::TensorType resultTensor = pimp::TensorType::get(
+      outputShape, resultType.getElementType(), resultType.getName(),
+      resultType.getEncoding(), resultType.getStride(), resultType.getLayout(),
+      resultType.getMemType(), resultType.getAddress(),
+      resultType.getDeviceParallel(), resultType.getOnchipParallel(),
+      resultType.getCacheData());
+      
+  result.setType(resultTensor);
+}
+
+void IdentityOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void ShapeOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void NotEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void WhereOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void StridedSliceOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void PackOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void GatherNdOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void SparseReshapeOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void SliceOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void GatherV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void ProdOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void GreaterEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void SparseFillEmptyRowsOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void UniqueOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void SparseSegmentSumOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void TileOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void ZerosLikeOp::inferShape() {inferEltwiseOpShape(getOperation());}
+
+void SelectOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void ConcatV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
+void BatchMatMulV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
+
 }  // namespace pimp

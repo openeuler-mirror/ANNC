@@ -1,5 +1,11 @@
 #include "Dialect/Pimp/PimpOps.h"
 
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/Value.h"
+#include "llvm/ADT/TypeSwitch.h"
+
 using namespace mlir;
 using namespace pimp;
 
@@ -362,4 +368,318 @@ Block &SwitchCaseOp::getCaseBlock(unsigned idx) {
   assert(idx < getNumCases() && "case index out-of-bounds");
   return getCaseRegions()[idx].front();
 }
+
+//===----------------------------------------------------------------------===//
+// ExpandDimsOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExpandDimsOp::verify() {
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  if (!inputType) {
+    return emitOpError("input must be a tensor type");
+  }
+  
+  auto inputShape = inputType.getShape();
+  int64_t inputRank = inputShape.size();
+  
+  int32_t axisAttr = getAxis();
+  int64_t axis = axisAttr;
+  
+  // axis
+  if (axis < -(inputRank + 1) || axis > inputRank) {
+    return emitOpError() 
+        << "axis must be in range [-" << (inputRank + 1) << ", " 
+        << inputRank << "], but got " << axis;
+  }
+  
+  auto resultType = llvm::dyn_cast<TensorType>(getResult().getType());
+  if (!resultType) {
+    return emitOpError("result must be a tensor type");
+  }
+  
+  auto resultShape = resultType.getShape();
+  
+  // rank
+  if (static_cast<int64_t>(resultShape.size()) != inputRank + 1) {
+    return emitOpError() 
+        << "result rank mismatch: expected " << (inputRank + 1)
+        << " but got " << resultShape.size();
+  }
+  
+  // shape
+  int64_t normalizedAxis = axis;
+  if (normalizedAxis < 0) {
+    normalizedAxis = inputRank + 1 + normalizedAxis;
+  }
+  
+  for (int64_t i = 0; i < static_cast<int64_t>(resultShape.size()); i++) {
+    if (i == normalizedAxis) {
+      // axis1
+      if (resultShape[i] != 1) {
+        return emitOpError() 
+            << "result shape at axis " << i << " should be 1, but got " 
+            << resultShape[i];
+      }
+    } else {
+      // 
+      int origIdx = i < normalizedAxis ? i : i - 1;
+      if (resultShape[i] != inputShape[origIdx]) {
+        return emitOpError() 
+            << "result shape mismatch at position " << i;
+      }
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// IdentityOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult IdentityOp::fold(FoldAdaptor adaptor) {
+  return getInput();
+}
+
+//===----------------------------------------------------------------------===//
+// ShapeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ShapeOp::verify() {
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  // 1D
+  if (outputType.getShape().size() != 1) {
+    return emitOpError() << "output must be 1D tensor, got rank "
+                         << outputType.getShape().size();
+  }
+  // 
+  Type elementType = outputType.getElementType();
+  if (!elementType.isInteger(32) && !elementType.isInteger(64)) {
+    return emitOpError() << "output element type must be i32 or i64, got "
+                         << elementType;
+  }
+  // 
+  int64_t inputRank = inputType.getShape().size();
+  int64_t outputDim = outputType.getShape()[0];
+  if (inputRank >= 0 && outputDim >= 0 && outputDim != inputRank) {
+    return emitOpError() << "output dimension (" << outputDim
+                         << ") must match input rank (" << inputRank << ")";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// SizeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SizeOp::verify() {
+  // 
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  auto outputShape = outputType.getShape();
+  if (outputShape.size() != 0) {
+    return emitOpError("output must be a scalar tensor");
+  }
+  auto elementType = outputType.getElementType();
+  if (!elementType.isIntOrIndex()) {
+    return emitOpError("output element type must be integer or index");
+  }
+  return success();
+}
+
+OpFoldResult SizeOp::fold(FoldAdaptor adaptor) {
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  auto shape = inputType.getShape();
+  int64_t numElements = 1;
+  for (int64_t dim : shape) {
+    if (dim == ShapedType::kDynamic) {
+      return {};
+    }
+    numElements *= dim;
+  }
+  auto outputElementType = llvm::dyn_cast<TensorType>(getOutput().getType()).getElementType();
+  if (auto intType = llvm::dyn_cast<IntegerType>(outputElementType)) {
+    return IntegerAttr::get(intType, numElements);
+  } else if (outputElementType.isIndex()) {
+    return IntegerAttr::get(IndexType::get(getContext()), numElements);
+  }
+  return {};
+}
+
+//===----------------------------------------------------------------------===//
+// RangeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RangeOp::verify(){
+  auto input1Type = llvm::dyn_cast<TensorType>(getStart().getType());
+  auto input1Shape = input1Type.getShape();
+  auto input2Type = llvm::dyn_cast<TensorType>(getLimit().getType());
+  auto input2Shape = input2Type.getShape();
+  auto input3Type = llvm::dyn_cast<TensorType>(getDelta().getType());
+  auto input3Shape = input3Type.getShape();
+  auto outputType = llvm::dyn_cast<TensorType>(getResult().getType());
+  auto outputShape = outputType.getShape();
+  if (input1Shape.size() != 0 || input2Shape.size() != 0 || input3Shape.size() != 0) {
+    return emitOpError("input parameter must be a scalar");
+  }
+  if (outputShape.size() != 1) {
+    return emitOpError("output must be a one-dimensional tensor");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ParallelDynamicStitchOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ParallelDynamicStitchOp::verify() {
+  if (getIndices().size() != getData().size()) {
+    return emitOpError("number of index tensors must equal number of data tensors");
+  }
+  return success();
+} 
+
+//===----------------------------------------------------------------------===//
+// FillOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult FillOp::verify() {
+  auto input1Type = llvm::dyn_cast<TensorType>(getShapeInput().getType());
+  auto input1Shape = input1Type.getShape();
+  auto input2Type = llvm::dyn_cast<TensorType>(getValueInput().getType());
+  auto input2Shape = input2Type.getShape();
+  if (input1Shape.size() != 1) {
+    return emitOpError("shapeInput must be a one-dimensional tensor");
+  }
+  if (input1Shape.size() != 0) {
+    return emitOpError("valueInput must be a scalar");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// BatchMatMulV2Op
+//===----------------------------------------------------------------------===//
+LogicalResult BatchMatMulV2Op::verify() {
+  auto AType = llvm::dyn_cast<TensorType>(getA().getType());
+  auto BType = llvm::dyn_cast<TensorType>(getB().getType());
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  
+  auto aElemType = AType.getElementType();
+  auto bElemType = BType.getElementType();
+  auto outElemType = outputType.getElementType();
+  
+  if (aElemType != bElemType || aElemType != outElemType) {
+    return emitOpError("all tensors must have the same element type");
+  }
+  if (!aElemType.isIntOrFloat()) {
+    return emitOpError("only integer and floating point types are supported");
+  }
+  auto aShape = AType.getShape();
+  auto bShape = BType.getShape();
+  auto outShape = outputType.getShape();
+  
+  if (aShape.size() < 2 || bShape.size() < 2) {
+    return emitOpError("inputs must have at least 2 dimensions");
+  }
+  
+  int64_t aRows = aShape[aShape.size() - 2];
+  int64_t aCols = aShape[aShape.size() - 1];
+  int64_t bRows = bShape[bShape.size() - 2];
+  int64_t bCols = bShape[bShape.size() - 1];
+  
+  if (getTransposeA()) std::swap(aRows, aCols);
+  if (getTransposeB()) std::swap(bRows, bCols);
+  
+  if (aCols != bRows) {
+    return emitOpError("incompatible inner dimensions for matrix multiplication");
+  }
+  
+  if (outShape.size() != std::max(aShape.size(), bShape.size())) {
+    return emitOpError("output rank mismatch");
+  }
+  
+  if (outShape[outShape.size() - 2] != aRows || 
+      outShape[outShape.size() - 1] != bCols) {
+    return emitOpError("output matrix dimensions incorrect");
+  }
+  
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TopKV2Op
+//===----------------------------------------------------------------------===//
+
+LogicalResult TopKV2Op::verify() {
+    auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+    auto kType = llvm::dyn_cast<TensorType>(getK().getType());
+    auto valuesType = llvm::dyn_cast<TensorType>(getValues().getType());
+    auto indicesType = llvm::dyn_cast<TensorType>(getIndices().getType());
+    auto kElemType = kType.getElementType();
+    if (!kElemType.isInteger()) {
+      return emitOpError("k must have integer type, got ")
+             << kElemType;
+    }
+    
+    auto kShape = kType.getShape();
+    if (!kShape.empty() && kShape.size() != 0) {
+      return emitOpError("k must be a scalar");
+    }
+  
+    auto inputShape = inputType.getShape();
+    if (inputShape.empty()) {
+      return emitOpError("input must have at least 1 dimension");
+    }
+  
+    auto valuesShape = valuesType.getShape();
+    auto indicesShape = indicesType.getShape();
+    
+    if (valuesShape != indicesShape) {
+      return emitOpError("values and indices must have the same shape");
+    }
+
+    return success();
+  }
+
+//===----------------------------------------------------------------------===//
+// PadOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult PadOp::verify() {
+  auto paddingsType = llvm::dyn_cast<TensorType>(getPaddings().getType());
+  auto paddingsShape = paddingsType.getShape();
+  if (paddingsShape.size() != 2) {
+    return emitOpError("paddings must be a 2D tensor, got shape: ")
+           << paddingsShape;
+  }
+  
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  unsigned inputRank = inputType.getShape().size();
+  if (paddingsShape[0] != inputRank) {
+    return emitOpError("paddings first dimension must equal input rank (")
+           << inputRank << "), got " << paddingsShape[0];
+  }
+  if (paddingsShape[1] != 2) {
+    return emitOpError("paddings second dimension must be 2, got ")
+           << paddingsShape[1];
+  }
+
+  auto valueType = llvm::dyn_cast<TensorType>(getValue().getType());
+  if (valueType.getShape().size() != 0) {
+    return emitOpError("value must be a scalar tensor");
+  }
+  if (valueType.getElementType() != inputType.getElementType()) {
+    return emitOpError("value element type must match input element type");
+  }
+  
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  auto outputShape = outputType.getShape();
+  if (outputShape.size() != inputRank) {
+    return emitOpError("output rank must equal input rank, got ")
+            << outputShape.size() << " vs " << inputRank;
+  }
+  return success();
+}
+
+
 } // namespace pimp

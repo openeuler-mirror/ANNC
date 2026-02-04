@@ -3,10 +3,17 @@
 //===----------------------------------------------------------------------===//
 #ifndef PIMP_OPS_TD
 #define PIMP_OPS_TD
+
+
 include "Dialect/Pimp/PimpDialect.td"
 include "Dialect/Pimp/Interfaces/ShapeInfer.td"
 include "Dialect/Pimp/Interfaces/Interpret.td"
 include "Dialect/Pimp/PimpEnums.td"
+
+include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 defvar Traits = [NoTerminator, NativeOpTrait<"Pimp_OpTrait">];
 defvar Interfaces = [DeclareOpInterfaceMethods<ShapeInferIntfc>,
@@ -323,6 +330,1117 @@ def Pimp_ReturnOp : Pimp_Op<"return", [Terminator, ParentOneOf<["ForOp", "Parall
 
   let assemblyFormat =
       [{  attr-dict ($results^ `:` type($results))? }];
+}
+
+def Pimp_ExpandDimsOp : Pimp_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
+  let summary = "Inserts a dimension of 1 into a tensor's shape";
+  let description = [{
+    Given a tensor input, this operation inserts a dimension of size 1 at the dimension index 
+    specified by axis. The axis is zero-based; if a negative value is specified, the index is 
+    counted from the end of the shape.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    I32Attr:$axis
+  );
+  let results = (outs Pimp_Tensor:$output);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($output)
+  }];
+}
+
+def Pimp_IdentityOp : Pimp_Op<"Identity", !listconcat([Pure, SameOperandsAndResultElementType, 
+    SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Identity operation";
+  let description = [{
+    Returns the input tensor as-is. This op is often used for 
+    naming, control dependencies, or intermediate value anchoring.
+  }];
+  let arguments = (ins Pimp_Tensor: $input);
+  let results = (outs Pimp_Tensor: $output);
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($output)
+  }];
+  let hasFolder = 1;
+}
+
+def Pimp_ShapeOp : Pimp_Op<"Shape", !listconcat([Pure], Interfaces)> {
+  let summary = "Returns the input shape information.";
+  let description = [{
+    Given a tensor input, this operation generates a one-dimensional tensor 
+    representing the shape information of the input.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input
+  );
+  let results = (outs 
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Pimp_NotEqualOp : Pimp_Op<"NotEqual", !listconcat([NoMemoryEffect, 
+    Elementwise, SameOperandsElementType, SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Returns (input1 != input2) element-wise";
+  let description = [{
+    Returns the truth value of (input1 != input2) element-wise.
+    Supports broadcasting between input1 and input2.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input1,
+    Pimp_Tensor:$input2
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input1 `,` $input2 attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_CastOp: Pimp_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)>{
+  let summary = "Cast input to a new type";
+  let description = [{
+    Casts a tensor from one data type to another.
+    The shape of the tensor remains unchanged.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_WhereOp : Pimp_Op<"Where", !listconcat([Pure], Interfaces)> {
+  let summary = "Returns elements from x or y depending on condition.";
+  let description = [{
+    Selects elements from `x` or `y` depending on `condition`.
+    When `x` and `y` are provided: output[i] = condition[i] ? x[i] : y[i]
+    When only `condition` is provided: returns indices where condition is true.
+  }];
+  let arguments = (ins
+    Variadic<Pimp_Tensor>:$inputs
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_StridedSliceOp : Pimp_Op<"StridedSlice", !listconcat([Pure], Interfaces)> {
+  let summary = "StridedSlice operation";
+  let description = [{
+    Extracts a strided slice from the input tensor using start, stop and stride indices.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    I64ArrayAttr:$startIndices,
+    I64ArrayAttr:$stopIndices,
+    I64ArrayAttr:$strides,
+    DefaultValuedAttr<I64ArrayAttr, "{}">:$beginMask,
+    DefaultValuedAttr<I64ArrayAttr, "{}">:$endMask,
+    DefaultValuedAttr<I64ArrayAttr, "{}">:$shrinkAxisMask
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` type(operands) `->` type(results)
+  }];
+}
+
+def Pimp_PackOp : Pimp_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfaces)> {
+  let summary = "Pack tensors along a new axis";
+  let description = [{
+    Packs the `N` tensors in `values` along the `axis` dimension.
+    Given a list of tensors of shape `(A, B, C)`;
+    if `axis == 0` then the `output` tensor will have shape `(N, A, B, C)`.
+  }];
+  let arguments = (ins
+    Variadic<Pimp_Tensor>:$inputs,
+    I64Attr:$axis
+  );
+  let results = (outs Pimp_Tensor:$output);
+  let assemblyFormat = [{
+    `(` $inputs `)` `axis` `=` $axis attr-dict `:` 
+    functional-type(operands, results)
+  }];
+}
+
+def Pimp_GatherNdOp : Pimp_Op<"GatherNd", !listconcat([Pure, 
+    AllElementTypesMatch<["values", "output"]>], Interfaces)> {
+  let summary = "Gather slices from params using nd indices";
+  let description = [{
+    Gathers slices from `params` into a Tensor with shape specified by 
+    `indices`. `indices` is a K-dimensional integer tensor, best thought of 
+    as a (K-1)-dimensional tensor of indices into `params`, where each 
+    element defines a slice of `params`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$values,
+    Pimp_Tensor:$indices
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $values `,` $indices attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_StringToHashBucketFastOp : Pimp_Op<"StringToHashBucketFast", 
+    !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Map strings to hash bucket indices.";
+  let description = [{
+    Maps each string in `input` to an integer hash modulo `numBuckets`.
+    Hash function is deterministic within a run but not guaranteed across versions.
+  }];
+  let arguments = (ins
+      Pimp_Tensor:$input,
+      I64Attr:$numBuckets
+    );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` type( $input) `->` type( $output)
+  }];
+}
+
+def Pimp_SparseReshapeOp : Pimp_Op<"SparesReshape", !listconcat([Pure], Interfaces)> {
+  let summary = "Reshape a SparseTensor to a new dense shape.";
+  let description = [{
+    This operation reshapes a sparse tensor represented by indices and values 
+    to a new dense shape. The non-zero elements remain the same, only their 
+    positions change according to the new shape.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$indices,
+    Pimp_Tensor:$inputShape,
+    Pimp_Tensor:$newShape
+  );
+  let results = (outs
+    Pimp_Tensor:$outputIndices,
+    Pimp_Tensor:$outputShape
+  );
+  let assemblyFormat = [{
+    $indices `,` $inputShape `,` $newShape attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SliceOp : Pimp_Op<"Slice", Interfaces> {
+  let summary = "Extracts slices of the tensor";
+  let description = [{
+    Extracts a slice from the input tensor starting at the position specified by begin,
+    and the size is specified by size.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$begin,
+    Pimp_Tensor:$size 
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input `,` $begin `,` $size attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_GatherV2Op : Pimp_Op<"GatherV2", Interfaces> {
+  let summary = "Gather slices from params axis according to indices"; 
+  let description = [{
+    Gathers slices from `params` along the `axis` dimension according to `indices`. 
+    Produces an output tensor with shape:
+    params.shape[:axis] + indices.shape[batch_dims:] + params.shape[axis + 1:]
+    The `batch_dims` attribute specifies how many leading dimensions of `indices`
+    are batch dimensions that should not be gathered over.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$params,
+    Pimp_Tensor:$indices,
+    Pimp_Tensor:$axis,
+    DefaultValuedAttr<I64Attr, "0">:$batch_dims
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $params `,` $indices `,` $axis attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ProdOp : Pimp_Op<"Prod", Interfaces> {
+  let summary = "Compute the product of tensor elements over specified axes"; 
+  let description = [{
+    Computes the product of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`. 
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+    Otherwise, the reduced dimensions are removed.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input `,` $indices attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_GreaterEqualOp : Pimp_Op<"GreaterEqual", Interfaces> {
+  let summary = "Element-wise greater-than-or-equal comparison";
+  let description = [{
+    Computes element-wise greater-than-or-equal comparison of `lhs` and `rhs`.
+    Returns a boolean tensor indicating where `lhs >= rhs`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SparseFillEmptyRowsOp : Pimp_Op<"SparseFillEmptyRows", 
+    !listconcat([Pure], Interfaces)> {
+  let summary = "Fills empty rows in a sparse tensor with a default value.";
+  let description = [{
+    This operation fills missing rows in a sparse tensor representation 
+    with a single entry at [row, 0, ..., 0] containing the default value.
+    The input sparse tensor is represented by (indices, values, denseShape).
+    The output has the same denseShape but with filled empty rows in sorted order.
+    Returns:
+    - outputIndices: The filled sparse tensor indices
+    - outputValues: The filled sparse tensor values  
+    - emptyRowIndicator: Boolean vector indicating which rows were empty
+    - reverseIndexMap: Maps input indices to output indices for backprop
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$indices,           // [N, rank] int64
+    Pimp_Tensor:$values,                  // [N] any type T
+    Pimp_Tensor:$denseShape,       // [rank] int64
+    Pimp_Tensor:$defaultValue              // scalar of type T
+  );
+  let results = (outs
+    Pimp_Tensor:$outputIndices,    // [N_full, rank] int64
+    Pimp_Tensor:$outputValues,           // [N_full] same type as values
+    Pimp_Tensor:$emptyRowIndicator,// [dense_shape[0]] bool
+    Pimp_Tensor:$reverseIndexMap  // [N] int64
+  );
+  let assemblyFormat = [{
+    $indices `,` $values `,` $denseShape `,` $defaultValue attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_VarHandleOp : Pimp_Op<"VarHandleOp", [NoMemoryEffect, Pure]> {
+  let summary = "Returns a handle to a variable resource";
+  let description = [{
+    Creates a handle to a variable resource. The handle can be used with 
+    ReadVariableOp and AssignVariableOp to read from and write to the variable.
+  }];
+  let arguments = (ins
+    StrAttr:$container,
+    StrAttr:$shared_name,
+    TypeAttr:$dtype,
+    I64ArrayAttr:$shape
+  );
+  // let results = (outs
+  //  Pimp_ResourceType:$resource_handle
+  // );
+}
+
+def Pimp_UniqueOp : Pimp_Op<"Unique", !listconcat([Pure], Interfaces)> {
+  let summary = "Finds unique elements in a 1-D tensor and returns them with indices.";
+  let description = [{
+    This operation returns a tensor `y` containing all of the unique elements of `x`
+    sorted in the same order that they occur in `x`. It also returns another tensor
+    `idx` the same size as `x` that contains the index of each value of `x` in the
+    unique output `y`. 
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x
+  );
+  let results = (outs
+    Pimp_Tensor:$y,
+    Pimp_Tensor:$idx
+  );
+  let assemblyFormat = [{
+    $x attr-dict `:` functional-type(operands, results)
+  }]; 
+}
+
+def Pimp_ResourceGatherOp : Pimp_Op<"ResourceGather"> {
+  let summary = "Gather elements from resource handle by indices";
+  let description = [{
+    Gathers data from a resource according to given indices.
+    Supports batched gathering with multiple index dimensions.
+  }];
+  let arguments = (ins
+    AnyType:$resource,
+    Variadic<AnyType>:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$validateIndices,
+    DefaultValuedAttr<I64Attr, "0">:$batchDims
+  );
+  let results = (outs Pimp_Tensor:$output);
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SparseSegmentSumOp : Pimp_Op<"SparseSegmentSum", !listconcat([Pure], Interfaces)> {
+  let summary = "Computes sums of sparse segments of a tensor.";
+  let description = [{
+    Computes the sum of rows in `data` selected by `indices`, grouped by `segment_ids`.
+    - `data`: Input tensor of shape `[D0, D1, ..., Dn]`
+    - `indices`: 1D integer tensor specifying which rows of `data` to use
+    - `segment_ids`: 1D integer tensor (same length as `indices`), must be sorted 
+      and start from 0 with no gaps. Each value assigns the corresponding indexed row to a segment.
+    Output shape: `[num_segments] + data.shape[1:]`, where `num_segments = max(segment_ids) + 1`.
+    Output element type matches `data`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor: $input,
+    Pimp_Tensor: $indices,
+    Pimp_Tensor: $segmentIds
+  );
+  let results = (outs
+    Pimp_Tensor: $output
+  );
+  let assemblyFormat = [{
+    $input `,` $indices `,` $segmentIds attr-dict `:` functional-type(operands, results)
+  }];      
+}
+
+def Pimp_TileOp : Pimp_Op<"Tile", Interfaces> {
+  let summary = "Tile a tensor along specified multiples";
+  let description = [{
+    Constructs a tensor by tiling `input` by `multiples`.
+    The output tensor has the same rank as `input`, and each dimension 
+    of the output is `multiples[i] * input.shape[i]`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$multiples
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input `,` $multiples attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ZerosLikeOp : Pimp_Op<"ZerosLike", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Returns a tensor of zeros with the same shape and type as input";
+  let description = [{
+    The ZerosLike operation returns a new tensor where all elements are zero,
+    matching the shape and element type of the input operand. This is useful
+    for initializing tensors in computations.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SelectOp : Pimp_Op<"Select", Interfaces> {
+  let summary = "Select elements from `input1` or `input2` depending on `condition`";
+  let description = [{
+    Selects elements from `input1` or `input2` based on the values of `condition`.
+    For each element, if the corresponding element in `condition` is true,
+    the element from `input2` is selected, otherwise the element from `input1` is selected.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$condition,
+    Pimp_Tensor:$input1,
+    Pimp_Tensor:$input2
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $condition `,` $input1 `,` $input2 attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ConcatV2Op : Pimp_Op<"ConcatV2", Interfaces> {
+  let summary = "Concatenate tensors along an axis";
+  let description = [{
+    Concatenates a list of tensors along dimension `axis`.
+    All tensors must have the same rank and same size in all dimensions
+    except `axis`.
+  }];
+  let arguments = (ins
+    Variadic<Pimp_Tensor>:$values,
+    Pimp_Tensor:$axis
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SizeOp : Pimp_Op<"Size", [Pure]> {
+  let summary = "Return the size of tensor.";
+  let description = [{
+    Computes the total number of elements in the input tensor.
+  }];
+  let arguments = (ins Pimp_Tensor:$input);
+  let results = (outs Pimp_Tensor:$output);  // The output must be a scalar and an integer.
+  let hasVerifier = 1;
+  let hasFolder = 1;
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_FloorModOp : Pimp_Op<"FloorMod", [Pure,
+    ResultsBroadcastableShape, SameOperandsAndResultShape]> {
+  let summary = "Element-wise remainder of division";
+  let description = [{
+    Returns element-wise remainder of division: `floor(x / y) * y + mod = x`.
+    Matches Python's `%` operator.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_FloorDivOp : Pimp_Op<"FloorDiv", [Pure, SameOperandsAndResultShape,
+    ResultsBroadcastableShape, SameOperandsAndResultType]>{
+  let summary = "Element-wise floor division: floor(x / y). Matches Python // semantics.";
+  let description = [{
+    Returns element-wise floor division: `x / y`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_RangeOp : Pimp_Op<"Range", [Pure]> {
+  let summary = "Creates a sequence of numbers";
+  let description = [{
+    Creates a sequence of numbers from `start` to `limit` with step `delta`.
+  }];
+  let arguments = (ins  // The input must be a scalar.
+    Pimp_Tensor:$start,
+    Pimp_Tensor:$limit,
+    Pimp_Tensor:$delta
+  );
+  let results = (outs  // The output must be a one-dimensional tensor.
+    Pimp_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $start `,` $limit `,` $delta attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_DynamicPartitionOp : Pimp_Op<"DynamicPartition", [Pure]> {
+  let summary = "Partitions data into numPartitions tensors using indices from partitions";
+  let description = [{
+    Partitions data into numPartitions tensors according to the indices in partitions.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$data,
+    Pimp_Tensor:$partitions,
+    I32Attr:$numPartitions
+  );
+  let results = (outs
+    Variadic<Pimp_Tensor>:$outputs
+  );
+  let assemblyFormat = [{
+    $data `,` $partitions attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ParallelDynamicStitchOp : Pimp_Op<"ParallelDynamicStitch", [Pure, SameVariadicOperandSize]> {
+  let summary = "Interleave values from multiple tensors into a single tensor using parallel indices";
+  let description = [{
+    Interleaves values from multiple tensors into a single tensor using indices arrays.
+    This is the inverse of DynamicPartition. Works in parallel for better performance.
+  }];
+  let arguments = (ins
+    Variadic<Pimp_Tensor>:$indices,
+    Variadic<Pimp_Tensor>:$data
+  );
+  let results = (outs
+    Pimp_Tensor:$merged
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `[`$indices`]` `,` `[`$data`]` attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SparseSegmentMeanOp : Pimp_Op<"SparseSegmentMean", [Pure]> {
+  let summary = "Computes the mean along sparse segments of a tensor";
+  let description = [{
+    Computes the mean along sparse segments of a tensor.
+    Example:
+      data = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+      indices = [0, 1, 2, 3]
+      segment_ids = [0, 0, 1, 1]
+      
+      output[0] = mean(data[0], data[1]) = [2.5, 3.5, 4.5]
+      output[1] = mean(data[2], data[3]) = [8.5, 9.5, 10.5]
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$data,
+    Pimp_Tensor:$indices,
+    Pimp_Tensor:$segmentIds
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $data `,` $indices `,` $segmentIds attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SubOp : Pimp_Op<"Sub", [Pure, Commutative,
+    ResultsBroadcastableShape, SameOperandsAndResultShape]> {
+  let summary = "Element-wise subtraction: x - y.";
+  let description = [{
+    Computes per-element subtraction of two tensors with standard broadcasting semantics.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_MulOp : Pimp_Op<"Mul", [Pure]> {
+  let summary = "Element-wise multiplication with broadcasting";
+  let description = [{
+    Computes output = lhs * rhs element-wise.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_LessOp : Pimp_Op<"Less", [Pure, ResultsBroadcastableShape]> {
+  let summary = "Element-wise less-than comparison operation (lhs < rhs).";
+  let description = [{
+    Performs element-wise less-than comparison of two tensors with broadcast support.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_FillOp : Pimp_Op<"Fill", [Pure]> {
+  let summary = "Create tensor of shape filled with scalar value";
+  let description = [{
+    Generates a tensor with a specified shape (from shape input) where all elements 
+    are set to the given scalar value (from value input).
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$shapeInput,
+    Pimp_Tensor:$valueInput
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $shapeInput `,` $valueInput attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_GreaterOp : Pimp_Op<"Greater", [Pure, ResultsBroadcastableShape]> {
+  let summary = "Element-wise greater-than comparison operation (lhs > rhs) ";
+  let description = [{
+    Performs element-wise greater-than comparison of two tensors with broadcast support.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_RealDivOp : Pimp_Op<"RealDiv", [Pure]> {
+  let summary = "For the real number type, element-wise returns x / y.";
+  let description = [{
+    If `x` and `y` are real numbers, this will return the result of floating-point division.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_SparseToDenseOp : Pimp_Op<"SparseToDense", [Pure]> {
+  let summary = "Converts sparse representations into dense tensors.";
+  let description = [{
+    Converts sparse representation (sparseIndice + sparseValues) to a dense tensor with specified shape.
+    The output tensor is initialized with defaultValue, then filled with values at the positions specified by indices.
+    The index should be sorted in lexicographical order, and it should not contain any duplicate items. 
+    If `validateIndices` is true, these properties will be checked during the execution process.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$sparseIndice,
+    Pimp_Tensor:$outputShape,
+    Pimp_Tensor:$sparseValue,
+    Pimp_Tensor:$defaultValue,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$validateIndices
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_BatchMatMulV2Op : Pimp_Op<"BatchMatMulV2", !listconcat([Pure], Interfaces)> {
+  let summary = "Performs batch multiplication on slices of two tensors.";
+  let description = [{
+    Performs batch matrix multiplication on high-dimensional tensors. For each batch, 
+    the matrix multiplication is computed on the submatrices, where the last two dimensions of A/B may be transposed or not,
+    which is controlled by the transposeA/transposeB attributes.
+    The batch dimensions are handled according to TensorFlow's batch matrix multiply broadcast rules.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$A,
+    Pimp_Tensor:$B,
+    DefaultValuedAttr<BoolAttr, "false">:$transposeA,
+    DefaultValuedAttr<BoolAttr, "false">:$transposeB
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $A `,` $B attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_AddV2Op : Pimp_Op<"AddV2", [Pure, Commutative, SameOperandsAndResultShape]> {
+  let summary = "Element-wise addition (x + y).";
+  let description = [{
+    Performs element-wise addition of tensor `x` and tensor `y`, producing a tensor `z`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_RsqrtOp : Pimp_Op<"Rsqrt", [Pure, SameOperandsAndResultType, Elementwise]> {
+  let summary = "Computes reciprocal of square root element-wise.";
+  let description = [{
+    Performs element-wise reciprocal square root on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = 1 / sqrt(x)`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$x
+  );
+  let results = (outs
+    Pimp_Tensor:$y
+  );
+  let assemblyFormat = [{
+    $x attr-dict `:` type($x)
+  }];
+}
+
+def Pimp_TopKV2Op : Pimp_Op<"TopKV2", [Pure]> {
+  let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
+  let description = [{
+    Find the values and indices of the `k` largest elements along the last dimension.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$k,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$sorted
+  );
+  let results = (outs
+    Pimp_Tensor:$values,
+    Pimp_Tensor:$indices
+  );
+  let hasVerifier = 1;
+  let assemblyFormat=[{
+    $input `,` $k attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_UnsortedSegmentMinOp : Pimp_Op<"UnsortedSegmentMinOp", [Pure]> {
+  let summary = "Computes the minimum value in each segment of the tensor.";
+  let description = [{
+    Aggregates elements of the input tensor into segments specified by segmentIds (unsorted),
+    and computes the minimum value for each segment. The output tensor has shape [num_segments] + input.shape[1:].
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$segmentIds,
+    I32Attr:$numSegments
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat=[{
+    $input `,` $segmentIds attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_MinimumOp : Pimp_Op<"Minimum", [Pure, 
+    ResultsBroadcastableShape, SameOperandsAndResultElementType]> {
+  let summary = "Returns the minimum value of x and y element-wise.";
+  let arguments = (ins
+    Pimp_Tensor:$x,
+    Pimp_Tensor:$y
+  );
+  let results = (outs
+    Pimp_Tensor:$z
+  );
+  let assemblyFormat=[{
+    $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_TensorScatterUpdateOp : Pimp_Op<"TensorScatterUpdate", [Pure, ResultsBroadcastableShape]> {
+  let summary = "Scatter update tensor values";
+  let description = [{
+    Updates values of the input tensor at specified indices with values from the updates tensor,
+    and returns a new tensor (non-in-place update). 
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$indices,
+    Pimp_Tensor:$updates
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat=[{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_PadOp : Pimp_Op<"Pad", [Pure]> {
+  let summary = "Pad a tensor with specified value";
+  let description = [{
+    Pads a tensor according to the paddings tensor.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    Pimp_Tensor:$paddings,
+    Pimp_Tensor:$value
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_MergeOp : Pimp_Op<"Merge"> {
+  let summary = [{
+    Accepts a list of input operands and returns a value of the operand 
+    type and the index of the first encountered match.
+  }];
+  let arguments = (ins
+    Variadic<AnyType>:$inputsAndControl
+  );
+  let results = (outs
+    Pimp_Tensor:$output,
+    Pimp_Tensor:$value_index
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_BroadcastOp : Pimp_Op<"broadcast",
+    [Pure, SameOperandsAndResultElementType]> {
+  let summary = "Broadcast a tensor to a new shape by adding leading dimensions";
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    DenseI64ArrayAttr:$broadcastSizes
+  );
+  let results = (outs Pimp_Tensor:$output);
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ReshapeOp : Pimp_Op<"Reshape", [Pure]> {
+  let summary = "Reshape a tensor to a new shape without changing its underlying data.";
+  let description = [{
+    Produce a tensor with the same data as the input but reshaped to the specified shape.
+    The total number of elements must remain unchanged. 
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    I64ArrayAttr:$targetShape
+  );
+  let results = (outs Pimp_Tensor:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ParameterOp : Pimp_Op<"Parameter", [Pure]> {
+  let summary = "Placeholder for input arguments of the computation graph";
+  let description = [{
+    This operation serves as a placeholder for external inputs into the computation graph.
+    It is identified by a unique `parameterNumber` (unique globally within the computation graph) and specifies
+    the type and shape of the tensor to be passed from the outside. This operation does not perform any computation;
+    it only acts as an input anchor for the computation graph.
+}];
+  let arguments = (ins I64Attr:$parameter_number);
+  let results = (outs Pimp_Tensor:$output);
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_CompareOp : Pimp_Op<"Compare", [Pure, SameOperandsAndResultShape]> {
+  let summary = "Element-wise comparison operation.";
+  let description = [{
+    This operation compares two input tensors element-wise.
+    The `comparisonDirection` attribute specifies the comparison relation.
+    Supported values are: "EQ", "NE", "LT", "LE", "GT", "GE".
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs,
+    StrAttr:$comparisonDirection
+  );
+  let results = (outs
+    Pimp_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_DivideOp : Pimp_Op<"Divide", [Pure]> {
+  let summary = "Element-wise division with broadcasting support";
+  let description = [{
+    Computes element-wise division of two tensors.
+  }];
+  let arguments = (ins 
+    Pimp_Tensor:$lhs, 
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs Pimp_Tensor:$result);
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_AndOp : Pimp_Op<"And", [Pure]> {
+  let summary = "Element-wise bitwise AND operation.";
+  let description = [{
+    This operation computes the bitwise AND of two input tensors
+    element-wise. 
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_LogisticOp : Pimp_Op<"Logistic", [Pure, SameOperandsAndResultShape]> {
+  let summary = "Element-wise logistic (sigmoid) function.";
+  let description = [{
+    This operation computes the logistic (sigmoid) function on
+    each element of the input tensor: `1 / (1 + exp(-x))`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_MaximumOp : Pimp_Op<"Maximum", [Pure, SameOperandsAndResultElementType]> {
+  let summary = "Element-wise maximum operation.";
+  let description = [{
+    This operation returns the element-wise maximum of two
+    input tensors `lhs` and `rhs`. For each element, it compares the values
+    and returns the larger one.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_ScatterOp : Pimp_Op<"Scatter", [Pure]> {
+  let summary = "Scatter operation with configurable update semantics.";
+  let description = [{
+    This operation updates elements of the `operand` tensor at
+    positions specified by `scatterIndices` using values from the `updates`
+    tensor. The `updateComputation` region defines how to combine existing
+    values with update values.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$operand,
+    Pimp_Tensor:$scatterIndices,
+    Pimp_Tensor:$updates,
+    I64ArrayAttr:$updateWindowDims,
+    I64ArrayAttr:$insertedWindowDims,
+    I64ArrayAttr:$scatterDimsToOperandDims,
+    DefaultValuedAttr<I64Attr, "0">:$indexVectorDim,
+    DefaultValuedAttr<BoolAttr, "false">:$uniqueIndices,
+    DefaultValuedAttr<BoolAttr, "false">:$indicesAreSorted
+  );
+
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let regions = (region
+    SizedRegion<1>:$updateComputation
+  );
+}
+
+def Pimp_AbsOp : Pimp_Op<"Abs", [Pure, SameOperandsAndResultShape]> {
+  let summary = "Element-wise absolute value operation.";
+  let description = [{
+    This operation computes the absolute value of each element in the input tensor. 
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_DotOp : Pimp_Op<"Dot", [Pure]> {
+  let summary = "General dot product operation.";
+  let description = [{
+    This operation computes the dot product of two tensors `lhs` and `rhs`.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$lhs,
+    Pimp_Tensor:$rhs
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Pimp_TransposeOp : Pimp_Op<"Transpose", [Pure]> {
+  let summary = "Transpose a tensor by permuting its dimensions.";
+  let description = [{
+    This operation returns a tensor with dimensions permuted
+    according to the `permutation` attribute.
+  }];
+  let arguments = (ins
+    Pimp_Tensor:$input,
+    I64ArrayAttr:$permutation
+  );
+  let results = (outs
+    Pimp_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 #endif  // PIMP_OPS_TD

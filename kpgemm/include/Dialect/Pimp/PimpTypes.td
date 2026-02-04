@@ -144,6 +144,8 @@ def Pimp_Tensor : Pimp_TypeDef<"Tensor", "tensor"> {
       if (elemType.isF64()) return "f64";
       if (elemType.isF80()) return "f80";
       if (elemType.isF128()) return "f128";
+      if (elemType.isSignlessInteger(1)) return "i1";
+      if (elemType.isInteger(1)) return "i1";
       if (elemType.isInteger(4)) return "i4";
       if (elemType.isInteger(5)) return "i5";
       if (elemType.isInteger(6)) return "i6";
@@ -151,12 +153,12 @@ def Pimp_Tensor : Pimp_TypeDef<"Tensor", "tensor"> {
       if (elemType.isInteger(8)) return "i8";
       if (elemType.isInteger(9)) return "i9";
       if (elemType.isInteger(10)) return "i10";
-      if (elemType.isInteger(11)) return "i1";
-      if (elemType.isInteger(12)) return "i2";
-      if (elemType.isInteger(13)) return "i3";
-      if (elemType.isInteger(14)) return "i4";
-      if (elemType.isInteger(15)) return "i5";
-      if (elemType.isInteger(16)) return "i6";
+      if (elemType.isInteger(11)) return "i11";
+      if (elemType.isInteger(12)) return "i12";
+      if (elemType.isInteger(13)) return "i13";
+      if (elemType.isInteger(14)) return "i14";
+      if (elemType.isInteger(15)) return "i15";
+      if (elemType.isInteger(16)) return "i16";
       if (elemType.isInteger(32)) return "i32";
       if (elemType.isInteger(64)) return "i64";
       return "";

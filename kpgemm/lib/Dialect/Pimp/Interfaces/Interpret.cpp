@@ -230,4 +230,50 @@ void ConcatOp::Interpret() {}
 
 void LoadOp::Interpret() {}
 
+void ExpandDimsOp::Interpret() {}
+
+void IdentityOp::Interpret() {}
+
+void ShapeOp::Interpret() {}
+
+void NotEqualOp::Interpret() {}
+
+void CastOp::Interpret() {}
+
+void WhereOp::Interpret() {}
+
+void StridedSliceOp::Interpret() {}
+
+void PackOp::Interpret() {}
+
+void GatherNdOp::Interpret() {}
+
+void StringToHashBucketFastOp::Interpret() {}
+
+void SparseReshapeOp::Interpret() {}
+
+void SliceOp::Interpret() {}
+
+void GatherV2Op::Interpret() {}
+
+void ProdOp::Interpret() {}
+
+void GreaterEqualOp::Interpret() {}
+
+void SparseFillEmptyRowsOp::Interpret() {}
+
+void UniqueOp::Interpret(){}
+
+void SparseSegmentSumOp::Interpret() {}
+
+void TileOp::Interpret() {}
+
+void ZerosLikeOp::Interpret() {}
+
+void SelectOp::Interpret() {}
+
+void ConcatV2Op::Interpret() {}
+
+void BatchMatMulV2Op::Interpret() {}
+
 }  // namespace pimp

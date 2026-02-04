@@ -8,6 +8,9 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "mlir/Dialect/Traits.h"
+// /annc-mlir/LLVM/mlir/include/mlir/Dialect/Traits.h
 
 #include "Dialect/Pimp/PimpOpTrait.h"
 #include "Dialect/Pimp/PimpDialect.h.inc"
