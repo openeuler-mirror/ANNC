@@ -1,0 +1,31 @@
+#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/shape_inference.h"
+
+using namespace tensorflow;
+
+REGISTER_OP("{OP_NAME}")
+    .Attr("{ATTRS}")
+    .Input("{INPUTS}")
+    .Output("{OUTPUTS}")
+    .SetShapeFn([](::tensorflow::shape_inference::InferenceContext* c) {
+        {SHAPE_INFERENCE}
+    });
+
+class {OP_NAME}Op : public OpKernel {
+public:
+    explicit {OP_NAME}Op(OpKernelConstruction* context) : OpKernel(context) {
+        {ATTR_INITIALIZATION}
+    }
+    
+    void Compute(OpKernelContext* context) override {
+        {INPUT_ACQUISITION}
+        {OUTPUT_ALLOCATION}
+        {COMPUTATION_LOGIC}
+    }
+
+private:
+    {ATTR_MEMBERS}
+};
+
+REGISTER_KERNEL_BUILDER(Name("{OP_NAME}").Device(DEVICE_CPU), {OP_NAME}Op);

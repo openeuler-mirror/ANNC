@@ -1,0 +1,5 @@
+set(LLVM_TARGET_DEFINITIONS OpVerify.td)
+mlir_tablegen(OpVerify.h.inc -gen-pass-decls -name Pimp)
+mlir_tablegen(PimpOpVerify.capi.h.inc -gen-pass-capi-header --prefix Pimp)
+mlir_tablegen(PimpOpVerify.capi.cpp.inc -gen-pass-capi-impl --prefix Pimp)
+add_public_tablegen_target(MLIRPimpOpVerifyIncGen)
