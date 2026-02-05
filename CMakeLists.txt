@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(kpgemm LANGUAGES CXX C)
+project(annc LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -75,10 +75,10 @@ include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
 
-include_directories(${CMAKE_SOURCE_DIR}/kpgemm/include)
-include_directories(${CMAKE_SOURCE_DIR}/build/kpgemm/include)
+include_directories(${CMAKE_SOURCE_DIR}/annc/include)
+include_directories(${CMAKE_SOURCE_DIR}/build/annc/include)
 
 include_directories(${CMAKE_SOURCE_DIR}/third_party/json/include)
 
-add_subdirectory(kpgemm)
+add_subdirectory(annc)
 add_subdirectory(python)
