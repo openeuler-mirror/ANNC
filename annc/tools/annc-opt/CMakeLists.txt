@@ -13,13 +13,15 @@ set(LIBS
   AtirDialect
   AtirBuilder
   AtirPasses
+  AtirToAffineConversion
+  AtirToLinalgConversion
 )
-add_llvm_executable(kp-opt
-  kp-opt.cpp
+add_llvm_executable(annc-opt
+  annc-opt.cpp
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(kp-opt PRIVATE ${LIBS})
-llvm_update_compile_flags(kp-opt)
-mlir_check_all_link_libraries(kp-opt)
-install(TARGETS kp-opt DESTINATION bin)
+target_link_libraries(annc-opt PRIVATE ${LIBS})
+llvm_update_compile_flags(annc-opt)
+mlir_check_all_link_libraries(annc-opt)
+install(TARGETS annc-opt DESTINATION bin)

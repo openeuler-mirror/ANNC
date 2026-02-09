@@ -1,5 +1,5 @@
-add_subdirectory(kp-opt)
-add_subdirectory(kp-verify)
+add_subdirectory(annc-opt)
+add_subdirectory(annc-verify)
 add_subdirectory(tf-adaptor)
-add_subdirectory(kp-asm)
+add_subdirectory(annc-asm)
 add_subdirectory(annc)

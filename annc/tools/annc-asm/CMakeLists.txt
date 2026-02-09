@@ -16,12 +16,12 @@ set(LIBS
   AtirToAffineConversion
   AtirToLinalgConversion
 )
-add_llvm_executable(kp-asm
-  kp-asm.cpp
+add_llvm_executable(annc-asm
+  annc-asm.cpp
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(kp-asm PRIVATE ${LIBS})
-llvm_update_compile_flags(kp-asm)
-mlir_check_all_link_libraries(kp-asm)
-install(TARGETS kp-asm DESTINATION bin)
+target_link_libraries(annc-asm PRIVATE ${LIBS})
+llvm_update_compile_flags(annc-asm)
+mlir_check_all_link_libraries(annc-asm)
+install(TARGETS annc-asm DESTINATION bin)

@@ -116,7 +116,7 @@ ninja && ninja install
 export PATH=${YOUR_ANNC_INSTALL_PATH}/bin:$PATH
 
 # 
-which kp-opt kp-asm
+which annc-opt annc-asm
 
 # 
 python -m pytest tests/
@@ -136,24 +136,24 @@ cd /path/to/annc-toolchain/build
 ./bin/tf-adaptor ../tests/graph_demo ./test.json
 
 # mlir
-./bin/kp-opt ./test.json --atir-op-fusion -o output.bin -emit-bytecode
+./bin/annc-opt ./test.json --atir-op-fusion -o output.bin -emit-bytecode
 
 # anncmlir
-./bin/kp-asm output.bin --atir-prune-func --atir-block-fusion --atir-tiling --atir-unroll --convert-atir-to-affine -o ../tests/annc/asm.mlir
+./bin/annc-asm output.bin --atir-prune-func --atir-block-fusion --atir-tiling --atir-unroll --convert-atir-to-affine -o ../tests/annc/asm.mlir
 
 # annc driverllvm
 cd ../tests/annc
 annc -t driver_dynamic.c -o 123 asm.mlir -v --save-temps --shared
 
-# kp-verify
+# annc-verify
 cd ../../build
-./bin/kp-verify output.bin --atir-op-verify="kpGenLibPath=../tests/annc/fused_matmul_add_relu_A0732AD9DB33D09F.so"
+./bin/annc-verify output.bin --atir-op-verify="kpGenLibPath=../tests/annc/fused_matmul_add_relu_A0732AD9DB33D09F.so"
 
 # llmcodegenLLMtensorflow opkernel
-./bin/kp-asm ./output.bin --atir-LLM-CodeGen
+./bin/annc-asm ./output.bin --atir-LLM-CodeGen
 
-# kp-verify
-./bin/kp-verify output.bin --atir-op-verify="llmGenLibPath=../annc/lib/Dialect/Atir/Passes/outputs/so/fused_matmul_add_relu_A0732AD9DB33D09F.so"
+# annc-verify
+./bin/annc-verify output.bin --atir-op-verify="llmGenLibPath=../annc/lib/Dialect/Atir/Passes/outputs/so/fused_matmul_add_relu_A0732AD9DB33D09F.so"
 ```
 
 ## 

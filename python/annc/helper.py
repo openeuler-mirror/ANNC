@@ -82,7 +82,7 @@ class kp:
                 func_op.attributes["function_type"] = mlir.TypeAttr.get(
                     mlir.FunctionType.get(inputs=func_op.attributes["function_type"].value.inputs,
                                           results=tuple(output_types)))
-                # subprocess.check_call(['kp-asm', builder.m, '--passes'])
+                # subprocess.check_call(['annc-asm', builder.m, '--passes'])
                 return builder.m
             return results
         return wrapper

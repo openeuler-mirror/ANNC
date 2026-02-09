@@ -14,9 +14,9 @@
 using namespace mlir;
 
 /*
-./kp-opt input.model --passes (input.bin, output.bin)
-./kp-asm output.bin --passes (lib.so)
-./kp-verify output.bin --atir-op-verify="kpGenLibPath=..."
+./annc-opt input.model --passes (input.bin, output.bin)
+./annc-asm output.bin --passes (lib.so)
+./annc-verify output.bin --atir-op-verify="kpGenLibPath=..."
 */
 
 int main(int argc, char **argv) {
@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
   context.allowsUnregisteredDialects();
 
   if (argc < 3) {
-    std::cerr << ": ./kp-verify output.bin --atir-op-verify=\"kpGenLibPath=...\" or --atir-op-verify=\"llmGenLibPath=...\"" << std::endl;
+    std::cerr << ": ./annc-verify output.bin --atir-op-verify=\"kpGenLibPath=...\" or --atir-op-verify=\"llmGenLibPath=...\"" << std::endl;
     return 1;
   }
 

@@ -716,7 +716,7 @@ void runOriGraph(mlir::ModuleOp *root, const std::string &funcName,
   }
 
   // BFS DAG
-  // todo moduleregionkp-opt
+  // todo moduleregionannc-opt
   std::vector<mlir::Operation *> allOps;
   targetFuncOp.walk([&](mlir::Operation *op) {
     //  funcOp 

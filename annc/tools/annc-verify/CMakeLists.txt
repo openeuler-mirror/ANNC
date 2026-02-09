@@ -15,14 +15,14 @@ set(LIBS
   AtirPasses
   AtirOpVerify
 )
-add_llvm_executable(kp-verify
-  kp-verify.cpp
+add_llvm_executable(annc-verify
+  annc-verify.cpp
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(kp-verify PRIVATE ${LIBS}
+target_link_libraries(annc-verify PRIVATE ${LIBS}
   ${TENSORFLOW_LIBS}
 )
-llvm_update_compile_flags(kp-verify)
-mlir_check_all_link_libraries(kp-verify)
-install(TARGETS kp-verify DESTINATION bin)
+llvm_update_compile_flags(annc-verify)
+mlir_check_all_link_libraries(annc-verify)
+install(TARGETS annc-verify DESTINATION bin)

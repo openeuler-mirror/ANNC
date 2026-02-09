@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   // mlir::OpPrintingFlags flags;
   // flags.elideLargeElementsAttrs(0);
   // root->print(llvm::errs(), flags);
-  // kp-asm input.bin --xxx_pass
+  // annc-asm input.bin --xxx_pass
   return mlir::asMainReturnCode(
     mlir::MlirOptMain(argc, argv, "ANNC Code Generation\n", registry));
 }
