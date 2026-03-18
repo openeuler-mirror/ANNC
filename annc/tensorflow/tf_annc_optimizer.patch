@@ -133,6 +133,12 @@ index 22617ef8ab5..f89a084f94c 100644
 +    deps = MATH_DEPS,
 +)
 +
++tf_kernel_library(
++    name = "fused_batchmatmul_add_sigmoid_op",
++    srcs = ["fused_batchmatmul_add_sigmoid.cc"],
++    deps = MATH_DEPS,
++)
+
 +cc_library(
 +    name = "embedding_fused_ops",
 +    deps = [
@@ -144,6 +150,7 @@ index 22617ef8ab5..f89a084f94c 100644
 +        ":embedding_fused_sparse_segment_reduce_op",
 +        ":embedding_fused_sparse_segment_reduce_nonzero_op",
 +        ":embedding_fused_sparse_select_op",
++        ":fused_batchmatmul_add_sigmoid_op",
 +    ],
 +)
 +
@@ -159,6 +166,7 @@ index 22617ef8ab5..f89a084f94c 100644
 +        "embedding_fused_sparse_select_test.cc",
 +        "embedding_fused_gather_test.cc",
 +        "embedding_fused_sparse_reshape_test.cc",
++        "fused_batchmatmul_add_sigmoid_test.cc",
 +    ],
 +    deps = [
 +        ":ops_testutil",
