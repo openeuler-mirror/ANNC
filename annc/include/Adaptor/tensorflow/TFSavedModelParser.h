@@ -84,7 +84,6 @@ private:
     std::string model_path_;
     const tensorflow::GraphDef* gdef_;
     std::unique_ptr<tensorflow::SavedModel> saved_model_;
-    std::vector<NodeInfo>;
     
     void load_model();
     std::string get_input_name(const std::string& name);

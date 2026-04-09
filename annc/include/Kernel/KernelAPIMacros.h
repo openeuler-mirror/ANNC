@@ -34,15 +34,6 @@ EXTERN_C ret_type API_CONCAT(API_PREFIX, name)(__VA_ARGS__)
 #define ANNC_AUTO_KERNEL_SYMBOL_STRING(spec_token) ANNC_STRINGIZE(ANNC_AUTO_KERNEL_SYMBOL(spec_token))
 #define ANNC_AUTO_KERNEL_C_API(spec_token) API_CONCAT(API_PREFIX, ANNC_AUTO_KERNEL_SYMBOL(spec_token))
 
-#define ANNC_DEFINE_AUTO_KERNEL_SPEC(spec_token, args_decl, body) \
-    DEFINE_KERNEL(void, ANNC_AUTO_KERNEL_SYMBOL(spec_token), ANNC_UNPAREN args_decl) body
-
-#define ANNC_DECLARE_AUTO_KERNEL_SPEC(spec_token, args_decl) \
-    EXTERN_C void ANNC_AUTO_KERNEL_C_API(spec_token)(ANNC_UNPAREN args_decl)
-
-#define ANNC_FORWARD(impl_fn, args_decl, args_call) \
-    args_decl, { impl_fn(ANNC_UNPAREN args_call); }
-
 #define ANNC_KERNEL(builder_expr, ...) \
     ANNC_KERNEL_SPEC(ANNC_INTERNAL_SPEC_TOKEN(__LINE__), builder_expr, __VA_ARGS__)
 

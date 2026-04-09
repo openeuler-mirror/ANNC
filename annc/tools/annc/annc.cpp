@@ -466,6 +466,8 @@ private:
         string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+                   " -lANNCThreadPool -Wl,--no-whole-archive";
         //
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
@@ -486,6 +488,8 @@ private:
         
         string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+                   " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         
         logCommand(command);
