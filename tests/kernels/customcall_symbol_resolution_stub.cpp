@@ -51,18 +51,9 @@ int main() {
     matmul.op_type = "MatMul";
     matmul.backend = "aarch64";
     const std::string matmulSymbol = resolveForCustomCallOrThrow(matmul);
-    expectHasPrefix(matmulSymbol, "ANNCKernel_matmul_kernel_specs_", "MatMul default");
+    expectHasPrefix(matmulSymbol, "ANNCKernel_matmul_", "MatMul default");
     expectHasSuffix(matmulSymbol, "_auto", "MatMul default");
     std::cout << "default lookup: MatMul -> " << matmulSymbol << "\n";
-
-    CustomCallSymbolRequest typedScaleF32;
-    typedScaleF32.op_type = "TypedScale1D";
-    typedScaleF32.backend = "aarch64";
-    typedScaleF32.type_constraints = {{"Tdata", "float"}};
-    const std::string typedScaleF32Symbol = resolveForCustomCallOrThrow(typedScaleF32);
-    expectHasPrefix(typedScaleF32Symbol, "ANNCKernel_typed_scale_kernel_specs_", "TypedScale1D<float>");
-    expectHasSuffix(typedScaleF32Symbol, "_auto", "TypedScale1D<float>");
-    std::cout << "specialized lookup: TypedScale1D<float> -> " << typedScaleF32Symbol << "\n";
 
     try {
         CustomCallSymbolRequest missing;

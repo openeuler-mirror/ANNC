@@ -8,23 +8,45 @@ TEST_BIN_DIR=""
 TEST_TMP_DIR="$PROJECT_ROOT/tests/tmp"
 
 BUILD_DIR=""
+KERNEL_LIB=""
+BUILTIN_LIB=""
+THREADPOOL_LIB=""
 for candidate in "$PROJECT_ROOT/build" "$PROJECT_ROOT/cmake-build-debug-wsl"; do
-  if [[ -f "$candidate/annc/lib/Kernel/libANNCKernel.a" && -f "$candidate/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a" ]]; then
+  if [[ -f "$candidate/lib/libANNCKernel.a" && -f "$candidate/lib/libANNCBuiltinKernels.a" && -f "$candidate/lib/libANNCThreadPool.a" ]]; then
     BUILD_DIR="$candidate"
+    KERNEL_LIB="$candidate/lib/libANNCKernel.a"
+    BUILTIN_LIB="$candidate/lib/libANNCBuiltinKernels.a"
+    THREADPOOL_LIB="$candidate/lib/libANNCThreadPool.a"
+    break
+  fi
+
+  if [[ -f "$candidate/annc/lib/Kernel/libANNCKernel.a" && -f "$candidate/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a" && -f "$candidate/annc/lib/Kernel/threadpool/libANNCThreadPool.a" ]]; then
+    BUILD_DIR="$candidate"
+    KERNEL_LIB="$candidate/annc/lib/Kernel/libANNCKernel.a"
+    BUILTIN_LIB="$candidate/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a"
+    THREADPOOL_LIB="$candidate/annc/lib/Kernel/threadpool/libANNCThreadPool.a"
     break
   fi
 done
 
 if [[ -z "$BUILD_DIR" ]]; then
   echo "Failed to locate a usable build directory. Checked:"
-  echo "  - $PROJECT_ROOT/build"
-  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl"
+  echo "  - $PROJECT_ROOT/build/lib/libANNCKernel.a"
+  echo "  - $PROJECT_ROOT/build/lib/libANNCBuiltinKernels.a"
+  echo "  - $PROJECT_ROOT/build/lib/libANNCThreadPool.a"
+  echo "  - $PROJECT_ROOT/build/annc/lib/Kernel/libANNCKernel.a"
+  echo "  - $PROJECT_ROOT/build/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a"
+  echo "  - $PROJECT_ROOT/build/annc/lib/Kernel/threadpool/libANNCThreadPool.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/lib/libANNCKernel.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/lib/libANNCBuiltinKernels.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/lib/libANNCThreadPool.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/annc/lib/Kernel/libANNCKernel.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a"
+  echo "  - $PROJECT_ROOT/cmake-build-debug-wsl/annc/lib/Kernel/threadpool/libANNCThreadPool.a"
   exit 1
 fi
 
 TEST_BIN_DIR="$BUILD_DIR/bin"
-KERNEL_LIB="$BUILD_DIR/annc/lib/Kernel/libANNCKernel.a"
-BUILTIN_LIB="$BUILD_DIR/annc/lib/Kernel/builtin_kernels/libANNCBuiltinKernels.a"
 
 mkdir -p "$TEST_BIN_DIR" "$TEST_TMP_DIR"
 
@@ -53,6 +75,7 @@ echo "Project root: $PROJECT_ROOT"
 echo "Build dir: $BUILD_DIR"
 echo "Kernel lib: $KERNEL_LIB"
 echo "Builtin lib: $BUILTIN_LIB"
+echo "Threadpool lib: $THREADPOOL_LIB"
 
 g++ -std=c++17 \
     -I"$PROJECT_ROOT" \
@@ -80,8 +103,11 @@ g++ -std=c++17 \
     -rdynamic \
     -o "$TEST_BIN_DIR/builtin_shared_spec_test" \
     "$SCRIPT_DIR/builtin_shared_spec_test.cpp" \
+    -Wl,--start-group \
     "$KERNEL_LIB" \
     -Wl,--whole-archive "$BUILTIN_LIB" -Wl,--no-whole-archive \
+    "$THREADPOOL_LIB" \
+    -Wl,--end-group \
     -ldl
 
 echo "=== Build successful ==="

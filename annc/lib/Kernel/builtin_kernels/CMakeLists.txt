@@ -20,7 +20,7 @@ foreach(spec_file ${KERNEL_SPEC_FILES})
         message(FATAL_ERROR "No implementation source found for spec ${spec_name}: expected ${impl_source}")
     endif()
 
-    string(MAKE_C_IDENTIFIER "${spec_stem}" spec_token_prefix)
+    string(MAKE_C_IDENTIFIER "${impl_base}" spec_token_prefix)
     get_filename_component(impl_name ${impl_source} NAME)
     set(SPEC_INCLUDE "${spec_name}")
     set(IMPL_INCLUDE "${impl_name}")

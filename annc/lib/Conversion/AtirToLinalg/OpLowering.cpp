@@ -1,6 +1,7 @@
 #include "Conversion/AtirToLinalg/OpLowering.h"
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
+#include "Kernel/KernelSymbolResolver.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -40,6 +41,21 @@ namespace {
         }
 
         return res;
+    }
+
+    std::string getLoweringBackend(ModuleOp module) {
+        if (auto backend = module->getAttrOfType<StringAttr>("annc.backend")) {
+            return backend.str();
+        }
+        return "aarch64";
+    }
+
+    std::optional<std::string> resolveKernelCallee(atir::CustomizeOp op, ModuleOp module) {
+        annc::kernels::KernelSymbolResolverRequest request;
+        request.op_type = op.getOpType().str();
+        request.backend = getLoweringBackend(module);
+
+        return annc::kernels::ResolveKernelSymbol(request);
     }
 }
 namespace atir
@@ -117,6 +133,12 @@ void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter, atir::
                                          atir::CustomizeOp op) const {
 
   ModuleOp module = op->getParentOfType<ModuleOp>();
+  auto calleeName = resolveKernelCallee(op, module);
+  if (!calleeName.has_value()) {
+    op.emitError() << "failed to resolve kernel symbol for CustomizeOp '"
+                   << op.getOpType() << "'";
+    return;
+  }
 
   SmallVector<mlir::Value> newOperands;
   SmallVector<mlir::Type> inputMemRefTypes;
@@ -139,19 +161,24 @@ void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter, atir::
 
   PatternRewriter::InsertionGuard guard(rewriter);
 
-  rewriter.setInsertionPointToStart(module.getBody());
-  auto funcOp = rewriter.create<func::FuncOp>(
-      op.getLoc(), op.getOpType(), funcType);
-
-  llvm::dbgs() << "this is CustomizeLoweringToLinalg::funcOp\n";
-
-  funcOp.setPrivate();
+  auto funcOp = module.lookupSymbol<func::FuncOp>(*calleeName);
+  if (!funcOp) {
+      rewriter.setInsertionPointToStart(module.getBody());
+      funcOp = rewriter.create<func::FuncOp>(op.getLoc(), *calleeName, funcType);
+      funcOp.setPrivate();
+      auto emitCAttr = UnitAttr::get(rewriter.getContext());
+      funcOp->setAttr("llvm.emit_c_interface", emitCAttr);
+  } else if (funcOp.getFunctionType() != funcType) {
+      op.emitError() << "resolved kernel callee '" << *calleeName
+                     << "' already exists with mismatched function type";
+      return;
+  }
 
   rewriter.setInsertionPoint(op);
 
   auto callOp = rewriter.create<func::CallOp>(
       op.getLoc(),
-      op.getOpType(),
+      *calleeName,
       resultMemrefTypes,
       newOperands);
 

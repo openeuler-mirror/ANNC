@@ -138,24 +138,9 @@ ANNC_KERNEL(
 2. 在同目录新增 `xxx_kernel_specs.inc`
 3. 重新构建
 
-构建系统会自动生成：
-
-- wrapper 源文件
-- builtin registry 源文件
-- `_mlir_ciface_*` 导出符号
-
-## 你不需要做的事
-
-你不需要：
-
-- 手写 symbol 字符串
-- 手写 wrapper 函数名
-- 手写 registry 代码
-- 改 `kernel_res.cpp`
-
 ## 当前目录里的参考实现
 
-- 默认 kernel：[matmul_aarch64.cpp](/home/doe/ANNC-next/annc/lib/Kernel/builtin_kernels/matmul_aarch64.cpp)
-- 默认 kernel spec：[matmul_kernel_specs.inc](/home/doe/ANNC-next/annc/lib/Kernel/builtin_kernels/matmul_kernel_specs.inc)
-- 类型特化 kernel：[typed_scale_aarch64.cpp](/home/doe/ANNC-next/annc/lib/Kernel/builtin_kernels/typed_scale_aarch64.cpp)
-- 类型特化 spec：[typed_scale_kernel_specs.inc](/home/doe/ANNC-next/annc/lib/Kernel/builtin_kernels/typed_scale_kernel_specs.inc)
+- 默认 kernel：[`matmul_aarch64.cpp`](matmul_aarch64.cpp)
+- 默认 kernel spec：[`matmul_kernel_specs.inc`](matmul_kernel_specs.inc)
+- 类型特化 kernel：[`typed_scale_aarch64.cpp`](typed_scale_aarch64.cpp)
+- 类型特化 spec：[`typed_scale_kernel_specs.inc`](typed_scale_kernel_specs.inc)

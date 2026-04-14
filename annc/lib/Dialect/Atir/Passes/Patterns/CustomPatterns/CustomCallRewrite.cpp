@@ -79,7 +79,7 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   std::string getKernelName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
-    return "my_matmul";
+    return "MatMul";
   }
 };
 
