@@ -1,39 +1,28 @@
-#!/usr/bin/env python3
-# coding=utf-8
-from setuptools import setup
-from setuptools import find_packages
+# -*- coding: utf-8 -*-
 import os
-import shutil
+from setuptools import setup, find_packages
 
-project, version = 'annc', '0.0.1'
+def iter_package_data(dir_path):
+    packages.append(dir_path.replace('/', '.'))
+    package_data[packages[-1]] = ['*']
+    for item in os.listdir(dir_path):
+        item = os.path.join(dir_path, item).replace('\\', '/')
+        if os.path.isdir(item):
+            iter_package_data(item)
 
-
-def collect_install_patches():
-    install_path = os.path.abspath(os.path.join('..', 'install'))
-    if os.path.exists('./scripts/patches'):
-        shutil.rmtree('./scripts/patches')
-    shutil.copytree(install_path, './scripts/patches/')
-
-
-collect_install_patches()
-
-setup(name=project,
-      include_package_data=True,
-      version=version,
-      description='Accelerated Neural Network Compiler',
-      url='https://gitee.com/openeuler/ANNC',
-      packages=find_packages() + [
-          f'{project}',
-          f'{project}/optimize',
-          'scripts',
-          'scripts.patches',
-      ],
-      package_data={
-          f'scripts.patches': ['*.patch'],
-      },
-      entry_points={
-          'console_scripts': [
-              f'{project}-opt = {project}.main:opt',
-              f'{project}-apply-tf = scripts.install:tf_install',
-          ],
-      })
+packages = find_packages()
+package_data = {}
+iter_package_data('kpgemm/_mlir_libs')
+iter_package_data('kpgemm/dialects')
+setup(
+    name='kpgemm',
+    version="1.0.0",
+    description='KPGEMM Compiler',
+    author='Hou Defu',
+    author_email='lark_fluvy@hotmail.com',
+    packages=packages,
+    install_requires=[],
+    include_package_data=True,
+    package_data=package_data,
+    python_requires='>=3.8.0',
+)

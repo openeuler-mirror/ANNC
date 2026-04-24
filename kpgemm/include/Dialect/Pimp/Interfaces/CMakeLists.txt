@@ -1,0 +1,2 @@
+add_mlir_interface(ShapeInfer)
+add_mlir_interface(Interpret)

@@ -1,22 +1,162 @@
-# aicompiler
+# ANNC-Next
 
-An AI compiler designed to optimize and compile ML model into high-performance executable code that can be executed on various targets.
+## 
+ANNC-NextAI/MLMLIRopenEuler
 
-### Build shared library
-```bash
-bazel --output_user_root=./output build -c opt annc/service/cpu:libannc.so
+## 
+### 2.1 
+|  |  |
+| --- | --- |
+|  | openEuler-22.03-LTS-SP4 |
+|  | 920X |
+|  | 500GB |
+|  | LLVM 21.1.3 |
+
+### 2.2 
+- 50GB
+- Gitee
+- 
+
+### 2.3 
+```shell
+# Python
+pip install pybind11 nanobind
+
+# 
+yum install ninja-build cmake
+yum-builddep llvm
+
+#  yum
+yum clean all
+```
+> ****:  `sudo` yum
+## 2.4 LLVM&MLIR
+> ****: ANNCMLIRMLIRANNC
+
+```shell
+git clone --depth 1 https://gitee.com/mirrors/LLVM.git --branch llvmorg-21.1.3
+
+mkdir build
+
+cd build
+
+cmake -G Ninja \
+  -DCMAKE_INSTALL_PREFIX=$YOUR_LLVM_PATH \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lldb;lld;mlir;llvm" \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DLLVM_ENABLE_RTTI=ON \
+  -DLLVM_ENABLE_EH=ON \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DPython3_EXECUTABLE=$(which python3) \
+  -DLLVM_TARGETS_TO_BUILD="AArch64" \
+  -DLLVM_ENABLE_ZLIB=ON \
+  ../LLVM/llvm
+
+ninja && ninja install
 ```
 
-### Build static library
+
+> ****:
+> 1. `${YOUR_LLVM_PATH}` LLVM `/opt/llvm-21.1.3`
+> 2. 1-2
+> 3. 255400G `-j` 
+
+
+LLVM
 ```bash
-bazel --output_user_root=./output build -c opt annc/service/cpu:annc
+export PATH=${YOUR_LLVM_PATH}/bin:$PATH
+llvm-config --version  # 21.1.3
+mlir-opt --version     # MLIR
 ```
 
-### Build test
-```bash
-bazel --output_user_root=./output build -c opt annc/tools/kp-opt:kp-opt
-bazel-bin/annc/tools/kp-opt/kp-opt {test_hlo_cluster_file.dat}
+## ANNC
+
+```shell
+# 
+git clone https://codehub-dg-y.huawei.com/Computing_Product_Line_Compiler_Group/AICompiler/annc-toolchain.git --branch dev
+
+# clone
+cd annc-toolchain
+
+# 
+git submodule init
+git submodule update
+
+# 
+mkdir -p build && cd build
+
+# CMake
+cmake -G Ninja .. \
+  -DCMAKE_INSTALL_PREFIX=$YOUR_ANNC_INSTALL_PATH \
+  -DMLIR_DIR=${YOUR_LLVM_PATH}/lib/cmake/mlir \
+  -DLLVM_DIR=${YOUR_LLVM_PATH}/lib/cmake/llvm \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER=${YOUR_LLVM_PATH}/bin/clang \
+  -DCMAKE_CXX_COMPILER=${YOUR_LLVM_PATH}/bin/clang++ \
+  -DLLVM_ENABLE_LIBCXX=ON \
+  -Dnanobind_DIR=/usr/local/lib/python3.*/site-packages/nanobind/cmake \
+  -Dpybind11_DIR=/usr/local/lib/python3.*/site-packages/pybind11/share/cmake/pybind11 \
+  -DCMAKE_CXX_FLAGS="-fPIC"
+
+# ninja
+ninja && ninja install
 ```
 
-Use `--distdir=/path/to/proxy` to download files locally.
-Use `--copt="-g"` for debug mode.
+> ****:
+> 1. `${YOUR_ANNC_INSTALL_PATH}` ANNC `/opt/ANNC`
+> 2. Python `/usr/local/lib/python3.9/` `python3.9` Python
+> 3. Python `~/.local/lib/python3.*/site-packages/`
+> 4. 
+
+## 
+```bash
+# 
+export PATH=${YOUR_ANNC_INSTALL_PATH}/bin:$PATH
+
+# 
+which kp-opt kp-asm
+
+# 
+python -m pytest tests/
+```
+
+## 
+1. ****:  `-D*_DIR` 
+2. **Python**: pybind11nanobind
+3. ****: 
+
+## 
+```shell
+# 
+cd /path/to/annc-toolchain/build
+
+# tf-adaptortfjson
+./bin/tf-adaptor ../tests/graph_demo ./test.json
+
+# mlir
+./bin/kp-opt ./test.json --pimp-op-fusion -o output.bin -emit-bytecode
+
+# kpgemmmlir
+./bin/kp-asm output.bin --pimp-prune-func --pimp-block-fusion --pimp-tiling --pimp-unroll --convert-pimp-to-affine -o ../tests/annc/asm.mlir
+
+# annc driverllvm
+cd ../tests/annc
+annc -t driver_dynamic.c -o 123 asm.mlir -v --save-temps --shared
+
+# kp-verify
+cd ../../build
+./bin/kp-verify output.bin --pimp-op-verify="kpGenLibPath=../tests/annc/fused_matmul_add_relu_A0732AD9DB33D09F.so"
+
+# llmcodegenLLMtensorflow opkernel
+./bin/kp-asm ./output.bin --pimp-LLM-CodeGen
+
+# kp-verify
+./bin/kp-verify output.bin --pimp-op-verify="llmGenLibPath=../kpgemm/lib/Dialect/Pimp/Passes/outputs/so/fused_matmul_add_relu_A0732AD9DB33D09F.so"
+```
+
+## 
+- [LLVM](https://llvm.org/)
+- [MLIR](https://mlir.llvm.org/)
+- [openEuler](https://openeuler.org/zh/)

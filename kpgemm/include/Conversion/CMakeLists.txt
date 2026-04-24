@@ -1,0 +1,5 @@
+set(LLVM_TARGET_DEFINITIONS Passes.td)
+mlir_tablegen(Passes.h.inc -gen-pass-decls -name PimpConversion)
+mlir_tablegen(PimpConversionPasses.capi.h.inc -gen-pass-capi-header --prefix PimpConversion)
+mlir_tablegen(PimpConversionPasses.capi.cpp.inc -gen-pass-capi-impl --prefix PimpConversion)
+add_public_tablegen_target(PimpMlirConversionPassIncGen)
