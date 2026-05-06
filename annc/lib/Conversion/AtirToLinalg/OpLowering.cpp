@@ -1,11 +1,11 @@
 #include "Conversion/AtirToLinalg/OpLowering.h"
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
-#include "Kernel/KernelSymbolResolver.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "Kernel/KernelPriorityResolver.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "llvm/Support/Debug.h"
 
 namespace {
     std::vector<AffineMap> getTransposeAttr(MLIRContext *ctx, ArrayRef<bool> transpose)
@@ -43,19 +43,12 @@ namespace {
         return res;
     }
 
-    std::string getLoweringBackend(ModuleOp module) {
-        if (auto backend = module->getAttrOfType<StringAttr>("annc.backend")) {
-            return backend.str();
-        }
-        return "aarch64";
-    }
-
     std::optional<std::string> resolveKernelCallee(atir::CustomizeOp op, ModuleOp module) {
-        annc::kernels::KernelSymbolResolverRequest request;
-        request.op_type = op.getOpType().str();
-        request.backend = getLoweringBackend(module);
-
-        return annc::kernels::ResolveKernelSymbol(request);
+        annc::kernels::KernelResolveRequest req;
+        req.op_type = op.getOpType().str();
+        auto attr = module->getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
+        bool enableKdnn = attr && attr.getValue();
+        return annc::kernels::resolveBestKernel(req, enableKdnn);
     }
 }
 namespace atir

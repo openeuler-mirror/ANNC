@@ -47,6 +47,13 @@ def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
   let dependentDialects = [
     "AtirDialect"
   ];
+  let options = [
+    Option<"enableKdnn", "enable-kdnn", "bool",
+           /*defaultValue=*/"false",
+           "Enable KDNN optimized kernels where available. "
+           "Kernels with a KDNN implementation will use it; "
+           "others fall back to aarch64.">
+  ];
 }
 
 /* distribute pass */

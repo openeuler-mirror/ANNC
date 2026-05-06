@@ -32,7 +32,7 @@ class PatternRegistry {
 
  private:
   PatternRegistry() = default;
-  
+
   mutable std::mutex mutex;
   std::vector<PatternCreator> creators;
   std::unordered_set<std::string> registeredNames;

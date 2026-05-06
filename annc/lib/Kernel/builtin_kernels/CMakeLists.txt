@@ -1,31 +1,43 @@
-file(GLOB KERNEL_SOURCES CONFIGURE_DEPENDS
+file(GLOB_RECURSE KERNEL_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
 )
 
-file(GLOB KERNEL_SPEC_FILES CONFIGURE_DEPENDS
+file(GLOB_RECURSE KERNEL_SPEC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*_kernel_specs.inc"
 )
+
+if(NOT ANNC_ENABLE_KDNN_ADAPTOR)
+    list(FILTER KERNEL_SOURCES EXCLUDE REGEX "kdnn_adaptor/")
+    list(FILTER KERNEL_SPEC_FILES EXCLUDE REGEX "kdnn_adaptor/")
+endif()
 
 set(GENERATED_WRAPPER_SOURCES)
 set(GENERATED_REGISTRY_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/BuiltinKernelRegistry.gen.cpp")
 set(WRAPPED_IMPL_SOURCES)
 set(REGISTRY_INCLUDE_BLOCKS "")
 foreach(spec_file ${KERNEL_SPEC_FILES})
-    get_filename_component(spec_name ${spec_file} NAME)
-    get_filename_component(spec_stem ${spec_file} NAME_WE)
+    file(RELATIVE_PATH spec_relpath "${CMAKE_CURRENT_SOURCE_DIR}" "${spec_file}")
+    get_filename_component(spec_name ${spec_relpath} NAME)
+    get_filename_component(spec_stem ${spec_relpath} NAME_WE)
     string(REGEX REPLACE "_kernel_specs$" "" impl_base ${spec_stem})
-    set(impl_source "${CMAKE_CURRENT_SOURCE_DIR}/${impl_base}_aarch64.cpp")
+    get_filename_component(spec_rel_dir "${spec_relpath}" DIRECTORY)
+    if(spec_rel_dir)
+        set(impl_source "${CMAKE_CURRENT_SOURCE_DIR}/${spec_rel_dir}/${impl_base}_aarch64.cpp")
+        set(SPEC_INCLUDE "${spec_rel_dir}/${spec_name}")
+        set(IMPL_INCLUDE "${spec_rel_dir}/${impl_base}_aarch64.cpp")
+    else()
+        set(impl_source "${CMAKE_CURRENT_SOURCE_DIR}/${impl_base}_aarch64.cpp")
+        set(SPEC_INCLUDE "${spec_name}")
+        set(IMPL_INCLUDE "${impl_base}_aarch64.cpp")
+    endif()
     if(NOT EXISTS ${impl_source})
-        message(FATAL_ERROR "No implementation source found for spec ${spec_name}: expected ${impl_source}")
+        message(FATAL_ERROR "No implementation source found for spec ${spec_relpath}: expected ${impl_source}")
     endif()
 
-    string(MAKE_C_IDENTIFIER "${impl_base}" spec_token_prefix)
-    get_filename_component(impl_name ${impl_source} NAME)
-    set(SPEC_INCLUDE "${spec_name}")
-    set(IMPL_INCLUDE "${impl_name}")
+    string(MAKE_C_IDENTIFIER "${spec_relpath}" spec_token_prefix)
     set(SPEC_TOKEN_PREFIX "${spec_token_prefix}")
-    set(wrapper_source "${CMAKE_CURRENT_BINARY_DIR}/${spec_stem}_wrappers.gen.cpp")
+    set(wrapper_source "${CMAKE_CURRENT_BINARY_DIR}/${spec_token_prefix}_wrappers.gen.cpp")
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/BuiltinKernelWrapper.cpp.in"
         "${wrapper_source}"
@@ -35,7 +47,7 @@ foreach(spec_file ${KERNEL_SPEC_FILES})
     list(APPEND WRAPPED_IMPL_SOURCES "${impl_source}")
     string(APPEND REGISTRY_INCLUDE_BLOCKS
         "#define ANNC_SPEC_TOKEN_PREFIX ${spec_token_prefix}\n"
-        "#define ANNC_BUILTIN_KERNEL_SPECS_FILE \"${spec_name}\"\n"
+        "#define ANNC_BUILTIN_KERNEL_SPECS_FILE \"${SPEC_INCLUDE}\"\n"
         "#include \"Kernel/BuiltinKernelSpecRegister.h\"\n"
         "#undef ANNC_SPEC_TOKEN_PREFIX\n\n")
 endforeach()
@@ -50,6 +62,15 @@ target_include_directories(ANNCBuiltinKernels PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+if(ANNC_ENABLE_KDNN_ADAPTOR)
+    target_include_directories(ANNCBuiltinKernels PRIVATE
+        "${KDNN_INCLUDE_DIR}"
+    )
+    target_link_libraries(ANNCBuiltinKernels PUBLIC
+        "${KDNN_LIBRARY}"
+    )
+endif()
 
 target_link_libraries(ANNCBuiltinKernels PUBLIC
     ANNCKernel
