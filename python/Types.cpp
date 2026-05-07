@@ -1,8 +1,8 @@
-#include "PimpModule.h"
+#include "AtirModule.h"
 
 namespace py = pybind11;
 
-namespace pimp {
+namespace atir {
 void replaceAllUsesWith_(MlirValue val1, MlirValue val2) {
   // replace val1's users with val2
   unwrap(val1).replaceAllUsesWith(unwrap(val2));
@@ -215,4 +215,4 @@ void populateTypesModule(py::module_ m) {
 
   m.def("wrap_tensor_type", &wrapType_<TensorType>, py::arg("tensor_type"));
 }
-}  // namespace pimp
+}  // namespace atir

@@ -43,7 +43,7 @@ typedef void (*fused_matmul_func_t) (
 // 
 static const char* get_library_name() {
     const char* lib_name = getenv("ANNC_LIBRARY_NAME");
-    return lib_name ? lib_name : "kpgemm";
+    return lib_name ? lib_name : "annc";
 }
 
 // 

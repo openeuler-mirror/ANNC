@@ -3,15 +3,15 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'python'))
 
-from kpgemm.ops import Pimp, Value, TensorType
-from kpgemm.types import ElemType
+from annc.ops import Atir, Value, TensorType
+from annc.types import ElemType
 
 def test_matmul_without_bias():
     """ bias  matmul """
     print(" matmul  bias...")
     
-    #  Pimp 
-    pimp = Pimp()
+    #  Atir 
+    atir = Atir()
     
     # 
     input_type = TensorType.get([2, 3], ElemType.FP32)
@@ -23,13 +23,13 @@ def test_matmul_without_bias():
     rhs = None  #  Value 
     
     try:
-        #  Pimp.matmul 
-        result = pimp.matmul(output_type, lhs, rhs)
-        print(" Pimp.matmul ")
+        #  Atir.matmul 
+        result = atir.matmul(output_type, lhs, rhs)
+        print(" Atir.matmul ")
         print(f": {type(result)}")
         return True
     except Exception as e:
-        print(f" Pimp.matmul : {e}")
+        print(f" Atir.matmul : {e}")
         return False
 
 def test_global_matmul():
@@ -37,7 +37,7 @@ def test_global_matmul():
     print("\n matmul ...")
     
     try:
-        from kpgemm.ops import matmul, Value
+        from annc.ops import matmul, Value
         
         # 
         input_type = TensorType.get([2, 3], ElemType.FP32)
@@ -62,7 +62,7 @@ def test_none_function():
     print("\n none ...")
     
     try:
-        from kpgemm.ops import none
+        from annc.ops import none
         
         #  none 
         result = none()
@@ -75,7 +75,7 @@ def test_none_function():
         return False
 
 if __name__ == "__main__":
-    print(" Pimp_MatMulOp  Python ...")
+    print(" Atir_MatMulOp  Python ...")
     
     test_none_function()
     test_matmul_without_bias()

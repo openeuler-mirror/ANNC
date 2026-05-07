@@ -9,7 +9,7 @@
 // 
 static const char* get_library_name() {
     const char* lib_name = getenv("ANNC_LIBRARY_NAME");
-    return lib_name ? lib_name : "kpgemm.so";
+    return lib_name ? lib_name : "annc.so";
 }
 
 /* ================================

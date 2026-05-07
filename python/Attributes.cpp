@@ -1,8 +1,8 @@
-#include "PimpModule.h"
+#include "AtirModule.h"
 #include "mlir/CAPI/Registration.h"
 
 namespace py = pybind11;
-namespace pimp {
+namespace atir {
 MlirAttribute getTilingAttr_(MlirAttribute axes, MlirAttribute starts, MlirAttribute sizes) {
   auto ctx = unwrap(axes).getContext();
   return wrap(TilingAttr::get(ctx, dyn_cast<ArrayAttr>(unwrap(axes)),
@@ -20,7 +20,7 @@ MlirAttribute wrapAttribute_(T attr) {
 }
 
 void populateAttributeModule(py::module_ m) {
-  m.doc() = "Pimp Attributes";
+  m.doc() = "Atir Attributes";
 
   py::enum_<DataType>(m, "DataType")
     .value("Unknown", DataType::Unknown)
@@ -70,4 +70,4 @@ void populateAttributeModule(py::module_ m) {
   m.def("k_dynamic_", []() { return ShapedType::kDynamic; });
 }
 
-} // namespace pimp
+} // namespace atir

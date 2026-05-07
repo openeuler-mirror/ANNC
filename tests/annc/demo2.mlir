@@ -1,4 +1,4 @@
-module @demo attributes {module.state = "pimp"} {
+module @demo attributes {module.state = "atir"} {
   func.func private @fused_matmul_add_relu_A0732AD9DB33D09F(%arg0: memref<4x8xf32>, %arg1: memref<8x2xf32>, %arg2: memref<4x2xf32>, %arg3: memref<2xf32>) -> memref<4x2xf32> attributes {fusion.pattern = "matmul_add_relu", llvm.emit_c_interface} {
     %subview = memref.subview %arg3[0] [2] [1] : memref<2xf32> to memref<2xf32, strided<[1]>>
     %subview_0 = memref.subview %arg0[0, 0] [4, 8] [1, 1] : memref<4x8xf32> to memref<4x8xf32, strided<[8, 1]>>

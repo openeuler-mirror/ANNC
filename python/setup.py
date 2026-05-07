@@ -12,12 +12,12 @@ def iter_package_data(dir_path):
 
 packages = find_packages()
 package_data = {}
-iter_package_data('kpgemm/_mlir_libs')
-iter_package_data('kpgemm/dialects')
+iter_package_data('annc/_mlir_libs')
+iter_package_data('annc/dialects')
 setup(
-    name='kpgemm',
+    name='annc',
     version="1.0.0",
-    description='KPGEMM Compiler',
+    description='ANNC Compiler',
     author='Hou Defu',
     author_email='lark_fluvy@hotmail.com',
     packages=packages,
