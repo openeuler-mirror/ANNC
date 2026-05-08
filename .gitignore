@@ -10,3 +10,4 @@ proxy
 
 __pycache__
 *.whl
+build/

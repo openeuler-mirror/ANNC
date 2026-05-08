@@ -107,11 +107,15 @@ mlir::Value MLIRBuilder::addConstantNode(const json& node) {
       for (size_t i = node.at("inputs").size(); i <= inNum; i++)           \
         ins.emplace_back(noneValue_);                                      \
     }                                                                      \
+    auto loc_ = getLoc(ctx, node.at("name").template get<std::string>());  \
+    auto outBuf = builder_.create<atir::BufferOp>(loc_, outs[0]);          \
+    llvm::SmallVector<Value> allIns;                                       \
+    allIns.push_back(outBuf.getResult());                                  \
+    allIns.append(ins.begin(), ins.end());                                 \
     mlir::Operation* op =                                                  \
         builder_                                                           \
             .create<atir::T##Op>(                                          \
-                getLoc(ctx, node.at("name").template get<std::string>()),  \
-                outs, ins, attrs)                                          \
+                loc_, outs, allIns, attrs)                                 \
             .getOperation();                                               \
     for (int i = 0; i < node.at("outputs").size(); i++) {                  \
       std::string outName =                                                \
@@ -185,9 +189,11 @@ void MLIRBuilder::createAddOp(
   float relu_limit = -1.0f;
   FloatAttr scalar = FloatAttr();
 
+  auto addOutput = builder_.create<atir::BufferOp>(loc, outs[0]);
   auto add = builder_.create<atir::AddOp>(
       loc,
       outs[0],
+      addOutput.getResult(),
       ins, // variadic inputs
       builder_.getBoolAttr(do_relu),
       builder_.getF32FloatAttr(relu_limit),

@@ -550,16 +550,17 @@ LogicalResult FillOp::verify() {
   if (input1Shape.size() != 1) {
     return emitOpError("shapeInput must be a one-dimensional tensor");
   }
-  if (input1Shape.size() != 0) {
+  if (input2Shape.size() != 0) {
     return emitOpError("valueInput must be a scalar");
   }
   return success();
 }
 
 //===----------------------------------------------------------------------===//
-// BatchMatMulV2Op
+// BatchMatMulOp
 //===----------------------------------------------------------------------===//
-LogicalResult BatchMatMulV2Op::verify() {
+
+LogicalResult BatchMatMulOp::verify() {
   auto AType = llvm::dyn_cast<TensorType>(getA().getType());
   auto BType = llvm::dyn_cast<TensorType>(getB().getType());
   auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
@@ -607,10 +608,10 @@ LogicalResult BatchMatMulV2Op::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// TopKV2Op
+// TopKOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult TopKV2Op::verify() {
+LogicalResult TopKOp::verify() {
     auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
     auto kType = llvm::dyn_cast<TensorType>(getK().getType());
     auto valuesType = llvm::dyn_cast<TensorType>(getValues().getType());
@@ -680,6 +681,5 @@ LogicalResult PadOp::verify() {
   }
   return success();
 }
-
 
 } // namespace atir
