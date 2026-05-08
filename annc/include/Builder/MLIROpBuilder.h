@@ -1,51 +1,40 @@
 #ifndef ANNC_OP_BUILDER_H
 #define ANNC_OP_BUILDER_H
-#include <nlohmann/json.hpp>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <variant>
 
 #include "Dialect/Atir/AtirOps.h"
 #include "Helper.h"
 
-using json = nlohmann::json;
 using namespace mlir;
 namespace annc {
 
-// struct NodeInfo{
-//   std::string name;
-//   std::string op_type;
-//   std::vector<std::string> inputs;
+// 输出张量信息
+struct OutputInfo {
+    std::string name;
+    std::string dtype;
+    std::vector<int64_t> shape;
+};
 
-//   std::string raw_data;
-
-//   bool isInputNode  = false;
-//   bool isOutputNode = false;
-
-//   struct OutputInfo {
-//     std::string name;
-//     std::string dtype;
-//     std::vector<int64_t> shape;
-//     int id = 0;
-
-//     std::string getName() const {
-//       if (id == 0) return name;
-//       return name + ":" + std::to_string(id);
-//     }
-//   };
-//   std::vector<OutputInfo> outputs;
-//   // std::vector<mlir::Attribute> attributes;
-  
-//   NodeInfo() = default;
-//   void addOutput(int id, const std::string& name, const std::vector<int64_t>& s, const std::string& d) {
-//     OutputInfo out;
-//     out.shape = s;
-//     out.dtype = d;
-//     out.id = id;
-//     out.name = name;
-//     outputs.push_back(out);
-//   }
-//   // bool isInputNode() const {
-//   //   return op_type == "Placeholder";
-//   // }
-// };
+// 节点信息
+struct NodeInfo {
+    std::string name;
+    std::string op_type;
+    std::vector<std::string> inputs;
+    std::vector<OutputInfo> outputs;
+    std::string raw_data;
+    using TfAttrValue =
+        std::variant<int64_t, double, bool, std::string, std::vector<int64_t>,
+                     std::vector<double>, std::vector<bool>,
+                     std::vector<std::string>>;
+    std::unordered_map<std::string, TfAttrValue> attrs;
+    bool has_numBuckets = false;
+    int64_t numBuckets = 0;
+    bool isInputNode = false;
+    bool isOutputNode = false;
+};
 
 class MLIRBuilder {
  public:
@@ -53,7 +42,11 @@ class MLIRBuilder {
       : module_(module), builder_(module.getContext()) {}
   virtual ~MLIRBuilder() = default;
 
-  void jsonConvertor(const json& graph);
+  void buildFromNodes(const std::vector<NodeInfo>& nodes);
+
+  // Op handlers will be added in subsequent PRs
+  void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
  private:
   ModuleOp module_;
@@ -62,17 +55,12 @@ class MLIRBuilder {
   func::FuncOp mainFunc_;
   Value noneValue_;
 
-  std::vector<Value> addGraphInput(const json& graph);
-  std::vector<Value> addGraphOutput(const json& graph);
+  std::vector<Value> addGraphInputs(const std::vector<NodeInfo>& inputNodes);
+  std::vector<Value> addGraphOutputs(const std::vector<NodeInfo>& outputNodes);
 
-  mlir::Value addConstantNode(const json& node);
+  mlir::Value addConstantNode(const NodeInfo& node);
 
-  void addNode(const json& node);
-
-  void createMatMulOp(const json& node, ArrayRef<Type> outs, ArrayRef<Value> ins,
-                      ArrayRef<NamedAttribute> attrs);
-  void createAddOp(const json& node, ArrayRef<Type> outs, ArrayRef<Value> ins,
-                   ArrayRef<NamedAttribute> attrs);
+  void addNode(const NodeInfo& node);
 
   std::unordered_map<std::string, Value> tensorValues_;
   atir::TensorType getTensorType(const std::string& name,
