@@ -137,6 +137,7 @@ CREATE_KDNN_FUSION_PASS(KDnnFusionAfterRunBackend,
   pipeline.AddPass<KDnnFusionAfterRunBackend>();
 
 /* register kernel function */
+void __layout_matmul(void* out, const void** in);
 void __matmul(void* out, const void** in);
 void __batch_matmul(void* out, const void** in);
 void __matmul_add(void* out, const void** in);
@@ -150,7 +151,8 @@ void __pooling(void* out, void** in);
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add);      \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__matmul_add_relu); \
   XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__reduce_mean);     \
-  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__pooling);         \
+  XLA_CPU_REGISTER_CUSTOM_CALL_TARGET(__layout_matmul);   \
 
 }  // namespace cpu
 }  // namespace xla

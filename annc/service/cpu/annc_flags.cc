@@ -9,6 +9,7 @@ static const char kWS[] = " \t\r\n";  // whitespace
 
 static const std::vector<Flag> g_default_flags = {
     {"matmul", "Register matmul operator.", false, GEMM_OPT},
+    {"layout-matmul", "Register layout_matmul operator.", false, GEMM_OPT},
     {"batch-matmul", "Register batch_matmul operator", false, NONE},
     {"matmul-add", "Register matmul_add operator", false, NONE},
     {"matmul-add-relu", "Register matmul_add_relu operator", false, NONE},
