@@ -2,11 +2,65 @@
 #include <memory>
 
 #include "annc/service/blas_util.h"
+#include "annc/service/kpgemm_util.h"
 #include "annc/service/kdnn_util.h"
+#include "annc/service/hlo_util.h"
 #include "annc_flags.h"
 #include "kdnn_rewriter.h"
 namespace xla {
 namespace cpu {
+
+bool match_layout_matmul(HloInstruction* dot) {
+  IS_VALID(dot->opcode() == HloOpcode::kDot);
+  HloInstruction* lhs = dot->mutable_operand(0);
+  HloInstruction* rhs = dot->mutable_operand(1);
+  HloInstruction* param = nullptr;
+
+  if (rhs->opcode() == HloOpcode::kParameter) {
+    param = rhs;
+  }
+  else{
+    return false;
+  }
+  if (lhs->shape().rank() != 2 || rhs->shape().rank() != 2){
+    return false;
+  }
+
+  for (size_t i = 0; i < lhs->shape().rank(); i++) {
+      if (lhs->shape().dimensions(i) < 12 ||
+          lhs->shape().dimensions(i) > INT64_MAX)
+        return false;
+    }
+  for (size_t i = 0; i < rhs->shape().rank(); i++) {
+      if (rhs->shape().dimensions(i) < 12 ||
+          rhs->shape().dimensions(i) > INT64_MAX)
+        return false;
+    }
+
+  std::vector<HloInstruction*> fused_instrs = { dot };
+  HloComputation* parent = dot->parent();
+  HloInstruction* fusion = parent->CreateFusionInstruction(
+      fused_instrs, HloInstruction::FusionKind::kInput);
+  HloInstruction* root_instr = fusion->parent()->root_instruction();
+   HloInstruction* shape_info_0 = root_instr->AddInstruction(
+      HloInstruction::CreateConstant(get_param_info(fusion->operand(0))));
+  HloInstruction* shape_info_1 = root_instr->AddInstruction(
+      HloInstruction::CreateConstant(get_param_info(param)));
+  std::vector<HloInstruction*> operands = {fusion->mutable_operand(0),
+                                           param,
+                                           shape_info_0,
+                                           shape_info_1};
+  HloInstruction* custom_call = fusion->AddInstruction(
+      HloInstruction::CreateCustomCall(fusion->shape(), operands, "__layout_matmul"));
+  return parent->ReplaceInstruction(fusion, custom_call, false).ok();
+}
+void register_layout_matmul(std::vector<KDnnRewriter>& rewriters,
+                     RewriterType rewrite_type, int benefit = 1) {
+  RewritePattern pattern("layout_matmul", HloOpcode::kDot);
+  pattern.custom_rewriter = match_layout_matmul;
+  auto rewriter = KDnnRewriter(benefit, pattern, rewrite_type);
+  rewriters.push_back(rewriter);
+}
 
 void register_matmul(std::vector<KDnnRewriter>& rewriters,
                      RewriterType rewrite_type, int benefit = 1) {
@@ -61,6 +115,9 @@ void register_matmul_add_relu(std::vector<KDnnRewriter>& rewriters,
 
 void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
   auto& flags = annc::get_annc_flags();
+  if (flags.is_enabled("layout-matmul")) {
+    register_layout_matmul(rewriters, RewriterType::FUSED_OPERATION);
+  }
   if (flags.is_enabled("matmul")) {
     register_matmul(rewriters, RewriterType::DNN_CUSTOM_CALL);
   }
@@ -74,6 +131,31 @@ void register_gemm_rewriters(std::vector<KDnnRewriter>& rewriters) {
     register_matmul_add_relu(rewriters, RewriterType::DNN_CUSTOM_CALL, 3);
   }
   std::sort(rewriters.begin(), rewriters.end(), compare_rewriter);
+}
+
+void __layout_matmul(void* out, const void** in) {
+  float* out_buf = reinterpret_cast<float*>(out);
+  const float* lhs = reinterpret_cast<const float*>(in[0]);
+  const float* rhs = reinterpret_cast<const float*>(in[1]);
+  const int64_t* lhs_shape = reinterpret_cast<const int64_t*>(in[2]);
+  const int64_t* rhs_shape = reinterpret_cast<const int64_t*>(in[3]);
+  int m = lhs_shape[0];
+  int k = lhs_shape[1];
+  int n = rhs_shape[1];
+
+  KP_ORDER clayout = KpRowMajor;
+  KP_TRANSPOSE transa = KpNoTrans;
+  KP_TRANSPOSE transb = KpNoTrans;
+
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  int lda = k;
+  int ldb = n;
+  int ldc = n;
+
+  kp_sgemm(clayout, transa, transb, m, n, k, alpha, lhs, lda, rhs, ldb, beta,
+           out_buf, ldc);
+
 }
 
 void __matmul(void* out, const void** in) {

@@ -24,3 +24,8 @@ cc_library(
     name = "blas_util",
     hdrs = ["blas_util.h"]
 )
+
+cc_library(
+    name = "kpgemm_util",
+    hdrs = ["kpgemm_util.h"]
+)

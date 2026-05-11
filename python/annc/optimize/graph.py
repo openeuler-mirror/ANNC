@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List
 import google.protobuf
 import tensorflow as tf
@@ -6,6 +7,7 @@ from tensorflow.python.framework import func_graph
 from tensorflow.python.framework.ops import Operation, SymbolicTensor
 from tensorflow.core.protobuf import saved_model_pb2
 from tensorflow.core.framework import types_pb2
+from .op_type import OpType
 
 
 def convert_saved_model_to_pbtxt(model_path):
@@ -140,6 +142,11 @@ class Node:
 
         attrs = {}
         for key, attr in self.node.node_def.attr.items():
+            attrs[key] = get_attr(key, attr).replace('?', '-1')
+        if self.node.type in (OpType.MatMul.value, OpType.BatchMatMul.value) \
+                              and self.attrs[-1].key in ('rhs_format', 'lhs_format'):
+            key = self.attrs[-1].key
+            attr = self.attrs[-1].value
             attrs[key] = get_attr(key, attr).replace('?', '-1')
 
         if self.type not in ('NoOp', 'AssignVariableOp'):
@@ -323,7 +330,6 @@ class MetaGraph:
             text_model = google.protobuf.text_format.MessageToString(
                 saved_model)
 
-        import re
         graph_def = re.search('  graph_def[\s\S]+?\n  }', text_model).group()
         new_text_model = text_model.replace(graph_def, self.graph.dump_graph())
         os.makedirs(output_path, exist_ok=True)
