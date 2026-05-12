@@ -93,9 +93,13 @@ namespace atir {
             CHECK_LOGICAL_SUCCESS(op.getResult().getNumUses() == 1)
             for (auto* user: op.getResult().getUsers()) {
                 if (auto addOp = llvm::dyn_cast<atir::AddOp>(user)) {
-                    //biasmatmulOp
-                    CHECK_LOGICAL_SUCCESS(addOp->getOperands().size() == 2);
-                    //
+                    // New AddOp structure: Add(output, input1, input2, ...)
+                    // For matmul+bias fusion: Add(output, matmul_result, bias)
+                    CHECK_LOGICAL_SUCCESS(addOp->getOperands().size() == 3);
+                    
+                    // Get bias from the third operand (index 2)
+                    Value bias = addOp.getOperand(2);
+                    
                     std::vector<NamedAttribute> attrs;
                     attrs.push_back(NamedAttribute(rewriter.getStringAttr("withBias"),
                                                    rewriter.getBoolAttr(true)));
@@ -126,18 +130,21 @@ namespace atir {
                         attrs.push_back(NamedAttribute(rewriter.getStringAttr("relu_limit"),
                                                        rewriter.getF32FloatAttr(relu_limit)));
                     }
-                    //ins
+                    // Build inputs for new MatMulOp: lhs, rhs, c, bias
                     std::vector<Value> ins;
                     ins.push_back(op.getLhs());
                     ins.push_back(op.getRhs());
                     ins.push_back(op.getC());
-                    ins.push_back(addOp.getOperand(1));
-                    //outs
+                    ins.push_back(bias);
+                    
+                    // Build outputs
                     std::vector<Type> outs;
                     outs.push_back(addOp.getResult().getType());
-                    if (addOp.getOperand(1).getDefiningOp() != nullptr
-                        && llvm::isa<atir::ConstantOp>(addOp.getOperand(1).getDefiningOp())) {
-                        addOp.getOperand(1).getDefiningOp()->moveBefore(op);
+                    
+                    // Move bias constant before matmul if needed
+                    if (bias.getDefiningOp() != nullptr
+                        && llvm::isa<atir::ConstantOp>(bias.getDefiningOp())) {
+                        bias.getDefiningOp()->moveBefore(op);
                     }
 
                     auto newMatmulOp = rewriter.create<atir::MatMulOp>(addOp.getLoc(), outs,

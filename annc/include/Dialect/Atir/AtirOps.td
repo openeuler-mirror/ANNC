@@ -48,7 +48,7 @@ def Atir_NoneOp : Atir_Op<"None"> {
   let assemblyFormat = [{ attr-dict }];
 }
 
-def Atir_LoadOp : Atir_Op<"Load", Interfaces> {
+def Atir_LoadOp : Atir_Op<"Load"> {
   let summary = "Load from a tensor";
   let description = [{Returns the element at the given location from within the tensor}];
   let arguments = (ins Atir_Tensor:$input,
@@ -80,7 +80,7 @@ def Atir_CustomizeOp : Atir_Op<"Customize"> {
   }];
 }
 
-def Atir_ConstantOp : Atir_Op<"constant", [DeclareOpInterfaceMethods<InterpretIntfc>]> {
+def Atir_ConstantOp : Atir_Op<"constant"> {
   let summary = "declare or define a constant";
   let description = [{}];
   let arguments = (ins SymbolNameAttr:$sym_name,
@@ -104,18 +104,19 @@ def Atir_VariableOp : Atir_Op<"variable"> {
   }];
 }
 
-def Atir_AddOp : Atir_Op<"Add", Interfaces> {
+def Atir_AddOp : Atir_Op<"Add"> {
   let summary = "add op";
   let arguments = (ins
+      Atir_Tensor:$output,
       Variadic<Atir_Tensor>:$inputs,
       DefaultValuedAttr<BoolAttr, "false">:$do_relu,
       DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit,
       OptionalAttr<F32Attr>:$scalar
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
 }
 
-def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
+def Atir_ConcatOp : Atir_Op<"Concat"> {
   let summary = "Concat operator";
 
   let description = [{
@@ -139,7 +140,8 @@ def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
   }];
 
   let arguments = (
-    ins Variadic<Atir_Tensor>:$inputs,
+    ins Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$inputs,
     DefaultValuedAttr<I32Attr, "1">:$axis,
     DefaultValuedAttr<BoolAttr, "false">:$do_relu,
     DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit,
@@ -147,10 +149,10 @@ def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
     OptionalAttr<BoolAttr>:$is_view
   );
 
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
 }
 
-def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
+def Atir_MatMulOp : Atir_Op<"MatMul"> {
   let summary = "matmul op";
   let arguments = (
     ins Atir_Tensor:$lhs,
@@ -173,13 +175,14 @@ def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
   let results = (outs Atir_Tensor:$output);
 }
 
-def Atir_ReluOp : Atir_Op<"Relu", Interfaces> {
+def Atir_ReluOp : Atir_Op<"Relu"> {
   let summary = "relu op";
   let arguments = (
-      ins Atir_Tensor:$input,
+      ins Atir_Tensor:$output,
+      Atir_Tensor:$input,
       DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
 }
 
 def Atir_ForOp : Atir_Op<"for"> {
@@ -332,7 +335,7 @@ def Atir_ReturnOp : Atir_Op<"return", [Terminator, ParentOneOf<["ForOp", "Parall
       [{  attr-dict ($results^ `:` type($results))? }];
 }
 
-def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
+def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", [Pure]> {
   let summary = "Inserts a dimension of 1 into a tensor's shape";
   let description = [{
     Given a tensor input, this operation inserts a dimension of size 1 at the dimension index 
@@ -350,8 +353,8 @@ def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure, SameOperandsAndResultElementType, 
-    SameOperandsAndResultShape], Interfaces)> {
+def Atir_IdentityOp : Atir_Op<"Identity", [Pure, SameOperandsAndResultElementType, 
+    SameOperandsAndResultShape]> {
   let summary = "Identity operation";
   let description = [{
     Returns the input tensor as-is. This op is often used for 
@@ -365,7 +368,7 @@ def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure, SameOperandsAndResu
   let hasFolder = 1;
 }
 
-def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
+def Atir_ShapeOp : Atir_Op<"Shape", [Pure]> {
   let summary = "Returns the input shape information.";
   let description = [{
     Given a tensor input, this operation generates a one-dimensional tensor 
@@ -383,8 +386,8 @@ def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
   let hasVerifier = 1;
 }
 
-def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect, 
-    Elementwise, SameOperandsElementType, SameOperandsAndResultShape], Interfaces)> {
+def Atir_NotEqualOp : Atir_Op<"NotEqual", [NoMemoryEffect, 
+    Elementwise, SameOperandsElementType, SameOperandsAndResultShape]> {
   let summary = "Returns (input1 != input2) element-wise";
   let description = [{
     Returns the truth value of (input1 != input2) element-wise.
@@ -402,7 +405,7 @@ def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect,
   }];
 }
 
-def Atir_CastOp: Atir_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)>{
+def Atir_CastOp: Atir_Op<"Cast", [Pure, SameOperandsAndResultShape]>{
   let summary = "Cast input to a new type";
   let description = [{
     Casts a tensor from one data type to another.
@@ -419,7 +422,7 @@ def Atir_CastOp: Atir_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape],
   }];
 }
 
-def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
+def Atir_WhereOp : Atir_Op<"Where", [Pure]> {
   let summary = "Returns elements from x or y depending on condition.";
   let description = [{
     Selects elements from `x` or `y` depending on `condition`.
@@ -437,7 +440,7 @@ def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_StridedSliceOp : Atir_Op<"StridedSlice", !listconcat([Pure], Interfaces)> {
+def Atir_StridedSliceOp : Atir_Op<"StridedSlice", [Pure]> {
   let summary = "StridedSlice operation";
   let description = [{
     Extracts a strided slice from the input tensor using start, stop and stride indices.
@@ -459,7 +462,7 @@ def Atir_StridedSliceOp : Atir_Op<"StridedSlice", !listconcat([Pure], Interfaces
   }];
 }
 
-def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfaces)> {
+def Atir_PackOp : Atir_Op<"Pack", [Pure, SameOperandsShape]> {
   let summary = "Pack tensors along a new axis";
   let description = [{
     Packs the `N` tensors in `values` along the `axis` dimension.
@@ -477,8 +480,8 @@ def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfa
   }];
 }
 
-def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure, 
-    AllElementTypesMatch<["values", "output"]>], Interfaces)> {
+def Atir_GatherNdOp : Atir_Op<"GatherNd", [Pure, 
+    AllElementTypesMatch<["values", "output"]>]> {
   let summary = "Gather slices from params using nd indices";
   let description = [{
     Gathers slices from `params` into a Tensor with shape specified by 
@@ -499,7 +502,7 @@ def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure,
 }
 
 def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast", 
-    !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+    [Pure, SameOperandsAndResultShape]> {
   let summary = "Map strings to hash bucket indices.";
   let description = [{
     Maps each string in `input` to an integer hash modulo `numBuckets`.
@@ -517,7 +520,7 @@ def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
   }];
 }
 
-def Atir_SparseReshapeOp : Atir_Op<"SparesReshape", !listconcat([Pure], Interfaces)> {
+def Atir_SparseReshapeOp : Atir_Op<"SparesReshape", [Pure]> {
   let summary = "Reshape a SparseTensor to a new dense shape.";
   let description = [{
     This operation reshapes a sparse tensor represented by indices and values 
@@ -538,7 +541,7 @@ def Atir_SparseReshapeOp : Atir_Op<"SparesReshape", !listconcat([Pure], Interfac
   }];
 }
 
-def Atir_SliceOp : Atir_Op<"Slice", Interfaces> {
+def Atir_SliceOp : Atir_Op<"Slice"> {
   let summary = "Extracts slices of the tensor";
   let description = [{
     Extracts a slice from the input tensor starting at the position specified by begin,
@@ -557,7 +560,7 @@ def Atir_SliceOp : Atir_Op<"Slice", Interfaces> {
   }];
 }
 
-def Atir_GatherV2Op : Atir_Op<"GatherV2", Interfaces> {
+def Atir_GatherV2Op : Atir_Op<"GatherV2"> {
   let summary = "Gather slices from params axis according to indices"; 
   let description = [{
     Gathers slices from `params` along the `axis` dimension according to `indices`. 
@@ -580,7 +583,7 @@ def Atir_GatherV2Op : Atir_Op<"GatherV2", Interfaces> {
   }];
 }
 
-def Atir_ProdOp : Atir_Op<"Prod", Interfaces> {
+def Atir_ProdOp : Atir_Op<"Prod"> {
   let summary = "Compute the product of tensor elements over specified axes"; 
   let description = [{
     Computes the product of elements across dimensions of a tensor.
@@ -601,7 +604,7 @@ def Atir_ProdOp : Atir_Op<"Prod", Interfaces> {
   }];
 }
 
-def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual", Interfaces> {
+def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual"> {
   let summary = "Element-wise greater-than-or-equal comparison";
   let description = [{
     Computes element-wise greater-than-or-equal comparison of `lhs` and `rhs`.
@@ -620,7 +623,7 @@ def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual", Interfaces> {
 }
 
 def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows", 
-    !listconcat([Pure], Interfaces)> {
+    [Pure]> {
   let summary = "Fills empty rows in a sparse tensor with a default value.";
   let description = [{
     This operation fills missing rows in a sparse tensor representation 
@@ -667,7 +670,7 @@ def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect, Pure]> {
   // );
 }
 
-def Atir_UniqueOp : Atir_Op<"Unique", !listconcat([Pure], Interfaces)> {
+def Atir_UniqueOp : Atir_Op<"Unique", [Pure]> {
   let summary = "Finds unique elements in a 1-D tensor and returns them with indices.";
   let description = [{
     This operation returns a tensor `y` containing all of the unique elements of `x`
@@ -705,7 +708,7 @@ def Atir_ResourceGatherOp : Atir_Op<"ResourceGather"> {
   }];
 }
 
-def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", !listconcat([Pure], Interfaces)> {
+def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", [Pure]> {
   let summary = "Computes sums of sparse segments of a tensor.";
   let description = [{
     Computes the sum of rows in `data` selected by `indices`, grouped by `segment_ids`.
@@ -729,7 +732,7 @@ def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", !listconcat([Pure], In
   }];      
 }
 
-def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
+def Atir_TileOp : Atir_Op<"Tile"> {
   let summary = "Tile a tensor along specified multiples";
   let description = [{
     Constructs a tensor by tiling `input` by `multiples`.
@@ -748,7 +751,7 @@ def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
   }];
 }
 
-def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", [Pure, SameOperandsAndResultShape]> {
   let summary = "Returns a tensor of zeros with the same shape and type as input";
   let description = [{
     The ZerosLike operation returns a new tensor where all elements are zero,
@@ -766,7 +769,7 @@ def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([Pure, SameOperandsAndRe
   }];
 }
 
-def Atir_SelectOp : Atir_Op<"Select", Interfaces> {
+def Atir_SelectOp : Atir_Op<"Select"> {
   let summary = "Select elements from `input1` or `input2` depending on `condition`";
   let description = [{
     Selects elements from `input1` or `input2` based on the values of `condition`.
@@ -786,7 +789,7 @@ def Atir_SelectOp : Atir_Op<"Select", Interfaces> {
   }];
 }
 
-def Atir_ConcatV2Op : Atir_Op<"ConcatV2", Interfaces> {
+def Atir_ConcatV2Op : Atir_Op<"ConcatV2"> {
   let summary = "Concatenate tensors along an axis";
   let description = [{
     Concatenates a list of tensors along dimension `axis`.
@@ -1065,7 +1068,7 @@ def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", [Pure]> {
   }];
 }
 
-def Atir_BatchMatMulV2Op : Atir_Op<"BatchMatMulV2", !listconcat([Pure], Interfaces)> {
+def Atir_BatchMatMulOp : Atir_Op<"BatchMatMulV2", [Pure]> {
   let summary = "Performs batch multiplication on slices of two tensors.";
   let description = [{
     Performs batch matrix multiplication on high-dimensional tensors. For each batch, 
@@ -1122,7 +1125,7 @@ def Atir_RsqrtOp : Atir_Op<"Rsqrt", [Pure, SameOperandsAndResultType, Elementwis
   }];
 }
 
-def Atir_TopKV2Op : Atir_Op<"TopKV2", [Pure]> {
+def Atir_TopKOp : Atir_Op<"TopK", [Pure]> {
   let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
   let description = [{
     Find the values and indices of the `k` largest elements along the last dimension.

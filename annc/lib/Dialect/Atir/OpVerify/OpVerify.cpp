@@ -29,10 +29,6 @@ namespace {
 #define DEFAULT_INPUT_DIM 4
 //  Op 
 #define ALL_OP_TYPES(OP, SrcOp) \
-  OP(AddOp, SrcOp)              \
-  OP(MatMulOp, SrcOp)           \
-  OP(ReluOp, SrcOp)             \
-  OP(ConstantOp, SrcOp)
 
 #define INTERPRET_SINGLE_OP(OpType, SrcOp)            \
   if (llvm::isa<atir::OpType>(SrcOp)) {               \

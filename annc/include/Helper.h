@@ -2,6 +2,7 @@
 #define ANNC_HELPER_H
 #include <numeric>
 
+#include "llvm/ADT/APFloat.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -17,6 +18,10 @@
 
 using namespace mlir;
 namespace annc {
+float apFloatToFloat(const llvm::APFloat &v);
+
+double apFloatToDouble(const llvm::APFloat &v);
+
 #define CHECK_LOGICAL_SUCCESS(f) \
   if (!(f)) return failure();
 
