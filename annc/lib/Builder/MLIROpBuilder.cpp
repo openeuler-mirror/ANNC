@@ -1,27 +1,85 @@
 #include "Builder/Builder.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "llvm/ADT/StringMap.h"
+#include <algorithm>
+#include <complex>
+#include <cstdint>
+#include <iostream>
+#include <variant>
 
-using json = nlohmann::json;
 using namespace mlir;
 namespace annc {
 
-void MLIRBuilder::jsonConvertor(const json& graph) {
+namespace {
+using NodeHandler = void (MLIRBuilder::*)(const NodeInfo&, llvm::ArrayRef<Type>, llvm::ArrayRef<Value>);
+
+int32_t tfAttrToI32Mask(const NodeInfo::TfAttrValue &v) {
+  if (auto *i = std::get_if<int64_t>(&v))
+    return static_cast<int32_t>(*i);
+  return 0;
+}
+
+int32_t lookupTfIntMask(const NodeInfo &node, llvm::StringRef key) {
+  auto it = node.attrs.find(key.str());
+  if (it == node.attrs.end())
+    return 0;
+  return tfAttrToI32Mask(it->second);
+}
+
+void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
+  // Op handlers will be registered in subsequent PRs
+  (void)m;
+}
+
+const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
+  static llvm::StringMap<NodeHandler> table;
+  static bool once = false;
+  if (!once) {
+    registerNodeHandlers(table);
+    once = true;
+  }
+  return table;
+}
+}  // namespace
+
+void MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
   auto unknownLoc = UnknownLoc::get(module_.getContext());
   mainFunc_ = builder_.create<func::FuncOp>(
-      unknownLoc, graph.at("name").template get<std::string>(),
-      builder_.getFunctionType({}, {}));
+      unknownLoc, "main", builder_.getFunctionType({}, {}));
   module_.push_back(mainFunc_);
 
   auto entryBlock = mainFunc_.addEntryBlock();
   builder_.setInsertionPointToStart(entryBlock);
 
-  // noneValue_ = builder_.create<atir::NoneOp>(
-  //     unknownLoc, NoneType::get(builder_.getContext()));
-  std::vector<Value> inputs = addGraphInput(graph.at("inputs"));
-  for (const auto& node : graph.at("nodes")) {
+  // 分离输入节点、输出节点和计算节点
+  std::vector<NodeInfo> inputNodes;
+  std::vector<NodeInfo> outputNodes;
+  std::vector<NodeInfo> computeNodes;
+  
+  for (const auto& node : nodes) {
+    if (node.isInputNode) {
+      inputNodes.push_back(node);
+    } else if (node.isOutputNode) {
+      outputNodes.push_back(node);
+    } else {
+      computeNodes.push_back(node);
+    }
+  }
+
+  std::vector<Value> inputs = addGraphInputs(inputNodes);
+  
+  for (const auto& node : computeNodes) {
     addNode(node);
   }
-  std::vector<Value> outputs = addGraphOutput(graph.at("outputs"));
+  
+  for (const auto& node : outputNodes) {
+    addNode(node);
+  }
+  
+  std::vector<Value> outputs = addGraphOutputs(outputNodes);
 
   llvm::SmallVector<Type> inputTypes{};
   std::for_each(inputs.begin(), inputs.end(),
@@ -33,13 +91,13 @@ void MLIRBuilder::jsonConvertor(const json& graph) {
   builder_.create<func::ReturnOp>(unknownLoc, outputs);
 }
 
-std::vector<Value> MLIRBuilder::addGraphInput(const json& inputs) {
+std::vector<Value> MLIRBuilder::addGraphInputs(const std::vector<NodeInfo>& inputNodes) {
   std::vector<Value> inputValues;
-  for (int i = 0; i < inputs.size(); i++) {
-    const std::string name = inputs[i].at("name").template get<std::string>();
-    const std::string dtype = inputs[i].at("dtype").template get<std::string>();
-    const std::vector<int64_t> shape =
-        inputs[i].at("shape").template get<std::vector<int64_t>>();
+  for (const auto& node : inputNodes) {
+    if (node.outputs.empty()) continue;
+    const std::string& name = node.name;
+    const std::string& dtype = node.outputs[0].dtype;
+    const std::vector<int64_t>& shape = node.outputs[0].shape;
     atir::TensorType inType = getTensorType(name, dtype, shape);
 
     Block* entryBlock = &mainFunc_.getBody().back();
@@ -51,11 +109,10 @@ std::vector<Value> MLIRBuilder::addGraphInput(const json& inputs) {
   return inputValues;
 }
 
-std::vector<Value> MLIRBuilder::addGraphOutput(const json& outputs) {
+std::vector<Value> MLIRBuilder::addGraphOutputs(const std::vector<NodeInfo>& outputNodes) {
   std::vector<Value> output_vals;
-  for (int i = 0; i < outputs.size(); i++) {
-    const std::string out =
-        outputs.at(i).at("name").template get<std::string>();
+  for (const auto& node : outputNodes) {
+    const std::string& out = node.name;
     Value val = tensorValues_[out];
     if (val == nullptr)
       llvm::report_fatal_error(llvm::StringRef("Unknown output value: " + out));
@@ -64,35 +121,253 @@ std::vector<Value> MLIRBuilder::addGraphOutput(const json& outputs) {
   return output_vals;
 }
 
-#define CREATE_CONSTAN(T, PREC)                                          \
-  {                                                                      \
-    const std::vector<T> data =                                          \
-        node.at("data").template get<std::vector<T>>();                  \
-    auto elems = DenseElementsAttr::get(                                 \
-        RankedTensorType::get(shape, builder_.PREC), ArrayRef<T>(data)); \
-    auto type = atir::TensorType::get(shape, builder_.PREC, elems);      \
-    auto gOp = builder_.create<atir::ConstantOp>(                        \
-        getLoc(builder_.getContext(), name), type,                       \
-        builder_.getStringAttr(name), builder_.getStringAttr("public")); \
-    tensorValues_[name] = gOp.getResult();                               \
-    return tensorValues_[name];                                          \
+// Base64解码函数
+static std::vector<uint8_t> base64Decode(const std::string& encoded) {
+    static const std::string chars = 
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    
+    std::vector<uint8_t> result;
+    int val = 0, valb = -8;
+    
+    for (char c : encoded) {
+        if (c == '=') break;
+        size_t pos = chars.find(c);
+        if (pos == std::string::npos) continue;
+        val = (val << 6) + pos;
+        valb += 6;
+        if (valb >= 0) {
+            result.push_back((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return result;
+}
+
+mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
+  const std::string& name = node.name;
+  if (node.outputs.empty()) {
+    llvm::report_fatal_error("Constant node has no output info");
+  }
+  const std::string& dtype = node.outputs[0].dtype;
+  const std::vector<int64_t>& shape = node.outputs[0].shape;
+  
+  // 解码base64数据（与 TensorProto tensor_content 字节布局一致，小端）
+  std::vector<uint8_t> decoded;
+  if (!node.raw_data.empty()) {
+    decoded = base64Decode(node.raw_data);
+  } else { // 避免解码失败，用零值回退
+    size_t elemCount = 1;
+    for (int64_t d : shape) {
+      if (d < 0) continue;
+      elemCount *= static_cast<size_t>(d);
+    }
+    auto fillZeros = [&](size_t elemSize) {
+      decoded.assign(elemCount * elemSize, 0);
+    };
+    if (dtype == "float32" || dtype == "int32") fillZeros(sizeof(int32_t));
+    else if (dtype == "float64" || dtype == "int64") fillZeros(sizeof(int64_t));
+    else if (dtype == "float16" || dtype == "bfloat16" || dtype == "uint16" ||
+             dtype == "int16")
+      fillZeros(sizeof(uint16_t));
+    else if (dtype == "uint8" || dtype == "int8" || dtype == "bool")
+      fillZeros(sizeof(uint8_t));
+    else if (dtype == "uint32") fillZeros(sizeof(uint32_t));
+    else if (dtype == "uint64") fillZeros(sizeof(uint64_t));
+    else if (dtype == "complex64") fillZeros(sizeof(float) * 2);
+    else if (dtype == "complex128") fillZeros(sizeof(double) * 2);
   }
 
-mlir::Value MLIRBuilder::addConstantNode(const json& node) {
-  const std::string name = node.at("name").template get<std::string>();
-  const std::string dtype = node.at("dtype").template get<std::string>();
-  const std::vector<int64_t> shape =
-      node.at("shape").template get<std::vector<int64_t>>();
-  atir::TensorType inType = getTensorType(name, dtype, shape);
-  int64_t size = std::accumulate(shape.begin(), shape.end(), 1,
-                                 std::multiplies<int64_t>());
-  if (dtype == "float32")
-    CREATE_CONSTAN(float_t, getF32Type())
-  else if (dtype == "int64")
-    CREATE_CONSTAN(float_t, getI64Type())
-  else if (dtype == "int32")
-    CREATE_CONSTAN(float_t, getI32Type())
-  llvm::report_fatal_error("Unsupported data type");
+  auto emitConstant = [&](DenseElementsAttr elems, Type eltType,
+                          Attribute encoding = {}) -> mlir::Value {
+    atir::TensorType tensorTy = atir::TensorType::get(
+        shape, eltType, builder_.getStringAttr(name), encoding, {}, {}, {}, {},
+        {}, {}, elems);
+    auto gOp = builder_.create<atir::ConstantOp>(
+        getLoc(builder_.getContext(), name), tensorTy,
+        builder_.getStringAttr(name), builder_.getStringAttr("public"));
+    tensorValues_[name] = gOp.getResult();
+    return tensorValues_[name];
+  };
+
+  auto elementCountFromShape = [&]() -> size_t {
+    if (shape.empty()) return 1;
+    size_t n = 1;
+    for (int64_t d : shape) {
+      if (d < 0) continue;
+      n *= static_cast<size_t>(d);
+    }
+    return n;
+  };
+
+  auto requireBytes = [&](size_t elemSize) {
+    size_t elemCount = elementCountFromShape();
+    if (elemCount == 0 && decoded.empty()) {
+      return;
+    }
+    if (decoded.empty() || decoded.size() % elemSize != 0) {
+      llvm::report_fatal_error(llvm::StringRef(
+          "Constant raw_data size mismatch for dtype " + dtype));
+    }
+  };
+
+  DenseElementsAttr elems;
+
+  if (dtype == "float32") {
+    requireBytes(sizeof(float));
+    const float* data = reinterpret_cast<const float*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(float);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getF32Type()),
+        ArrayRef<float>(data, numElements));
+    return emitConstant(elems, builder_.getF32Type());
+  }
+  if (dtype == "float64") {
+    requireBytes(sizeof(double));
+    const double* data = reinterpret_cast<const double*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(double);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getF64Type()),
+        ArrayRef<double>(data, numElements));
+    return emitConstant(elems, builder_.getF64Type());
+  }
+  if (dtype == "float16") {
+    requireBytes(sizeof(uint16_t));
+    const uint16_t* data =
+        reinterpret_cast<const uint16_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint16_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getF16Type()),
+        ArrayRef<uint16_t>(data, numElements));
+    return emitConstant(elems, builder_.getF16Type());
+  }
+  if (dtype == "bfloat16") {
+    requireBytes(sizeof(uint16_t));
+    const uint16_t* data =
+        reinterpret_cast<const uint16_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint16_t);
+    auto bf16Type = BFloat16Type::get(builder_.getContext());
+    elems = DenseElementsAttr::get(RankedTensorType::get(shape, bf16Type),
+                                   ArrayRef<uint16_t>(data, numElements));
+    return emitConstant(elems, bf16Type);
+  }
+  if (dtype == "int64") {
+    requireBytes(sizeof(int64_t));
+    const int64_t* data = reinterpret_cast<const int64_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(int64_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI64Type()),
+        ArrayRef<int64_t>(data, numElements));
+    return emitConstant(elems, builder_.getI64Type());
+  }
+  if (dtype == "int32") {
+    requireBytes(sizeof(int32_t));
+    const int32_t* data = reinterpret_cast<const int32_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(int32_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI32Type()),
+        ArrayRef<int32_t>(data, numElements));
+    return emitConstant(elems, builder_.getI32Type());
+  }
+  if (dtype == "int16") {
+    requireBytes(sizeof(int16_t));
+    const int16_t* data = reinterpret_cast<const int16_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(int16_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI16Type()),
+        ArrayRef<int16_t>(data, numElements));
+    return emitConstant(elems, builder_.getI16Type());
+  }
+  if (dtype == "int8") {
+    requireBytes(sizeof(int8_t));
+    const int8_t* data = reinterpret_cast<const int8_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(int8_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI8Type()),
+        ArrayRef<int8_t>(data, numElements));
+    return emitConstant(elems, builder_.getI8Type());
+  }
+  if (dtype == "uint8") {
+    requireBytes(sizeof(uint8_t));
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint8_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getIntegerType(8)),
+        ArrayRef<uint8_t>(data, numElements));
+    return emitConstant(elems, builder_.getIntegerType(8));
+  }
+  if (dtype == "uint16") {
+    requireBytes(sizeof(uint16_t));
+    const uint16_t* data =
+        reinterpret_cast<const uint16_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint16_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getIntegerType(16)),
+        ArrayRef<uint16_t>(data, numElements));
+    return emitConstant(elems, builder_.getIntegerType(16));
+  }
+  if (dtype == "uint32") {
+    requireBytes(sizeof(uint32_t));
+    const uint32_t* data =
+        reinterpret_cast<const uint32_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint32_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getIntegerType(32)),
+        ArrayRef<uint32_t>(data, numElements));
+    return emitConstant(elems, builder_.getIntegerType(32));
+  }
+  if (dtype == "uint64") {
+    requireBytes(sizeof(uint64_t));
+    const uint64_t* data =
+        reinterpret_cast<const uint64_t*>(decoded.data());
+    size_t numElements = decoded.size() / sizeof(uint64_t);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getIntegerType(64)),
+        ArrayRef<uint64_t>(data, numElements));
+    return emitConstant(elems, builder_.getIntegerType(64));
+  }
+  if (dtype == "bool") {
+    requireBytes(sizeof(uint8_t));
+    std::vector<int32_t> asI32;
+    asI32.reserve(decoded.size());
+    for (uint8_t b : decoded)
+      asI32.push_back(b ? 1 : 0);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI32Type()),
+        ArrayRef<int32_t>(asI32));
+    return emitConstant(elems, builder_.getI32Type(),
+                        builder_.getStringAttr("bool"));
+  }
+  if (dtype == "complex64") {
+    requireBytes(2 * sizeof(float));
+    size_t numElements = decoded.size() / (2 * sizeof(float));
+    const float* p = reinterpret_cast<const float*>(decoded.data());
+    std::vector<std::complex<float>> vals(numElements);
+    for (size_t i = 0; i < numElements; ++i)
+      vals[i] = std::complex<float>(p[2 * i], p[2 * i + 1]);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, ComplexType::get(builder_.getF32Type())),
+        ArrayRef<std::complex<float>>(vals));
+    return emitConstant(elems, ComplexType::get(builder_.getF32Type()));
+  }
+  if (dtype == "complex128") {
+    requireBytes(2 * sizeof(double));
+    size_t numElements = decoded.size() / (2 * sizeof(double));
+    const double* p = reinterpret_cast<const double*>(decoded.data());
+    std::vector<std::complex<double>> vals(numElements);
+    for (size_t i = 0; i < numElements; ++i)
+      vals[i] = std::complex<double>(p[2 * i], p[2 * i + 1]);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, ComplexType::get(builder_.getF64Type())),
+        ArrayRef<std::complex<double>>(vals));
+    return emitConstant(elems, ComplexType::get(builder_.getF64Type()));
+  }
+  if (dtype == "string") {
+    llvm::report_fatal_error(
+        "Constant tf.string from raw_data is not supported in MLIROpBuilder");
+  }
+
+  llvm::report_fatal_error(llvm::StringRef("Unsupported data type for constant: " +
+                                           dtype));
 }
 
 #define CREATE_NODE(T, FUNC) \
@@ -100,175 +375,184 @@ mlir::Value MLIRBuilder::addConstantNode(const json& node) {
     FUNC(node);              \
     return;                  \
   }
-
-#define CREATE_COMMON_NODE(T, inNum)                                       \
-  if (type == #T) {                                                        \
-    if (node.at("inputs").size() < inNum) {                                \
-      for (size_t i = node.at("inputs").size(); i <= inNum; i++)           \
-        ins.emplace_back(noneValue_);                                      \
-    }                                                                      \
-    auto loc_ = getLoc(ctx, node.at("name").template get<std::string>());  \
-    auto outBuf = builder_.create<atir::BufferOp>(loc_, outs[0]);          \
-    llvm::SmallVector<Value> allIns;                                       \
-    allIns.push_back(outBuf.getResult());                                  \
-    allIns.append(ins.begin(), ins.end());                                 \
-    mlir::Operation* op =                                                  \
-        builder_                                                           \
-            .create<atir::T##Op>(                                          \
-                loc_, outs, allIns, attrs)                                 \
-            .getOperation();                                               \
-    for (int i = 0; i < node.at("outputs").size(); i++) {                  \
-      std::string outName =                                                \
-          node.at("outputs").at(i).at("name").template get<std::string>(); \
-      tensorValues_[outName] = op->getResult(i);                           \
-    }                                                                      \
-    return;                                                                \
-  }
-
-void MLIRBuilder::createMatMulOp(const json& node,
-  ArrayRef<Type> outs,
-  ArrayRef<Value> ins,
-  ArrayRef<NamedAttribute> attrs) {
-    auto ctx = builder_.getContext();
-    Location loc = getLoc(ctx, node.at("name").template get<std::string>());
-    Value lhs = ins[0];
-    Value rhs = ins[1];
-
-    Type outputTensorType = outs[0];
-    Value C = builder_.create<atir::BufferOp>(loc, outputTensorType);
-
-    // === Step 2:  bias () ===
-    Value bias = nullptr;
-    bool hasBias = (ins.size() >= 3);
-    if (hasBias) {
-      bias = ins[2];
-    }
-
-    bool right_transpose =  false;
-    bool left_transpose = false;
-    bool output_transpose = false;
-    bool do_relu = false;
-    float relu_limit = -1.0f;
-    std::optional<int64_t>  m_start, n_start, k_start, m_size, n_size, k_size;
-
-    // TODO: attrs
-    
-    auto matmul = builder_.create<atir::MatMulOp>(
-      loc,
-      outs[0], lhs, rhs, C, hasBias? bias: Value{},
-      builder_.getBoolAttr(hasBias),
-      builder_.getBoolAttr(right_transpose),
-      builder_.getBoolAttr(left_transpose),
-      builder_.getBoolAttr(output_transpose),
-      builder_.getBoolAttr(do_relu),
-      builder_.getF32FloatAttr(relu_limit),
-      m_start ? builder_.getI32IntegerAttr(*m_start) : IntegerAttr(),
-      n_start ? builder_.getI32IntegerAttr(*n_start) : IntegerAttr(),
-      k_start ? builder_.getI32IntegerAttr(*k_start) : IntegerAttr(),
-      m_size ? builder_.getI32IntegerAttr(*m_size) : IntegerAttr(),
-      n_size ? builder_.getI32IntegerAttr(*n_size) : IntegerAttr(),
-      k_size ? builder_.getI32IntegerAttr(*k_size) : IntegerAttr());
-    std::string outName = node.at("outputs")[0].at("name").get<std::string>();
-    tensorValues_[outName] = matmul.getResult();
-    return ;
+void MLIRBuilder::createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  (void)outs; (void)ins;
+  llvm::report_fatal_error(llvm::StringRef("Op type not fully supported yet: " + node.op_type));
+}
+void MLIRBuilder::createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  llvm::SmallVector<Type, 2> outTypes(outs.begin(), outs.end());
+  auto op = builder_.create<atir::CustomizeOp>(loc, outTypes, ins, builder_.getStringAttr(node.op_type));
+  for (size_t i = 0; i < node.outputs.size(); ++i)
+    tensorValues_[node.outputs[i].name] = op.getResult(static_cast<unsigned>(i));
 }
 
-void MLIRBuilder::createAddOp(
-    const json& node,
-    ArrayRef<Type> outs,
-    ArrayRef<Value> ins,
-    ArrayRef<NamedAttribute> attrs) {
+#undef SINGLE_OUT
 
-  auto loc = getLoc(builder_.getContext(), node.at("name").get<std::string>());
-
-  if (ins.empty()) {
-    llvm::report_fatal_error("Add requires at least one input");
-  }
-
-  bool do_relu = false;
-  float relu_limit = -1.0f;
-  FloatAttr scalar = FloatAttr();
-
-  auto addOutput = builder_.create<atir::BufferOp>(loc, outs[0]);
-  auto add = builder_.create<atir::AddOp>(
-      loc,
-      outs[0],
-      addOutput.getResult(),
-      ins, // variadic inputs
-      builder_.getBoolAttr(do_relu),
-      builder_.getF32FloatAttr(relu_limit),
-      scalar
-  );
-
-  std::string outName = node.at("outputs")[0].at("name").get<std::string>();
-  tensorValues_[outName] = add.getResult();
-  return ;
-}
-
-void MLIRBuilder::addNode(const json& node) {
-  const std::string& type = node.at("type").template get<std::string>();
+void MLIRBuilder::addNode(const NodeInfo& node) {
+  const std::string& type = node.op_type;
   CREATE_NODE("Constant", addConstantNode)
+  CREATE_NODE("Const", addConstantNode)
+  if (node.isOutputNode && type == "Identity" && node.inputs.size() == 1) {
+    Value src = tensorValues_[node.inputs[0]];
+    if (src == nullptr) {
+      llvm::report_fatal_error(llvm::StringRef("Unknown input tensor: " + node.inputs[0] +
+                                               " when building node " + node.name +
+                                               " (" + node.op_type + ")"));
+    }
+    tensorValues_[node.name] = src;
+    if (!node.outputs.empty()) {
+      tensorValues_[node.outputs[0].name] = src;
+    }
+    return;
+  }
 
   std::vector<Type> outs;
-  for (int i = 0; i < node.at("outputs").size(); i++) {
-    const json& out = node.at("outputs").at(i);
-    const std::string name = out.at("name").template get<std::string>();
-    const std::string dtype = out.at("dtype").template get<std::string>();
-    const std::vector<int64_t> shape =
-        out.at("shape").template get<std::vector<int64_t>>();
-    outs.push_back(getTensorType(name, dtype, shape));
-  }
+  for (const auto& out : node.outputs)
+    outs.push_back(getTensorType(out.name, out.dtype, out.shape));
+
   std::vector<Value> ins;
-  const json& inputs = node.at("inputs");
-  for (int i = 0; i < inputs.size(); i++) {
-    const std::string inName = inputs.at(i).template get<std::string>();
+  for (const auto& inName : node.inputs) {
     Value val = tensorValues_[inName];
-    if (val == nullptr) {
-      llvm::report_fatal_error(
-          llvm::StringRef("Unknown input tensor: " + inName));
-    } else if (val.getDefiningOp() == nullptr) {
-      // function argument
-      ins.push_back(val);
-    } else {
-      // node output
-      ins.push_back(val);
-    }
-  }
-  std::vector<NamedAttribute> attrs;
-  for (int i = 0; i < node.at("attributes").size(); i++) {
-    const json& attr = node.at("attributes").at(i);
-    const std::string name = attr.at("name").template get<std::string>();
-    const std::string dtype = attr.at("dtype").template get<std::string>();
-    if (dtype == "int64") {
-      const auto value = attr.at("value").template get<std::vector<int64_t>>();
-      attrs.push_back(NamedAttribute(builder_.getStringAttr(name),
-                                     builder_.getI64ArrayAttr(value)));
-    } else if (dtype == "float32") {
-      const auto value = attr.at("value").template get<std::vector<float_t>>();
-      attrs.push_back(NamedAttribute(builder_.getStringAttr(name),
-                                     builder_.getF32ArrayAttr(value)));
-    } else if (dtype == "string") {
-      const std::string value = attr.at("value").template get<std::string>();
-      attrs.push_back(NamedAttribute(builder_.getStringAttr(name),
-                                     builder_.getStringAttr(value)));
-    } else {
-      llvm::report_fatal_error(
-          llvm::StringRef("Unsupport attribute type: " + dtype));
-    }
+    if (val == nullptr)
+      llvm::report_fatal_error(llvm::StringRef("Unknown input tensor: " + inName +
+                                               " when building node " + node.name +
+                                               " (" + node.op_type + ")"));
+    ins.push_back(val);
   }
 
-  auto ctx = builder_.getContext();
-  if (type == "MatMul") {
-    createMatMulOp(node, outs, ins, attrs);
-    return ;
-  } else if (type == "Add") {
-    createAddOp(node, outs, ins, attrs);
-    return ;
-  }
+  const llvm::StringMap<NodeHandler>& table = getNodeDispatchTable();
+  auto it = table.find(type);
+  auto applyTfAttrsToCreatedOp = [&](Operation *createdOp) {
+    if (!createdOp || node.attrs.empty())
+      return;
+    auto ctx = builder_.getContext();
+    auto mapTfAttrName = [&](StringRef tfName) -> StringRef {
+      if (tfName == "transpose_a") return "left_transpose";
+      if (tfName == "transpose_b") return "right_transpose";
+      if (tfName == "adj_x") return "transposeA";
+      if (tfName == "adj_y") return "transposeB";
+      if (tfName == "keep_dims") return "keep_dims";
+      return tfName;
+    };
 
-  CREATE_COMMON_NODE(Relu, 1)
-  // TODO: support more op types
-  llvm::report_fatal_error(llvm::StringRef("Unknown op type: " + type));
+    for (const auto &kv : node.attrs) {
+      const std::string &tfAttrName = kv.first;
+      const auto &tfVal = kv.second;
+
+      StringRef atirAttrName = mapTfAttrName(tfAttrName);
+      if (!createdOp->hasAttr(atirAttrName))
+        continue;
+
+      Attribute existingAttr = createdOp->getAttr(atirAttrName);
+      Attribute newAttr;
+
+      if (auto iAttr = dyn_cast<IntegerAttr>(existingAttr)) {
+        if (auto v = std::get_if<int64_t>(&tfVal)) {
+          newAttr = IntegerAttr::get(iAttr.getType(), *v);
+        } else if (auto v = std::get_if<bool>(&tfVal)) {
+          newAttr = IntegerAttr::get(iAttr.getType(), *v ? 1 : 0);
+        } else if (auto v = std::get_if<double>(&tfVal)) {
+          newAttr = IntegerAttr::get(iAttr.getType(),
+                                      static_cast<int64_t>(*v));
+        }
+      } else if (auto fAttr = dyn_cast<FloatAttr>(existingAttr)) {
+        double d;
+        if (auto v = std::get_if<double>(&tfVal)) {
+          d = *v;
+        } else if (auto v = std::get_if<int64_t>(&tfVal)) {
+          d = static_cast<double>(*v);
+        } else {
+          d = 0.0;
+          continue;
+        }
+        newAttr = FloatAttr::get(fAttr.getType(), d);
+      } else if (auto bAttr = dyn_cast<BoolAttr>(existingAttr)) {
+        if (auto v = std::get_if<bool>(&tfVal)) {
+          newAttr = BoolAttr::get(ctx, *v);
+        } else if (auto v = std::get_if<int64_t>(&tfVal)) {
+          newAttr = BoolAttr::get(ctx, *v != 0);
+        } else {
+          continue;
+        }
+      } else if (auto sAttr = dyn_cast<StringAttr>(existingAttr)) {
+        if (auto v = std::get_if<std::string>(&tfVal)) {
+          newAttr = StringAttr::get(ctx, *v);
+        } else if (auto v = std::get_if<int64_t>(&tfVal)) {
+          newAttr = StringAttr::get(ctx, std::to_string(*v));
+        } else {
+          continue;
+        }
+      } else if (auto denseI64 = dyn_cast<DenseI64ArrayAttr>(existingAttr)) {
+        (void)denseI64;
+        if (auto v = std::get_if<std::vector<int64_t>>(&tfVal)) {
+          newAttr = DenseI64ArrayAttr::get(ctx, *v);
+        }
+      } else if (auto arrAttr = dyn_cast<ArrayAttr>(existingAttr)) {
+        if (!arrAttr || arrAttr.size() == 0)
+          continue;
+        Attribute first = arrAttr[0];
+
+        if (dyn_cast<IntegerAttr>(first)) {
+          if (auto v = std::get_if<std::vector<int64_t>>(&tfVal)) {
+            auto ty = dyn_cast<IntegerAttr>(first).getType();
+            llvm::SmallVector<Attribute> elems;
+            elems.reserve(v->size());
+            for (auto x : *v)
+              elems.push_back(IntegerAttr::get(ty, x));
+            newAttr = ArrayAttr::get(ctx, elems);
+          }
+        } else if (dyn_cast<FloatAttr>(first)) {
+          if (auto v = std::get_if<std::vector<double>>(&tfVal)) {
+            auto ty = dyn_cast<FloatAttr>(first).getType();
+            llvm::SmallVector<Attribute> elems;
+            elems.reserve(v->size());
+            for (auto x : *v)
+              elems.push_back(FloatAttr::get(ty, x));
+            newAttr = ArrayAttr::get(ctx, elems);
+          }
+        } else if (dyn_cast<BoolAttr>(first)) {
+          if (auto v = std::get_if<std::vector<bool>>(&tfVal)) {
+            llvm::SmallVector<Attribute> elems;
+            elems.reserve(v->size());
+            for (auto x : *v)
+              elems.push_back(BoolAttr::get(ctx, x));
+            newAttr = ArrayAttr::get(ctx, elems);
+          }
+        } else if (dyn_cast<StringAttr>(first)) {
+          if (auto v = std::get_if<std::vector<std::string>>(&tfVal)) {
+            llvm::SmallVector<Attribute> elems;
+            elems.reserve(v->size());
+            for (auto x : *v)
+              elems.push_back(StringAttr::get(ctx, x));
+            newAttr = ArrayAttr::get(ctx, elems);
+          }
+        }
+      }
+
+      if (newAttr)
+        createdOp->setAttr(atirAttrName, newAttr);
+    }
+  };
+
+  Operation *createdOp = nullptr;
+  if (it != table.end()) {
+    (this->*it->second)(node, outs, ins);
+  } else {
+    createCustomizeNode(node, outs, ins);
+  }
+  for (const auto &out : node.outputs) {
+    auto itVal = tensorValues_.find(out.name);
+    if (itVal == tensorValues_.end())
+      continue;
+    if (!itVal->second)
+      continue;
+    if (auto op = itVal->second.getDefiningOp()) {
+      createdOp = op;
+      break;
+    }
+  }
+  applyTfAttrsToCreatedOp(createdOp);
 }
 
 atir::TensorType MLIRBuilder::getTensorType(const std::string& name,
@@ -282,8 +566,27 @@ atir::TensorType MLIRBuilder::getTensorType(const std::string& name,
   if (dtype == "float32")
     return atir::TensorType::get(tensorShape, builder_.getF32Type(),
                                  builder_.getStringAttr(name), encoding);
+  if (dtype == "float64")
+    return atir::TensorType::get(tensorShape, builder_.getF64Type(),
+                                 builder_.getStringAttr(name), encoding);
+  if (dtype == "float16")
+    return atir::TensorType::get(tensorShape, builder_.getF16Type(),
+                                 builder_.getStringAttr(name), encoding);
+  if (dtype == "bfloat16")
+    return atir::TensorType::get(tensorShape,
+                                 BFloat16Type::get(builder_.getContext()),
+                                 builder_.getStringAttr(name), encoding);
   if (dtype == "uint8")
     return atir::TensorType::get(tensorShape, builder_.getIntegerType(8),
+                                 builder_.getStringAttr(name), encoding);
+  if (dtype == "uint16")
+    return atir::TensorType::get(tensorShape, builder_.getIntegerType(16),
+                                 builder_.getStringAttr(name), encoding);
+  if (dtype == "uint32")
+    return atir::TensorType::get(tensorShape, builder_.getIntegerType(32),
+                                 builder_.getStringAttr(name), encoding);
+  if (dtype == "uint64")
+    return atir::TensorType::get(tensorShape, builder_.getIntegerType(64),
                                  builder_.getStringAttr(name), encoding);
   if (dtype == "int8")
     return atir::TensorType::get(tensorShape, builder_.getI8Type(),
@@ -297,9 +600,28 @@ atir::TensorType MLIRBuilder::getTensorType(const std::string& name,
   if (dtype == "int64")
     return atir::TensorType::get(tensorShape, builder_.getI64Type(),
                                  builder_.getStringAttr(name), encoding);
-  if (dtype == "float16")
-    return atir::TensorType::get(tensorShape, builder_.getF16Type(),
+  // todo 类型处理
+  if (dtype == "bool") {
+    encoding = builder_.getStringAttr("bool");
+    return atir::TensorType::get(tensorShape, builder_.getI32Type(),
                                  builder_.getStringAttr(name), encoding);
+  }
+  if (dtype == "string") {
+    return atir::TensorType::get(
+        tensorShape,
+        ComplexType::get(builder_.getF32Type()),
+        builder_.getStringAttr(name), builder_.getStringAttr("string"));
+  }
+  if (dtype == "complex64") {
+    return atir::TensorType::get(
+        tensorShape, ComplexType::get(builder_.getF32Type()),
+        builder_.getStringAttr(name), encoding);
+  }
+  if (dtype == "complex128") {
+    return atir::TensorType::get(
+        tensorShape, ComplexType::get(builder_.getF64Type()),
+        builder_.getStringAttr(name), encoding);
+  }
   llvm::report_fatal_error("Unsupported data type");
 }
 }  // namespace annc
