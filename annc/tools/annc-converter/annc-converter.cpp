@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <set>
 #include "llvm/ADT/DenseMap.h"
 
 #include "Dialect/Atir/AtirOps.h"
@@ -384,8 +385,8 @@ private:
     }
 
     // TF 属性: transpose_a, transpose_b
-    node.tf_attrs["transpose_a"] = op.getLeftTranspose().getValue() ? "true" : "false";
-    node.tf_attrs["transpose_b"] = op.getRightTranspose().getValue() ? "true" : "false";
+    node.tf_attrs["transpose_a"] = "b:" + std::string(op.getLeftTranspose().getValue() ? "true" : "false");
+    node.tf_attrs["transpose_b"] = "b:" + std::string(op.getRightTranspose().getValue() ? "true" : "false");
 
     // 记录融合属性供 Step 3 使用
     if (op.getWithBias().getValue()) node.tf_attrs["_fused_withBias"] = "true";
@@ -395,8 +396,7 @@ private:
         node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
     }
 
-    // TODO: Step 3 融合拆分 — withBias/do_relu 在此处理
-    // 当前先不拆分，直接输出为 MatMul 节点
+        // 当前先不拆分，直接输出为 MatMul 节点 (融合拆分在 Step 3 splitFusedNodes 中处理)
 
     registerValueName(op.getResult(), node.name);
     nodes_.push_back(std::move(node));
@@ -405,7 +405,7 @@ private:
   void parseAddOp(atir::AddOp op) {
     NodeInfo node;
     node.name = getLocName(op);
-    node.op_type = "Add";
+    node.op_type = "AddV2";
 
     // variadic inputs
     for (Value input : op.getInputs()) {
@@ -419,8 +419,7 @@ private:
       node.addOutput(0, node.name, shape, dtype);
     }
 
-    // TODO: Step 3 融合拆分 — do_relu 在此处理
-    // 记录融合属性供 Step 3 使用
+        // 记录融合属性供 Step 3 splitFusedNodes 使用
     if (op.getDoRelu().getValue()) {
       node.tf_attrs["_fused_do_relu"] = "true";
       if (op.getReluLimit().getValue().convertToDouble() > 0.0)
@@ -465,10 +464,32 @@ private:
       node.addOutput(0, node.name, shape, dtype);
     }
 
-    // TF 属性: axis
-    node.tf_attrs["axis"] = std::to_string(op.getAxis());
+        // ConcatV2: axis 是最后一个输入 (TF 要求)，不是属性
+    // 创建 axis Const 节点
+    int64_t axis = op.getAxis();
+    std::string axisNodeName = node.name + "/axis";
 
-    // TODO: Step 3 融合拆分 — do_relu 在此处理
+    NodeInfo axisNode;
+    axisNode.name = axisNodeName;
+    axisNode.op_type = "Const";
+    axisNode.addOutput(0, axisNodeName, {}, "int32");  // scalar
+    // axis 值 → raw bytes → base64
+    int32_t axisVal = static_cast<int32_t>(axis);
+    std::vector<uint8_t> axisBytes(
+        reinterpret_cast<const uint8_t*>(&axisVal),
+        reinterpret_cast<const uint8_t*>(&axisVal) + sizeof(int32_t));
+    axisNode.raw_data = base64Encode(axisBytes);
+    nodes_.push_back(std::move(axisNode));
+
+    // axis 作为最后一个输入
+    node.inputs.push_back(axisNodeName);
+
+    // 记录融合属性供 Step 3 splitFusedNodes 使用
+    if (op.getDoRelu().getValue()) {
+      node.tf_attrs["_fused_do_relu"] = "true";
+      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
+    }
 
     registerValueName(op.getResult(), node.name);
     nodes_.push_back(std::move(node));
@@ -529,6 +550,137 @@ private:
 };
 
 // ============================================================================
+// Step 3: 融合节点拆分
+// ============================================================================
+
+// 核心拆分函数: 后处理 NodeInfo 列表，拆分融合节点
+// 算法: 两遍 —
+//   第一遍: 拆分融合节点，记录 name → 最终名 映射
+//   第二遍: 用映射表修正所有输入引用
+static std::vector<NodeInfo> splitFusedNodes(const std::vector<NodeInfo> &inputNodes) {
+  // name mapping: 原节点名 → 拆分链末尾节点名
+  std::map<std::string, std::string> nameMap;
+  // 拆分链中新增的节点名 (它们的输入已正确，不需要重写)
+  std::set<std::string> splitChainNames;
+  std::vector<NodeInfo> result;
+
+  for (const auto &node : inputNodes) {
+    bool hasFusedBias = (node.tf_attrs.count("_fused_withBias") &&
+                         node.tf_attrs.at("_fused_withBias") == "true");
+    bool hasFusedRelu = (node.tf_attrs.count("_fused_do_relu") &&
+                         node.tf_attrs.at("_fused_do_relu") == "true");
+
+    // ---- MatMul(withBias) → MatMul + BiasAdd [→ Relu] ----
+    if (node.op_type == "MatMul" && hasFusedBias) {
+      // 1. MatMul: 去掉 bias 输入，去掉融合属性，不是最终输出
+      NodeInfo matmul = node;
+      if (matmul.inputs.size() >= 3) {
+        matmul.inputs.pop_back();
+      }
+      matmul.tf_attrs.erase("_fused_withBias");
+      matmul.tf_attrs.erase("_fused_do_relu");
+      matmul.tf_attrs.erase("_fused_relu_limit");
+      matmul.isOutputNode = false;
+      result.push_back(std::move(matmul));
+
+      // 2. BiasAdd: 输入 = matmul输出 + bias
+      NodeInfo biasAdd;
+      std::string biasAddName = node.name + "/bias_add";
+      biasAdd.name = biasAddName;
+      biasAdd.op_type = "BiasAdd";
+      biasAdd.inputs.push_back(node.name);           // matmul output
+      biasAdd.inputs.push_back(node.inputs.back());   // bias (原第3个输入)
+      if (!node.outputs.empty()) {
+        biasAdd.addOutput(0, biasAddName,
+                          node.outputs[0].shape, node.outputs[0].dtype);
+      }
+
+      if (hasFusedRelu) {
+        biasAdd.isOutputNode = false;
+        result.push_back(std::move(biasAdd));
+        splitChainNames.insert(biasAddName);
+
+        // 3. Relu: 输入 = biasAdd输出
+        NodeInfo relu;
+        std::string reluName = node.name + "/relu";
+        relu.name = reluName;
+        relu.op_type = "Relu";
+        relu.inputs.push_back(biasAddName);
+        if (!node.outputs.empty()) {
+          relu.addOutput(0, reluName,
+                        node.outputs[0].shape, node.outputs[0].dtype);
+        }
+        relu.isOutputNode = node.isOutputNode;
+        result.push_back(std::move(relu));
+        splitChainNames.insert(reluName);
+
+        // 映射: 原名 → 最终名 (Relu)
+        nameMap[node.name] = reluName;
+      } else {
+        biasAdd.isOutputNode = node.isOutputNode;
+        result.push_back(std::move(biasAdd));
+        splitChainNames.insert(biasAddName);
+
+        // 映射: 原名 → BiasAdd
+        nameMap[node.name] = biasAddName;
+      }
+      continue;
+    }
+
+    // ---- MatMul(do_relu) / AddV2(do_relu) / ConcatV2(do_relu) → Op + Relu ----
+    if (hasFusedRelu &&
+        (node.op_type == "MatMul" || node.op_type == "AddV2" ||
+         node.op_type == "ConcatV2")) {
+      // 1. 原算子: 去掉融合属性，不是最终输出
+      NodeInfo baseOp = node;
+      baseOp.tf_attrs.erase("_fused_do_relu");
+      baseOp.tf_attrs.erase("_fused_relu_limit");
+      baseOp.isOutputNode = false;
+      result.push_back(std::move(baseOp));
+
+      // 2. Relu: 输入 = 原算子输出
+      NodeInfo relu;
+      std::string reluName = node.name + "/relu";
+      relu.name = reluName;
+      relu.op_type = "Relu";
+      relu.inputs.push_back(node.name);
+      if (!node.outputs.empty()) {
+        relu.addOutput(0, reluName,
+                      node.outputs[0].shape, node.outputs[0].dtype);
+      }
+      relu.isOutputNode = node.isOutputNode;
+      result.push_back(std::move(relu));
+      splitChainNames.insert(reluName);
+
+      // 映射: 原名 → Relu
+      nameMap[node.name] = reluName;
+      continue;
+    }
+
+    // ---- 无融合: 直接保留，清理残留 _fused_ 属性 ----
+    NodeInfo clean = node;
+    clean.tf_attrs.erase("_fused_withBias");
+    clean.tf_attrs.erase("_fused_do_relu");
+    clean.tf_attrs.erase("_fused_relu_limit");
+    result.push_back(std::move(clean));
+  }
+
+  // 第二遍: 用映射表修正下游节点的输入引用
+  // 跳过拆分链内部节点 (它们的输入已正确)
+  for (auto &node : result) {
+    if (splitChainNames.count(node.name)) continue;
+    for (auto &input : node.inputs) {
+      auto it = nameMap.find(input);
+      if (it != nameMap.end()) {
+        input = it->second;
+      }
+    }
+  }
+
+  return result;
+}
+
+// ============================================================================
 // CLI 入口
 // ============================================================================
 
@@ -573,12 +725,19 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // 4. 输出解析结果 (Step 4 中将替换为 GraphDef 构建)
-  if (verbose) {
-    llvm::outs() << "[annc-converter] Parsed " << nodes.size()
-                 << " nodes from MLIR\n";
+  // 4. Step 3: 融合节点拆分
+  std::vector<NodeInfo> splitNodes = splitFusedNodes(nodes);
 
-    for (const auto &node : nodes) {
+  if (verbose) {
+    llvm::outs() << "[annc-converter] After Step 3 (fusion split): "
+                 << splitNodes.size() << " nodes";
+    if (splitNodes.size() != nodes.size()) {
+      llvm::outs() << " (was " << nodes.size() << ", split "
+                   << (splitNodes.size() - nodes.size()) << " more)";
+    }
+    llvm::outs() << "\n";
+
+    for (const auto &node : splitNodes) {
       llvm::outs() << "  " << node.op_type << " \"" << node.name << "\"";
       if (node.isInputNode) llvm::outs() << " [INPUT]";
       if (node.isOutputNode) llvm::outs() << " [OUTPUT]";
@@ -613,11 +772,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  // TODO: Step 3 — 融合节点拆分
   // TODO: Step 4 — NodeInfo → TF GraphDef 构建
   // TODO: Step 5 — 序列化输出
 
-  llvm::outs() << "[annc-converter] Step 1-2 complete: "
-               << nodes.size() << " nodes parsed\n";
+  llvm::outs() << "[annc-converter] Step 1-3 complete: "
+               << splitNodes.size() << " nodes (after fusion split)\n";
   return 0;
 }
