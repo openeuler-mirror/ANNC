@@ -2,8 +2,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <cstring>
+#include <filesystem>
 #include <set>
+#include <map>
+#include <unordered_map>
+#include <queue>
 #include "llvm/ADT/DenseMap.h"
 
 #include "Dialect/Atir/AtirOps.h"
@@ -20,6 +23,15 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include "tensorflow/core/protobuf/saved_model.pb.h"
+#include "tensorflow/core/protobuf/graph.pb.h"
+#include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/lib/core/status.h"
+#include "google/protobuf/text_format.h"
 
 using namespace mlir;
 using namespace annc;
@@ -73,7 +85,42 @@ static std::string base64Encode(const std::vector<uint8_t> &data) {
   return result;
 }
 
-// DenseElementsAttr → raw bytes
+// base64 解码
+static std::vector<uint8_t> base64Decode(const std::string& encoded) {
+  static const int8_t lookup[] = {
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+    52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  };
+
+  std::vector<uint8_t> result;
+  if (encoded.empty()) return result;
+
+  int val = 0, valb = -8;
+  for (unsigned char c : encoded) {
+    if (lookup[c] == -1) break;
+    val = (val << 6) + lookup[c];
+    valb += 6;
+    if (valb >= 0) {
+      result.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+      valb -= 8;
+    }
+  }
+  return result;
+}
 static std::vector<uint8_t> denseElementsToRawBytes(DenseElementsAttr attr) {
   if (!attr || attr.empty()) return {};
 
@@ -303,7 +350,7 @@ private:
       return;
     }
 
-    // LoadOp → StridedSlice
+    // LoadOp → 不支持 (缺 StridedSlice 必需属性)
     if (auto loadOp = dyn_cast<atir::LoadOp>(op)) {
       parseLoadOp(loadOp);
       return;
@@ -347,10 +394,13 @@ private:
     nodes_.push_back(std::move(node));
   }
 
+  // Atir VariableOp 没有嵌入数据，TF 的 VariableV2 需要 checkpoint 文件
+  // MVP: 转为 Placeholder (作为模型输入，由调用方提供初始值)
   void parseVariableOp(atir::VariableOp op) {
     NodeInfo node;
     node.name = getLocName(op);
-    node.op_type = "VariableV2";
+    node.op_type = "Placeholder";
+    node.isInputNode = true;
 
     auto tensorType = dyn_cast<atir::TensorType>(op.getOutput().getType());
     if (!tensorType) return;
@@ -373,8 +423,11 @@ private:
     node.inputs.push_back(lookupValueName(op.getRhs()));
 
     // bias: withBias=true 时添加
-    if (op.getWithBias().getValue() && op.getBias()) {
-      node.inputs.push_back(lookupValueName(*op.getBias()));
+    if (op.getWithBias()) {
+      auto bias = op.getBias();
+      if (bias && bias != mlir::Value()) {
+        node.inputs.push_back(lookupValueName(bias));
+      }
     }
 
     auto tensorType = dyn_cast<atir::TensorType>(op.getOutput().getType());
@@ -385,18 +438,18 @@ private:
     }
 
     // TF 属性: transpose_a, transpose_b
-    node.tf_attrs["transpose_a"] = "b:" + std::string(op.getLeftTranspose().getValue() ? "true" : "false");
-    node.tf_attrs["transpose_b"] = "b:" + std::string(op.getRightTranspose().getValue() ? "true" : "false");
+    node.tf_attrs["transpose_a"] = "b:" + std::string(op.getLeftTranspose() ? "true" : "false");
+    node.tf_attrs["transpose_b"] = "b:" + std::string(op.getRightTranspose() ? "true" : "false");
 
     // 记录融合属性供 Step 3 使用
-    if (op.getWithBias().getValue()) node.tf_attrs["_fused_withBias"] = "true";
-    if (op.getDoRelu().getValue()) {
+    if (op.getWithBias()) node.tf_attrs["_fused_withBias"] = "true";
+    if (op.getDoRelu()) {
       node.tf_attrs["_fused_do_relu"] = "true";
-      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
-        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
+      if (op.getReluLimit().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().convertToDouble());
     }
 
-        // 当前先不拆分，直接输出为 MatMul 节点 (融合拆分在 Step 3 splitFusedNodes 中处理)
+    // 当前先不拆分，直接输出为 MatMul 节点 (融合拆分在 Step 3 splitFusedNodes 中处理)
 
     registerValueName(op.getResult(), node.name);
     nodes_.push_back(std::move(node));
@@ -420,10 +473,10 @@ private:
     }
 
         // 记录融合属性供 Step 3 splitFusedNodes 使用
-    if (op.getDoRelu().getValue()) {
+    if (op.getDoRelu()) {
       node.tf_attrs["_fused_do_relu"] = "true";
-      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
-        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
+      if (op.getReluLimit().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().convertToDouble());
     }
 
     registerValueName(op.getResult(), node.name);
@@ -464,7 +517,7 @@ private:
       node.addOutput(0, node.name, shape, dtype);
     }
 
-        // ConcatV2: axis 是最后一个输入 (TF 要求)，不是属性
+    // ConcatV2: axis 是最后一个输入 (TF 要求)，不是属性
     // 创建 axis Const 节点
     int64_t axis = op.getAxis();
     std::string axisNodeName = node.name + "/axis";
@@ -485,32 +538,24 @@ private:
     node.inputs.push_back(axisNodeName);
 
     // 记录融合属性供 Step 3 splitFusedNodes 使用
-    if (op.getDoRelu().getValue()) {
+    if (op.getDoRelu()) {
       node.tf_attrs["_fused_do_relu"] = "true";
-      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
-        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
+      if (op.getReluLimit().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().convertToDouble());
     }
 
     registerValueName(op.getResult(), node.name);
     nodes_.push_back(std::move(node));
   }
 
+  // Atir LoadOp 缺少 TF StridedSlice 必需属性 (begin_mask/end_mask 等)
+  // MVP: 报错跳过
   void parseLoadOp(atir::LoadOp op) {
-    NodeInfo node;
-    node.name = getLocName(op);
-    node.op_type = "StridedSlice";
-
-    node.inputs.push_back(lookupValueName(op.getInput()));
-
-    auto tensorType = dyn_cast<atir::TensorType>(op.getOutput().getType());
-    if (tensorType) {
-      std::vector<int64_t> shape = getShapeVector(tensorType);
-      std::string dtype = atirTypeToDtypeStr(tensorType.getElementType());
-      node.addOutput(0, node.name, shape, dtype);
-    }
-
-    registerValueName(op.getResult(), node.name);
-    nodes_.push_back(std::move(node));
+    llvm::errs() << "[annc-converter] Error: atir.LoadOp → StridedSlice not supported "
+                     "(missing required TF attributes: begin_mask, end_mask, etc.)\n";
+    // 仍然注册 Value 名称，避免下游引用断裂
+    std::string name = getLocName(op);
+    registerValueName(op.getResult(), name);
   }
 
   void parseCustomizeOp(atir::CustomizeOp op) {
@@ -627,7 +672,7 @@ static std::vector<NodeInfo> splitFusedNodes(const std::vector<NodeInfo> &inputN
       continue;
     }
 
-    // ---- MatMul(do_relu) / AddV2(do_relu) / ConcatV2(do_relu) → Op + Relu ----
+    // ---- MatMul(do_relu) / Add(do_relu) / ConcatV2(do_relu) → Op + Relu ----
     if (hasFusedRelu &&
         (node.op_type == "MatMul" || node.op_type == "AddV2" ||
          node.op_type == "ConcatV2")) {
@@ -680,9 +725,323 @@ static std::vector<NodeInfo> splitFusedNodes(const std::vector<NodeInfo> &inputN
   return result;
 }
 
-// ============================================================================
+// ----------------------------------------------------------------------------
+// Step 4: GraphDef 构建
+// ----------------------------------------------------------------------------
+
+// 拓扑排序 (Kahn算法)
+static std::vector<NodeInfo> topologicalSort(const std::vector<NodeInfo>& nodes) {
+  std::unordered_map<std::string, size_t> node_to_index;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    node_to_index[nodes[i].name] = i;
+  }
+
+  std::vector<int> in_degree(nodes.size(), 0);
+  std::vector<std::vector<size_t>> adj_list(nodes.size());
+
+  // 构建依赖关系
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    const NodeInfo& node = nodes[i];
+    for (const std::string& input_name : node.inputs) {
+      if (node_to_index.find(input_name) != node_to_index.end()) {
+        size_t input_index = node_to_index[input_name];
+        adj_list[input_index].push_back(i);
+        in_degree[i]++;
+      }
+    }
+  }
+
+  // Kahn算法
+  std::queue<size_t> q;
+  std::vector<NodeInfo> sorted_nodes;
+
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    if (in_degree[i] == 0) {
+      q.push(i);
+    }
+  }
+
+  while (!q.empty()) {
+    size_t current = q.front();
+    q.pop();
+    sorted_nodes.push_back(nodes[current]);
+
+    for (size_t neighbor : adj_list[current]) {
+      in_degree[neighbor]--;
+      if (in_degree[neighbor] == 0) {
+        q.push(neighbor);
+      }
+    }
+  }
+
+  // 检测环
+  if (sorted_nodes.size() != nodes.size()) {
+    llvm::errs() << "[annc-converter] Warning: Cycle detected in graph, using original order\n";
+    return nodes;
+  }
+
+  return sorted_nodes;
+}
+
+// dtype string → tensorflow::DataType
+static tensorflow::DataType stringToTFDataType(const std::string& dtype) {
+  if (dtype == "float32") return tensorflow::DT_FLOAT;
+  if (dtype == "float64") return tensorflow::DT_DOUBLE;
+  if (dtype == "float16") return tensorflow::DT_HALF;
+  if (dtype == "int8") return tensorflow::DT_INT8;
+  if (dtype == "int16") return tensorflow::DT_INT16;
+  if (dtype == "int32") return tensorflow::DT_INT32;
+  if (dtype == "int64") return tensorflow::DT_INT64;
+  if (dtype == "bool") return tensorflow::DT_BOOL;
+  return tensorflow::DT_INVALID;
+}
+
+// tf_attrs value helper: 带类型标记的属性值
+// 格式: "b:true", "b:false"     → bool
+//        "i:42", "i:-1"          → int64
+//        "f:3.14"                → float
+//        "s:hello"               → string
+// 无前缀: 尝试推断 (兼容旧数据)
+static tensorflow::AttrValue parseAttrValue(const std::string& value) {
+  tensorflow::AttrValue attr_value;
+
+  // 带类型前缀
+  if (value.rfind("b:", 0) == 0) {
+    attr_value.set_b(value.substr(2) == "true");
+    return attr_value;
+  }
+  if (value.rfind("i:", 0) == 0) {
+    attr_value.set_i(std::stol(value.substr(2)));
+    return attr_value;
+  }
+  if (value.rfind("f:", 0) == 0) {
+    attr_value.set_f(std::stod(value.substr(2)));
+    return attr_value;
+  }
+  if (value.rfind("s:", 0) == 0) {
+    attr_value.set_s(value.substr(2));
+    return attr_value;
+  }
+
+  // 无前缀: 兼容推断
+  if (value == "true" || value == "false") {
+    attr_value.set_b(value == "true");
+  } else {
+    // 默认为字符串 (TF属性很少用裸数字)
+    attr_value.set_s(value);
+  }
+  return attr_value;
+}
+
+// NodeInfo → tensorflow::NodeDef
+static tensorflow::NodeDef nodeInfoToNodeDef(const NodeInfo& node) {
+  tensorflow::NodeDef node_def;
+  node_def.set_name(node.name);
+  node_def.set_op(node.op_type);
+
+  // 设置输入
+  for (const auto& input : node.inputs) {
+    node_def.add_input(input);
+  }
+
+  // 设置通用 TF 属性 (从 outputs 信息自动推断)
+  if (!node.outputs.empty()) {
+    auto* attr = node_def.mutable_attr();
+    tensorflow::DataType dtype = stringToTFDataType(node.outputs[0].dtype);
+
+    // Placeholder / Const 需要 dtype + shape 属性
+    if (node.op_type == "Placeholder" || node.op_type == "Const") {
+      tensorflow::AttrValue dtype_attr;
+      dtype_attr.set_type(dtype);
+      (*attr)["dtype"] = dtype_attr;
+
+      tensorflow::AttrValue shape_attr;
+      auto* shape_proto = shape_attr.mutable_shape();
+      for (int64_t dim : node.outputs[0].shape) {
+        shape_proto->add_dim()->set_size(dim);
+      }
+      (*attr)["shape"] = shape_attr;
+    }
+
+    // 计算节点需要 T 属性 (元素类型)
+    // TF约定: T属性表示输入/输出的元素类型
+    if (node.op_type == "MatMul" || node.op_type == "AddV2" ||
+        node.op_type == "BiasAdd" || node.op_type == "Relu" ||
+        node.op_type == "ConcatV2") {
+      tensorflow::AttrValue t_attr;
+      t_attr.set_type(dtype);
+      (*attr)["T"] = t_attr;
+    }
+
+    // _output_shapes: 输出形状信息 (TF 工具链可能期望)
+    tensorflow::AttrValue output_shapes_attr;
+    auto* shape_list = output_shapes_attr.mutable_list();
+    for (const auto& output : node.outputs) {
+      auto* shape_proto = shape_list->add_shape();
+      for (int64_t dim : output.shape) {
+        shape_proto->add_dim()->set_size(dim);
+      }
+    }
+    (*attr)["_output_shapes"] = output_shapes_attr;
+  }
+
+  // 设置 TF 特有属性 (从 tf_attrs)
+  for (const auto& [key, value] : node.tf_attrs) {
+    auto* attr = node_def.mutable_attr();
+    (*attr)[key] = parseAttrValue(value);
+  }
+
+  // 常量数据: base64 解码 → TensorProto
+  if (!node.raw_data.empty() && node.op_type == "Const") {
+    auto* attr = node_def.mutable_attr();
+    tensorflow::AttrValue tensor_attr;
+    tensorflow::TensorProto* tensor = tensor_attr.mutable_tensor();
+
+    if (!node.outputs.empty()) {
+      tensor->set_dtype(stringToTFDataType(node.outputs[0].dtype));
+      for (int64_t dim : node.outputs[0].shape) {
+        tensor->mutable_tensor_shape()->add_dim()->set_size(dim);
+      }
+    }
+
+    // base64 解码 → tensor_content (raw bytes)
+    std::vector<uint8_t> decoded = base64Decode(node.raw_data);
+    if (!decoded.empty()) {
+      tensor->set_tensor_content(
+          std::string(decoded.begin(), decoded.end()));
+    }
+
+    (*attr)["value"] = tensor_attr;
+  }
+
+  return node_def;
+}
+
+// 构建SavedModel
+static tensorflow::SavedModel buildSavedModel(const std::vector<NodeInfo>& nodes) {
+  tensorflow::SavedModel saved_model;
+
+  // 创建MetaGraphDef
+  auto* meta_graph = saved_model.add_meta_graphs();
+  meta_graph->set_meta_graph_version("1.0");
+
+  // 构建GraphDef
+  auto* graph_def = meta_graph->mutable_graph_def();
+
+  for (const auto& node : nodes) {
+    auto* node_def = graph_def->add_node();
+    *node_def = nodeInfoToNodeDef(node);
+  }
+
+  // 创建signature_def (serving_default)
+  auto* signatures = meta_graph->mutable_signature_def();
+  auto& sig_def = (*signatures)["serving_default"];
+  sig_def.set_method_name("tensorflow/serving/predict");
+
+  // 输入信息
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+  for (const auto& node : nodes) {
+    if (node.isInputNode) {
+      input_names.push_back(node.name);
+    }
+    if (node.isOutputNode) {
+      output_names.push_back(node.name);
+    }
+  }
+
+  // 设置输入
+  for (const auto& name : input_names) {
+    auto* input_info = sig_def.mutable_inputs();
+    tensorflow::TensorInfo tensor_info;
+    tensor_info.set_name(name);
+    // 查找对应节点的实际dtype
+    for (const auto& node : nodes) {
+      if (node.name == name && !node.outputs.empty()) {
+        tensor_info.set_dtype(stringToTFDataType(node.outputs[0].dtype));
+        auto* shape = tensor_info.mutable_tensor_shape();
+        for (int64_t dim : node.outputs[0].shape) {
+          shape->add_dim()->set_size(dim);
+        }
+        break;
+      }
+    }
+    (*input_info)[name] = tensor_info;
+  }
+
+  // 设置输出
+  for (const auto& name : output_names) {
+    auto* output_info = sig_def.mutable_outputs();
+    tensorflow::TensorInfo tensor_info;
+    tensor_info.set_name(name);
+    // 查找对应节点的实际dtype
+    for (const auto& node : nodes) {
+      if (node.name == name && !node.outputs.empty()) {
+        tensor_info.set_dtype(stringToTFDataType(node.outputs[0].dtype));
+        auto* shape = tensor_info.mutable_tensor_shape();
+        for (int64_t dim : node.outputs[0].shape) {
+          shape->add_dim()->set_size(dim);
+        }
+        break;
+      }
+    }
+    (*output_info)[name] = tensor_info;
+  }
+
+  return saved_model;
+}
+
+// 序列化输出
+static bool saveSavedModel(const tensorflow::SavedModel& saved_model,
+                           const std::string& output_path, bool is_text_format) {
+  // 自动创建输出目录
+  if (!output_path.empty() && output_path != ".") {
+    std::error_code ec;
+    std::filesystem::create_directories(output_path, ec);
+    if (ec) {
+      llvm::errs() << "[annc-converter] Error: failed to create output directory: "
+                   << output_path << " (" << ec.message() << ")\n";
+      return false;
+    }
+  }
+
+  std::string full_path = output_path;
+  if (is_text_format) {
+    full_path += "/saved_model.pbtxt";
+  } else {
+    full_path += "/saved_model.pb";
+  }
+
+  std::ofstream output_file(full_path, std::ios::binary);
+  if (!output_file.is_open()) {
+    llvm::errs() << "[annc-converter] Error: failed to open output file: "
+                 << full_path << "\n";
+    return false;
+  }
+
+  if (is_text_format) {
+    // 文本格式
+    std::string text_output;
+    if (!google::protobuf::TextFormat::PrintToString(saved_model, &text_output)) {
+      llvm::errs() << "[annc-converter] Error: failed to serialize to text format\n";
+      return false;
+    }
+    output_file << text_output;
+  } else {
+    // 二进制格式
+    if (!saved_model.SerializeToOstream(&output_file)) {
+      llvm::errs() << "[annc-converter] Error: failed to serialize to binary format\n";
+      return false;
+    }
+  }
+
+  output_file.close();
+  return true;
+}
+
+// ----------------------------------------------------------------------------
 // CLI 入口
-// ============================================================================
+// ----------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
   llvm::InitLLVM y(argc, argv);
@@ -698,8 +1057,11 @@ int main(int argc, char **argv) {
   llvm::cl::opt<bool> verbose("verbose", llvm::cl::desc("Verbose output"),
                                llvm::cl::init(false));
 
+  llvm::cl::opt<bool> text_format("text_format", llvm::cl::desc("Output in text format (.pbtxt) instead of binary (.pb)"),
+                                   llvm::cl::init(false));
+
   llvm::cl::ParseCommandLineOptions(argc, argv,
-                                    "annc-converter: Atir MLIR → TF GraphDef\n");
+                                    "annc-converter: Atir MLIR → TF SavedModel\n");
 
   // 1. 注册方言
   DialectRegistry registry;
@@ -772,10 +1134,28 @@ int main(int argc, char **argv) {
     }
   }
 
-  // TODO: Step 4 — NodeInfo → TF GraphDef 构建
-  // TODO: Step 5 — 序列化输出
+  // 5. Step 4: 拓扑排序
+  std::vector<NodeInfo> sortedNodes = topologicalSort(splitNodes);
+  if (verbose) {
+    llvm::outs() << "[annc-converter] After Step 4 (topological sort): "
+                 << sortedNodes.size() << " nodes\n";
+  }
 
-  llvm::outs() << "[annc-converter] Step 1-3 complete: "
-               << splitNodes.size() << " nodes (after fusion split)\n";
+  // 6. Step 4: 构建SavedModel
+  tensorflow::SavedModel saved_model = buildSavedModel(sortedNodes);
+
+  // 7. Step 5: 序列化输出
+  std::string output_dir = outputFilename;
+  if (output_dir == "-") {
+    output_dir = "."; // 默认当前目录
+  }
+
+  if (!saveSavedModel(saved_model, output_dir, text_format)) {
+    llvm::errs() << "[annc-converter] Error: failed to save SavedModel\n";
+    return 1;
+  }
+
+  llvm::outs() << "[annc-converter] Success! SavedModel written to: " << output_dir
+               << (text_format ? "/saved_model.pbtxt\n" : "/saved_model.pb\n");
   return 0;
 }
