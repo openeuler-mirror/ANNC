@@ -9,7 +9,6 @@
 #include "Builder/MLIROpBuilder.h"
 #include "Helper.h"
 
-using json = nlohmann::json;
 using namespace mlir;
 namespace annc {
 class ANNCBuilder {
@@ -20,7 +19,7 @@ class ANNCBuilder {
   ModuleOp module_;
   func::FuncOp func_;
 
-  ModuleOp buildModule(std::string name, const json& graph);
+  ModuleOp buildModule(std::string name, const std::vector<NodeInfo>& nodes);
 
   void save(const std::string& output) {
     outputCode(module_, output);
