@@ -121,12 +121,30 @@ class Atir:
             wrap_type(output), lhs, rhs, bias_value, loc=self.Loc.unknown(), ip=state.ip).output)
 
     def add(self, output: TensorType, lhs: Value, rhs: Value, scalar: int = None) -> Value:
-        return get_value_ptr(atir.AddOp(wrap_type(output), lhs.value, rhs.value, scalar, 
-                                       loc=self.Loc.unknown(), ip=state.ip).output)
+        # Create output buffer first (destination-style)
+        output_type = wrap_type(output)
+        output_buffer = atir.BufferOp(output_type, loc=self.Loc.unknown(), ip=state.ip).output
+        
+        # Call AddOp with output as first operand, followed by inputs
+        return get_value_ptr(atir.AddOp(output_type,
+                                       output_buffer,
+                                       lhs.value, 
+                                       rhs.value, 
+                                       scalar=scalar,
+                                       loc=self.Loc.unknown(), 
+                                       ip=state.ip).result)
 
     def relu(self, output:TensorType, input: Value):
-        return get_value_ptr(atir.ReluOp(wrap_type(output), input.value,
-                             loc=self.Loc.unknown(), ip=state.ip).output)
+        # Create output buffer first (destination-style)
+        output_type = wrap_type(output)
+        output_buffer = atir.BufferOp(output_type, loc=self.Loc.unknown(), ip=state.ip).output
+        
+        # Call ReluOp with output as first operand
+        return get_value_ptr(atir.ReluOp(output_type,
+                                        output_buffer,
+                                        input.value,
+                                        loc=self.Loc.unknown(), 
+                                        ip=state.ip).result)
 
     def ret(self, ret_vals: List[Value]):
         atir.ReturnOp([val.value for val in ret_vals], loc=self.Loc.unknown(), ip=state.ip)
@@ -166,11 +184,30 @@ def matmul(dtype: ElemType, shape: List[int], lhs: Value, rhs: Value, C: Value ,
 
 def add(dtype: ElemType, shape: List[int], operands: List[Value], do_relu: bool = False, relu_limit: float = -1.0, scalar: int = None, loc=None, **kwargs) -> Value:
     loc = loc or mlir.Location.unknown()
-
-    return Value(atir.AddOp(wrap_type(TensorType.get(shape, dtype, **kwargs)),
-                            [v.value for v in operands], do_relu=do_relu, relu_limit=relu_limit, scalar=scalar, loc=loc, ip=state.ip).output)
+    # Create output buffer first (destination-style)
+    output_type = wrap_type(TensorType.get(shape, dtype, **kwargs))
+    output_buffer = atir.BufferOp(output_type, loc=loc, ip=state.ip).output
+    
+    # Call AddOp with output as first operand, followed by inputs
+    return Value(atir.AddOp(output_type,
+                            output_buffer,
+                            [v.value for v in operands], 
+                            do_relu=do_relu, 
+                            relu_limit=relu_limit, 
+                            scalar=scalar, 
+                            loc=loc, 
+                            ip=state.ip).result)
 
 def relu(dtype: ElemType, shape: List[int], input: Value, relu_limit: float = 0.0, loc=None, **kwargs) -> Value:
     loc = loc or mlir.Location.unknown()
-    return Value(atir.ReluOp(wrap_type(TensorType.get(shape, dtype, **kwargs)), 
-                             input.value, relu_limit = relu_limit, loc=loc, ip=state.ip).output)
+    # Create output buffer first (destination-style)
+    output_type = wrap_type(TensorType.get(shape, dtype, **kwargs))
+    output_buffer = atir.BufferOp(output_type, loc=loc, ip=state.ip).output
+    
+    # Call ReluOp with output as first operand
+    return Value(atir.ReluOp(output_type, 
+                             output_buffer,
+                             input.value, 
+                             relu_limit=relu_limit, 
+                             loc=loc, 
+                             ip=state.ip).result)

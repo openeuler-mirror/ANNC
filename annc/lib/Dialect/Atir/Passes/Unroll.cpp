@@ -199,7 +199,10 @@ namespace atir {
                 auto outputType = atir::TensorType::get(ArrayRef<int64_t>{llvm::dyn_cast<atir::TensorType>(rowBlocks[0].getType()).getValueOfShape()[0], rowSize}, builder.getF32Type(),
                                                         builder.getStringAttr("concat_out_n"), encoding);
 
-                auto rowConcat = builder.create<atir::ConcatOp>(loc, outputType, rowBlocks,builder.getI32IntegerAttr(1),builder.getBoolAttr(
+                // 创建 output buffer
+                auto outputBuffer = builder.create<atir::BufferOp>(loc, outputType);
+                
+                auto rowConcat = builder.create<atir::ConcatOp>(loc, outputType, outputBuffer.getResult(), rowBlocks,builder.getI32IntegerAttr(1),builder.getBoolAttr(
                         false),builder.getF32FloatAttr(-1),builder.getI32IntegerAttr(0),builder.getBoolAttr(false));  // falseaxis=1
                 rowResults.push_back(rowConcat);
             } else {
@@ -219,7 +222,10 @@ namespace atir {
             auto outputType = atir::TensorType::get(ArrayRef<int64_t>{finalSize, llvm::dyn_cast<atir::TensorType>(rowResults[0].getType()).getValueOfShape()[1]}, builder.getF32Type(),
                                                     builder.getStringAttr("out"), encoding);
 
-            auto rowConcat = builder.create<atir::ConcatOp>(loc, outputType, rowResults,builder.getI32IntegerAttr(0),builder.getBoolAttr(
+            // 创建 output buffer
+            auto outputBuffer = builder.create<atir::BufferOp>(loc, outputType);
+            
+            auto rowConcat = builder.create<atir::ConcatOp>(loc, outputType, outputBuffer.getResult(), rowResults,builder.getI32IntegerAttr(0),builder.getBoolAttr(
                     false),builder.getF32FloatAttr(-1),builder.getI32IntegerAttr(0), builder.getBoolAttr(false));  // falseaxis=1
 
             return rowConcat;
@@ -283,8 +289,11 @@ namespace atir {
             }
         }
 
-        auto concat_value = builder.create<atir::ConcatOp>(matmul.getLoc(), matmul.getResult().getType(),matmul.getC(),builder.getI32IntegerAttr(-1),builder.getBoolAttr(
-                false),builder.getF32FloatAttr(-1),builder.getI32IntegerAttr(0),builder.getBoolAttr(true)).getResult();
+        // 创建 output buffer
+        auto concatOutputBuffer = builder.create<atir::BufferOp>(matmul.getLoc(), matmul.getResult().getType());
+        
+        auto concat_value = builder.create<atir::ConcatOp>(matmul.getLoc(), matmul.getResult().getType(), concatOutputBuffer.getResult(), matmul.getC(), builder.getI32IntegerAttr(-1), builder.getBoolAttr(
+                false), builder.getF32FloatAttr(-1), builder.getI32IntegerAttr(0), builder.getBoolAttr(true)).getResult();
 
         assert(concat_value != nullptr);
         matmul.getResult().replaceAllUsesWith(concat_value);

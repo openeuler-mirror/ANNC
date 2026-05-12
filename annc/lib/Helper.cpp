@@ -3,6 +3,23 @@
 #include "mlir/Bytecode/BytecodeWriter.h"
 
 namespace annc {
+
+float apFloatToFloat(const llvm::APFloat &v) {
+  llvm::APFloat copy = v;
+  bool losesInfo = false;
+  (void)copy.convert(llvm::APFloat::IEEEsingle(),
+                     llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+  return copy.convertToFloat();
+}
+
+double apFloatToDouble(const llvm::APFloat &v) {
+  llvm::APFloat copy = v;
+  bool losesInfo = false;
+  (void)copy.convert(llvm::APFloat::IEEEdouble(),
+                     llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+  return copy.convertToDouble();
+}
+
 void outputCode(const ModuleOp &module, const std::string &filenameWithExt,
                 int64_t elide) {
   if (module == nullptr) {

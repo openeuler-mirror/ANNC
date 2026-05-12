@@ -1,266 +1,238 @@
+#include <cmath>
+#include <optional>
+#include <string>
+
 #include <llvm/Support/Debug.h>
+#include "Helper.h"
 #include "Dialect/Atir/AtirOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
 
 #include "Dialect/Atir/Interfaces/ShapeInfer.cpp.inc"
 
 namespace atir {
 #define UNREACHABLE_OP(info) emitError(info);
 
-llvm::SmallVector<int64_t> computeBroadcastShape(mlir::Operation* op) {
-  // todo  type shape
-  auto lhsType = op->getOperand(0).getType();
-  auto lhsTensorType = dyn_cast<atir::TensorType>(lhsType);
+namespace {
 
-  auto lhs_shape = lhsTensorType.getShape();
-  auto out_shape = llvm::SmallVector<int64_t>(lhs_shape);
+bool isNoneOperand(Value value) {
+  return llvm::isa_and_nonnull<atir::NoneOp>(value.getDefiningOp());
+}
 
-  if (op->getNumOperands() > 1) {
-    for (size_t i = 1; i < op->getNumOperands(); ++i) {
-      auto operandType = op->getOperand(i).getType();
-      auto operandTensorType = dyn_cast<atir::TensorType>(operandType);
-      // Opdyn_cast_or_nullnull
-      if (llvm::dyn_cast_or_null<atir::NoneOp>(
-              op->getOperand(i).getDefiningOp())) {
+atir::TensorType cloneWithShape(atir::TensorType type,
+                                llvm::ArrayRef<int64_t> shape) {
+  return atir::TensorType::get(
+      shape, type.getElementType(), type.getName(), type.getEncoding(),
+      type.getStride(), type.getLayout(), type.getMemType(), type.getAddress(),
+      type.getDeviceParallel(), type.getOnchipParallel(), type.getCacheData());
+}
+
+LogicalResult setSingleResultShape(Operation *op, llvm::ArrayRef<int64_t> shape) {
+  if (op->getNumResults() != 1) {
+    return op->emitOpError("expects exactly one result");
+  }
+
+  auto resultType = dyn_cast<atir::TensorType>(op->getResult(0).getType());
+  if (!resultType) {
+    return op->emitOpError("result must be atir::TensorType");
+  }
+
+  op->getResult(0).setType(cloneWithShape(resultType, shape));
+  return success();
+}
+
+SmallVector<int64_t> getIntArrayAttrValues(ArrayAttr attr) {
+  SmallVector<int64_t> values;
+  if (!attr) {
+    return values;
+  }
+
+  values.reserve(attr.size());
+  for (Attribute element : attr) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(element)) {
+      values.push_back(intAttr.getInt());
+    }
+  }
+  return values;
+}
+
+std::optional<int64_t> mergeBroadcastDims(Operation *op, int64_t lhsDim,
+                                          int64_t rhsDim) {
+  if (lhsDim == rhsDim) {
+    return lhsDim;
+  }
+  if (lhsDim == 1) {
+    return rhsDim;
+  }
+  if (rhsDim == 1) {
+    return lhsDim;
+  }
+  if (lhsDim == ShapedType::kDynamic || rhsDim == ShapedType::kDynamic) {
+    return ShapedType::kDynamic;
+  }
+
+  op->emitOpError() << "broadcast shape mismatch: " << lhsDim << " vs "
+                    << rhsDim;
+  return std::nullopt;
+}
+
+LogicalResult inferConcatLikeOpShape(Operation *op, ValueRange inputs,
+                                     int64_t axis) {
+  llvm::SmallVector<int64_t> outShape;
+  bool initialized = false;
+
+  for (Value input : inputs) {
+    if (isNoneOperand(input)) {
+      continue;
+    }
+
+    auto tensorType = dyn_cast<atir::TensorType>(input.getType());
+    if (!tensorType) {
+      return op->emitOpError("expects atir::TensorType operands");
+    }
+
+    auto shape = tensorType.getShape();
+    if (!initialized) {
+      outShape.assign(shape.begin(), shape.end());
+      initialized = true;
+      continue;
+    }
+
+    if (shape.size() != outShape.size()) {
+      return op->emitOpError("concat inputs must have the same rank");
+    }
+
+    int64_t normalizedAxis = axis;
+    if (normalizedAxis < 0) {
+      normalizedAxis += static_cast<int64_t>(shape.size());
+    }
+    if (normalizedAxis < 0 ||
+        normalizedAxis >= static_cast<int64_t>(shape.size())) {
+      return op->emitOpError("concat axis out of range");
+    }
+
+    for (size_t dim = 0; dim < shape.size(); ++dim) {
+      if (static_cast<int64_t>(dim) == normalizedAxis) {
+        if (outShape[dim] == ShapedType::kDynamic ||
+            shape[dim] == ShapedType::kDynamic) {
+          outShape[dim] = ShapedType::kDynamic;
+        } else {
+          outShape[dim] += shape[dim];
+        }
         continue;
       }
 
-      auto hs_shape = operandTensorType.getShape();
-      auto tmp_shape = llvm::SmallVector<int64_t>();
-      for (auto it : llvm::zip_longest(llvm::reverse(out_shape),
-                                       llvm::reverse(hs_shape))) {
-        if (std::get<0>(it) && std::get<0>(it) != 1) {
-          tmp_shape.push_back(std::get<0>(it).value());
-        } else {
-          if (std::get<1>(it))
-            tmp_shape.push_back(std::get<1>(it).value());
-          else
-            tmp_shape.push_back(std::get<0>(it).value());
-        }
+      if (outShape[dim] != shape[dim]) {
+        return op->emitOpError()
+               << "concat inputs must match on non-axis dimensions";
       }
-      out_shape = llvm::SmallVector<int64_t>(llvm::reverse(tmp_shape));
     }
   }
-  return out_shape;
+
+  if (!initialized) {
+    return op->emitOpError("expects at least one tensor operand");
+  }
+  return setSingleResultShape(op, outShape);
 }
 
-// todo shapeInfer
-void inferEltwiseOpShape(mlir::Operation* op) {}
+std::vector<int64_t> inferReductionAxesFromShapes(ArrayRef<int64_t> inputShape,
+                                                  ArrayRef<int64_t> outputShape) {
+  std::vector<int64_t> axes;
 
-void AddOp::inferShape() {
-  inferEltwiseOpShape(getOperation());
-  auto out_shape = computeBroadcastShape(getOperation());
-  auto result = this->getResult();
-  auto resultType = result.getType();
-  // todo atir::TensorTypecloneWithShape
-  atir::TensorType resultTensor = atir::TensorType::get(
-      out_shape, resultType.getElementType(), resultType.getName(),
-      resultType.getEncoding(), resultType.getStride(), resultType.getLayout(),
-      resultType.getMemType(), resultType.getAddress(),
-      resultType.getDeviceParallel(), resultType.getOnchipParallel(),
-      resultType.getCacheData());
-  result.setType(resultTensor);
-  auto resultShape = result.getType().getShape();
-  llvm::dbgs() << "after Add inferShape, resultShape M: " << resultShape[0]
-               << ", N: " << resultShape[1] << "\n";
+  if (inputShape.size() == outputShape.size()) {
+    for (size_t i = 0; i < inputShape.size(); ++i) {
+      if (outputShape[i] == 1 && inputShape[i] != 1) {
+        axes.push_back(i);
+      }
+    }
+    return axes;
+  }
+
+  size_t outPos = 0;
+  for (size_t inPos = 0; inPos < inputShape.size(); ++inPos) {
+    if (outPos < outputShape.size() && inputShape[inPos] == outputShape[outPos]) {
+      ++outPos;
+      continue;
+    }
+    axes.push_back(inPos);
+  }
+
+  if (outPos != outputShape.size()) {
+    axes.clear();
+  }
+  return axes;
 }
 
-void MatMulOp::inferShape() {
-  inferEltwiseOpShape(getOperation());
-  // todo batch matmul
-  // todo 2
-  // todo 
-  auto lhsType = getOperand(0).getType();
-  auto rhsType = getOperand(1).getType();
-  if (!lhsType || !rhsType) {
-    emitError("Matmul operands must have defining ops");
-    return;
+}  // namespace
+
+// 形状广播函数
+llvm::SmallVector<int64_t> computeBroadcastShape(mlir::Operation *op) {
+  llvm::SmallVector<int64_t> outShape;
+  bool initialized = false;
+
+  for (Value operand : op->getOperands()) {
+    if (isNoneOperand(operand)) {
+      continue;
+    }
+
+    auto operandTensorType = dyn_cast<atir::TensorType>(operand.getType());
+    if (!operandTensorType) {
+      op->emitOpError("expected atir::TensorType operand for shape inference");
+      return {};
+    }
+
+    auto operandShape = operandTensorType.getShape();
+    if (!initialized) {
+      outShape.assign(operandShape.begin(), operandShape.end());
+      initialized = true;
+      continue;
+    }
+
+    size_t outRank = outShape.size();
+    size_t operandRank = operandShape.size();
+    size_t resultRank = std::max(outRank, operandRank);
+    llvm::SmallVector<int64_t> merged(resultRank, 1);
+
+    for (size_t idx = 0; idx < resultRank; ++idx) {  // 从右往左记录维度信息
+      int64_t lhsDim = 1;
+      int64_t rhsDim = 1;
+      if (idx < outRank) {
+        lhsDim = outShape[outRank - 1 - idx];
+      }
+      if (idx < operandRank) {
+        rhsDim = operandShape[operandRank - 1 - idx];
+      }
+
+      auto mergedDim = mergeBroadcastDims(op, lhsDim, rhsDim);
+      if (!mergedDim) {
+        return {};
+      }
+      merged[resultRank - 1 - idx] = *mergedDim;
+    }
+
+    outShape = std::move(merged);
   }
 
-  auto lhsTensorType = dyn_cast<atir::TensorType>(lhsType);
-  auto rhsTensorType = dyn_cast<atir::TensorType>(rhsType);
-  if (!lhsTensorType || !rhsTensorType) {
-    emitError("Expected TensorType for operand, got: ")
-        << "lhsType: " << lhsType
-        << " (TensorType: " << isa<atir::TensorType>(lhsType) << ")\n"
-        << "rhsType: " << rhsType
-        << " (TensorType: " << isa<atir::TensorType>(rhsType) << ")\n";
-    return;
-  }
-
-  llvm::ArrayRef<int64_t> lhsShape = lhsTensorType.getShape();  // (M, K)
-  llvm::ArrayRef<int64_t> rhsShape = rhsTensorType.getShape();  // (K, N)
-  llvm::dbgs() << "before inferShape, Matmul lhsShape M: " << lhsShape[0]
-               << ", N: " << lhsShape[1] << "\n";
-  llvm::dbgs() << "before inferShape, Matmul rhsShape M: " << rhsShape[0]
-               << ", N: " << rhsShape[1] << "\n";
-  if (lhsShape.size() != 2 || lhsShape.size() != 2) {
-    emitError(
-        "Matmul inputs must have rank == 2, batchMatmul not yet supported");
-    return;
-  }
-  llvm::dbgs() << "lhsShape M: " << lhsShape[0] << ", N: " << lhsShape[1]
-               << " ----------\n";
-  llvm::dbgs() << "rhsShape M: " << rhsShape[0] << ", N: " << rhsShape[1]
-               << " ----------\n";
-
-  int64_t M = lhsShape[0];
-  int64_t K_a = lhsShape[1];
-  int64_t K_b = rhsShape[0];
-  int64_t N = rhsShape[1];
-  if (K_a != K_b) {
-    emitError("Matmul lhsShape[1] != rhsShape[0]");
-    return;
-  }
-
-  llvm::SmallVector<int64_t, 2> outputShape = {M, N};
-  auto result = this->getResult();
-  auto resultType = result.getType();
-  // todo atir::TensorTypecloneWithShape
-  atir::TensorType resultTensor = atir::TensorType::get(
-      outputShape, resultType.getElementType(), resultType.getName(),
-      resultType.getEncoding(), resultType.getStride(), resultType.getLayout(),
-      resultType.getMemType(), resultType.getAddress(),
-      resultType.getDeviceParallel(), resultType.getOnchipParallel(),
-      resultType.getCacheData());
-  result.setType(resultTensor);
-  auto resultShape = result.getType().getShape();
-  llvm::dbgs() << "after inferShape, Matmul resultShape M: " << resultShape[0]
-               << ", N: " << resultShape[1] << "\n";
+  return outShape;
 }
 
-void ReluOp::inferShape() {
-  // 
-  if (this->getOperation()->getNumOperands() != 1) {
-    mlir::emitError(getLoc(), "ReluOp must have exactly one operand.");
-    return;
+void inferEltwiseOpShape(mlir::Operation *op) {
+  bool hasMaterializedOperand = false;
+  for (Value operand : op->getOperands()) {
+    if (!isNoneOperand(operand)) {
+      hasMaterializedOperand = true;
+      break;
+    }
   }
-  auto type = getOperand().getType();
-  if (!type) {
-    emitError("Relu operands must have defining ops");
-    return;
-  }
-
-  auto tensorType = dyn_cast<atir::TensorType>(type);
-  if (!tensorType) {
-    emitError("Expected TensorType for operand, got: ")
-        << "type: " << type << " (TensorType: " << isa<atir::TensorType>(type)
-        << ")\n";
+  if (!hasMaterializedOperand) {
+    op->emitOpError("expects at least one tensor operand");
     return;
   }
 
-  // 2. 
-  llvm::ArrayRef<int64_t> inputShape = tensorType.getShape();  // (M, K)
-
-  // 
-  auto result = this->getResult();
-  auto resultType = result.getType();
-  // todo atir::TensorTypecloneWithShape
-  atir::TensorType resultTensor = atir::TensorType::get(
-      inputShape, resultType.getElementType(), resultType.getName(),
-      resultType.getEncoding(), resultType.getStride(), resultType.getLayout(),
-      resultType.getMemType(), resultType.getAddress(),
-      resultType.getDeviceParallel(), resultType.getOnchipParallel(),
-      resultType.getCacheData());
-  result.setType(resultTensor);
-  auto resultShape = result.getType().getShape();
-  llvm::dbgs() << "after Relu inferShape, resultShape M: " << resultShape[0]
-               << ", N: " << resultShape[1] << "\n";
-  inferEltwiseOpShape(getOperation());
+  auto outShape = computeBroadcastShape(op); // 获取广播后的输出形状
+  if (outShape.empty()) {
+    return;
+  }
+  (void)setSingleResultShape(op, outShape);
 }
-
-void ConcatOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void LoadOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void ExpandDimsOp::inferShape() {
-  auto inputType = getInput().getType();
-  if (!inputType) {
-    emitError("ExpandDims input must have defining op");
-    return;
-  }
-
-  auto inputTensorType = dyn_cast<atir::TensorType>(inputType);
-  if (!inputTensorType) {
-    emitError("Expected TensorType for input, got: ") << inputType;
-    return;
-  }
-
-  llvm::ArrayRef<int64_t> inputShape = inputTensorType.getShape();
-  int32_t axisAttr = getAxis();
-  int64_t axis = axisAttr;
-  int64_t rank = inputShape.size();
-
-  // 
-  if (axis < 0) axis = rank + axis + 1;
-  
-  // 
-  if (axis < 0 || axis > rank) {
-    emitError("axis must be in range [0, ") << rank << "]";
-    return;
-  }
-
-  // axis1
-  llvm::SmallVector<int64_t> outputShape;
-  for (int64_t i = 0; i < rank; ++i) {
-    if (i == axis) outputShape.push_back(1);  // 
-    outputShape.push_back(inputShape[i]);
-  }
-  if (axis == rank) outputShape.push_back(1);  // 
-  
-  auto result = this->getResult();
-  auto resultType = result.getType();
-  
-  atir::TensorType resultTensor = atir::TensorType::get(
-      outputShape, resultType.getElementType(), resultType.getName(),
-      resultType.getEncoding(), resultType.getStride(), resultType.getLayout(),
-      resultType.getMemType(), resultType.getAddress(),
-      resultType.getDeviceParallel(), resultType.getOnchipParallel(),
-      resultType.getCacheData());
-      
-  result.setType(resultTensor);
-}
-
-void IdentityOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void ShapeOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void NotEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void WhereOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void StridedSliceOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void PackOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void GatherNdOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void SparseReshapeOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void SliceOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void GatherV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void ProdOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void GreaterEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void SparseFillEmptyRowsOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void UniqueOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void SparseSegmentSumOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void TileOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void ZerosLikeOp::inferShape() {inferEltwiseOpShape(getOperation());}
-
-void SelectOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-void ConcatV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
-void BatchMatMulV2Op::inferShape() { inferEltwiseOpShape(getOperation()); }
 
 }  // namespace atir

@@ -79,11 +79,13 @@ MLIRContext *ctx = func.getContext();
   SmallVector<Value> addInputs = {matmul.getResult(), bias};
   auto doReluAttr = rewriter.getBoolAttr(false);
   auto reluLimitAttr = rewriter.getF32FloatAttr(-1.0f);
+  auto addOutput = rewriter.create<atir::BufferOp>(func.getLoc(), matmulOutputType);
   auto add = rewriter.create<AddOp>(
-      func.getLoc(), matmulOutputType, addInputs, doReluAttr, reluLimitAttr,  FloatAttr());
+      func.getLoc(), matmulOutputType, addOutput.getResult(), addInputs, doReluAttr, reluLimitAttr, FloatAttr());
 
+  auto reluOutput = rewriter.create<atir::BufferOp>(func.getLoc(), resultType);
   auto relu = rewriter.create<ReluOp>(
-      func.getLoc(), resultType, add.getResult());
+      func.getLoc(), resultType, reluOutput.getResult(), add.getResult(), rewriter.getF32FloatAttr(-1.0f));
 
   rewriter.create<func::ReturnOp>(func.getLoc(), relu.getResult());
 
