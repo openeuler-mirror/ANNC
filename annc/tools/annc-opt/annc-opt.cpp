@@ -25,18 +25,18 @@ int main(int argc, char **argv) {
   context.loadAllAvailableDialects();
   context.allowsUnregisteredDialects();
 
-  std::ifstream f(argv[1]);
-  nlohmann::json jgraph = nlohmann::json::parse(f);
-  f.close();
+  // std::ifstream f(argv[1]);
+  // nlohmann::json jgraph = nlohmann::json::parse(f);
+  // f.close();
   
-  auto builder = std::make_shared<annc::ANNCBuilder>(&context);
-  auto root = builder->buildModule("demo", jgraph);
+  // auto builder = std::make_shared<annc::ANNCBuilder>(&context);
+  // auto root = builder->buildModule("demo", jgraph);
 
   // mlir::OpPrintingFlags flags;
   // flags.elideLargeElementsAttrs(0);
   // root->print(llvm::errs(), flags);
 
-  annc::outputBinary(root, "input.bin");
+  // annc::outputBinary(root, "input.bin");
 
   argv[1] = "input.bin";
 
