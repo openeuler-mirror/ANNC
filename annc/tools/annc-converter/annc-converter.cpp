@@ -2,10 +2,10 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <cstring>
 #include "llvm/ADT/DenseMap.h"
 
 #include "Dialect/Atir/AtirOps.h"
-#include "Builder/MLIROpBuilder.h"
 #include "Adaptor/tensorflow/TFSavedModelParser.h"
 #include "Helper.h"
 
@@ -24,8 +24,10 @@ using namespace mlir;
 using namespace annc;
 
 // ============================================================================
-// Step 1: Atir MLIR → NodeInfo 解析器
+// Step 1-2: Atir MLIR → NodeInfo 解析器
 // ============================================================================
+
+// ---- 辅助函数 ----
 
 // dtype: atir::Type → TF dtype string
 static std::string atirTypeToDtypeStr(Type elementType) {
@@ -38,6 +40,67 @@ static std::string atirTypeToDtypeStr(Type elementType) {
   if (elementType.isInteger(64)) return "int64";
   if (elementType.isInteger(1))  return "bool";
   return "unknown";
+}
+
+// base64 编码 (复用 TFSavedModelParser.cpp 的逻辑)
+static std::string base64Encode(const std::vector<uint8_t> &data) {
+  static const char chars[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string result;
+  result.resize(data.size() * 4 / 3 + 4, '\0');
+  size_t j = 0;
+  size_t i = 0;
+  for (; i + 2 < data.size(); i += 3) {
+    uint32_t value = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    result[j++] = chars[(value >> 18) & 0x3F];
+    result[j++] = chars[(value >> 12) & 0x3F];
+    result[j++] = chars[(value >> 6) & 0x3F];
+    result[j++] = chars[value & 0x3F];
+  }
+  if (i < data.size()) {
+    uint32_t value = data[i] << 16;
+    if (i + 1 < data.size()) value |= data[i + 1] << 8;
+    result[j++] = chars[(value >> 18) & 0x3F];
+    result[j++] = chars[(value >> 12) & 0x3F];
+    if (i + 1 < data.size())
+      result[j++] = chars[(value >> 6) & 0x3F];
+    else
+      result[j++] = '=';
+    result[j++] = '=';
+  }
+  result.resize(j);
+  return result;
+}
+
+// DenseElementsAttr → raw bytes
+static std::vector<uint8_t> denseElementsToRawBytes(DenseElementsAttr attr) {
+  if (!attr || attr.empty()) return {};
+
+  // 尝试获取原始字节 (适用于 float/int 等连续存储类型)
+  // DenseElementsAttr 在元素数量较大时使用 raw_data 模式
+  if (attr.isSplat()) {
+    // 单值: 需要复制 N 次
+    auto shapedType = dyn_cast<ShapedType>(attr.getType());
+    if (!shapedType) return {};
+    size_t elemSize = shapedType.getElementTypeBitWidth() / 8;
+    size_t numElems = shapedType.getNumElements();
+
+    // 读取单值的字节
+    std::vector<uint8_t> singleVal(elemSize);
+    auto rawSplat = attr.getRawData();
+    memcpy(singleVal.data(), rawSplat.data(), elemSize);
+
+    // 复制 N 次
+    std::vector<uint8_t> result(numElems * elemSize);
+    for (size_t i = 0; i < numElems; i++) {
+      memcpy(result.data() + i * elemSize, singleVal.data(), elemSize);
+    }
+    return result;
+  }
+
+  // 非单值: 直接获取原始字节
+  auto rawData = attr.getRawData();
+  return std::vector<uint8_t>(rawData.begin(), rawData.end());
 }
 
 // shape: 处理动态维度 (ShapedType::kDynamic → -1)
@@ -178,6 +241,31 @@ private:
     // 忽略 NoneOp
     if (isa<atir::NoneOp>(op)) return;
 
+    // 忽略 Atir_ReturnOp (终止符，非计算)
+    if (isa<atir::ReturnOp>(op)) return;
+
+    // 含 region 的 Op: 暂不支持，报错
+    if (isa<atir::ForOp>(op)) {
+      llvm::errs() << "[annc-converter] Error: atir.ForOp not supported "
+                      "(contains region, cannot reverse to TF)\n";
+      return;
+    }
+    if (isa<atir::IfOp>(op)) {
+      llvm::errs() << "[annc-converter] Error: atir.IfOp not supported "
+                      "(contains region, cannot reverse to TF)\n";
+      return;
+    }
+    if (isa<atir::SwitchCaseOp>(op)) {
+      llvm::errs() << "[annc-converter] Error: atir.SwitchCaseOp not supported "
+                      "(contains region, cannot reverse to TF)\n";
+      return;
+    }
+    if (isa<atir::ParallelOp>(op)) {
+      llvm::errs() << "[annc-converter] Error: atir.ParallelOp not supported "
+                      "(contains region, cannot reverse to TF)\n";
+      return;
+    }
+
     // ConstantOp
     if (auto constOp = dyn_cast<atir::ConstantOp>(op)) {
       parseConstantOp(constOp);
@@ -248,9 +336,10 @@ private:
     // 提取常量数据 (cacheData 中的 DenseElementsAttr)
     auto cacheData = tensorType.getCacheData();
     if (cacheData && !cacheData.empty()) {
-      // TODO: Step 4 中将 DenseElementsAttr 序列化为 TF TensorProto
-      // 目前先标记有数据
-      node.raw_data = "<constant_data_pending>";
+      std::vector<uint8_t> rawBytes = denseElementsToRawBytes(cacheData);
+      if (!rawBytes.empty()) {
+        node.raw_data = base64Encode(rawBytes);
+      }
     }
 
     registerValueName(op.getResult(), node.name);
@@ -283,7 +372,7 @@ private:
     node.inputs.push_back(lookupValueName(op.getRhs()));
 
     // bias: withBias=true 时添加
-    if (op.getWithBias() && op.getBias()) {
+    if (op.getWithBias().getValue() && op.getBias()) {
       node.inputs.push_back(lookupValueName(*op.getBias()));
     }
 
@@ -292,6 +381,18 @@ private:
       std::vector<int64_t> shape = getShapeVector(tensorType);
       std::string dtype = atirTypeToDtypeStr(tensorType.getElementType());
       node.addOutput(0, node.name, shape, dtype);
+    }
+
+    // TF 属性: transpose_a, transpose_b
+    node.tf_attrs["transpose_a"] = op.getLeftTranspose().getValue() ? "true" : "false";
+    node.tf_attrs["transpose_b"] = op.getRightTranspose().getValue() ? "true" : "false";
+
+    // 记录融合属性供 Step 3 使用
+    if (op.getWithBias().getValue()) node.tf_attrs["_fused_withBias"] = "true";
+    if (op.getDoRelu().getValue()) {
+      node.tf_attrs["_fused_do_relu"] = "true";
+      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
     }
 
     // TODO: Step 3 融合拆分 — withBias/do_relu 在此处理
@@ -319,6 +420,12 @@ private:
     }
 
     // TODO: Step 3 融合拆分 — do_relu 在此处理
+    // 记录融合属性供 Step 3 使用
+    if (op.getDoRelu().getValue()) {
+      node.tf_attrs["_fused_do_relu"] = "true";
+      if (op.getReluLimit().getValue().convertToDouble() > 0.0)
+        node.tf_attrs["_fused_relu_limit"] = std::to_string(op.getReluLimit().getValue().convertToDouble());
+    }
 
     registerValueName(op.getResult(), node.name);
     nodes_.push_back(std::move(node));
@@ -357,6 +464,9 @@ private:
       std::string dtype = atirTypeToDtypeStr(tensorType.getElementType());
       node.addOutput(0, node.name, shape, dtype);
     }
+
+    // TF 属性: axis
+    node.tf_attrs["axis"] = std::to_string(op.getAxis());
 
     // TODO: Step 3 融合拆分 — do_relu 在此处理
 
@@ -489,16 +599,25 @@ int main(int argc, char **argv) {
         }
         llvm::outs() << "] dtype=" << out.dtype;
       }
+      if (!node.tf_attrs.empty()) {
+        llvm::outs() << " attrs={";
+        bool first = true;
+        for (auto &[k, v] : node.tf_attrs) {
+          if (!first) llvm::outs() << ", ";
+          first = false;
+          llvm::outs() << k << "=" << v;
+        }
+        llvm::outs() << "}";
+      }
       llvm::outs() << "\n";
     }
   }
 
-  // TODO: Step 2 — 完善更多 Op 的映射
   // TODO: Step 3 — 融合节点拆分
   // TODO: Step 4 — NodeInfo → TF GraphDef 构建
   // TODO: Step 5 — 序列化输出
 
-  llvm::outs() << "[annc-converter] Step 1 complete: "
+  llvm::outs() << "[annc-converter] Step 1-2 complete: "
                << nodes.size() << " nodes parsed\n";
   return 0;
 }

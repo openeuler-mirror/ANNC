@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -38,7 +39,11 @@ struct NodeInfo {
         }
     };
     std::vector<OutputInfo> outputs;
-    
+
+    // TF-specific attributes (for reverse conversion)
+    // key: attribute name, value: string representation
+    std::map<std::string, std::string> tf_attrs;
+
     void addOutput(int id, const std::string& name, 
                    const std::vector<int64_t>& s, const std::string& d) {
         OutputInfo out;
