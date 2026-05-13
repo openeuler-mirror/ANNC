@@ -31,7 +31,20 @@ int32_t lookupTfIntMask(const NodeInfo &node, llvm::StringRef key) {
 
 void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   // Op handlers will be registered in subsequent PRs
-  (void)m;
+  auto add = [&m](llvm::ArrayRef<llvm::StringRef> keys, NodeHandler h) {
+    for (llvm::StringRef k : keys) m[k] = h;
+  };
+  add({"Add", "AddV2", "AddN"}, &MLIRBuilder::createAddNode);
+  add({"Mul"}, &MLIRBuilder::createMulNode);
+  add({"Sub"}, &MLIRBuilder::createSubNode);
+  add({"Div", "RealDiv", "Divide"}, &MLIRBuilder::createRealDivNode);
+  add({"Less"}, &MLIRBuilder::createLessNode);
+  add({"NotEqual"}, &MLIRBuilder::createNotEqualNode);
+  add({"Less"}, &MLIRBuilder::createLessNode);
+  add({"Greater"}, &MLIRBuilder::createGreaterNode);
+  add({"GreaterEqual", "GreaterEqualV2"}, &MLIRBuilder::createGreaterEqualNode);
+  add({"Maximum"}, &MLIRBuilder::createMaximumNode);
+  add({"Minimum"}, &MLIRBuilder::createMinimumNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -623,5 +636,90 @@ atir::TensorType MLIRBuilder::getTensorType(const std::string& name,
         builder_.getStringAttr(name), encoding);
   }
   llvm::report_fatal_error("Unsupported data type");
+}
+
+void MLIRBuilder::createAddNode(
+    const NodeInfo& node,
+    ArrayRef<Type> outs,
+    ArrayRef<Value> ins) {
+
+  auto loc = getLoc(builder_.getContext(), node.name);
+
+  if (ins.empty()) {
+    llvm::report_fatal_error("Add requires at least one input");
+  }
+
+  bool do_relu = false;
+  float relu_limit = -1.0f;
+  FloatAttr scalar = FloatAttr();
+
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+
+  auto add = builder_.create<atir::AddOp>(
+      loc,
+      outs[0],
+      outputBuffer.getResult(),
+      ins,
+      builder_.getBoolAttr(do_relu),
+      builder_.getF32FloatAttr(relu_limit),
+      scalar
+  );
+
+  std::string outName = node.outputs[0].name;
+  tensorValues_[outName] = add.getResult();
+}
+
+#define SINGLE_OUT(OP_CREATE) do { \
+  auto loc = getLoc(builder_.getContext(), node.name); \
+  auto op = (OP_CREATE); \
+  tensorValues_[node.outputs[0].name] = op.getResult(); \
+} while (0)
+
+void MLIRBuilder::createMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::MulOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createSubNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::SubOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createRealDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::RealDivOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createNotEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
+                                              builder_.getStringAttr("NE")));
+}
+void MLIRBuilder::createLessNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
+                                              builder_.getStringAttr("LT")));
+}
+void MLIRBuilder::createGreaterNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
+                                              builder_.getStringAttr("GT")));
+}
+void MLIRBuilder::createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
+                                              builder_.getStringAttr("GE")));
+}
+void MLIRBuilder::createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::MaximumOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::MinimumOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
 }
 }  // namespace annc

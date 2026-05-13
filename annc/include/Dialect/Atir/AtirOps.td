@@ -104,7 +104,7 @@ def Atir_VariableOp : Atir_Op<"variable"> {
   }];
 }
 
-def Atir_AddOp : Atir_Op<"Add"> {
+def Atir_AddOp : Atir_Op<"Add", Interfaces> {
   let summary = "add op";
   let arguments = (ins
       Atir_Tensor:$output,
@@ -386,8 +386,8 @@ def Atir_ShapeOp : Atir_Op<"Shape", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Atir_NotEqualOp : Atir_Op<"NotEqual", [NoMemoryEffect, 
-    Elementwise, SameOperandsElementType, SameOperandsAndResultShape]> {
+def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect,
+    Elementwise, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Returns (input1 != input2) element-wise";
   let description = [{
     Returns the truth value of (input1 != input2) element-wise.
@@ -604,7 +604,7 @@ def Atir_ProdOp : Atir_Op<"Prod"> {
   }];
 }
 
-def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual"> {
+def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual", Interfaces> {
   let summary = "Element-wise greater-than-or-equal comparison";
   let description = [{
     Computes element-wise greater-than-or-equal comparison of `lhs` and `rhs`.
@@ -940,42 +940,44 @@ def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", [Pure]> {
   }];
 }
 
-def Atir_SubOp : Atir_Op<"Sub", [Pure, Commutative,
-    ResultsBroadcastableShape, SameOperandsAndResultShape]> {
+def Atir_SubOp : Atir_Op<"Sub", !listconcat([Pure, Commutative,
+    ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise subtraction: x - y.";
   let description = [{
     Computes per-element subtraction of two tensors with standard broadcasting semantics.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
-def Atir_MulOp : Atir_Op<"Mul", [Pure]> {
+def Atir_MulOp : Atir_Op<"Mul", !listconcat([Pure], Interfaces)> {
   let summary = "Element-wise multiplication with broadcasting";
   let description = [{
     Computes output = lhs * rhs element-wise.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
-def Atir_LessOp : Atir_Op<"Less", [Pure, ResultsBroadcastableShape]> {
+def Atir_LessOp : Atir_Op<"Less", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise less-than comparison operation (lhs < rhs).";
   let description = [{
     Performs element-wise less-than comparison of two tensors with broadcast support.
@@ -1011,7 +1013,7 @@ def Atir_FillOp : Atir_Op<"Fill", [Pure]> {
   }];
 }
 
-def Atir_GreaterOp : Atir_Op<"Greater", [Pure, ResultsBroadcastableShape]> {
+def Atir_GreaterOp : Atir_Op<"Greater", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise greater-than comparison operation (lhs > rhs) ";
   let description = [{
     Performs element-wise greater-than comparison of two tensors with broadcast support.
@@ -1028,20 +1030,21 @@ def Atir_GreaterOp : Atir_Op<"Greater", [Pure, ResultsBroadcastableShape]> {
   }];
 }
 
-def Atir_RealDivOp : Atir_Op<"RealDiv", [Pure]> {
+def Atir_RealDivOp : Atir_Op<"RealDiv", !listconcat([Pure], Interfaces)> {
   let summary = "For the real number type, element-wise returns x / y.";
   let description = [{
     If `x` and `y` are real numbers, this will return the result of floating-point division.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
@@ -1164,18 +1167,19 @@ def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMinOp", [Pure]> {
   }];
 }
 
-def Atir_MinimumOp : Atir_Op<"Minimum", [Pure, 
-    ResultsBroadcastableShape, SameOperandsAndResultElementType]> {
+def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([Pure,
+    ResultsBroadcastableShape], Interfaces)> {
   let summary = "Returns the minimum value of x and y element-wise.";
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat=[{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
@@ -1278,7 +1282,7 @@ def Atir_ParameterOp : Atir_Op<"Parameter", [Pure]> {
   }];
 }
 
-def Atir_CompareOp : Atir_Op<"Compare", [Pure, SameOperandsAndResultShape]> {
+def Atir_CompareOp : Atir_Op<"Compare", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise comparison operation.";
   let description = [{
     This operation compares two input tensors element-wise.
@@ -1313,7 +1317,7 @@ def Atir_DivideOp : Atir_Op<"Divide", [Pure]> {
   }];
 }
 
-def Atir_AndOp : Atir_Op<"And", [Pure]> {
+def Atir_AndOp : Atir_Op<"And", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise bitwise AND operation.";
   let description = [{
     This operation computes the bitwise AND of two input tensors
@@ -1348,7 +1352,7 @@ def Atir_LogisticOp : Atir_Op<"Logistic", [Pure, SameOperandsAndResultShape]> {
   }];
 }
 
-def Atir_MaximumOp : Atir_Op<"Maximum", [Pure, SameOperandsAndResultElementType]> {
+def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise maximum operation.";
   let description = [{
     This operation returns the element-wise maximum of two
@@ -1356,6 +1360,7 @@ def Atir_MaximumOp : Atir_Op<"Maximum", [Pure, SameOperandsAndResultElementType]
     and returns the larger one.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$lhs,
     Atir_Tensor:$rhs
   );
@@ -1363,7 +1368,7 @@ def Atir_MaximumOp : Atir_Op<"Maximum", [Pure, SameOperandsAndResultElementType]
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+    $output `,` $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
   }];
 }
 
