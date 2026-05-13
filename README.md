@@ -7,7 +7,7 @@ ANNC-NextAI/MLMLIRopenEuler
 ### 2.1 
 |  |  |
 | --- | --- |
-|  | openEuler-22.03-LTS-SP4 |
+|  | openEuler-24.03-LTS-SP4 |
 |  | 920X |
 |  | 500GB |
 |  | LLVM 21.1.3 |
