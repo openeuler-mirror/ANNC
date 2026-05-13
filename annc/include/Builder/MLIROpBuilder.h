@@ -44,6 +44,17 @@ class MLIRBuilder {
 
   void buildFromNodes(const std::vector<NodeInfo>& nodes);
 
+  void createAddNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSubNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createRealDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createNotEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createLessNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createGreaterNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
@@ -73,6 +84,5 @@ class MLIRBuilder {
     return result;
   }
 };
-
 }  // namespace annc
 #endif  // ANNC_OP_BUILDER_H

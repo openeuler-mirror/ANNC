@@ -235,4 +235,20 @@ void inferEltwiseOpShape(mlir::Operation *op) {
   (void)setSingleResultShape(op, outShape);
 }
 
+// BinaryOps
+void AddOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void SubOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void MulOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void RealDivOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+// ComparisonOps
+void NotEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void LessOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void GreaterEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void GreaterOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void CompareOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void AndOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void MaximumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
 }  // namespace atir
