@@ -11,3 +11,4 @@ proxy
 __pycache__
 *.whl
 build/
+tf_protos_minimal/

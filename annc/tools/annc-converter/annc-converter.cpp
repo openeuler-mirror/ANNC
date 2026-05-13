@@ -25,7 +25,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "tensorflow/core/protobuf/saved_model.pb.h"
-#include "tensorflow/core/protobuf/graph.pb.h"
+#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -923,7 +923,7 @@ static tensorflow::SavedModel buildSavedModel(const std::vector<NodeInfo>& nodes
 
   // 创建MetaGraphDef
   auto* meta_graph = saved_model.add_meta_graphs();
-  meta_graph->set_meta_graph_version("1.0");
+  meta_graph->mutable_meta_info_def()->set_meta_graph_version("1.0");
 
   // 构建GraphDef
   auto* graph_def = meta_graph->mutable_graph_def();
