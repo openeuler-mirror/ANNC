@@ -529,7 +529,7 @@ def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
   }];
 }
 
-def Atir_SparseReshapeOp : Atir_Op<"SparesReshape", [Pure]> {
+def Atir_SparseReshapeOp : Atir_Op<"SparseReshape", !listconcat([Pure], Interfaces)> {
   let summary = "Reshape a SparseTensor to a new dense shape.";
   let description = [{
     This operation reshapes a sparse tensor represented by indices and values 
@@ -656,7 +656,7 @@ def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual", Interfaces> {
 }
 
 def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows", 
-    [Pure]> {
+    !listconcat([Pure], Interfaces)> {
   let summary = "Fills empty rows in a sparse tensor with a default value.";
   let description = [{
     This operation fills missing rows in a sparse tensor representation 
@@ -741,7 +741,7 @@ def Atir_ResourceGatherOp : Atir_Op<"ResourceGather"> {
   }];
 }
 
-def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", [Pure]> {
+def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", !listconcat([Pure], Interfaces)> {
   let summary = "Computes sums of sparse segments of a tensor.";
   let description = [{
     Computes the sum of rows in `data` selected by `indices`, grouped by `segment_ids`.
@@ -749,20 +749,52 @@ def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", [Pure]> {
     - `indices`: 1D integer tensor specifying which rows of `data` to use
     - `segment_ids`: 1D integer tensor (same length as `indices`), must be sorted 
       and start from 0 with no gaps. Each value assigns the corresponding indexed row to a segment.
-    Output shape: `[num_segments] + data.shape[1:]`, where `num_segments = max(segment_ids) + 1`.
+    - `num_segments`: scalar integer tensor. If the constant value is `<= 0`, the leading output
+      dimension is inferred as `max(segment_ids) + 1` from `segment_ids` data when available.
+      If `> 0`, it is the explicit number of segment rows (padded with zeros), and must be
+      at least `max(segment_ids) + 1`.
+    Output shape: `[num_segments] + data.shape[1:]` (inferred or explicit as above).
     Output element type matches `data`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor: $input,
     Atir_Tensor: $indices,
-    Atir_Tensor: $segmentIds
+    Atir_Tensor: $segmentIds,
+    Atir_Tensor:$numSegments
   );
   let results = (outs
-    Atir_Tensor: $output
+    Atir_Tensor: $result
   );
   let assemblyFormat = [{
-    $input `,` $indices `,` $segmentIds attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
   }];      
+}
+
+def Atir_SparseSegmentMinOp : Atir_Op<"SparseSegmentMin", !listconcat([Pure], Interfaces)> {
+  let summary = "Computes minima of sparse segments of a tensor.";
+  let description = [{
+    Computes the element-wise minimum of rows in `data` selected by `indices`, grouped by `segment_ids`.
+    - `data`: Input tensor of shape `[D0, D1, ..., Dn]`
+    - `indices`: 1D integer tensor specifying which rows of `data` to use
+    - `segment_ids`: 1D integer tensor (same length as `indices`), sorted, starting from 0 with no gaps.
+    - `num_segments`: scalar integer tensor; `<= 0` means infer row count from `segment_ids` (`max + 1`);
+      `> 0` is an explicit segment count (padding), at least `max(segment_ids) + 1`.
+    Output shape: `[num_segments] + data.shape[1:]`. Empty segments yield `+inf` for float inputs (same convention as `UnsortedSegmentMin`).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor: $input,
+    Atir_Tensor: $indices,
+    Atir_Tensor: $segmentIds,
+    Atir_Tensor: $numSegments
+  );
+  let results = (outs
+    Atir_Tensor: $result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
+  }];
 }
 
 def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
@@ -953,7 +985,7 @@ def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch",
   }];
 }
 
-def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", [Pure]> {
+def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", !listconcat([Pure], Interfaces)> {
   let summary = "Computes the mean along sparse segments of a tensor";
   let description = [{
     Computes the mean along sparse segments of a tensor.
@@ -964,17 +996,22 @@ def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", [Pure]> {
       
       output[0] = mean(data[0], data[1]) = [2.5, 3.5, 4.5]
       output[1] = mean(data[2], data[3]) = [8.5, 9.5, 10.5]
+    - `num_segments`: scalar integer tensor. If the constant value is `<= 0`, the leading output
+      dimension is inferred as `max(segment_ids) + 1` from `segment_ids` when available.
+      If `> 0`, it is the explicit segment count (extra segments have mean 0 / no contribution).
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$data,
     Atir_Tensor:$indices,
-    Atir_Tensor:$segmentIds
+    Atir_Tensor:$segmentIds,
+    Atir_Tensor:$numSegments
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $data `,` $indices `,` $segmentIds attr-dict `:` functional-type(operands, results)
+    $output `,` $data `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($data) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
   }];
 }
 
@@ -1087,7 +1124,7 @@ def Atir_RealDivOp : Atir_Op<"RealDiv", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", [Pure]> {
+def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", !listconcat([Pure], Interfaces)> {
   let summary = "Converts sparse representations into dense tensors.";
   let description = [{
     Converts sparse representation (sparseIndice + sparseValues) to a dense tensor with specified shape.
@@ -1096,6 +1133,7 @@ def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", [Pure]> {
     If `validateIndices` is true, these properties will be checked during the execution process.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$sparseIndice,
     Atir_Tensor:$outputShape,
     Atir_Tensor:$sparseValue,
@@ -1103,10 +1141,10 @@ def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", [Pure]> {
     DefaultValuedOptionalAttr<BoolAttr, "true">:$validateIndices
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` $sparseIndice `,` $outputShape `,` $sparseValue `,` $defaultValue attr-dict `:` type($output) `,` type($sparseIndice) `,` type($outputShape) `,` type($sparseValue) `,` type($defaultValue) `->` type($result)
   }];
 }
 

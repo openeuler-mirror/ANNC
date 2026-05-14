@@ -73,6 +73,14 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"Tile"}, &MLIRBuilder::createTileNode);
   add({"BroadcastTo", "Broadcast"}, &MLIRBuilder::createBroadcastNode);
   add({"Pad", "PadV2"}, &MLIRBuilder::createPadNode);
+  add({"SparseToDense"}, &MLIRBuilder::createSparseToDenseNode);
+  add({"SparseReshape"}, &MLIRBuilder::createSparseReshapeNode);
+  add({"SparseSegmentSum", "SparseSegmentSumWithNumSegments"},
+      &MLIRBuilder::createSparseSegmentSumNode);
+  add({"SparseSegmentMin", "SparseSegmentMinWithNumSegments"},
+      &MLIRBuilder::createSparseSegmentMinNode);
+  add({"SparseSegmentMean", "SparseSegmentMeanWithNumSegments"},
+      &MLIRBuilder::createSparseSegmentMeanNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -1150,5 +1158,131 @@ void MLIRBuilder::createPadNode(const NodeInfo& node, ArrayRef<Type> outs, Array
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::PadOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2]));
+}
+void MLIRBuilder::createSparseToDenseNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 4) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value sparseIndice = ins[0];
+  Value outputShape = ins[1];
+  Value sparseValue = ins[2];
+  Value defaultValue = ins[3];
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto sparseOp = builder_.create<atir::SparseToDenseOp>(loc, outs[0], outputBuffer.getResult(), sparseIndice, outputShape, 
+                                                          sparseValue, defaultValue, 
+                                                          builder_.getBoolAttr(true));
+  tensorValues_[node.outputs[0].name] = sparseOp.getResult();
+}
+
+void MLIRBuilder::createSparseReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value indices = ins[0];
+  Value inputShape = ins[1];
+  Value newShape = ins[2];
+  auto reshapeOp = builder_.create<atir::SparseReshapeOp>(loc, outs, indices, inputShape, newShape);
+  if (node.outputs.size() >= 1) {
+    tensorValues_[node.outputs[0].name] = reshapeOp.getOutputIndices();
+  }
+  if (node.outputs.size() >= 2) {
+    tensorValues_[node.outputs[1].name] = reshapeOp.getOutputShape();
+  }
+}
+void MLIRBuilder::createSparseSegmentSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+  Value indices = ins[1];
+  Value segmentIds = ins[2];
+  Value numSegmentsVal;
+  if (ins.size() >= 4) {
+    numSegmentsVal = ins[3];
+  } else {
+    llvm::SmallVector<int64_t> scalarShape;
+    auto ranked = RankedTensorType::get(scalarShape, builder_.getI32Type());
+    auto dense = DenseElementsAttr::get(ranked, static_cast<int32_t>(0));
+    std::string nsName = std::string(node.name) + "/num_segments";
+    auto numSegTensorType = atir::TensorType::get(
+        scalarShape, builder_.getI32Type(), builder_.getStringAttr(nsName),
+        Attribute(), ArrayAttr(), StringAttr(), atir::MemTypeAttr(),
+        IntegerAttr(), atir::TilingAttr(), atir::TilingAttr(), dense);
+    numSegmentsVal =
+        builder_
+            .create<atir::ConstantOp>(loc, numSegTensorType,
+                                      builder_.getStringAttr(nsName),
+                                      builder_.getStringAttr("private"))
+            .getResult();
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto sssOp = builder_.create<atir::SparseSegmentSumOp>(
+      loc, outs[0], outputBuffer.getResult(), input, indices, segmentIds, numSegmentsVal);
+  tensorValues_[node.outputs[0].name] = sssOp.getResult();
+}
+
+void MLIRBuilder::createSparseSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+  Value indices = ins[1];
+  Value segmentIds = ins[2];
+  Value numSegmentsVal;
+  if (ins.size() >= 4) {
+    numSegmentsVal = ins[3];
+  } else {
+    llvm::SmallVector<int64_t> scalarShape;
+    auto ranked = RankedTensorType::get(scalarShape, builder_.getI32Type());
+    auto dense = DenseElementsAttr::get(ranked, static_cast<int32_t>(0));
+    std::string nsName = std::string(node.name) + "/num_segments";
+    auto numSegTensorType = atir::TensorType::get(
+        scalarShape, builder_.getI32Type(), builder_.getStringAttr(nsName),
+        Attribute(), ArrayAttr(), StringAttr(), atir::MemTypeAttr(),
+        IntegerAttr(), atir::TilingAttr(), atir::TilingAttr(), dense);
+    numSegmentsVal =
+        builder_
+            .create<atir::ConstantOp>(loc, numSegTensorType,
+                                      builder_.getStringAttr(nsName),
+                                      builder_.getStringAttr("private"))
+            .getResult();
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::SparseSegmentMinOp>(
+      loc, outs[0], outputBuffer.getResult(), input, indices, segmentIds, numSegmentsVal);
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+
+void MLIRBuilder::createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+  Value indices = ins[1];
+  Value segmentIds = ins[2];
+  Value numSegmentsVal;
+  if (ins.size() >= 4) {
+    numSegmentsVal = ins[3];
+  } else {
+    llvm::SmallVector<int64_t> scalarShape;
+    auto ranked = RankedTensorType::get(scalarShape, builder_.getI32Type());
+    auto dense = DenseElementsAttr::get(ranked, static_cast<int32_t>(0));
+    std::string nsName = std::string(node.name) + "/num_segments";
+    auto numSegTensorType = atir::TensorType::get(
+        scalarShape, builder_.getI32Type(), builder_.getStringAttr(nsName),
+        Attribute(), ArrayAttr(), StringAttr(), atir::MemTypeAttr(),
+        IntegerAttr(), atir::TilingAttr(), atir::TilingAttr(), dense);
+    numSegmentsVal =
+        builder_
+            .create<atir::ConstantOp>(loc, numSegTensorType,
+                                      builder_.getStringAttr(nsName),
+                                      builder_.getStringAttr("private"))
+            .getResult();
+  }
+
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+
+  auto ssmOp = builder_.create<atir::SparseSegmentMeanOp>(
+      loc, outs[0], outputBuffer.getResult(), input, indices, segmentIds, numSegmentsVal);
+  tensorValues_[node.outputs[0].name] = ssmOp.getResult();
 }
 }  // namespace annc

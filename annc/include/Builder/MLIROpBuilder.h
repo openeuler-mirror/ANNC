@@ -82,6 +82,11 @@ class MLIRBuilder {
   void createTileNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createBroadcastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createPadNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseToDenseNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseSegmentSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
