@@ -73,6 +73,15 @@ class MLIRBuilder {
   void createGatherNdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createStridedSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createMatMulOp(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createBatchMatMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createDotNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createTransposeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createExpandDimsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createTileNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createBroadcastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createPadNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
