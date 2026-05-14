@@ -69,7 +69,11 @@ class MLIRBuilder {
   void createRangeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createProdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  
+  void createGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createGatherNdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createStridedSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
