@@ -1412,4 +1412,277 @@ void PadOp::inferShape() {
       outputType,
       SmallVector<int64_t>(inputShape.size(), ShapedType::kDynamic)));
 }
+
+void SparseToDenseOp::inferShape() {
+  auto outputShapeType = dyn_cast<atir::TensorType>(getOutputShape().getType());
+  auto outputType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!outputShapeType || !outputType) {
+    emitError("SparseToDense expects tensor outputShape and output");
+    return;
+  }
+  if (DenseElementsAttr shapeAttr = outputShapeType.getCacheData()) {
+    SmallVector<int64_t> denseShape;
+    auto elemTy = shapeAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      for (const APInt &v : shapeAttr.getValues<APInt>()) {
+        denseShape.push_back(v.getSExtValue());
+      }
+    } else if (isa<FloatType>(elemTy)) {
+      for (const APFloat &v : shapeAttr.getValues<APFloat>()) {
+        denseShape.push_back(
+            static_cast<int64_t>(annc::apFloatToDouble(v)));
+      }
+    }
+    if (!denseShape.empty()) {
+      getOutput().setType(cloneWithShape(outputType, denseShape));
+    }
+  }
+}
+
+void SparseReshapeOp::inferShape() {
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto newShapeType = dyn_cast<atir::TensorType>(getNewShape().getType());
+  auto outIndicesType = dyn_cast<atir::TensorType>(getOutputIndices().getType());
+  auto outShapeType = dyn_cast<atir::TensorType>(getOutputShape().getType());
+  if (!indicesType || !newShapeType || !outIndicesType || !outShapeType) {
+    emitError("SparseReshape operands/results must be atir::TensorType");
+    return;
+  }
+  auto indicesShape = indicesType.getShape();
+  auto newShapeShape = newShapeType.getShape();
+  if (indicesShape.size() != 2 || newShapeShape.size() != 1) {
+    emitError("SparseReshape expects indices rank-2 and newShape rank-1");
+    return;
+  }
+  int64_t nnz = indicesShape[0];
+  int64_t outRank = newShapeShape[0];
+  SmallVector<int64_t> outIndicesShape = {nnz, outRank};
+  SmallVector<int64_t> outShapeShape = {outRank};
+  getResult(0).setType(cloneWithShape(outIndicesType, outIndicesShape));
+  getResult(1).setType(cloneWithShape(outShapeType, outShapeShape));
+}
+
+void SparseFillEmptyRowsOp::inferShape() {
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto valuesType = dyn_cast<atir::TensorType>(getValues().getType());
+  auto denseShapeType = dyn_cast<atir::TensorType>(getDenseShape().getType());
+  if (!indicesType || !valuesType || !denseShapeType) {
+    emitError("SparseFillEmptyRows operands must be atir::TensorType");
+    return;
+  }
+  auto indicesShape = indicesType.getShape();
+  if (indicesShape.size() != 2) {
+    emitError("SparseFillEmptyRows indices must have rank-2");
+    return;
+  }
+  int64_t idxRank = indicesShape[1];
+  getOutputIndices().setType(
+      cloneWithShape(getOutputIndices().getType(),
+                      {ShapedType::kDynamic, idxRank}));
+  getOutputValues().setType(
+      cloneWithShape(getOutputValues().getType(), {ShapedType::kDynamic}));
+  getEmptyRowIndicator().setType(
+      cloneWithShape(getEmptyRowIndicator().getType(), {ShapedType::kDynamic}));
+  getReverseIndexMap().setType(
+      cloneWithShape(getReverseIndexMap().getType(), {indicesShape[0]}));
+}
+
+void SparseSegmentSumOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto segmentIdsType = dyn_cast<atir::TensorType>(getSegmentIds().getType());
+  auto numSegType = dyn_cast<atir::TensorType>(getNumSegments().getType());
+  if (!inputType || !indicesType || !segmentIdsType || !numSegType) {
+    emitError("SparseSegmentSum operands must be atir::TensorType");
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  if (inputShape.empty()) {
+    emitError("SparseSegmentSum input rank must be >= 1");
+    return;
+  }
+  auto inferRowsFromSegmentIds = [&](atir::TensorType segTy) -> int64_t {
+    int64_t inferred = ShapedType::kDynamic;
+    if (auto segmentIdsAttr = segTy.getCacheData();
+        segmentIdsAttr && segmentIdsAttr.getNumElements() > 0) {
+      int64_t maxSegment = -1;
+      auto elemTy = segmentIdsAttr.getElementType();
+      if (isa<IntegerType, IndexType>(elemTy)) {
+        for (const APInt &v : segmentIdsAttr.getValues<APInt>()) {
+          maxSegment = std::max(maxSegment, v.getSExtValue());
+        }
+        inferred = maxSegment + 1;
+      } else if (isa<FloatType>(elemTy)) {
+        for (const APFloat &v : segmentIdsAttr.getValues<APFloat>()) {
+          maxSegment = std::max(
+              maxSegment,
+              static_cast<int64_t>(annc::apFloatToDouble(v)));
+        }
+        inferred = maxSegment + 1;
+      }
+    }
+    return inferred;
+  };
+  int64_t inferredRows = inferRowsFromSegmentIds(segmentIdsType);
+  int64_t explicitRows = ShapedType::kDynamic;
+  if (auto nsAttr = numSegType.getCacheData();
+      nsAttr && nsAttr.getNumElements() == 1) {
+    int64_t v = 0;
+    auto elemTy = nsAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      v = nsAttr.getValues<APInt>()[0].getSExtValue();
+    } else if (isa<FloatType>(elemTy)) {
+      v = static_cast<int64_t>(
+          annc::apFloatToDouble(nsAttr.getValues<APFloat>()[0]));
+    }
+    if (v > 0) explicitRows = v;
+  }
+  int64_t numSegments = ShapedType::kDynamic;
+  if (inferredRows != ShapedType::kDynamic &&
+      explicitRows != ShapedType::kDynamic) {
+    numSegments = std::max(inferredRows, explicitRows);
+  } else if (explicitRows != ShapedType::kDynamic) {
+    numSegments = explicitRows;
+  } else {
+    numSegments = inferredRows;
+  }
+  llvm::SmallVector<int64_t> outputShape;
+  outputShape.push_back(numSegments);
+  outputShape.append(inputShape.begin() + 1, inputShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void SparseSegmentMeanOp::inferShape() {
+  auto dataType = dyn_cast<atir::TensorType>(getData().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto segmentIdsType = dyn_cast<atir::TensorType>(getSegmentIds().getType());
+  auto numSegType = dyn_cast<atir::TensorType>(getNumSegments().getType());
+  if (!dataType || !indicesType || !segmentIdsType || !numSegType) {
+    emitError("SparseSegmentMean operands must be atir::TensorType");
+    return;
+  }
+  auto dataShape = dataType.getShape();
+  if (dataShape.empty()) {
+    emitError("SparseSegmentMean data rank must be >= 1");
+    return;
+  }
+  auto inferRowsFromSegmentIds = [&](atir::TensorType segTy) -> int64_t {
+    int64_t inferred = ShapedType::kDynamic;
+    if (auto segmentIdsAttr = segTy.getCacheData();
+        segmentIdsAttr && segmentIdsAttr.getNumElements() > 0) {
+      int64_t maxSegment = -1;
+      auto elemTy = segmentIdsAttr.getElementType();
+      if (isa<IntegerType, IndexType>(elemTy)) {
+        for (const APInt &v : segmentIdsAttr.getValues<APInt>()) {
+          maxSegment = std::max(maxSegment, v.getSExtValue());
+        }
+        inferred = maxSegment + 1;
+      } else if (isa<FloatType>(elemTy)) {
+        for (const APFloat &v : segmentIdsAttr.getValues<APFloat>()) {
+          maxSegment = std::max(
+              maxSegment,
+              static_cast<int64_t>(annc::apFloatToDouble(v)));
+        }
+        inferred = maxSegment + 1;
+      }
+    }
+    return inferred;
+  };
+  int64_t inferredRows = inferRowsFromSegmentIds(segmentIdsType);
+  int64_t explicitRows = ShapedType::kDynamic;
+  if (auto nsAttr = numSegType.getCacheData();
+      nsAttr && nsAttr.getNumElements() == 1) {
+    int64_t v = 0;
+    auto elemTy = nsAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      v = nsAttr.getValues<APInt>()[0].getSExtValue();
+    } else if (isa<FloatType>(elemTy)) {
+      v = static_cast<int64_t>(
+          annc::apFloatToDouble(nsAttr.getValues<APFloat>()[0]));
+    }
+    if (v > 0) explicitRows = v;
+  }
+  int64_t numSegments = ShapedType::kDynamic;
+  if (inferredRows != ShapedType::kDynamic &&
+      explicitRows != ShapedType::kDynamic) {
+    numSegments = std::max(inferredRows, explicitRows);
+  } else if (explicitRows != ShapedType::kDynamic) {
+    numSegments = explicitRows;
+  } else {
+    numSegments = inferredRows;
+  }
+  llvm::SmallVector<int64_t> outputShape;
+  outputShape.push_back(numSegments);
+  outputShape.append(dataShape.begin() + 1, dataShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+void SparseSegmentMinOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto segmentIdsType = dyn_cast<atir::TensorType>(getSegmentIds().getType());
+  auto numSegType = dyn_cast<atir::TensorType>(getNumSegments().getType());
+  if (!inputType || !indicesType || !segmentIdsType || !numSegType) {
+    emitError("SparseSegmentMin operands must be atir::TensorType");
+    return;
+  }
+
+  auto inputShape = inputType.getShape();
+  if (inputShape.empty()) {
+    emitError("SparseSegmentMin input rank must be >= 1");
+    return;
+  }
+
+  auto inferRowsFromSegmentIds = [&](atir::TensorType segTy) -> int64_t {
+    int64_t inferred = ShapedType::kDynamic;
+    if (auto segmentIdsAttr = segTy.getCacheData();
+        segmentIdsAttr && segmentIdsAttr.getNumElements() > 0) {
+      int64_t maxSegment = -1;
+      auto elemTy = segmentIdsAttr.getElementType();
+      if (isa<IntegerType, IndexType>(elemTy)) {
+        for (const APInt &v : segmentIdsAttr.getValues<APInt>()) {
+          maxSegment = std::max(maxSegment, v.getSExtValue());
+        }
+        inferred = maxSegment + 1;
+      } else if (isa<FloatType>(elemTy)) {
+        for (const APFloat &v : segmentIdsAttr.getValues<APFloat>()) {
+          maxSegment = std::max(
+              maxSegment,
+              static_cast<int64_t>(annc::apFloatToDouble(v)));
+        }
+        inferred = maxSegment + 1;
+      }
+    }
+    return inferred;
+  };
+
+  int64_t inferredRows = inferRowsFromSegmentIds(segmentIdsType);
+  int64_t explicitRows = ShapedType::kDynamic;
+  if (auto nsAttr = numSegType.getCacheData();
+      nsAttr && nsAttr.getNumElements() == 1) {
+    int64_t v = 0;
+    auto elemTy = nsAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      v = nsAttr.getValues<APInt>()[0].getSExtValue();
+    } else if (isa<FloatType>(elemTy)) {
+      v = static_cast<int64_t>(
+          annc::apFloatToDouble(nsAttr.getValues<APFloat>()[0]));
+    }
+    if (v > 0) explicitRows = v;
+  }
+
+  int64_t numSegments = ShapedType::kDynamic;
+  if (inferredRows != ShapedType::kDynamic &&
+      explicitRows != ShapedType::kDynamic) {
+    numSegments = std::max(inferredRows, explicitRows);
+  } else if (explicitRows != ShapedType::kDynamic) {
+    numSegments = explicitRows;
+  } else {
+    numSegments = inferredRows;
+  }
+
+  llvm::SmallVector<int64_t> outputShape;
+  outputShape.push_back(numSegments);
+  outputShape.append(inputShape.begin() + 1, inputShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
 }  // namespace atir
