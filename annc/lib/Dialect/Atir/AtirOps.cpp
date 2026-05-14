@@ -370,69 +370,6 @@ Block &SwitchCaseOp::getCaseBlock(unsigned idx) {
 }
 
 //===----------------------------------------------------------------------===//
-// ExpandDimsOp
-//===----------------------------------------------------------------------===//
-
-LogicalResult ExpandDimsOp::verify() {
-  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
-  if (!inputType) {
-    return emitOpError("input must be a tensor type");
-  }
-  
-  auto inputShape = inputType.getShape();
-  int64_t inputRank = inputShape.size();
-  
-  int32_t axisAttr = getAxis();
-  int64_t axis = axisAttr;
-  
-  // axis
-  if (axis < -(inputRank + 1) || axis > inputRank) {
-    return emitOpError() 
-        << "axis must be in range [-" << (inputRank + 1) << ", " 
-        << inputRank << "], but got " << axis;
-  }
-  
-  auto resultType = llvm::dyn_cast<TensorType>(getResult().getType());
-  if (!resultType) {
-    return emitOpError("result must be a tensor type");
-  }
-  
-  auto resultShape = resultType.getShape();
-  
-  // rank
-  if (static_cast<int64_t>(resultShape.size()) != inputRank + 1) {
-    return emitOpError() 
-        << "result rank mismatch: expected " << (inputRank + 1)
-        << " but got " << resultShape.size();
-  }
-  
-  // shape
-  int64_t normalizedAxis = axis;
-  if (normalizedAxis < 0) {
-    normalizedAxis = inputRank + 1 + normalizedAxis;
-  }
-  
-  for (int64_t i = 0; i < static_cast<int64_t>(resultShape.size()); i++) {
-    if (i == normalizedAxis) {
-      // axis1
-      if (resultShape[i] != 1) {
-        return emitOpError() 
-            << "result shape at axis " << i << " should be 1, but got " 
-            << resultShape[i];
-      }
-    } else {
-      // 
-      int origIdx = i < normalizedAxis ? i : i - 1;
-      if (resultShape[i] != inputShape[origIdx]) {
-        return emitOpError() 
-            << "result shape mismatch at position " << i;
-      }
-    }
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // IdentityOp
 //===----------------------------------------------------------------------===//
 

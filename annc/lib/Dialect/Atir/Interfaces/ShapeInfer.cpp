@@ -1177,5 +1177,239 @@ void StridedSliceOp::inferShape() {
       "StridedSlice needs static 1-D spec length or constant begin/end/strides");
 }
 
+void MatMulOp::inferShape() {
+  auto lhsType = getLhs().getType();
+  auto rhsType = getRhs().getType();
+  if (!lhsType || !rhsType) {
+    emitError("Matmul operands must have defining ops");
+    return;
+  }
+  auto lhsTensorType = dyn_cast<atir::TensorType>(lhsType);
+  auto rhsTensorType = dyn_cast<atir::TensorType>(rhsType);
 
+  llvm::ArrayRef<int64_t> lhsShape = lhsTensorType.getShape();
+  llvm::ArrayRef<int64_t> rhsShape = rhsTensorType.getShape();
+  if (lhsShape.size() != 2 || rhsShape.size() != 2) {
+    emitError("Matmul inputs must have rank == 2, batchMatmul not yet supported");
+    return;
+  }
+
+  int64_t lhsRows = getLeftTranspose() ? lhsShape[1] : lhsShape[0];
+  int64_t lhsCols = getLeftTranspose() ? lhsShape[0] : lhsShape[1];
+  int64_t rhsRows = getRightTranspose() ? rhsShape[1] : rhsShape[0];
+  int64_t rhsCols = getRightTranspose() ? rhsShape[0] : rhsShape[1];
+  if (lhsCols != rhsRows) {
+    emitError("Matmul lhsShape[1] != rhsShape[0]");
+    return;
+  }
+  llvm::SmallVector<int64_t, 2> outputShape = {lhsRows, rhsCols};
+  if (getOutputTranspose()) { 
+    outputShape = {rhsCols, lhsRows}; 
+  }
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void BatchMatMulOp::inferShape() {}
+
+void DotOp::inferShape() {
+  auto lhsType = dyn_cast<atir::TensorType>(getLhs().getType());
+  auto rhsType = dyn_cast<atir::TensorType>(getRhs().getType());
+  if (!lhsType || !rhsType) {
+    emitError("Dot operands must be atir::TensorType");
+    return;
+  }
+  auto lsh = lhsType.getShape();
+  auto rsh = rhsType.getShape();
+  if (lsh.empty() || rsh.empty()) {
+    emitError("Dot expects rank>=1 operands");
+    return;
+  }
+  int64_t lLast = lsh.back();
+  int64_t rFirst = rsh[0];
+  if (lLast != rFirst && lLast != ShapedType::kDynamic &&
+      rFirst != ShapedType::kDynamic) {
+    emitError("Dot contracting dimension mismatch");
+    return;
+  }
+  llvm::SmallVector<int64_t> outShape;
+  outShape.append(lsh.begin(), lsh.end() - 1);
+  outShape.append(rsh.begin() + 1, rsh.end());
+  (void)setSingleResultShape(getOperation(), outShape);
+}
+void ReshapeOp::inferShape() {
+  auto targetAttr = getTargetShapeAttr();
+  if (!targetAttr) {
+    return;
+  }
+  llvm::SmallVector<int64_t> outShape;
+  for (Attribute a : targetAttr) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(a)) {
+      outShape.push_back(intAttr.getInt());
+      continue;
+    }
+    emitError("Reshape targetShape must be integer array");
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), outShape);
+}
+void TransposeOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (!inputType) {
+    emitError("Transpose input must be atir::TensorType");
+    return;
+  }
+  auto inShape = inputType.getShape();
+  int64_t rank = static_cast<int64_t>(inShape.size());
+  auto permAttr = getPermutationAttr();
+  if (!permAttr) {
+    emitError("Transpose missing permutation");
+    return;
+  }
+  llvm::SmallVector<int64_t> perm;
+  perm.reserve(permAttr.size());
+  for (Attribute a : permAttr) {
+    auto ia = dyn_cast<IntegerAttr>(a);
+    if (!ia) {
+      emitError("Transpose permutation must be integer attributes");
+      return;
+    }
+    perm.push_back(ia.getInt());
+  }
+  if (static_cast<int64_t>(perm.size()) != rank) {
+    emitError("Transpose permutation length must match input rank");
+    return;
+  }
+  llvm::SmallVector<int64_t> outShape(rank, ShapedType::kDynamic);
+  llvm::SmallVector<bool> seen(rank, false);
+  for (int64_t i = 0; i < rank; ++i) {
+    int64_t p = perm[i];
+    if (p < 0) p += rank;
+    if (p < 0 || p >= rank) {
+      emitError("Transpose permutation out of range");
+      return;
+    }
+    if (seen[p]) {
+      emitError("Transpose permutation must be bijective");
+      return;
+    }
+    seen[p] = true;
+    outShape[i] = inShape[p];
+  }
+  (void)setSingleResultShape(getOperation(), outShape);
+}
+void ExpandDimsOp::inferShape() {
+  auto inputType = getInput().getType();
+  if (!inputType) {
+    emitError("ExpandDims input must have defining op");
+    return;
+  }
+  auto inputTensorType = dyn_cast<atir::TensorType>(inputType);
+  if (!inputTensorType) {
+    emitError("Expected TensorType for input, got: ") << inputType;
+    return;
+  }
+  llvm::ArrayRef<int64_t> inputShape = inputTensorType.getShape();
+  int32_t axisAttr = getAxis();
+  int64_t axis = axisAttr;
+  int64_t rank = inputShape.size();
+  if (axis < 0) axis = rank + axis + 1;
+  if (axis < 0 || axis > rank) {
+    emitError("axis must be in range [0, ") << rank << "]";
+    return;
+  }
+  // 在指定axis位置插入大小为1的新维度
+  llvm::SmallVector<int64_t> outputShape;
+  for (int64_t i = 0; i <= rank; ++i) {
+    if (i == axis) outputShape.push_back(1);  // 插入新维度
+    if (i < rank) outputShape.push_back(inputShape[i]);  // 复制原始维度
+  } 
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+void TileOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto multiplesType = dyn_cast<atir::TensorType>(getMultiples().getType());
+  if (!inputType || !multiplesType || !multiplesType.getCacheData()) return;
+  auto inputShape = inputType.getShape();
+  auto multiplesAttr = multiplesType.getCacheData();
+  llvm::SmallVector<int64_t> multiples;
+  for (const APInt &value : multiplesAttr.getValues<APInt>()) {
+    multiples.push_back(value.getSExtValue());
+  }
+  if (multiples.size() != inputShape.size()) {
+    emitError("Tile multiples rank mismatch");
+    return;
+  }
+  llvm::SmallVector<int64_t> outputShape;
+  for (auto [dim, multiple] : llvm::zip(inputShape, multiples)) {
+    outputShape.push_back(dim * multiple);
+  }
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void BroadcastOp::inferShape() {
+  auto outputType = dyn_cast<atir::TensorType>(getOutput().getType());
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (!outputType || !inputType) {
+    emitError("broadcast input/output must be atir::TensorType");
+    return;
+  }
+  SmallVector<int64_t> outShape;
+  for (int64_t d : getBroadcastSizes()) {
+    outShape.push_back(d);
+  }
+  if (outShape.empty()) {
+    outShape.assign(outputType.getShape().begin(), outputType.getShape().end());
+  }
+  if (!outShape.empty()) {
+    getOutput().setType(cloneWithShape(outputType, outShape));
+  }
+}
+
+void PadOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto paddingsType = dyn_cast<atir::TensorType>(getPaddings().getType());
+  if (!inputType || !paddingsType) {
+    emitError("Pad input/paddings must be atir::TensorType");
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  auto outputType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!outputType) {
+    emitError("Pad output must be atir::TensorType");
+    return;
+  }
+  if (auto paddingsAttr = paddingsType.getCacheData()) {
+    SmallVector<int64_t> paddings;
+    auto elemTy = paddingsAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      for (const APInt &v : paddingsAttr.getValues<APInt>()) {
+        paddings.push_back(v.getSExtValue());
+      }
+    } else if (isa<FloatType>(elemTy)) {
+      for (const APFloat &v : paddingsAttr.getValues<APFloat>()) {
+        paddings.push_back(
+            static_cast<int64_t>(annc::apFloatToDouble(v)));
+      }
+    }
+    if (paddings.size() == inputShape.size() * 2) {
+      SmallVector<int64_t> outputShape;
+      outputShape.reserve(inputShape.size());
+      for (size_t i = 0; i < inputShape.size(); ++i) {
+        int64_t d = inputShape[i];
+        int64_t before = paddings[2 * i];
+        int64_t after = paddings[2 * i + 1];
+        if (d == ShapedType::kDynamic || before < 0 || after < 0) {
+          outputShape.push_back(ShapedType::kDynamic);
+        } else {
+          outputShape.push_back(d + before + after);
+        }
+      }
+      getOutput().setType(cloneWithShape(outputType, outputShape));
+      return;
+    }
+  }
+  getOutput().setType(cloneWithShape(
+      outputType,
+      SmallVector<int64_t>(inputShape.size(), ShapedType::kDynamic)));
+}
 }  // namespace atir

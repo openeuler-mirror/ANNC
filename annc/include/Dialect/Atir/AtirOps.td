@@ -152,12 +152,12 @@ def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
   let results = (outs Atir_Tensor:$result);
 }
 
-def Atir_MatMulOp : Atir_Op<"MatMul"> {
+def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
   let summary = "matmul op";
   let arguments = (
-    ins Atir_Tensor:$lhs,
+    ins Atir_Tensor:$C, 
+    Atir_Tensor:$lhs,
     Atir_Tensor:$rhs,
-    Atir_Tensor:$C,
     Optional<Atir_Tensor>:$bias,
     BoolAttr:$withBias,
     DefaultValuedAttr<BoolAttr, "false">:$right_transpose,
@@ -335,7 +335,7 @@ def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["For
       [{  attr-dict ($results^ `:` type($results))? }];
 }
 
-def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", [Pure]> {
+def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
   let summary = "Inserts a dimension of 1 into a tensor's shape";
   let description = [{
     Given a tensor input, this operation inserts a dimension of size 1 at the dimension index 
@@ -343,13 +343,13 @@ def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", [Pure]> {
     counted from the end of the shape.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     I32Attr:$axis
   );
-  let results = (outs Atir_Tensor:$output);
-  let hasVerifier = 1;
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    $input attr-dict `:` type($input) `->` type($output)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
@@ -765,7 +765,7 @@ def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", [Pure]> {
   }];      
 }
 
-def Atir_TileOp : Atir_Op<"Tile"> {
+def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
   let summary = "Tile a tensor along specified multiples";
   let description = [{
     Constructs a tensor by tiling `input` by `multiples`.
@@ -773,14 +773,15 @@ def Atir_TileOp : Atir_Op<"Tile"> {
     of the output is `multiples[i] * input.shape[i]`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$multiples
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input `,` $multiples attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $multiples attr-dict `:` type($output) `,` type($input) `,` type($multiples) `->` type($result)
   }];
 }
 
@@ -1109,7 +1110,7 @@ def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", [Pure]> {
   }];
 }
 
-def Atir_BatchMatMulOp : Atir_Op<"BatchMatMulV2", [Pure]> {
+def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", !listconcat([Pure], Interfaces)> {
   let summary = "Performs batch multiplication on slices of two tensors.";
   let description = [{
     Performs batch matrix multiplication on high-dimensional tensors. For each batch, 
@@ -1118,17 +1119,18 @@ def Atir_BatchMatMulOp : Atir_Op<"BatchMatMulV2", [Pure]> {
     The batch dimensions are handled according to TensorFlow's batch matrix multiply broadcast rules.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$A,
     Atir_Tensor:$B,
     DefaultValuedAttr<BoolAttr, "false">:$transposeA,
     DefaultValuedAttr<BoolAttr, "false">:$transposeB
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let hasVerifier = 1;
   let assemblyFormat = [{
-    $A `,` $B attr-dict `:` functional-type(operands, results)
+    $output `,` $A `,` $B attr-dict `:` type($output) `,` type($A) `,` type($B) `->` type($result)
   }];
 }
 
@@ -1240,22 +1242,23 @@ def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", [Pure, ResultsBr
   }];
 }
 
-def Atir_PadOp : Atir_Op<"Pad", [Pure]> {
+def Atir_PadOp : Atir_Op<"Pad", !listconcat([Pure], Interfaces)> {
   let summary = "Pad a tensor with specified value";
   let description = [{
     Pads a tensor according to the paddings tensor.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$paddings,
     Atir_Tensor:$value
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let hasVerifier = 1;
   let assemblyFormat = [{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $paddings `,` $value attr-dict `:` type($output) `,` type($input) `,` type($paddings) `,` type($value) `->` type($result)
   }];
 }
 
@@ -1277,31 +1280,33 @@ def Atir_MergeOp : Atir_Op<"Merge", Interfaces> {
 }
 
 def Atir_BroadcastOp : Atir_Op<"broadcast",
-    [Pure, SameOperandsAndResultElementType]> {
+    !listconcat([Pure], Interfaces)> {
   let summary = "Broadcast a tensor to a new shape by adding leading dimensions";
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     DenseI64ArrayAttr:$broadcastSizes
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
-def Atir_ReshapeOp : Atir_Op<"Reshape", [Pure]> {
+def Atir_ReshapeOp : Atir_Op<"Reshape", !listconcat([Pure], Interfaces)> {
   let summary = "Reshape a tensor to a new shape without changing its underlying data.";
   let description = [{
     Produce a tensor with the same data as the input but reshaped to the specified shape.
     The total number of elements must remain unchanged. 
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     I64ArrayAttr:$targetShape
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    $input attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
@@ -1454,12 +1459,13 @@ def Atir_AbsOp : Atir_Op<"Abs", [Pure, SameOperandsAndResultShape]> {
   }];
 }
 
-def Atir_DotOp : Atir_Op<"Dot", [Pure]> {
+def Atir_DotOp : Atir_Op<"Dot", !listconcat([Pure], Interfaces)> {
   let summary = "General dot product operation.";
   let description = [{
     This operation computes the dot product of two tensors `lhs` and `rhs`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$lhs,
     Atir_Tensor:$rhs
   );
@@ -1467,17 +1473,18 @@ def Atir_DotOp : Atir_Op<"Dot", [Pure]> {
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+    $output `,` $lhs `,` $rhs attr-dict `:` type($output) `,` type($lhs) `,` type($rhs) `->` type($result)
   }];
 }
 
-def Atir_TransposeOp : Atir_Op<"Transpose", [Pure]> {
+def Atir_TransposeOp : Atir_Op<"Transpose", !listconcat([Pure], Interfaces)> {
   let summary = "Transpose a tensor by permuting its dimensions.";
   let description = [{
     This operation returns a tensor with dimensions permuted
     according to the `permutation` attribute.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     I64ArrayAttr:$permutation
   );
@@ -1485,7 +1492,7 @@ def Atir_TransposeOp : Atir_Op<"Transpose", [Pure]> {
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
