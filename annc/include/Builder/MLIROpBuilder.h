@@ -54,6 +54,13 @@ class MLIRBuilder {
   void createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createConcatNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createConcatV2Node(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createPackNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createMergeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createDynamicPartitionNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createParallelDynamicStitchNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createWhereNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
