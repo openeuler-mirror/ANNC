@@ -251,4 +251,196 @@ void AndOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MaximumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 
+void ConcatOp::inferShape() {
+  // 第一个操作数是 output，从第二个开始是 inputs
+  SmallVector<Value> inputs;
+  for (size_t i = 1; i < getNumOperands(); ++i) {
+    inputs.push_back(getOperand(i));
+  }
+  (void)inferConcatLikeOpShape(getOperation(), inputs, getAxis());
+}
+
+void ConcatV2Op::inferShape() {
+  auto axisType = dyn_cast<atir::TensorType>(getAxis().getType());
+  if (!axisType || !axisType.getCacheData()) {
+    return;
+  }
+
+  auto axisAttr = axisType.getCacheData();
+  if (axisAttr.getNumElements() != 1) {
+    emitError("ConcatV2 axis must be scalar");
+    return;
+  }
+
+  auto axisValue = axisAttr.getValues<APInt>()[0].getSExtValue();
+  (void)inferConcatLikeOpShape(getOperation(), getValues(), axisValue);
+}
+
+void PackOp::inferShape() {
+  if (getInputs().empty()) {
+    emitError("Pack requires at least one input");
+    return;
+  }
+
+  auto inputType = dyn_cast<atir::TensorType>(getInputs().front().getType());
+  if (!inputType) {
+    emitError("Pack inputs must be atir::TensorType");
+    return;
+  }
+
+  llvm::SmallVector<int64_t> outputShape(inputType.getShape().begin(),
+                                         inputType.getShape().end());
+  int64_t axis = getAxis();
+  int64_t rank = static_cast<int64_t>(outputShape.size());
+  if (axis < 0) {
+    axis += rank + 1;
+  }
+  if (axis < 0 || axis > rank) {
+    emitError("Pack axis out of range");
+    return;
+  }
+
+  outputShape.insert(outputShape.begin() + axis,
+                     static_cast<int64_t>(getInputs().size()));
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void MergeOp::inferShape() {
+  auto inputs = getInputsAndControl();
+  if (inputs.empty()) {
+    emitError("Merge expects at least one input");
+    return;
+  }
+
+  auto firstInputType = dyn_cast<atir::TensorType>(inputs.front().getType());
+  auto outputType = dyn_cast<atir::TensorType>(getOutput().getType());
+  auto valueIndexType = dyn_cast<atir::TensorType>(getValueIndex().getType());
+  if (!firstInputType || !outputType || !valueIndexType) {
+    emitError("Merge operands/results must be atir::TensorType");
+    return;
+  }
+
+  getOutput().setType(cloneWithShape(outputType, firstInputType.getShape()));
+  getValueIndex().setType(cloneWithShape(valueIndexType, {}));
+}
+
+void DynamicPartitionOp::inferShape() {
+  auto dataType = dyn_cast<atir::TensorType>(getData().getType());
+  auto partitionsType = dyn_cast<atir::TensorType>(getPartitions().getType());
+  if (!dataType || !partitionsType) {
+    emitError("DynamicPartition operands must be atir::TensorType");
+    return;
+  }
+
+  auto dataShape = dataType.getShape();
+  auto partitionsShape = partitionsType.getShape();
+  if (dataShape.size() < partitionsShape.size()) {
+    emitError("DynamicPartition data rank must be >= partitions rank");
+    return;
+  }
+  for (size_t i = 0; i < partitionsShape.size(); ++i) {
+    int64_t pd = partitionsShape[i];
+    int64_t dd = dataShape[i];
+    if (pd != ShapedType::kDynamic && dd != ShapedType::kDynamic && pd != dd) {
+      emitError("DynamicPartition partitions shape must match data prefix");
+      return;
+    }
+  }
+
+  SmallVector<int64_t> outputShape;
+  outputShape.push_back(ShapedType::kDynamic);
+  outputShape.append(dataShape.begin() + partitionsShape.size(), dataShape.end());
+
+  for (Value out : getOutputs()) {
+    auto outType = dyn_cast<atir::TensorType>(out.getType());
+    if (!outType) {
+      emitError("DynamicPartition outputs must be atir::TensorType");
+      return;
+    }
+    out.setType(cloneWithShape(outType, outputShape));
+  }
+}
+
+void ParallelDynamicStitchOp::inferShape() {
+  if (getIndices().empty() || getData().empty() ||
+      getIndices().size() != getData().size()) {
+    emitError("ParallelDynamicStitch expects non-empty matched indices/data lists");
+    return;
+  }
+
+  auto firstDataType = dyn_cast<atir::TensorType>(getData().front().getType());
+  if (!firstDataType) {
+    emitError("ParallelDynamicStitch data operands must be atir::TensorType");
+    return;
+  }
+
+  auto dataShape = firstDataType.getShape();
+  if (dataShape.empty()) {
+    emitError("ParallelDynamicStitch data rank must be >= 1");
+    return;
+  }
+
+  int64_t firstDim = ShapedType::kDynamic;
+  for (Value idx : getIndices()) {
+    auto idxType = dyn_cast<atir::TensorType>(idx.getType());
+    if (!idxType) {
+      emitError("ParallelDynamicStitch indices operands must be atir::TensorType");
+      return;
+    }
+    auto idxShape = idxType.getShape();
+    if (idxShape.size() != 1) {
+      emitError("ParallelDynamicStitch currently expects 1D indices");
+      return;
+    }
+    if (DenseElementsAttr idxAttr = idxType.getCacheData()) {
+      SmallVector<int64_t> idxVals;
+      auto elemTy = idxAttr.getElementType();
+      if (isa<IntegerType, IndexType>(elemTy)) {
+        idxVals.reserve(idxAttr.getNumElements());
+        for (const APInt &v : idxAttr.getValues<APInt>()) {
+          idxVals.push_back(v.getSExtValue());
+        }
+      } else if (isa<FloatType>(elemTy)) {
+        idxVals.reserve(idxAttr.getNumElements());
+        for (const APFloat &v : idxAttr.getValues<APFloat>()) {
+          idxVals.push_back(
+              static_cast<int64_t>(annc::apFloatToDouble(v)));
+        }
+      }
+      if (!idxVals.empty()) {
+        int64_t localMax = *std::max_element(idxVals.begin(), idxVals.end());
+        firstDim = std::max(firstDim == ShapedType::kDynamic ? -1 : firstDim,
+                            localMax + 1);
+      }
+    }
+  }
+
+  SmallVector<int64_t> outShape;
+  outShape.push_back(firstDim);
+  outShape.append(dataShape.begin() + 1, dataShape.end());
+  (void)setSingleResultShape(getOperation(), outShape);
+}
+
+void WhereOp::inferShape() {
+  if (getInputs().size() == 1) {
+    // 单输入情况：返回满足条件的索引
+    auto condType = dyn_cast<atir::TensorType>(getInputs().front().getType());
+    if (!condType) {
+      emitError("Where condition must be atir::TensorType");
+      return;
+    }
+    // 输出形状: [N, R]，N是满足条件的元素数量（动态），R是输入维度数
+    int64_t rank = static_cast<int64_t>(condType.getShape().size());
+    (void)setSingleResultShape(getOperation(), {ShapedType::kDynamic, rank});
+    return;
+  }
+  if (getInputs().size() == 3) {
+    // 三输入情况：condition, x, y
+    inferEltwiseOpShape(getOperation());
+    return;
+  }
+  emitError("Where expects either 1 input (indices) or 3 inputs (condition, x, y)");
+}
+
+
 }  // namespace atir

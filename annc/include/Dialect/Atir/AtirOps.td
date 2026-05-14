@@ -116,7 +116,7 @@ def Atir_AddOp : Atir_Op<"Add", Interfaces> {
   let results = (outs Atir_Tensor:$result);
 }
 
-def Atir_ConcatOp : Atir_Op<"Concat"> {
+def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
   let summary = "Concat operator";
 
   let description = [{
@@ -422,7 +422,7 @@ def Atir_CastOp: Atir_Op<"Cast", [Pure, SameOperandsAndResultShape]>{
   }];
 }
 
-def Atir_WhereOp : Atir_Op<"Where", [Pure]> {
+def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
   let summary = "Returns elements from x or y depending on condition.";
   let description = [{
     Selects elements from `x` or `y` depending on `condition`.
@@ -430,13 +430,14 @@ def Atir_WhereOp : Atir_Op<"Where", [Pure]> {
     When only `condition` is provided: returns indices where condition is true.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Variadic<Atir_Tensor>:$inputs
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` `(` $inputs `)` attr-dict `:` type($output) `,` type($inputs) `->` type($result)
   }];
 }
 
@@ -462,7 +463,7 @@ def Atir_StridedSliceOp : Atir_Op<"StridedSlice", [Pure]> {
   }];
 }
 
-def Atir_PackOp : Atir_Op<"Pack", [Pure, SameOperandsShape]> {
+def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfaces)> {
   let summary = "Pack tensors along a new axis";
   let description = [{
     Packs the `N` tensors in `values` along the `axis` dimension.
@@ -470,13 +471,14 @@ def Atir_PackOp : Atir_Op<"Pack", [Pure, SameOperandsShape]> {
     if `axis == 0` then the `output` tensor will have shape `(N, A, B, C)`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Variadic<Atir_Tensor>:$inputs,
     I64Attr:$axis
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    `(` $inputs `)` `axis` `=` $axis attr-dict `:` 
-    functional-type(operands, results)
+    $output `,` `(` $inputs `)` `axis` `=` $axis attr-dict `:` 
+    type($output) `,` type($inputs) `->` type($result)
   }];
 }
 
@@ -789,7 +791,7 @@ def Atir_SelectOp : Atir_Op<"Select"> {
   }];
 }
 
-def Atir_ConcatV2Op : Atir_Op<"ConcatV2"> {
+def Atir_ConcatV2Op : Atir_Op<"ConcatV2", Interfaces> {
   let summary = "Concatenate tensors along an axis";
   let description = [{
     Concatenates a list of tensors along dimension `axis`.
@@ -797,11 +799,12 @@ def Atir_ConcatV2Op : Atir_Op<"ConcatV2"> {
     except `axis`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Variadic<Atir_Tensor>:$values,
     Atir_Tensor:$axis
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
     operands attr-dict `:` functional-type(operands, results)
@@ -878,7 +881,7 @@ def Atir_RangeOp : Atir_Op<"Range", [Pure]> {
   }];
 }
 
-def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", [Pure]> {
+def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", !listconcat([Pure], Interfaces)> {
   let summary = "Partitions data into numPartitions tensors using indices from partitions";
   let description = [{
     Partitions data into numPartitions tensors according to the indices in partitions.
@@ -896,22 +899,24 @@ def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", [Pure]> {
   }];
 }
 
-def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch", [Pure, SameVariadicOperandSize]> {
+def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch",
+    !listconcat([Pure, SameVariadicOperandSize], Interfaces)> {
   let summary = "Interleave values from multiple tensors into a single tensor using parallel indices";
   let description = [{
     Interleaves values from multiple tensors into a single tensor using indices arrays.
     This is the inverse of DynamicPartition. Works in parallel for better performance.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Variadic<Atir_Tensor>:$indices,
     Variadic<Atir_Tensor>:$data
   );
   let results = (outs
-    Atir_Tensor:$merged
+    Atir_Tensor:$result
   );
   let hasVerifier = 1;
   let assemblyFormat = [{
-    `[`$indices`]` `,` `[`$data`]` attr-dict `:` functional-type(operands, results)
+    operands attr-dict `:` functional-type(operands, results)
   }];
 }
 
@@ -1221,7 +1226,7 @@ def Atir_PadOp : Atir_Op<"Pad", [Pure]> {
   }];
 }
 
-def Atir_MergeOp : Atir_Op<"Merge"> {
+def Atir_MergeOp : Atir_Op<"Merge", Interfaces> {
   let summary = [{
     Accepts a list of input operands and returns a value of the operand 
     type and the index of the first encountered match.

@@ -45,6 +45,13 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"GreaterEqual", "GreaterEqualV2"}, &MLIRBuilder::createGreaterEqualNode);
   add({"Maximum"}, &MLIRBuilder::createMaximumNode);
   add({"Minimum"}, &MLIRBuilder::createMinimumNode);
+  add({"Concat"}, &MLIRBuilder::createConcatNode);
+  add({"ConcatV2"}, &MLIRBuilder::createConcatV2Node);
+  add({"Pack", "Stack"}, &MLIRBuilder::createPackNode);
+  add({"Merge"}, &MLIRBuilder::createMergeNode);
+  add({"DynamicPartition"}, &MLIRBuilder::createDynamicPartitionNode);
+  add({"ParallelDynamicStitch"}, &MLIRBuilder::createParallelDynamicStitchNode);
+  add({"Select", "SelectV2", "Where"}, &MLIRBuilder::createWhereNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -722,4 +729,85 @@ void MLIRBuilder::createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, A
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::MinimumOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
 }
+void MLIRBuilder::createConcatNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::ConcatOp>(loc, outs[0], outputBuffer.getResult(), ins, builder_.getI32IntegerAttr(0),
+      builder_.getBoolAttr(false), builder_.getF32FloatAttr(-1.0f), builder_.getI32IntegerAttr(0), BoolAttr());
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createConcatV2Node(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  // ConcatV2: 最后一个输入是 axis，前面的是 values
+  if (ins.size() < 2) {
+    llvm::report_fatal_error("ConcatV2 requires at least two inputs (values and axis)");
+  }
+  // 分离 values 和 axis
+  llvm::SmallVector<Value> values(ins.begin(), ins.end() - 1);
+  Value axis = ins.back();
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::ConcatV2Op>(loc, outs[0], outputBuffer.getResult(), values, axis);
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createPackNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  if (ins.empty()) { createUnsupportedNode(node, outs, ins); return; }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::PackOp>(loc, outs[0], outputBuffer.getResult(), ins, builder_.getI64IntegerAttr(0));
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createMergeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.empty() || outs.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto mergeOp = builder_.create<atir::MergeOp>(loc, TypeRange{outs[0], outs[1]}, ins);
+  if (node.outputs.size() >= 2) {
+    tensorValues_[node.outputs[0].name] = mergeOp.getOutput();
+    tensorValues_[node.outputs[1].name] = mergeOp.getValueIndex();
+  } else if (node.outputs.size() == 1) {
+    tensorValues_[node.outputs[0].name] = mergeOp.getOutput();
+  }
+}
+void MLIRBuilder::createDynamicPartitionNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value data = ins[0];
+  Value partitions = ins[1];
+  int32_t numPartitions = static_cast<int32_t>(outs.size());
+  auto partitionOp = builder_.create<atir::DynamicPartitionOp>(loc, outs, data, partitions, 
+                                                                builder_.getI32IntegerAttr(numPartitions));
+  for (size_t i = 0; i < node.outputs.size() && i < outs.size(); ++i) {
+    Value outVal = partitionOp.getOutputs()[i];
+    tensorValues_[node.outputs[i].name] = outVal;
+    if (i == 0) {
+      tensorValues_[node.name] = outVal;
+    } else {
+      tensorValues_[node.name + ":" + std::to_string(i)] = outVal;
+    }
+  }
+}
+void MLIRBuilder::createParallelDynamicStitchNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  size_t half = ins.size() / 2;
+  llvm::SmallVector<Value, 4> indices(ins.begin(), ins.begin() + half);
+  llvm::SmallVector<Value, 4> data(ins.begin() + half, ins.end());
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto stitchOp = builder_.create<atir::ParallelDynamicStitchOp>(loc, outs[0], outputBuffer.getResult(), indices, data);
+  tensorValues_[node.outputs[0].name] = stitchOp.getResult();
+}
+void MLIRBuilder::createWhereNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() != 1 && ins.size() != 3) {
+    createUnsupportedNode(node, outs, ins);
+    return;
+  }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::WhereOp>(loc, outs[0], outputBuffer.getResult(), ins));
+}
+
 }  // namespace annc
