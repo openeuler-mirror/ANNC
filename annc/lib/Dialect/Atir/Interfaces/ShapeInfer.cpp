@@ -259,6 +259,249 @@ int64_t inferStaticRangeOutputDim(double start, double limit, double delta,
   return n;
 }
 
+static bool readStridedSlice1DInts(atir::TensorType ty,
+                                   SmallVector<int64_t> &out) {
+  out.clear();
+  if (!ty)
+    return false;
+  auto shape = ty.getShape();
+  if (shape.size() != 1)
+    return false;
+  DenseElementsAttr cache = ty.getCacheData();
+  if (!cache)
+    return false;
+  int64_t dim = shape[0];
+  if (dim >= 0 && static_cast<int64_t>(cache.getNumElements()) != dim)
+    return false;
+  auto elemTy = cache.getElementType();
+  if (isa<IntegerType, IndexType>(elemTy)) {
+    for (const APInt &v : cache.getValues<APInt>())
+      out.push_back(v.getSExtValue());
+    return true;
+  }
+  if (isa<FloatType>(elemTy)) {
+    for (const APFloat &v : cache.getValues<APFloat>())
+      out.push_back(static_cast<int64_t>(annc::apFloatToDouble(v)));
+    return true;
+  }
+  return false;
+}
+
+// --- TensorFlow-compatible StridedSlice dense spec (no separate header) ---
+
+constexpr int64_t kStridedSliceShrinkGather = -1;
+constexpr int64_t kStridedSliceNewAxisGather = -2;
+
+struct StridedSliceDensePlan {
+  bool ok = false;
+  int64_t input_rank = 0;
+  SmallVector<int64_t, 8> dense_begin;
+  SmallVector<int64_t, 8> dense_end;
+  SmallVector<int64_t, 8> dense_stride;
+  int32_t dense_begin_mask = 0;
+  int32_t dense_end_mask = 0;
+  int32_t dense_shrink_mask = 0;
+  SmallVector<int64_t, 8> final_gather;
+};
+
+static int64_t stridedSliceDimLen(int64_t dim, int64_t start, int64_t stop,
+                                  int64_t step, bool shrink, bool useBeginMask,
+                                  bool useEndMask) {
+  if (step == 0)
+    return ShapedType::kDynamic;
+  if (shrink)
+    return 1;
+  if (dim == ShapedType::kDynamic)
+    return ShapedType::kDynamic;
+
+  if (useBeginMask)
+    start = step > 0 ? 0 : dim - 1;
+  else if (start < 0)
+    start += dim;
+
+  if (useEndMask)
+    stop = step > 0 ? dim : -1;
+  else if (stop < 0)
+    stop += dim;
+
+  if (step > 0) {
+    start = std::min<int64_t>(std::max<int64_t>(start, 0), dim);
+    stop = std::min<int64_t>(std::max<int64_t>(stop, 0), dim);
+    if (stop <= start)
+      return 0;
+    return (stop - start + step - 1) / step;
+  }
+  start = std::min<int64_t>(std::max<int64_t>(start, -1), dim - 1);
+  stop = std::min<int64_t>(std::max<int64_t>(stop, -1), dim - 1);
+  int64_t negStep = -step;
+  if (start <= stop)
+    return 0;
+  return (start - stop + negStep - 1) / negStep;
+}
+
+static bool stridedSliceMaskBit32(int32_t m, int32_t bit) {
+  return bit < 32 && ((static_cast<uint32_t>(m) >> bit) & 1u) != 0;
+}
+
+static bool buildStridedSliceDensePlan(llvm::ArrayRef<int64_t> input_shape,
+                                       llvm::ArrayRef<int64_t> sparse_begin,
+                                       llvm::ArrayRef<int64_t> sparse_end,
+                                       llvm::ArrayRef<int64_t> sparse_stride,
+                                       int32_t begin_mask_spec,
+                                       int32_t end_mask_spec, int32_t ellipsis_mask,
+                                       int32_t new_axis_mask, int32_t shrink_axis_mask,
+                                       StridedSliceDensePlan &out, std::string *err) {
+  out = StridedSliceDensePlan{};
+  const int64_t input_shape_size = static_cast<int64_t>(input_shape.size());
+  const size_t sparse_stride_size = sparse_stride.size();
+  if (sparse_begin.size() != sparse_stride_size || sparse_end.size() != sparse_stride_size) {
+    if (err)
+      *err = "begin, end, and strides must have the same length";
+    return false;
+  }
+  if (sparse_stride_size >= 32) {
+    if (err)
+      *err = "begin/end/strides tensor must have fewer than 32 elements";
+    return false;
+  }
+  // 省略号掩码最多只有一位非零
+  if (ellipsis_mask && ((ellipsis_mask & (ellipsis_mask - 1)) != 0)) {
+    if (err)
+      *err = "ellipsis_mask must have at most one bit set";
+    return false;
+  }
+
+  int32_t sparse_dims = static_cast<int32_t>(sparse_stride_size);
+  int32_t num_add_after_ellipsis = 0;
+  bool ellipsis_seen = false;
+  for (int32_t i = 0; i < sparse_dims; ++i) {
+    if (ellipsis_seen && ((static_cast<uint32_t>(new_axis_mask) >> i) & 1u))
+      ++num_add_after_ellipsis;
+    if (((static_cast<uint32_t>(ellipsis_mask) >> i) & 1u))
+      ellipsis_seen = true;
+  }
+
+  int32_t ellipsis_mask_eff = ellipsis_mask;
+  if (!ellipsis_seen) {
+    ellipsis_mask_eff |= (1 << sparse_dims);
+    ++sparse_dims;
+  }
+
+  out.input_rank = input_shape_size;
+  out.dense_begin.assign(input_shape_size, 0);
+  out.dense_end.assign(input_shape_size, 0);
+  out.dense_stride.assign(input_shape_size, 1);
+  out.dense_begin_mask = 0;
+  out.dense_end_mask = 0;
+  out.dense_shrink_mask = 0;
+  out.final_gather.clear();
+
+  int32_t full_index = 0;
+  const int32_t input_shape_dims = static_cast<int32_t>(input_shape_size);
+
+  for (int32_t i = 0; i < sparse_dims; ++i) {
+    if (((static_cast<uint32_t>(ellipsis_mask_eff) >> i) & 1u)) {
+      // 省略号掩码位置
+      int32_t next_index =
+          std::min(input_shape_dims - (sparse_dims - i) + 1 + num_add_after_ellipsis, input_shape_dims);
+      for (; full_index < next_index; ++full_index) {
+        if (full_index < 0 || full_index >= input_shape_dims) {
+          if (err)
+            *err = "ellipsis expansion out of range for input rank";
+          return false;
+        }
+        out.dense_begin[full_index] = 0;
+        out.dense_end[full_index] = 0;
+        out.dense_stride[full_index] = 1;
+        out.dense_begin_mask |= (1 << full_index);
+        out.dense_end_mask |= (1 << full_index);
+        out.final_gather.push_back(full_index);
+      }
+    } else if (((static_cast<uint32_t>(new_axis_mask) >> i) & 1u)) {
+      out.final_gather.push_back(kStridedSliceNewAxisGather);
+    } else {
+      if (full_index < 0 || full_index >= input_shape_dims) {
+        if (err)
+          *err = "slice index out of range for input rank";
+        return false;
+      }
+      out.dense_begin[full_index] = sparse_begin[i];
+      out.dense_end[full_index] = sparse_end[i];
+      out.dense_stride[full_index] = sparse_stride[i];
+      if (stridedSliceMaskBit32(begin_mask_spec, i))
+        out.dense_begin_mask |= (1 << full_index);
+      if (stridedSliceMaskBit32(end_mask_spec, i))
+        out.dense_end_mask |= (1 << full_index);
+      if (stridedSliceMaskBit32(shrink_axis_mask, i)) {
+        out.final_gather.push_back(kStridedSliceShrinkGather);
+        out.dense_shrink_mask |= (1 << full_index);
+      } else {
+        out.final_gather.push_back(full_index);
+      }
+      ++full_index;
+    }
+  }
+
+  if (full_index != input_shape_dims) {
+    if (err)
+      *err = "strided slice spec does not match input tensor rank";
+    return false;
+  }
+
+  out.ok = true;
+  return true;
+}
+
+static void inferStridedSliceProcessingShape(
+    llvm::ArrayRef<int64_t> input_shape, const StridedSliceDensePlan &plan,
+    llvm::SmallVectorImpl<int64_t> &processing_shape) {
+  processing_shape.clear();
+  if (!plan.ok || static_cast<size_t>(plan.input_rank) != input_shape.size())
+    return;
+  processing_shape.resize(static_cast<size_t>(plan.input_rank));
+  for (int64_t i = 0; i < plan.input_rank; ++i) {
+    int32_t ii = static_cast<int32_t>(i);
+    int64_t dim = input_shape[i];
+    int64_t step = plan.dense_stride[i];
+    bool shrink = stridedSliceMaskBit32(plan.dense_shrink_mask, ii);
+
+    if (step == 0) {
+      processing_shape[static_cast<size_t>(i)] = ShapedType::kDynamic;
+      continue;
+    }
+    if (shrink && step != 1) {
+      processing_shape[static_cast<size_t>(i)] = ShapedType::kDynamic;
+      continue;
+    }
+
+    bool bm = stridedSliceMaskBit32(plan.dense_begin_mask, ii);
+    bool em = stridedSliceMaskBit32(plan.dense_end_mask, ii);
+    processing_shape[static_cast<size_t>(i)] = stridedSliceDimLen(
+        dim, plan.dense_begin[i], plan.dense_end[i], step, shrink, bm, em);
+  }
+}
+
+static void inferStridedSliceShapes(llvm::ArrayRef<int64_t> input_shape,
+                                    const StridedSliceDensePlan &plan,
+                                    llvm::SmallVectorImpl<int64_t> &final_shape) {
+  final_shape.clear();
+  if (!plan.ok || static_cast<size_t>(plan.input_rank) != input_shape.size())
+    return;
+  SmallVector<int64_t, 8> processing;
+  inferStridedSliceProcessingShape(input_shape, plan, processing);
+  if (processing.size() != static_cast<size_t>(plan.input_rank))
+    return;
+
+  for (int64_t g : plan.final_gather) {
+    if (g == kStridedSliceNewAxisGather)
+      final_shape.push_back(1);
+    else if (g == kStridedSliceShrinkGather)
+      continue;
+    else if (g >= 0 && g < plan.input_rank)
+      final_shape.push_back(processing[static_cast<size_t>(g)]);
+  }
+}
+
 // BinaryOps
 void AddOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void SubOp::inferShape() { inferEltwiseOpShape(getOperation()); }
@@ -719,6 +962,219 @@ void ProdOp::inferShape() {
   }
 
   (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void GatherOp::inferShape() {
+  auto paramsType = dyn_cast<atir::TensorType>(getParams().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto axisType = dyn_cast<atir::TensorType>(getAxis().getType());
+  if (!paramsType || !indicesType || !axisType || !axisType.getCacheData()) {
+    return;
+  }
+
+  auto axisValues = axisType.getCacheData().getValues<APInt>();
+  if (axisType.getCacheData().getNumElements() != 1) {
+    emitError("Gather axis must be scalar");
+    return;
+  }
+
+  int64_t axis = axisValues[0].getSExtValue();
+  auto paramsShape = paramsType.getShape();
+  auto indicesShape = indicesType.getShape();
+  int64_t rank = static_cast<int64_t>(paramsShape.size());
+  if (axis < 0) axis += rank;
+  if (axis < 0 || axis >= rank) {
+    emitError("Gather axis out of range");
+    return;
+  }
+  int64_t batchDims = getBatchDims();
+  int64_t indicesRank = static_cast<int64_t>(indicesShape.size());
+  if (batchDims < 0) {
+    emitError("Gather batch_dims must be non-negative");
+    return;
+  }
+  if (indicesRank == 0) {
+    if (batchDims != 0) {
+      emitError("Gather with scalar indices requires batch_dims == 0");
+      return;
+    }
+  } else if (!(batchDims < indicesRank)) {
+    emitError("Gather batch_dims must be less than indices rank");
+    return;
+  }
+  if (batchDims > axis) {
+    emitError("Gather batch_dims must not exceed axis");
+    return;
+  }
+  for (int64_t i = 0; i < batchDims; ++i) {
+    int64_t ps = paramsShape[i];
+    int64_t is = indicesShape[i];
+    if (ps >= 0 && is >= 0 && ps != is) {
+      emitError(
+          "Gather params and indices must have identical shapes in the batch "
+          "dimensions");
+      return;
+    }
+  }
+  llvm::SmallVector<int64_t> outputShape;
+  outputShape.append(paramsShape.begin(), paramsShape.begin() + axis);
+  outputShape.append(indicesShape.begin() + batchDims, indicesShape.end());
+  outputShape.append(paramsShape.begin() + axis + 1, paramsShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void GatherNdOp::inferShape() {
+  auto valuesType = dyn_cast<atir::TensorType>(getValues().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  if (!valuesType || !indicesType) {
+    emitError("GatherNd inputs must be atir::TensorType");
+    return;
+  }
+  
+  auto valuesShape = valuesType.getShape();
+  auto indicesShape = indicesType.getShape();
+  
+  if (indicesShape.empty()) {
+    emitError("GatherNd indices must have at least one dimension");
+    return;
+  }
+  
+  // indices 的最后一个维度指定要收集的轴数
+  int64_t indicesRank = static_cast<int64_t>(indicesShape.size());
+  int64_t valuesRank = static_cast<int64_t>(valuesShape.size());
+  int64_t lastIndexDim = indicesShape[indicesRank - 1];
+  
+  if (lastIndexDim > valuesRank) {
+    emitError("GatherNd lastIndexDim must not exceed values rank");
+    return;
+  }
+  
+  // 输出形状: indicesShape[:-1] + valuesShape[lastIndexDim:]
+  SmallVector<int64_t> outputShape;
+  for (int64_t i = 0; i < indicesRank - 1; ++i) {
+    outputShape.push_back(indicesShape[i]);
+  }
+  for (int64_t i = lastIndexDim; i < valuesRank; ++i) {
+    outputShape.push_back(valuesShape[i]);
+  }
+  
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void SliceOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto beginTypepe = dyn_cast<atir::TensorType>(getBegin().getType());
+  auto sizeType = dyn_cast<atir::TensorType>(getSize().getType());
+
+  if (!inputType || !beginTypepe || !sizeType) {
+    emitError("Slice inputs must be atir::TensorType");
+    return;
+  }
+
+  auto inputShape = inputType.getShape();
+  auto beginShape = beginTypepe.getShape();
+  auto sizeShape = sizeType.getShape();
+
+  if (beginShape.size() != 1 || sizeShape.size() != 1) {
+    emitError("Slice begin and size must be 1D tensors");
+    return;
+  }
+
+  if (beginShape[0] != static_cast<int64_t>(inputShape.size()) ||
+      sizeShape[0] != static_cast<int64_t>(inputShape.size())) {
+    emitError("Slice begin and size length must match input rank");
+    return;
+  }
+
+  SmallVector<int64_t> outputShape(inputShape.begin(), inputShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void LoadOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (!inputType) {
+    emitError("Load input must be atir::TensorType");
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  auto axes = getIntArrayAttrValues(getAxes());
+  auto sizes = getIntArrayAttrValues(getSize());
+  if (axes.size() != sizes.size()) {
+    emitError("Load axes and size must have the same length");
+    return;
+  }
+  llvm::SmallVector<int64_t> outputShape(inputShape.begin(), inputShape.end());
+  for (auto [axis, size] : llvm::zip(axes, sizes)) {
+    if (axis < 0 || axis >= static_cast<int64_t>(outputShape.size())) {
+      emitError("Load axis out of range");
+      return;
+    }
+    outputShape[axis] = size;
+  }
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void StridedSliceOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto beginType = dyn_cast<atir::TensorType>(getBegin().getType());
+  auto endType = dyn_cast<atir::TensorType>(getEnd().getType());
+  auto stridesType = dyn_cast<atir::TensorType>(getStrides().getType());
+
+  if (!inputType || !beginType || !endType || !stridesType) {
+    emitError("StridedSlice begin/end/strides must be atir::TensorType");
+    return;
+  }
+  llvm::ArrayRef<int64_t> inputShape = inputType.getShape();
+
+  int64_t Ltensor = beginType.getShape().empty() ? int64_t(-1) : beginType.getShape()[0];
+  SmallVector<int64_t> beginVals, endVals, strideVals;
+  bool haveIdx = readStridedSlice1DInts(beginType, beginVals) &&
+                 readStridedSlice1DInts(endType, endVals) &&
+                 readStridedSlice1DInts(stridesType, strideVals);
+  auto runWithVectors = [&](llvm::ArrayRef<int64_t> b, llvm::ArrayRef<int64_t> e,
+                            llvm::ArrayRef<int64_t> s) -> bool {
+    StridedSliceDensePlan plan;
+    std::string err;
+    if (!buildStridedSliceDensePlan(inputShape, b, e, s, getBeginMask(),
+                                    getEndMask(), getEllipsisMask(),
+                                    getNewAxisMask(), getShrinkAxisMask(), plan,
+                                    &err)) {
+      emitError(err);
+      return false;
+    }
+    SmallVector<int64_t> outputShape;
+    inferStridedSliceShapes(inputShape, plan, outputShape);
+    return succeeded(setSingleResultShape(getOperation(), outputShape));
+  };
+
+  if (haveIdx) {
+    (void)runWithVectors(beginVals, endVals, strideVals);
+    return;
+  }
+
+  if (Ltensor >= 0 && Ltensor < 32) {
+    SmallVector<int64_t> zb(Ltensor, 0), ze(Ltensor, 0), zs(Ltensor, 1);
+    StridedSliceDensePlan plan;
+    std::string err;
+    if (!buildStridedSliceDensePlan(inputShape, zb, ze, zs, getBeginMask(),
+                                    getEndMask(), getEllipsisMask(),
+                                    getNewAxisMask(), getShrinkAxisMask(), plan,
+                                    &err)) {
+      emitError(err);
+      return;
+    }
+    int64_t outRank = 0;
+    for (int64_t g : plan.final_gather) {
+      if (g != kStridedSliceShrinkGather)
+        ++outRank;
+    }
+    SmallVector<int64_t> dynamicShape(outRank, ShapedType::kDynamic);
+    (void)setSingleResultShape(getOperation(), dynamicShape);
+    return;
+  }
+
+  emitError(
+      "StridedSlice needs static 1-D spec length or constant begin/end/strides");
 }
 
 

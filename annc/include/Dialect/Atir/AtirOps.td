@@ -48,7 +48,7 @@ def Atir_NoneOp : Atir_Op<"None"> {
   let assemblyFormat = [{ attr-dict }];
 }
 
-def Atir_LoadOp : Atir_Op<"Load"> {
+def Atir_LoadOp : Atir_Op<"Load", Interfaces> {
   let summary = "Load from a tensor";
   let description = [{Returns the element at the given location from within the tensor}];
   let arguments = (ins Atir_Tensor:$input,
@@ -441,25 +441,32 @@ def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_StridedSliceOp : Atir_Op<"StridedSlice", [Pure]> {
+def Atir_StridedSliceOp : Atir_Op<"StridedSlice", !listconcat([Pure], Interfaces)> {
   let summary = "StridedSlice operation";
   let description = [{
-    Extracts a strided slice from the input tensor using start, stop and stride indices.
+    TensorFlow-compatible StridedSlice: 1-D tensor operands `begin`, `end`, and
+    `strides` (same length as the sparse slice spec, less than 32), plus scalar
+    bitmask attributes `beginMask`, `endMask`, `ellipsisMask`, `newAxisMask`, and
+    `shrinkAxisMask`. At most one bit may be set in `ellipsisMask`; if none is
+    set, an ellipsis is implied at the end of the spec (matching TensorFlow).
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
-    I64ArrayAttr:$startIndices,
-    I64ArrayAttr:$stopIndices,
-    I64ArrayAttr:$strides,
-    DefaultValuedAttr<I64ArrayAttr, "{}">:$beginMask,
-    DefaultValuedAttr<I64ArrayAttr, "{}">:$endMask,
-    DefaultValuedAttr<I64ArrayAttr, "{}">:$shrinkAxisMask
+    Atir_Tensor:$begin,
+    Atir_Tensor:$end,
+    Atir_Tensor:$strides,
+    DefaultValuedAttr<I32Attr, "0">:$beginMask,
+    DefaultValuedAttr<I32Attr, "0">:$endMask,
+    DefaultValuedAttr<I32Attr, "0">:$ellipsisMask,
+    DefaultValuedAttr<I32Attr, "0">:$newAxisMask,
+    DefaultValuedAttr<I32Attr, "0">:$shrinkAxisMask
   );
   let results = (outs
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` type(operands) `->` type(results)
+    $output `,` $input `,` $begin `,` $end `,` $strides attr-dict `:` type($output) `,` type($input) `,` type($begin) `,` type($end) `,` type($strides) `->` type($result)
   }];
 }
 
@@ -482,8 +489,7 @@ def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfa
   }];
 }
 
-def Atir_GatherNdOp : Atir_Op<"GatherNd", [Pure, 
-    AllElementTypesMatch<["values", "output"]>]> {
+def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure], Interfaces)> {
   let summary = "Gather slices from params using nd indices";
   let description = [{
     Gathers slices from `params` into a Tensor with shape specified by 
@@ -492,14 +498,15 @@ def Atir_GatherNdOp : Atir_Op<"GatherNd", [Pure,
     element defines a slice of `params`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$values,
     Atir_Tensor:$indices
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $values `,` $indices attr-dict `:` functional-type(operands, results)
+    $output `,` $values `,` $indices attr-dict `:` type($output) `,` type($values) `,` type($indices) `->` type($result)
   }];
 }
 
@@ -543,26 +550,26 @@ def Atir_SparseReshapeOp : Atir_Op<"SparesReshape", [Pure]> {
   }];
 }
 
-def Atir_SliceOp : Atir_Op<"Slice"> {
+def Atir_SliceOp : Atir_Op<"Slice", Interfaces> {
   let summary = "Extracts slices of the tensor";
   let description = [{
-    Extracts a slice from the input tensor starting at the position specified by begin,
-    and the size is specified by size.
+    TF `Slice`: `input`, 1D `begin`, 1D `size` (stride 1).
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$begin,
-    Atir_Tensor:$size 
+    Atir_Tensor:$size
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input `,` $begin `,` $size attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $begin `,` $size attr-dict `:` type($output) `,` type($input) `,` type($begin) `,` type($size) `->` type($result)
   }];
 }
 
-def Atir_GatherV2Op : Atir_Op<"GatherV2"> {
+def Atir_GatherOp : Atir_Op<"Gather", Interfaces> {
   let summary = "Gather slices from params axis according to indices"; 
   let description = [{
     Gathers slices from `params` along the `axis` dimension according to `indices`. 
@@ -572,16 +579,17 @@ def Atir_GatherV2Op : Atir_Op<"GatherV2"> {
     are batch dimensions that should not be gathered over.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$params,
     Atir_Tensor:$indices,
     Atir_Tensor:$axis,
-    DefaultValuedAttr<I64Attr, "0">:$batch_dims
+    DefaultValuedAttr<I32Attr, "0">:$batch_dims
   );
   let results = (outs
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $params `,` $indices `,` $axis attr-dict `:` functional-type(operands, results)
+    $output `,` $params `,` $indices `,` $axis attr-dict `:` type($output) `,` type($params) `,` type($indices) `,` type($axis) `->` type($result)
   }];
 }
 

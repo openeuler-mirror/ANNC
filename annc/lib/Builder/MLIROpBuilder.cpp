@@ -60,6 +60,10 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"Range"}, &MLIRBuilder::createRangeNode);
   add({"Sum"}, &MLIRBuilder::createSumNode);
   add({"Prod"}, &MLIRBuilder::createProdNode);
+  add({"Gather", "GatherV2"}, &MLIRBuilder::createGatherNode);
+  add({"GatherNd"}, &MLIRBuilder::createGatherNdNode);
+  add({"Slice"}, &MLIRBuilder::createSliceNode);
+  add({"StridedSlice"}, &MLIRBuilder::createStridedSliceNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -927,6 +931,59 @@ void MLIRBuilder::createProdNode(const NodeInfo& node, ArrayRef<Type> outs, Arra
   auto prodOp = builder_.create<atir::ProdOp>(loc, outs[0], outputBuffer.getResult(), input, indices,
                                              builder_.getBoolAttr(keepDims));
   tensorValues_[node.outputs[0].name] = prodOp.getResult();
+}
+
+void MLIRBuilder::createGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  int32_t batchDims = lookupTfIntMask(node, "batch_dims");
+  SINGLE_OUT(builder_.create<atir::GatherOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2],
+                                           builder_.getI32IntegerAttr(batchDims)));
+}
+
+void MLIRBuilder::createGatherNdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value values = ins[0];
+  Value indices = ins[1];
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto gatherOp = builder_.create<atir::GatherNdOp>(loc, outs[0], outputBuffer.getResult(), values, indices);
+  tensorValues_[node.outputs[0].name] = gatherOp.getResult();
+}
+
+void MLIRBuilder::createSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() != 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+  Value begin = ins[1];
+  Value size = ins[2];
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::SliceOp>(loc, outs[0], outputBuffer.getResult(), input, begin, size);
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+
+void MLIRBuilder::createStridedSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  if (ins.size() < 4) {
+    createUnsupportedNode(node, outs, ins);
+    return;
+  }
+  int32_t beginMask = lookupTfIntMask(node, "begin_mask");
+  int32_t endMask = lookupTfIntMask(node, "end_mask");
+  int32_t ellipsisMask = lookupTfIntMask(node, "ellipsis_mask");
+  int32_t newAxisMask = lookupTfIntMask(node, "new_axis_mask");
+  int32_t shrinkAxisMask = lookupTfIntMask(node, "shrink_axis_mask");
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::StridedSliceOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2], ins[3],
+      builder_.getI32IntegerAttr(beginMask), builder_.getI32IntegerAttr(endMask),
+      builder_.getI32IntegerAttr(ellipsisMask), builder_.getI32IntegerAttr(newAxisMask),
+      builder_.getI32IntegerAttr(shrinkAxisMask)));
 }
 
 }  // namespace annc
