@@ -30,7 +30,7 @@ class Atir_Op<string mnemonic, list<Trait> traits = []> :
   let results = (outs );
 }
 
-def Atir_BufferOp : Atir_Op<"buffer"> {
+def Atir_BufferOp : Atir_Op<"buffer", Interfaces> {
   let summary = "Allocate an uninitialized buffer for intermediate computation";
   let description = [{
     A placeholder for a temporary tensor buffer.
@@ -60,7 +60,7 @@ def Atir_LoadOp : Atir_Op<"Load"> {
   let results = (outs Atir_Tensor:$output);
 }
 
-def Atir_CustomizeOp : Atir_Op<"Customize"> {
+def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
   let summary = "customize op";
   let description = [{
     Customize op is defined for user defined operations.
@@ -80,7 +80,7 @@ def Atir_CustomizeOp : Atir_Op<"Customize"> {
   }];
 }
 
-def Atir_ConstantOp : Atir_Op<"constant"> {
+def Atir_ConstantOp : Atir_Op<"constant", Interfaces> {
   let summary = "declare or define a constant";
   let description = [{}];
   let arguments = (ins SymbolNameAttr:$sym_name,
@@ -92,7 +92,7 @@ def Atir_ConstantOp : Atir_Op<"constant"> {
   }];
 }
 
-def Atir_VariableOp : Atir_Op<"variable"> {
+def Atir_VariableOp : Atir_Op<"variable", Interfaces> {
   let summary = "declare or define a variable";
   let description = [{}];
   let arguments = (ins SymbolNameAttr:$sym_name,
@@ -324,7 +324,7 @@ def Atir_ParallelOp : Atir_Op<"Parallel"> {
   }];
 }
 
-def Atir_ReturnOp : Atir_Op<"return", [Terminator, ParentOneOf<["ForOp", "ParallelOp", "SwitchCaseOp"]>]> {
+def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["ForOp", "ParallelOp", "SwitchCaseOp"]>], Interfaces)> {
   let summary = "loop yield and termination operation";
   let description = [{}];
 
@@ -353,22 +353,22 @@ def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", [Pure]> {
   }];
 }
 
-def Atir_IdentityOp : Atir_Op<"Identity", [Pure, SameOperandsAndResultElementType, 
-    SameOperandsAndResultShape]> {
+def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure, SameOperandsAndResultElementType,
+    SameOperandsAndResultShape], Interfaces)> {
   let summary = "Identity operation";
   let description = [{
     Returns the input tensor as-is. This op is often used for 
     naming, control dependencies, or intermediate value anchoring.
   }];
-  let arguments = (ins Atir_Tensor: $input);
-  let results = (outs Atir_Tensor: $output);
+  let arguments = (ins Atir_Tensor:$output, Atir_Tensor:$input);
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    $input attr-dict `:` type($input) `->` type($output)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
   let hasFolder = 1;
 }
 
-def Atir_ShapeOp : Atir_Op<"Shape", [Pure]> {
+def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
   let summary = "Returns the input shape information.";
   let description = [{
     Given a tensor input, this operation generates a one-dimensional tensor 
@@ -585,7 +585,7 @@ def Atir_GatherV2Op : Atir_Op<"GatherV2"> {
   }];
 }
 
-def Atir_ProdOp : Atir_Op<"Prod"> {
+def Atir_ProdOp : Atir_Op<"Prod", Interfaces> {
   let summary = "Compute the product of tensor elements over specified axes"; 
   let description = [{
     Computes the product of elements across dimensions of a tensor.
@@ -594,15 +594,38 @@ def Atir_ProdOp : Atir_Op<"Prod"> {
     Otherwise, the reduced dimensions are removed.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$indices,
     DefaultValuedAttr<BoolAttr, "false">:$keep_dims
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input `,` $indices attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_SumOp : Atir_Op<"Sum", Interfaces> {
+  let summary = "Compute the sum of tensor elements over specified axes";
+  let description = [{
+    Computes the sum of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`.
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+    Otherwise, the reduced dimensions are removed.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
   }];
 }
 
@@ -811,7 +834,7 @@ def Atir_ConcatV2Op : Atir_Op<"ConcatV2", Interfaces> {
   }];
 }
 
-def Atir_SizeOp : Atir_Op<"Size", [Pure]> {
+def Atir_SizeOp : Atir_Op<"Size", !listconcat([Pure], Interfaces)> {
   let summary = "Return the size of tensor.";
   let description = [{
     Computes the total number of elements in the input tensor.
@@ -862,12 +885,13 @@ def Atir_FloorDivOp : Atir_Op<"FloorDiv", [Pure, SameOperandsAndResultShape,
   }];
 }
 
-def Atir_RangeOp : Atir_Op<"Range", [Pure]> {
+def Atir_RangeOp : Atir_Op<"Range", !listconcat([Pure], Interfaces)> {
   let summary = "Creates a sequence of numbers";
   let description = [{
     Creates a sequence of numbers from `start` to `limit` with step `delta`.
   }];
   let arguments = (ins  // The input must be a scalar.
+    Atir_Tensor:$output,
     Atir_Tensor:$start,
     Atir_Tensor:$limit,
     Atir_Tensor:$delta
@@ -877,7 +901,7 @@ def Atir_RangeOp : Atir_Op<"Range", [Pure]> {
   );
   let hasVerifier = 1;
   let assemblyFormat = [{
-    $start `,` $limit `,` $delta attr-dict `:` functional-type(operands, results)
+    $output `,` $start `,` $limit `,` $delta attr-dict `:` type($output) `,` type($start) `,` type($limit) `,` type($delta) `->` type($result)
   }];
 }
 
@@ -999,13 +1023,14 @@ def Atir_LessOp : Atir_Op<"Less", !listconcat([Pure, ResultsBroadcastableShape],
   }];
 }
 
-def Atir_FillOp : Atir_Op<"Fill", [Pure]> {
+def Atir_FillOp : Atir_Op<"Fill", !listconcat([Pure], Interfaces)> {
   let summary = "Create tensor of shape filled with scalar value";
   let description = [{
     Generates a tensor with a specified shape (from shape input) where all elements 
     are set to the given scalar value (from value input).
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$shapeInput,
     Atir_Tensor:$valueInput
   );
@@ -1014,7 +1039,7 @@ def Atir_FillOp : Atir_Op<"Fill", [Pure]> {
   );
   let hasVerifier = 1;
   let assemblyFormat = [{
-    $shapeInput `,` $valueInput attr-dict `:` functional-type(operands, results)
+    $output `,` $shapeInput `,` $valueInput attr-dict `:` type($output) `,` type($shapeInput) `,` type($valueInput) `->` type($result)
   }];
 }
 
@@ -1272,14 +1297,14 @@ def Atir_ReshapeOp : Atir_Op<"Reshape", [Pure]> {
   }];
 }
 
-def Atir_ParameterOp : Atir_Op<"Parameter", [Pure]> {
+def Atir_ParameterOp : Atir_Op<"Parameter", !listconcat([Pure], Interfaces)> {
   let summary = "Placeholder for input arguments of the computation graph";
   let description = [{
     This operation serves as a placeholder for external inputs into the computation graph.
     It is identified by a unique `parameterNumber` (unique globally within the computation graph) and specifies
     the type and shape of the tensor to be passed from the outside. This operation does not perform any computation;
     it only acts as an input anchor for the computation graph.
-}];
+  }];
   let arguments = (ins I64Attr:$parameter_number);
   let results = (outs Atir_Tensor:$output);
   let assemblyFormat = [{
@@ -1377,7 +1402,7 @@ def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([Pure, ResultsBroadcastableS
   }];
 }
 
-def Atir_ScatterOp : Atir_Op<"Scatter", [Pure]> {
+def Atir_ScatterOp : Atir_Op<"Scatter", !listconcat([Pure], Interfaces)> {
   let summary = "Scatter operation with configurable update semantics.";
   let description = [{
     This operation updates elements of the `operand` tensor at

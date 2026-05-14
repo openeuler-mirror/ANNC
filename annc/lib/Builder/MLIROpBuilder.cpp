@@ -52,6 +52,14 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"DynamicPartition"}, &MLIRBuilder::createDynamicPartitionNode);
   add({"ParallelDynamicStitch"}, &MLIRBuilder::createParallelDynamicStitchNode);
   add({"Select", "SelectV2", "Where"}, &MLIRBuilder::createWhereNode);
+  add({"Variable", "VariableV2", "VarHandleOp"}, &MLIRBuilder::createVariableNode);
+  add({"Identity", "IdentityN"}, &MLIRBuilder::createIdentityNode);
+  add({"Shape"}, &MLIRBuilder::createShapeNode);
+  add({"Size"}, &MLIRBuilder::createSizeNode);
+  add({"Fill"}, &MLIRBuilder::createFillNode);
+  add({"Range"}, &MLIRBuilder::createRangeNode);
+  add({"Sum"}, &MLIRBuilder::createSumNode);
+  add({"Prod"}, &MLIRBuilder::createProdNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -808,6 +816,117 @@ void MLIRBuilder::createWhereNode(const NodeInfo& node, ArrayRef<Type> outs, Arr
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::WhereOp>(loc, outs[0], outputBuffer.getResult(), ins));
+}
+void MLIRBuilder::createVariableNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto op = builder_.create<atir::VariableOp>(loc, outs[0], 
+                                              builder_.getStringAttr(node.name),
+                                              builder_.getStringAttr("public"));
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createIdentityNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::IdentityOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createShapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::ShapeOp>(loc, outs[0], ins[0]));
+}
+void MLIRBuilder::createSizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (outs.empty() || ins.empty()) { createUnsupportedNode(node, outs, ins); return; }
+  Type resultType = outs[0];
+  if (auto tensorType = dyn_cast<atir::TensorType>(resultType)) {
+    auto elemTy = tensorType.getElementType();
+    if (!elemTy.isIntOrIndex()) {
+      resultType = atir::TensorType::get(
+          {}, builder_.getI64Type(), tensorType.getName(), tensorType.getEncoding(),
+          tensorType.getStride(), tensorType.getLayout(), tensorType.getMemType(),
+          tensorType.getAddress(), tensorType.getDeviceParallel(),
+          tensorType.getOnchipParallel(), tensorType.getCacheData());
+    }
+  }
+  SINGLE_OUT(builder_.create<atir::SizeOp>(loc, resultType, ins[0]));
+}
+void MLIRBuilder::createFillNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::FillOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createRangeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::RangeOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2]));
+}
+void MLIRBuilder::createSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.empty()) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+
+  Value input = ins[0];
+  Value indices = Value{};
+  if (ins.size() >= 2) {
+    indices = ins[1];
+  } else {
+    std::vector<int64_t> indicesShape = {0};
+    auto indicesTensorType = atir::TensorType::get(
+        indicesShape, builder_.getI32Type(),
+        builder_.getStringAttr("sum_indices"), mlir::Attribute());
+    auto indicesConst = builder_.create<atir::ConstantOp>(
+        loc, indicesTensorType, builder_.getStringAttr("sum_indices"),
+        builder_.getStringAttr("private"));
+    indices = indicesConst.getResult();
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto sumOp = builder_.create<atir::SumOp>(
+      loc, outs[0], outputBuffer.getResult(), input, indices, builder_.getBoolAttr(false));
+  tensorValues_[node.outputs[0].name] = sumOp.getResult();
+}
+void MLIRBuilder::createProdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 1) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+
+  Value indices = Value{};
+  if (ins.size() >= 2) {
+    indices = ins[1];
+  } else {
+    std::vector<int64_t> indicesShape = {0};
+    auto rankedType = RankedTensorType::get(indicesShape, builder_.getI32Type());
+    auto emptyAttr =
+        DenseElementsAttr::get(rankedType, llvm::ArrayRef<int32_t>{});
+    auto indicesTensorType = atir::TensorType::get(
+        indicesShape, builder_.getI32Type(), builder_.getStringAttr("prod_indices"),
+        /*encoding*/ Attribute(), /*stride*/ ArrayAttr(), /*layout*/ StringAttr(),
+        /*memType*/ atir::MemTypeAttr(), /*address*/ IntegerAttr(),
+        /*deviceParallel*/ atir::TilingAttr(), /*onchipParallel*/ atir::TilingAttr(),
+        emptyAttr);
+
+    auto indicesConst = builder_.create<atir::ConstantOp>(
+        loc, indicesTensorType, builder_.getStringAttr("prod_indices"),
+        builder_.getStringAttr("private"));
+    indices = indicesConst.getResult();
+  }
+
+  bool keepDims = false;
+  if (auto it = node.attrs.find("keep_dims"); it != node.attrs.end()) {
+    if (auto v = std::get_if<bool>(&it->second)) keepDims = *v;
+    else if (auto v = std::get_if<int64_t>(&it->second)) keepDims = (*v != 0);
+  } else if (auto it = node.attrs.find("keepdims"); it != node.attrs.end()) {
+    if (auto v = std::get_if<bool>(&it->second)) keepDims = *v;
+    else if (auto v = std::get_if<int64_t>(&it->second)) keepDims = (*v != 0);
+  }
+
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+
+  auto prodOp = builder_.create<atir::ProdOp>(loc, outs[0], outputBuffer.getResult(), input, indices,
+                                             builder_.getBoolAttr(keepDims));
+  tensorValues_[node.outputs[0].name] = prodOp.getResult();
 }
 
 }  // namespace annc

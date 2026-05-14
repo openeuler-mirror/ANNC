@@ -61,6 +61,14 @@ class MLIRBuilder {
   void createDynamicPartitionNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createParallelDynamicStitchNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createWhereNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createVariableNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createIdentityNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createShapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createFillNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createRangeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createProdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);

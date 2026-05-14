@@ -235,6 +235,30 @@ void inferEltwiseOpShape(mlir::Operation *op) {
   (void)setSingleResultShape(op, outShape);
 }
 
+int64_t inferStaticRangeOutputDim(double start, double limit, double delta,
+                                  int64_t maxElements) {
+  if (delta == 0.0) {
+    return -1;
+  }
+  int64_t n = 0;
+  if (delta > 0) {
+    for (double cur = start; cur < limit; cur += delta) {
+      ++n;
+      if (n > maxElements) {
+        return -2;
+      }
+    }
+  } else {
+    for (double cur = start; cur > limit; cur += delta) {
+      ++n;
+      if (n > maxElements) {
+        return -2;
+      }
+    }
+  }
+  return n;
+}
+
 // BinaryOps
 void AddOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void SubOp::inferShape() { inferEltwiseOpShape(getOperation()); }
@@ -440,6 +464,261 @@ void WhereOp::inferShape() {
     return;
   }
   emitError("Where expects either 1 input (indices) or 3 inputs (condition, x, y)");
+}
+
+void BufferOp::inferShape() {
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!resultType) {
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), resultType.getShape());
+}
+
+void CustomizeOp::inferShape() {}
+
+void ConstantOp::inferShape() {
+  auto resultType = dyn_cast<atir::TensorType>(getData().getType());
+  if (!resultType) {
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), resultType.getShape());
+}
+
+void VariableOp::inferShape() {
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!resultType) {
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), resultType.getShape());
+}
+
+void ReturnOp::inferShape() {}
+
+void IdentityOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void ShapeOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (!inputType) {
+    emitError("Shape input must be atir::TensorType");
+    return;
+  }
+
+  llvm::SmallVector<int64_t> outputShape = {
+      static_cast<int64_t>(inputType.getShape().size())};
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void SizeOp::inferShape() { (void)setSingleResultShape(getOperation(), {}); }
+
+void FillOp::inferShape() {
+  auto shapeInTy = dyn_cast<atir::TensorType>(getShapeInput().getType());
+  if (!shapeInTy) {
+    emitError("Fill shapeInput must be atir::TensorType");
+    return;
+  }
+
+  auto shapeInShape = shapeInTy.getShape();
+  if (shapeInShape.size() != 1) {
+    emitError("Fill shapeInput must be rank-1");
+    return;
+  }
+
+  int64_t rank = shapeInShape[0];
+  llvm::SmallVector<int64_t> outShape;
+  if (rank == ShapedType::kDynamic) {
+    return;
+  }
+
+  if (DenseElementsAttr shapeAttr = shapeInTy.getCacheData()) {
+    auto elemTy = shapeAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      for (const APInt &v : shapeAttr.getValues<APInt>()) {
+        outShape.push_back(v.getSExtValue());
+      }
+    } else if (isa<FloatType>(elemTy)) {
+      for (const APFloat &v : shapeAttr.getValues<APFloat>()) {
+        outShape.push_back(
+            static_cast<int64_t>(annc::apFloatToDouble(v)));
+      }
+    }
+    if (static_cast<int64_t>(outShape.size()) == rank) {
+      (void)setSingleResultShape(getOperation(), outShape);
+      return;
+    }
+  }
+
+  outShape.assign(static_cast<size_t>(rank), ShapedType::kDynamic);
+  (void)setSingleResultShape(getOperation(), outShape);
+}
+
+void RangeOp::inferShape() {
+  auto startTy = dyn_cast<atir::TensorType>(getStart().getType());
+  auto limitTy = dyn_cast<atir::TensorType>(getLimit().getType());
+  auto deltaTy = dyn_cast<atir::TensorType>(getDelta().getType());
+  if (!startTy || !limitTy || !deltaTy) {
+    emitError("Range operands must be atir::TensorType");
+    return;
+  }
+
+  auto readScalarDouble = [](DenseElementsAttr attr) -> std::optional<double> {
+    if (!attr || attr.getNumElements() != 1) {
+      return std::nullopt;
+    }
+    auto et = attr.getElementType();
+    if (isa<FloatType>(et)) {
+      return annc::apFloatToDouble(attr.getValues<APFloat>()[0]);
+    }
+    if (isa<IntegerType, IndexType>(et)) {
+      return static_cast<double>(attr.getValues<APInt>()[0].getSExtValue());
+    }
+    return std::nullopt;
+  };
+
+  DenseElementsAttr sAttr = startTy.getCacheData();
+  DenseElementsAttr lAttr = limitTy.getCacheData();
+  DenseElementsAttr dAttr = deltaTy.getCacheData();
+  if (!sAttr || !lAttr || !dAttr) {
+    (void)setSingleResultShape(getOperation(), {ShapedType::kDynamic});
+    return;
+  }
+
+  auto start = readScalarDouble(sAttr);
+  auto limit = readScalarDouble(lAttr);
+  auto delta = readScalarDouble(dAttr);
+  if (!start || !limit || !delta) {
+    (void)setSingleResultShape(getOperation(), {ShapedType::kDynamic});
+    return;
+  }
+
+  int64_t len =
+      inferStaticRangeOutputDim(*start, *limit, *delta, 1LL << 28);
+  if (len < 0) {
+    if (len == -1) {
+      emitError("Range delta must be non-zero for shape inference");
+    }
+    (void)setSingleResultShape(getOperation(), {ShapedType::kDynamic});
+    return;
+  }
+
+  (void)setSingleResultShape(getOperation(), {len});
+}
+
+void ParameterOp::inferShape() {}
+
+void ScatterOp::inferShape() {
+  auto baseTy =
+      dyn_cast<atir::TensorType>(getOperation()->getOperand(0).getType());
+  if (!baseTy) {
+    emitError("Scatter operand must be atir::TensorType");
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), baseTy.getShape());
+}
+
+void SumOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!inputType || !indicesType || !resultType) {
+    return;
+  }
+
+  auto inputShape = inputType.getShape();
+  llvm::SmallVector<int64_t> axes;
+  auto indicesAttr = indicesType.getCacheData();
+  if (indicesAttr && !indicesAttr.empty()) {
+    for (const APInt &value : indicesAttr.getValues<APInt>()) {
+      int64_t axis = value.getSExtValue();
+      if (axis < 0) {
+        axis += static_cast<int64_t>(inputShape.size());
+      }
+      axes.push_back(axis);
+    }
+  }
+
+  if (axes.empty()) {
+    auto inferredAxes =
+        inferReductionAxesFromShapes(inputShape, resultType.getShape());
+    axes.append(inferredAxes.begin(), inferredAxes.end());
+  }
+
+  llvm::SmallVector<int64_t> outputShape;
+  bool keepDims = getKeepDims() ||
+                  resultType.getShape().size() == inputShape.size();
+  if (keepDims) {
+    outputShape.assign(inputShape.begin(), inputShape.end());
+    for (int64_t axis : axes) {
+      if (axis >= 0 && axis < static_cast<int64_t>(outputShape.size())) {
+        outputShape[axis] = 1;
+      }
+    }
+  } else {
+    if (axes.empty()) {
+      for (int64_t axis = 0; axis < static_cast<int64_t>(inputShape.size()); ++axis) {
+        axes.push_back(axis);
+      }
+    }
+    for (size_t axis = 0; axis < inputShape.size(); ++axis) {
+      if (!llvm::is_contained(axes, static_cast<int64_t>(axis))) {
+        outputShape.push_back(inputShape[axis]);
+      }
+    }
+  }
+
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void ProdOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!inputType || !indicesType || !resultType) {
+    return;
+  }
+
+  auto inputShape = inputType.getShape();
+  llvm::SmallVector<int64_t> axes;
+  auto indicesAttr = indicesType.getCacheData();
+  if (indicesAttr && !indicesAttr.empty()) {
+    for (const APInt &value : indicesAttr.getValues<APInt>()) {
+      int64_t axis = value.getSExtValue();
+      if (axis < 0) {
+        axis += static_cast<int64_t>(inputShape.size());
+      }
+      axes.push_back(axis);
+    }
+  }
+
+  if (axes.empty()) {
+    auto inferredAxes =
+        inferReductionAxesFromShapes(inputShape, resultType.getShape());
+    axes.append(inferredAxes.begin(), inferredAxes.end());
+  }
+
+  llvm::SmallVector<int64_t> outputShape;
+  bool keepDims = getKeepDims() ||
+                  resultType.getShape().size() == inputShape.size();
+  if (keepDims) {
+    outputShape.assign(inputShape.begin(), inputShape.end());
+    for (int64_t axis : axes) {
+      if (axis >= 0 && axis < static_cast<int64_t>(outputShape.size())) {
+        outputShape[axis] = 1;
+      }
+    }
+  } else {
+    if (axes.empty()) {
+      for (int64_t axis = 0; axis < static_cast<int64_t>(inputShape.size()); ++axis) {
+        axes.push_back(axis);
+      }
+    }
+    for (size_t axis = 0; axis < inputShape.size(); ++axis) {
+      if (!llvm::is_contained(axes, static_cast<int64_t>(axis))) {
+        outputShape.push_back(inputShape[axis]);
+      }
+    }
+  }
+
+  (void)setSingleResultShape(getOperation(), outputShape);
 }
 
 
