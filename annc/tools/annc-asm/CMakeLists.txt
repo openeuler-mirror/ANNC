@@ -15,6 +15,7 @@ set(LIBS
   AtirPasses
   AtirToAffineConversion
   AtirToLinalgConversion
+  AArch64Codegen
 )
 add_llvm_executable(annc-asm
   annc-asm.cpp
