@@ -519,6 +519,9 @@ void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MaximumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
+void LogisticOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void AbsOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void ZerosLikeOp::inferShape() {inferEltwiseOpShape(getOperation());}
 
 void ConcatOp::inferShape() {
   // 第一个操作数是 output，从第二个开始是 inputs
@@ -1821,4 +1824,38 @@ void ResourceGatherOp::inferShape() {
   outShape.append(resourceShape.begin() + 1, resourceShape.end());
   (void)setSingleResultShape(getOperation(), outShape);
 }
+
+void ReluOp::inferShape() {
+  if (this->getOperation()->getNumOperands() != 2) {
+    mlir::emitError(getLoc(), "ReluOp must have exactly two operands (output, input).");
+    return;
+  }
+  // 第二个操作数是 input
+  auto type = getOperand(1).getType();
+  if (!type) {
+    emitError("Relu operands must have defining ops");
+    return;
+  }
+
+  auto tensorType = dyn_cast<atir::TensorType>(type);
+  if (!tensorType) {
+    emitError("Expected TensorType for operand, got: ")
+        << "type: " << type << " (TensorType: " << isa<atir::TensorType>(type)
+        << ")\n";
+    return;
+  }
+
+  llvm::ArrayRef<int64_t> inputShape = tensorType.getShape();
+  (void)setSingleResultShape(getOperation(), inputShape);
+}
+
+void RsqrtOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getX().getType());
+  if (!inputType) {
+    emitError("Rsqrt input must be atir::TensorType");
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), inputType.getShape());
+}
+
 }  // namespace atir

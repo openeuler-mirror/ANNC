@@ -175,7 +175,7 @@ def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
   let results = (outs Atir_Tensor:$output);
 }
 
-def Atir_ReluOp : Atir_Op<"Relu"> {
+def Atir_ReluOp : Atir_Op<"Relu", Interfaces> {
   let summary = "relu op";
   let arguments = (
       ins Atir_Tensor:$output,
@@ -820,7 +820,7 @@ def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
   }];
 }
 
-def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", [Pure, SameOperandsAndResultShape]> {
+def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Returns a tensor of zeros with the same shape and type as input";
   let description = [{
     The ZerosLike operation returns a new tensor where all elements are zero,
@@ -1177,20 +1177,21 @@ def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", !listconcat([Pure], Interfaces)>
   }];
 }
 
-def Atir_RsqrtOp : Atir_Op<"Rsqrt", [Pure, SameOperandsAndResultType, Elementwise]> {
+def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([Pure, SameOperandsAndResultShape, Elementwise], Interfaces)> {
   let summary = "Computes reciprocal of square root element-wise.";
   let description = [{
     Performs element-wise reciprocal square root on tensor `x`, producing tensor `y`.
     For each element in the input: `y = 1 / sqrt(x)`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x
   );
   let results = (outs
-    Atir_Tensor:$y
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x attr-dict `:` type($x)
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
   }];
 }
 
@@ -1406,20 +1407,21 @@ def Atir_AndOp : Atir_Op<"And", !listconcat([Pure, ResultsBroadcastableShape], I
   }];
 }
 
-def Atir_LogisticOp : Atir_Op<"Logistic", [Pure, SameOperandsAndResultShape]> {
+def Atir_LogisticOp : Atir_Op<"Logistic", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise logistic (sigmoid) function.";
   let description = [{
     This operation computes the logistic (sigmoid) function on
     each element of the input tensor: `1 / (1 + exp(-x))`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input
   );
   let results = (outs
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` functional-type(operands, results)
   }];
 }
 
@@ -1471,19 +1473,20 @@ def Atir_ScatterOp : Atir_Op<"Scatter", !listconcat([Pure], Interfaces)> {
   );
 }
 
-def Atir_AbsOp : Atir_Op<"Abs", [Pure, SameOperandsAndResultShape]> {
+def Atir_AbsOp : Atir_Op<"Abs", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise absolute value operation.";
   let description = [{
     This operation computes the absolute value of each element in the input tensor. 
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input
   );
   let results = (outs
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` functional-type(operands, results)
   }];
 }
 

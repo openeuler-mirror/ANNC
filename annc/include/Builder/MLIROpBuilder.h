@@ -96,6 +96,11 @@ class MLIRBuilder {
   void createTopKNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createUnsortedSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createTensorScatterUpdateNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createReluNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createLogisticNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createAbsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createRsqrtNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createZerosLikeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
