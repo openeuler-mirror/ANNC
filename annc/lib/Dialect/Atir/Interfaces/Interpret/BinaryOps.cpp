@@ -207,4 +207,131 @@ void RealDivOp::Interpret() {
   (void)setDenseResult(resultType, outputShape, result);
 }
 
+void FloorModOp::Interpret() {
+  this->inferShape();
+
+  atir::TensorType lhsType;
+  atir::TensorType rhsType;
+  DenseElementsAttr lhsAttr;
+  DenseElementsAttr rhsAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getX(), "FloorMod lhs",
+                                  lhsType, lhsAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getY(), "FloorMod rhs",
+                                  rhsType, rhsAttr))) {
+    return;
+  }
+
+  auto lhsValsOr = getFloatValues(lhsAttr);
+  auto rhsValsOr = getFloatValues(rhsAttr);
+  if (failed(lhsValsOr) || failed(rhsValsOr)) {
+    emitOpError("FloorMod only supports numeric input cacheData");
+    return;
+  }
+
+  auto resultType = getResult().getType();
+  auto outputShape = resultType.getShape();
+  int64_t outputSize = getElementCount(outputShape);
+  if (outputSize < 0) {
+    emitOpError("FloorMod output shape must be static for interpretation");
+    return;
+  }
+
+  std::vector<float> result(outputSize, 0.0f);
+  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
+    auto outputIndex = getMultiIndex(outputShape, outIdx);
+    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
+    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
+    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
+    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
+    result[outIdx] = std::fmod(std::fmod(lhsValue, rhsValue) + rhsValue, rhsValue);
+  }
+
+  (void)setDenseResult(resultType, outputShape, result);
+}
+
+void FloorDivOp::Interpret() {
+  this->inferShape();
+
+  atir::TensorType lhsType;
+  atir::TensorType rhsType;
+  DenseElementsAttr lhsAttr;
+  DenseElementsAttr rhsAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getX(), "FloorDiv lhs",
+                                  lhsType, lhsAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getY(), "FloorDiv rhs",
+                                  rhsType, rhsAttr))) {
+    return;
+  }
+
+  auto lhsValsOr = getFloatValues(lhsAttr);
+  auto rhsValsOr = getFloatValues(rhsAttr);
+  if (failed(lhsValsOr) || failed(rhsValsOr)) {
+    emitOpError("FloorDiv only supports numeric input cacheData");
+    return;
+  }
+
+  auto resultType = getResult().getType();
+  auto outputShape = resultType.getShape();
+  int64_t outputSize = getElementCount(outputShape);
+  if (outputSize < 0) {
+    emitOpError("FloorDiv output shape must be static for interpretation");
+    return;
+  }
+
+  std::vector<float> result(outputSize, 0.0f);
+  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
+    auto outputIndex = getMultiIndex(outputShape, outIdx);
+    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
+    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
+    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
+    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
+    result[outIdx] = std::floor(lhsValue / rhsValue);
+  }
+
+  (void)setDenseResult(resultType, outputShape, result);
+}
+
+void DivideOp::Interpret() {
+  this->inferShape();
+
+  atir::TensorType lhsType;
+  atir::TensorType rhsType;
+  DenseElementsAttr lhsAttr;
+  DenseElementsAttr rhsAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getLhs(), "Divide lhs",
+                                  lhsType, lhsAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getRhs(), "Divide rhs",
+                                  rhsType, rhsAttr))) {
+    return;
+  }
+
+  auto lhsValsOr = getFloatValues(lhsAttr);
+  auto rhsValsOr = getFloatValues(rhsAttr);
+  if (failed(lhsValsOr) || failed(rhsValsOr)) {
+    emitOpError("Divide only supports numeric input cacheData");
+    return;
+  }
+
+  auto resultType = getResult().getType();
+  auto outputShape = resultType.getShape();
+  int64_t outputSize = getElementCount(outputShape);
+  if (outputSize < 0) {
+    emitOpError("Divide output shape must be static for interpretation");
+    return;
+  }
+
+  std::vector<float> result(outputSize, 0.0f);
+  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
+    auto outputIndex = getMultiIndex(outputShape, outIdx);
+    auto lhsIndex =
+        getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
+    auto rhsIndex =
+        getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
+    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
+    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
+    result[outIdx] = lhsValue / rhsValue;
+  }
+
+  (void)setDenseResult(resultType, outputShape, result);
+}
 } // namespace atir
