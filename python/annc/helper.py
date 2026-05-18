@@ -75,9 +75,9 @@ class kp:
                         continue;
                     for res in op.results:
                         t_name = get_tensor_type(res).get_name()
-                        if t_name in outputs:
-                            output_vals.append(res)
-                            output_types.append(res.type)
+                        # if t_name in outputs:
+                        #     output_vals.append(res)
+                        #     output_types.append(res.type)
                 builder.create_return(output_vals)
                 func_op.attributes["function_type"] = mlir.TypeAttr.get(
                     mlir.FunctionType.get(inputs=func_op.attributes["function_type"].value.inputs,

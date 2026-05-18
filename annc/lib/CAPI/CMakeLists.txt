@@ -16,7 +16,6 @@ add_mlir_public_c_api_library(AtirCAPIPasses
 
   LINK_LIBS PUBLIC
   AtirDialect
-  AtirPasses
   AtirBuilder
   AtirToAffineConversion
   AtirToLinalgConversion

@@ -24,7 +24,10 @@ namespace atir {
             std::cout << "this is ConvertAtirToLinalg" << std::endl;
             ConversionTarget target(getContext());
             target.addLegalDialect<linalg::LinalgDialect,
-                                   arith::ArithDialect>();
+                                   arith::ArithDialect,
+                                   bufferization::BufferizationDialect,
+                                   memref::MemRefDialect,
+                                   func::FuncDialect>();
             AtirTypeToLinalgConverter atirTypeConverter;
             InputTypeConverter inputTypeConverter;
             RewritePatternSet patterns(&getContext());

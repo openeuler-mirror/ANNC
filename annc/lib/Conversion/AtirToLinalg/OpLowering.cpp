@@ -4,6 +4,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "llvm/Support/Debug.h"
 
 namespace {
     std::vector<AffineMap> getTransposeAttr(MLIRContext *ctx, ArrayRef<bool> transpose)
@@ -53,6 +54,7 @@ void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter, T
     // patterns.add<ConcatLoweringToLinalg>(typeConverter, patterns.getContext());
     patterns.add<MatMulLoweringToLinalg>(atirTypeConverter, patterns.getContext());
     // patterns.add<ReturnLoweringToLinalg>(inputTypeConverter, patterns.getContext());
+    patterns.add<CustomizeLoweringToLinalg>(inputTypeConverter, patterns.getContext());
     patterns.add<FuncReturnOpLowering>(inputTypeConverter, patterns.getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, inputTypeConverter);
 }
@@ -109,6 +111,51 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
         Value matmul = linalgMatmul.getResult(0);
         rewriter.replaceOp(op, matmul);
     }
+}
+
+void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter, atir::CustomizeOpAdaptor adaptor,
+                                         atir::CustomizeOp op) const {
+
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+
+  SmallVector<mlir::Value> newOperands;
+  SmallVector<mlir::Type> inputMemRefTypes;
+  for (mlir::Value input : adaptor.getOperands()) {
+    newOperands.push_back(input);
+    inputMemRefTypes.push_back(input.getType());
+  }
+
+  SmallVector<mlir::Type> resultMemrefTypes;
+  for (mlir::Type resultType : op->getResultTypes()) {
+    if (auto tensorType = llvm::dyn_cast<TensorType>(resultType)) {
+      auto outMemrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      resultMemrefTypes.push_back(outMemrefType);
+    }else {
+      resultMemrefTypes.push_back(resultType);
+    }
+  }
+
+  auto funcType = rewriter.getFunctionType(inputMemRefTypes,resultMemrefTypes);
+
+  PatternRewriter::InsertionGuard guard(rewriter);
+
+  rewriter.setInsertionPointToStart(module.getBody());
+  auto funcOp = rewriter.create<func::FuncOp>(
+      op.getLoc(), op.getOpType(), funcType);
+
+  llvm::dbgs() << "this is CustomizeLoweringToLinalg::funcOp\n";
+
+  funcOp.setPrivate();
+
+  rewriter.setInsertionPoint(op);
+
+  auto callOp = rewriter.create<func::CallOp>(
+      op.getLoc(),
+      op.getOpType(),
+      resultMemrefTypes,
+      newOperands);
+
+  rewriter.replaceOp(op, callOp);
 }
 
 void ReturnLoweringToLinalg::Lowering(PatternRewriter &rewriter, ReturnOpAdaptor adaptor, ReturnOp op) const {

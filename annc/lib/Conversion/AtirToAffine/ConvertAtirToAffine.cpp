@@ -24,7 +24,8 @@ namespace atir {
             target.addLegalDialect<affine::AffineDialect,
                                    arith::ArithDialect,
                                    bufferization::BufferizationDialect,
-                                   memref::MemRefDialect>();
+                                   memref::MemRefDialect,
+                                   func::FuncDialect>();
             AtirTypeToAffineConverter atirTypeConverter;
             RewritePatternSet patterns(&getContext());
             populateAtirToAffineConversionPatterns(atirTypeConverter, patterns);

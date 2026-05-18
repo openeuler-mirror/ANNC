@@ -48,6 +48,7 @@ void populateAtirToAffineConversionPatterns(TypeConverter& typeConverter, Rewrit
     patterns.add<AddLoweringToAffine>(typeConverter, patterns.getContext());
     patterns.add<ConcatLoweringToAffine>(typeConverter, patterns.getContext());
     patterns.add<MatMulLoweringToAffine>(typeConverter, patterns.getContext());
+    patterns.add<CustomizeLoweringToAffine>(typeConverter, patterns.getContext());
     patterns.add<ReturnLoweringToAffine>(typeConverter, patterns.getContext());
     patterns.add<FuncReturnOpLowering>(typeConverter, patterns.getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
@@ -332,6 +333,48 @@ void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
     }
 
     rewriter.replaceOp(op, c);
+}
+
+void CustomizeLoweringToAffine::Lowering(mlir::PatternRewriter &rewriter, atir::CustomizeOpAdaptor adaptor,
+                                         atir::CustomizeOp op) const {
+
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+
+  SmallVector<mlir::Value> newOperands;
+  SmallVector<mlir::Type> inputMemRefTypes;
+  for (mlir::Value input : adaptor.getOperands()) {
+    newOperands.push_back(input);
+    inputMemRefTypes.push_back(input.getType());
+  }
+
+  SmallVector<mlir::Type> resultMemrefTypes;
+  for (mlir::Type resultType : op->getResultTypes()) {
+    if (auto tensorType = llvm::dyn_cast<TensorType>(resultType)) {
+      auto outMemrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      resultMemrefTypes.push_back(outMemrefType);
+    }else {
+      resultMemrefTypes.push_back(resultType);
+    }
+  }
+
+  auto funcType = rewriter.getFunctionType(inputMemRefTypes,resultMemrefTypes);
+
+  PatternRewriter::InsertionGuard guard(rewriter);
+
+  rewriter.setInsertionPointToStart(module.getBody());
+  auto funcOp = rewriter.create<func::FuncOp>(
+      op.getLoc(), op.getOpType(), funcType);
+
+  funcOp.setPrivate();
+
+  rewriter.setInsertionPoint(op);
+
+  auto callOp = rewriter.create<func::CallOp>(
+      op.getLoc(),
+      op.getOpType(),
+      resultMemrefTypes,
+      newOperands);
+  rewriter.replaceOp(op, callOp);
 }
 
 void ReturnLoweringToAffine::Lowering(PatternRewriter &rewriter, ReturnOpAdaptor adaptor, ReturnOp op) const {

@@ -1,44 +1,63 @@
+import numpy as np
+
 from annc.builder import mlir
 from annc.helper import kp
+from annc.ops import matmul
+from annc.passmanager import PassManager
 from annc.types import ElemType
-from annc.ops import constant, matmul, add, relu
-from annc.types import TensorType
-from annc.types import TilingAttr
 
-import numpy as np
 
 @kp.jit
 def fused_matmul(inputs, **kwargs):
     lhs = inputs[0]
     rhs = inputs[1]
     cm = inputs[2]
-    bias = inputs[3]
-    matmul(ElemType.FP32(), [1024,1024], lhs, rhs, cm, False)
+    matmul(ElemType.FP32(), [1024, 1024], lhs, rhs, cm, False)
 
-module: mlir.Module = fused_matmul(
-    name="demo",
-    outputs=['out'],
-    inputs=[
-        np.random.randn(1024,1024).astype(np.float32),
-        np.random.randn(1024,1024).astype(np.float32),
-        np.zeros((1024,1024)).astype(np.float32),
-        np.random.randn(1024).astype(np.float32)
-    ]
-)
 
-module.operation.print(large_elements_limit=16)
+def build_fused_matmul_module() -> mlir.Module:
+    return fused_matmul(
+        name="demo",
+        outputs=["out"],
+        inputs=[
+            np.random.randn(1024, 1024).astype(np.float32),
+            np.random.randn(1024, 1024).astype(np.float32),
+            np.zeros((1024, 1024)).astype(np.float32),
+            np.random.randn(1024).astype(np.float32),
+        ],
+    )
 
-from annc.passmanager import PassManager
 
-module.context.__enter__()
-pm = PassManager.parse("builtin.module()")
+def run_pipeline(label: str, passes: list[str]) -> None:
+    module = build_fused_matmul_module()
 
-pm.add("atir-tiling")
-# pm.add("atir-select-lowering-strategy")
-# pm.add("convert-atir-to-linalg")
-# pm.add("annc-one-shot-bufferize")
-# pm.add("cache-parallel")
+    print(f"=== {label}: before ===")
+    module.operation.print(large_elements_limit=16)
 
-pm.run(module.operation)
-module.operation.print(large_elements_limit=16)
-module.context.__exit__(None, None, None)
+    module.context.__enter__()
+    try:
+        pm = PassManager.parse("builtin.module()")
+        for pass_name in passes:
+            pm.add(pass_name)
+        pm.run(module.operation)
+    finally:
+        module.context.__exit__(None, None, None)
+
+    print(f"=== {label}: after ===")
+    module.operation.print(large_elements_limit=16)
+
+
+PIPELINES = {
+    "fast-codegen-affine": [
+        "atir-fast-codegen",
+        "convert-atir-to-affine",
+    ],
+}
+
+
+def main() -> None:
+    run_pipeline("fast-codegen-affine", PIPELINES["fast-codegen-affine"])
+
+
+if __name__ == "__main__":
+    main()

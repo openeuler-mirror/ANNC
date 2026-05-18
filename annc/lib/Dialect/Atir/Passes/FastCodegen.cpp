@@ -2,33 +2,36 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
-#include "iostream"
+#include "llvm/Support/Debug.h"
+#include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
 
 using namespace llvm;
 using namespace mlir;
 
 namespace atir {
+
+
+
     class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
     public:
         AtirFastCodegenPass() = default;
 
         void runOnOperation() override {
-            std::cout << "this is AtirFastCodegenPass" << std::endl;
+            llvm::dbgs() << "this is PimpFastCodegenPass\n";
             auto m = getOperation();
-            //todo c++
-            //todo 
-            //1.mlir
-            //2.pass?
+            auto ctx = m.getContext();
+            GreedyRewriteConfig config;
+            config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
 
-            //todo
-            // 1.
-            // 2.c++matmul-add-relu
+            RewritePatternSet patterns(ctx);
+            PatternRegistry::instance().populatePatterns(patterns);
+            (void)applyPatternsGreedily(m, std::move(patterns), config);
 
         }
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass() {
-        std::cout << "this is createAtirFastCodegenPass" << std::endl;
+        llvm::dbgs() << "this is createPimpFastCodegenPass\n";
         return std::make_unique<AtirFastCodegenPass>();
     }
 }  // namespace atir

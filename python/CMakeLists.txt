@@ -66,6 +66,9 @@ add_mlir_python_common_capi_library(ANNCPythonCAPI
     MLIRPythonSources.Core
 )
 
+# Force AtirPasses into the common CAPI shared library with whole-archive
+target_link_libraries(ANNCPythonCAPI PRIVATE "-Wl,--whole-archive" AtirPasses "-Wl,--no-whole-archive")
+
 ################################################################################
 # Instantiation of all Python modules
 ################################################################################
