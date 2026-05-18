@@ -8,6 +8,11 @@ Options:
   -d, --dir DIR       Working directory (default: current directory)
   -h, --help          Show this help message
 
+Requirements:
+  - protoc (Protocol Buffers compiler) version 3.14.0
+  - The script will automatically attempt to install protobuf-devel-3.14.0 using yum if protoc is not found
+  - Note: Automatic installation requires root privileges (run with sudo)
+
 Example:
   $0                          # Use current directory
   $0 -d /path/to/workspace    # Specify working directory"
@@ -33,6 +38,47 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "${WORK_DIR}"
+
+# 检查并安装依赖（仅使用 yum）
+check_and_install_dependencies() {
+  echo "Checking dependencies..."
+  
+  # 检查 protoc 是否已经安装
+  if command -v protoc &> /dev/null; then
+    echo "protoc is already installed."
+    return 0
+  fi
+  
+  echo "protoc is not installed. Attempting to install automatically..."
+  
+  # 检查 yum 是否可用
+  if ! command -v yum &> /dev/null; then
+    echo "Error: yum package manager is not available."
+    echo "Please manually install protobuf-devel-3.14.0."
+    exit 1
+  fi
+  
+  # 检查是否有 root 权限
+  if [[ $EUID -ne 0 ]]; then
+    echo "Error: Need root privileges to install packages. Please run with sudo."
+    echo "Alternatively, you can manually install protobuf-devel-3.14.0 using: yum install protobuf-devel-3.14.0"
+    exit 1
+  fi
+  
+  echo "Installing protobuf-devel-3.14.0 using yum..."
+  yum install -y protobuf-devel-3.14.0
+  
+  # 验证安装是否成功
+  if command -v protoc &> /dev/null; then
+    echo "protoc installation successful."
+    return 0
+  else
+    echo "Error: Failed to install protoc. Please try installing manually: yum install protobuf-devel-3.14.0"
+    exit 1
+  fi
+}
+
+check_and_install_dependencies
 
 # TensorFlow proto 版本
 TF_TAG=v2.20.0

@@ -90,6 +90,10 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"TopK", "TopKV2"}, &MLIRBuilder::createTopKNode);
   add({"UnsortedSegmentMin"}, &MLIRBuilder::createUnsortedSegmentMinNode);
   add({"TensorScatterUpdate"}, &MLIRBuilder::createTensorScatterUpdateNode);
+  add({"ZerosLike"}, &MLIRBuilder::createZerosLikeNode);
+  add({"Relu"}, &MLIRBuilder::createReluNode);
+  add({"Sigmoid", "Logistic"}, &MLIRBuilder::createLogisticNode);
+  
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -1376,5 +1380,20 @@ void MLIRBuilder::createTensorScatterUpdateNode(const NodeInfo& node, ArrayRef<T
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::TensorScatterUpdateOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2]));
+}
+void MLIRBuilder::createZerosLikeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::ZerosLikeOp>(loc, outs[0], ins[0]));
+}
+void MLIRBuilder::createReluNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::ReluOp>(loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getF32FloatAttr(-1.0f)));
+}
+void MLIRBuilder::createLogisticNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::LogisticOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
 }
 }  // namespace annc
