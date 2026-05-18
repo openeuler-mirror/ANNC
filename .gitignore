@@ -1,8 +1,10 @@
 .vscode
 .venv
+.idea
 
 bazel-*
 output
+build
 
 github
 

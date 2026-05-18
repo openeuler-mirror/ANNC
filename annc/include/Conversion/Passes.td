@@ -23,7 +23,8 @@ def ConvertAtirToLinalg : Pass<"convert-atir-to-linalg", "ModuleOp"> {
     "AtirDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::arith::ArithDialect",
-    "mlir::memref::MemRefDialect"
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 

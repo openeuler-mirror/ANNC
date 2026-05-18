@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "Common/AtirLowering.h"
 #include "Dialect/Atir/AtirOps.h"
 
