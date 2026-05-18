@@ -12,5 +12,5 @@ void populateAtirToLinalgConversionPatterns(TypeConverter &inputTypeConverter, T
   };
 
 OpLowering(None)OpLowering(Constant)OpLowering(Relu)OpLowering(Add)OpLowering(Concat)OpLowering(MatMul)
-  OpLowering(Return)OpLowering(Load)
+  OpLowering(Return)OpLowering(Load)OpLowering(Customize)
 }

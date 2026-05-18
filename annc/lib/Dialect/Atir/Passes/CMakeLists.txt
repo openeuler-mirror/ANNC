@@ -1,4 +1,4 @@
-file(GLOB _srcs *.cpp)
+file(GLOB _srcs *.cpp Patterns/*.cpp Patterns/CustomPatterns/*.cpp)
 
 add_mlir_library(AtirPasses
     ${_srcs}
@@ -12,6 +12,7 @@ add_mlir_library(AtirPasses
     MLIRAtirPassIncGen
   
     LINK_LIBS PUBLIC
+    AtirDialect
     MLIRIR
     MLIRPass
     MLIRSupport
@@ -19,6 +20,7 @@ add_mlir_library(AtirPasses
     MLIRFuncDialect
     MLIRRewrite
     MLIRTransforms
+    MLIRDialect
     
     AtirShapeInferIntfc
     AtirInterpretIntfc

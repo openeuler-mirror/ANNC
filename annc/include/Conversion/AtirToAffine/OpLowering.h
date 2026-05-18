@@ -12,5 +12,5 @@ void populateAtirToAffineConversionPatterns(TypeConverter &typeConverter, Rewrit
   };
 
 OpLowering(None)OpLowering(Constant)OpLowering(Relu)OpLowering(Add)OpLowering(Concat)OpLowering(MatMul)
-  OpLowering(Return)OpLowering(Load)
+  OpLowering(Return)OpLowering(Load)OpLowering(Customize)
 }

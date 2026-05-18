@@ -1,0 +1,88 @@
+#include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
+#include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
+
+using namespace mlir;
+using namespace atir;
+
+struct MatmulAddReluToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
+  MatmulAddReluToCustomCallRewrite(MLIRContext* context, PatternBenefit benefit = 8)
+      : CustomFusionPatternBase<MatMulOp>(context, benefit){}
+  mlir::LogicalResult matchFusion(
+      MatMulOp anchor,
+      llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
+
+
+    fusedOps.push_back(anchor);
+    if (!anchor->hasOneUse()) {
+      return failure();
+    }
+    auto add = llvm::dyn_cast<AddOp>(*anchor->getUsers().begin());
+    if (!add) {
+      return failure();
+    }
+    fusedOps.push_back(add);
+    if (!add->hasOneUse()) {
+      return failure();
+    }
+    auto relu = llvm::dyn_cast<ReluOp>(*add->getUsers().begin());
+    if (!relu) {
+      return failure();
+    }
+    fusedOps.push_back(relu);
+    return success();
+  }
+
+  std::string getKernelName(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
+    return "my_matmul_add_relu";
+  }
+};
+
+struct MatmulAddToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
+  MatmulAddToCustomCallRewrite(MLIRContext* context, PatternBenefit benefit = 7)
+      : CustomFusionPatternBase<MatMulOp>(context, benefit){}
+  mlir::LogicalResult matchFusion(
+      MatMulOp anchor,
+      llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
+
+
+    fusedOps.push_back(anchor);
+    if (!anchor->hasOneUse()) {
+      return failure();
+    }
+    auto add = llvm::dyn_cast<AddOp>(*anchor->getUsers().begin());
+    if (!add) {
+      return failure();
+    }
+    fusedOps.push_back(add);
+    return success();
+  }
+
+  std::string getKernelName(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
+    return "my_matmul_add";
+  }
+};
+
+struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
+  MatmulToCustomCallRewrite(MLIRContext* context, PatternBenefit benefit = 6)
+      : CustomFusionPatternBase<MatMulOp>(context, benefit){}
+  mlir::LogicalResult matchFusion(
+      MatMulOp anchor,
+      llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
+    fusedOps.push_back(anchor);
+    return success();
+  }
+
+  std::string getKernelName(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
+    return "my_matmul";
+  }
+};
+
+REGISTER_CUSTOM_PATTERN(MatmulAddReluToCustomCallRewrite);
+REGISTER_CUSTOM_PATTERN(MatmulAddToCustomCallRewrite);
+REGISTER_CUSTOM_PATTERN(MatmulToCustomCallRewrite);
