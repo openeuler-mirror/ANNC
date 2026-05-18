@@ -48,6 +48,9 @@ def run_pipeline(label: str, passes: list[str]) -> None:
 
 
 PIPELINES = {
+    "select-lowering-strategy": [
+        "atir-select-lowering-strategy",
+    ],
     "fast-codegen-affine": [
         "atir-fast-codegen",
         "convert-atir-to-affine",
@@ -56,7 +59,10 @@ PIPELINES = {
 
 
 def main() -> None:
-    run_pipeline("fast-codegen-affine", PIPELINES["fast-codegen-affine"])
+    run_pipeline(
+        "select-lowering-strategy",
+        PIPELINES["select-lowering-strategy"],
+    )
 
 
 if __name__ == "__main__":

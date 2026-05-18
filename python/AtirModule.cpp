@@ -21,6 +21,7 @@ PYBIND11_MODULE(_annc, m) {
   atir::registerAtirOpFusionPass();
   atir::registerConvertAtirToAffinePass();
   atir::registerConvertAtirToLinalgPass();
+  atir::registerAtirSelectLoweringStrategyPass();
   annc::registerAllTargetPasses();
 
   auto atir_m = m.def_submodule("atir");

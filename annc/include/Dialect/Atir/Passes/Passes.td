@@ -21,6 +21,15 @@ def AtirCanonicalize : Pass<"atir-canonicalize", "ModuleOp"> {
   ];
 }
 
+/* Select Lowering Strategy */
+def AtirSelectLoweringStrategy : Pass<"atir-select-lowering-strategy", "ModuleOp"> {
+  let summary = "select lowering strategy";
+  let constructor = "createAtirSelectLoweringStrategyPass()";
+  let dependentDialects = [
+    "AtirDialect"
+  ];
+}
+
 /* Operation Fusion */
 def AtirOpFusion : Pass<"atir-op-fusion", "ModuleOp"> {
   let summary = "operator fusion";
