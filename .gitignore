@@ -1,9 +1,14 @@
 .vscode
 .venv
+
 AGENTS.md
+
+.idea
+
 
 bazel-*
 output
+build
 
 github
 
