@@ -38,6 +38,8 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"Mul"}, &MLIRBuilder::createMulNode);
   add({"Sub"}, &MLIRBuilder::createSubNode);
   add({"Div", "RealDiv", "Divide"}, &MLIRBuilder::createRealDivNode);
+  add({"FloorDiv"}, &MLIRBuilder::createFloorDivNode);
+  add({"FloorMod"}, &MLIRBuilder::createFloorModNode);
   add({"Less"}, &MLIRBuilder::createLessNode);
   add({"NotEqual"}, &MLIRBuilder::createNotEqualNode);
   add({"Less"}, &MLIRBuilder::createLessNode);
@@ -81,6 +83,13 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
       &MLIRBuilder::createSparseSegmentMinNode);
   add({"SparseSegmentMean", "SparseSegmentMeanWithNumSegments"},
       &MLIRBuilder::createSparseSegmentMeanNode);
+  add({"ResourceGather"}, &MLIRBuilder::createResourceGatherNode);
+  add({"Cast"}, &MLIRBuilder::createCastNode);
+  add({"StringToHashBucketFast"}, &MLIRBuilder::createStringToHashBucketFastNode);
+  add({"Unique"}, &MLIRBuilder::createUniqueNode);
+  add({"TopK", "TopKV2"}, &MLIRBuilder::createTopKNode);
+  add({"UnsortedSegmentMin"}, &MLIRBuilder::createUnsortedSegmentMinNode);
+  add({"TensorScatterUpdate"}, &MLIRBuilder::createTensorScatterUpdateNode);
 }
 
 const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
@@ -730,6 +739,18 @@ void MLIRBuilder::createRealDivNode(const NodeInfo& node, ArrayRef<Type> outs, A
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::RealDivOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
 }
+void MLIRBuilder::createFloorDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::FloorDivOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
+void MLIRBuilder::createFloorModNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::FloorModOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
+}
 void MLIRBuilder::createNotEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
                                               builder_.getStringAttr("NE")));
@@ -1284,5 +1305,76 @@ void MLIRBuilder::createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Typ
   auto ssmOp = builder_.create<atir::SparseSegmentMeanOp>(
       loc, outs[0], outputBuffer.getResult(), input, indices, segmentIds, numSegmentsVal);
   tensorValues_[node.outputs[0].name] = ssmOp.getResult();
+}
+void MLIRBuilder::createResourceGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2 || outs.empty()) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value resource = ins[0];
+  llvm::SmallVector<Value, 4> indices(ins.begin() + 1, ins.end());
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::ResourceGatherOp>(
+      loc, outs[0], outputBuffer.getResult(), resource, indices, builder_.getBoolAttr(false),
+      builder_.getI64IntegerAttr(0));
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createCastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::CastOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createStringToHashBucketFastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 1 || outs.empty()) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  int64_t numBuckets = node.has_numBuckets ? node.numBuckets : 100;
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::StringToHashBucketFastOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getI64IntegerAttr(numBuckets)));
+}
+void MLIRBuilder::createUniqueNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 1) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  // Unique has 2 outputs: y (unique values) and idx (indices)
+  auto uniqueOp = builder_.create<atir::UniqueOp>(loc, outs[0], outs[1], ins[0]);
+  // Store both outputs
+  if (node.outputs.size() >= 2) {
+    tensorValues_[node.outputs[0].name] = uniqueOp.getY();
+    tensorValues_[node.outputs[1].name] = uniqueOp.getIdx();
+  } else if (node.outputs.size() == 1) {
+    tensorValues_[node.outputs[0].name] = uniqueOp.getY();
+  }
+}
+void MLIRBuilder::createTopKNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  bool sorted = true;
+  if (auto it = node.attrs.find("sorted"); it != node.attrs.end()) {
+    if (auto v = std::get_if<bool>(&it->second)) sorted = *v;
+    else if (auto v = std::get_if<int64_t>(&it->second)) sorted = (*v != 0);
+  }
+  auto topkOp = builder_.create<atir::TopKOp>(loc, outs[0], outs[1], ins[0], ins[1],
+                                              builder_.getBoolAttr(sorted));
+  if (node.outputs.size() >= 2) {
+    tensorValues_[node.outputs[0].name] = topkOp.getValues();
+    tensorValues_[node.outputs[1].name] = topkOp.getIndices();
+  } else if (node.outputs.size() == 1) {
+    tensorValues_[node.outputs[0].name] = topkOp.getValues();
+  }
+}
+void MLIRBuilder::createUnsortedSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::UnsortedSegmentMinOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2]));
+}
+void MLIRBuilder::createTensorScatterUpdateNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::TensorScatterUpdateOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2]));
 }
 }  // namespace annc

@@ -502,13 +502,13 @@ static void inferStridedSliceShapes(llvm::ArrayRef<int64_t> input_shape,
   }
 }
 
-// BinaryOps
 void AddOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void SubOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MulOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void RealDivOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-
-// ComparisonOps
+void FloorModOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void FloorDivOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void DivideOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void NotEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void LessOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void GreaterEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
@@ -517,6 +517,8 @@ void CompareOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void AndOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MaximumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
 
 void ConcatOp::inferShape() {
   // 第一个操作数是 output，从第二个开始是 inputs
@@ -1616,6 +1618,7 @@ void SparseSegmentMeanOp::inferShape() {
   outputShape.append(dataShape.begin() + 1, dataShape.end());
   (void)setSingleResultShape(getOperation(), outputShape);
 }
+
 void SparseSegmentMinOp::inferShape() {
   auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
   auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
@@ -1684,5 +1687,138 @@ void SparseSegmentMinOp::inferShape() {
   outputShape.push_back(numSegments);
   outputShape.append(inputShape.begin() + 1, inputShape.end());
   (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void UniqueOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getX().getType());
+  if (!inputType) {
+    emitError("Unique input must be atir::TensorType");
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  if (getNumResults() >= 1) {
+    SmallVector<int64_t> uniqueShape = {ShapedType::kDynamic};
+    auto uniqueType = atir::TensorType::get(uniqueShape, inputType.getElementType());
+    getResult(0).setType(uniqueType);
+  }
+  if (getNumResults() >= 2) {
+    auto indexType = atir::TensorType::get(inputShape, IntegerType::get(getContext(), 32));
+    getResult(1).setType(indexType);
+  }
+}
+
+void TopKOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto kType = dyn_cast<atir::TensorType>(getK().getType());
+  auto valuesType = dyn_cast<atir::TensorType>(getValues().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  if (!inputType || !kType || !valuesType || !indicesType) {
+    emitError("TopK operands/results must be atir::TensorType");
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  if (inputShape.empty()) {
+    emitError("TopK input rank must be >= 1");
+    return;
+  }
+  int64_t kValue = ShapedType::kDynamic;
+  if (auto kAttr = kType.getCacheData(); kAttr && kAttr.getNumElements() == 1) {
+    int64_t parsedK = -1;
+    auto elemTy = kAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      parsedK = (*kAttr.getValues<APInt>().begin()).getSExtValue();
+    } else if (isa<FloatType>(elemTy)) {
+      parsedK = static_cast<int64_t>(annc::apFloatToDouble(
+          *kAttr.getValues<APFloat>().begin()));
+    }
+    if (parsedK > 0) {
+      kValue = parsedK;
+      int64_t lastDim = inputShape.back();
+      if (lastDim != ShapedType::kDynamic) {
+        kValue = std::min(kValue, lastDim);
+      }
+    }
+  }
+  SmallVector<int64_t> outputShape(inputShape.begin(), inputShape.end());
+  outputShape.back() = kValue;
+  getValues().setType(cloneWithShape(valuesType, outputShape));
+  getIndices().setType(cloneWithShape(indicesType, outputShape));
+}
+
+void UnsortedSegmentMinOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto segmentIdsType = dyn_cast<atir::TensorType>(getSegmentIds().getType());
+  auto numSegmentsType = dyn_cast<atir::TensorType>(getNumSegments().getType());
+  if (!inputType || !segmentIdsType || !numSegmentsType) {
+    emitError("UnsortedSegmentMin operands must be atir::TensorType");
+    return;
+  }
+
+  auto inputShape = inputType.getShape();
+  if (inputShape.empty()) {
+    emitError("UnsortedSegmentMin input rank must be >= 1");
+    return;
+  }
+
+  int64_t numSegments = ShapedType::kDynamic;
+  if (auto numSegmentsAttr = numSegmentsType.getCacheData();
+      numSegmentsAttr && numSegmentsAttr.getNumElements() == 1) {
+    auto elemTy = numSegmentsAttr.getElementType();
+    if (isa<IntegerType, IndexType>(elemTy)) {
+      numSegments = (*numSegmentsAttr.getValues<APInt>().begin()).getSExtValue();
+    } else if (isa<FloatType>(elemTy)) {
+      numSegments = static_cast<int64_t>(annc::apFloatToDouble(
+          *numSegmentsAttr.getValues<APFloat>().begin()));
+    }
+  }
+
+  SmallVector<int64_t> outputShape;
+  outputShape.push_back(numSegments);
+  outputShape.append(inputShape.begin() + 1, inputShape.end());
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
+void TensorScatterUpdateOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto outputType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!inputType || !outputType) {
+    emitError("TensorScatterUpdate input/output must be atir::TensorType");
+    return;
+  }
+  getOutput().setType(cloneWithShape(outputType, inputType.getShape()));
+}
+
+void ResourceGatherOp::inferShape() {
+  // 输出形状遵循TF规则：output.shape = indices.shape + resource.shape[1:].
+  int64_t batchDims = getBatchDims();
+  if (batchDims != 0) {
+    (void)setSingleResultShape(getOperation(),
+                                SmallVector<int64_t>{ShapedType::kDynamic});
+    return;
+  }
+  auto resourceType = dyn_cast<atir::TensorType>(getResource().getType());
+  if (!resourceType) {
+    emitError("ResourceGather resource must be atir::TensorType for inference");
+    return;
+  }
+  auto resourceShape = resourceType.getShape();
+  if (resourceShape.empty()) {
+    emitError("ResourceGather resource must have rank >= 1");
+    return;
+  }
+  if (getIndices().empty()) {
+    emitError("ResourceGather expects at least one indices operand");
+    return;
+  }
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().front().getType());
+  if (!indicesType) {
+    emitError("ResourceGather indices must be atir::TensorType for inference");
+    return;
+  }
+  auto indicesShape = indicesType.getShape();
+  SmallVector<int64_t> outShape;
+  outShape.append(indicesShape.begin(), indicesShape.end());
+  outShape.append(resourceShape.begin() + 1, resourceShape.end());
+  (void)setSingleResultShape(getOperation(), outShape);
 }
 }  // namespace atir

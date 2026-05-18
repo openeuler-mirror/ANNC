@@ -48,6 +48,8 @@ class MLIRBuilder {
   void createMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSubNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createRealDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createFloorModNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createFloorDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createNotEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createLessNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createGreaterNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
@@ -87,6 +89,13 @@ class MLIRBuilder {
   void createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseSegmentSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createResourceGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createCastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createStringToHashBucketFastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createUniqueNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createTopKNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createUnsortedSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createTensorScatterUpdateNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);

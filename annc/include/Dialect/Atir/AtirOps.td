@@ -405,20 +405,21 @@ def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect,
   }];
 }
 
-def Atir_CastOp: Atir_Op<"Cast", [Pure, SameOperandsAndResultShape]>{
+def Atir_CastOp: Atir_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)>{
   let summary = "Cast input to a new type";
   let description = [{
     Casts a tensor from one data type to another.
     The shape of the tensor remains unchanged.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` functional-type(operands, results)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
@@ -510,22 +511,23 @@ def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast", 
-    [Pure, SameOperandsAndResultShape]> {
+def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
+    !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Map strings to hash bucket indices.";
   let description = [{
     Maps each string in `input` to an integer hash modulo `numBuckets`.
     Hash function is deterministic within a run but not guaranteed across versions.
   }];
   let arguments = (ins
+      Atir_Tensor:$output,
       Atir_Tensor:$input,
       I64Attr:$numBuckets
     );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $input attr-dict `:` type( $input) `->` type( $output)
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
 }
 
@@ -703,7 +705,7 @@ def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect, Pure]> {
   // );
 }
 
-def Atir_UniqueOp : Atir_Op<"Unique", [Pure]> {
+def Atir_UniqueOp : Atir_Op<"Unique", !listconcat([Pure], Interfaces)> {
   let summary = "Finds unique elements in a 1-D tensor and returns them with indices.";
   let description = [{
     This operation returns a tensor `y` containing all of the unique elements of `x`
@@ -723,21 +725,22 @@ def Atir_UniqueOp : Atir_Op<"Unique", [Pure]> {
   }]; 
 }
 
-def Atir_ResourceGatherOp : Atir_Op<"ResourceGather"> {
+def Atir_ResourceGatherOp : Atir_Op<"ResourceGather", !listconcat([Pure], Interfaces)> {
   let summary = "Gather elements from resource handle by indices";
   let description = [{
     Gathers data from a resource according to given indices.
     Supports batched gathering with multiple index dimensions.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     AnyType:$resource,
     Variadic<AnyType>:$indices,
     DefaultValuedAttr<BoolAttr, "false">:$validateIndices,
     DefaultValuedAttr<I64Attr, "0">:$batchDims
   );
-  let results = (outs Atir_Tensor:$output);
+  let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` $resource `,` $indices attr-dict `:` type($output) `,` type($resource) `,` type($indices) `->` type($result)
   }];
 }
 
@@ -889,40 +892,42 @@ def Atir_SizeOp : Atir_Op<"Size", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_FloorModOp : Atir_Op<"FloorMod", [Pure,
-    ResultsBroadcastableShape, SameOperandsAndResultShape]> {
+def Atir_FloorModOp : Atir_Op<"FloorMod", !listconcat([Pure,
+    ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise remainder of division";
   let description = [{
     Returns element-wise remainder of division: `floor(x / y) * y + mod = x`.
     Matches Python's `%` operator.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
-def Atir_FloorDivOp : Atir_Op<"FloorDiv", [Pure, SameOperandsAndResultShape,
-    ResultsBroadcastableShape, SameOperandsAndResultType]>{
+def Atir_FloorDivOp : Atir_Op<"FloorDiv", !listconcat([Pure, SameOperandsAndResultShape,
+    ResultsBroadcastableShape], Interfaces)>{
   let summary = "Element-wise floor division: floor(x / y). Matches Python // semantics.";
   let description = [{
     Returns element-wise floor division: `x / y`.
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$x,
     Atir_Tensor:$y
   );
   let results = (outs
-    Atir_Tensor:$z
+    Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
   }];
 }
 
@@ -1172,23 +1177,6 @@ def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", !listconcat([Pure], Interfaces)>
   }];
 }
 
-def Atir_AddV2Op : Atir_Op<"AddV2", [Pure, Commutative, SameOperandsAndResultShape]> {
-  let summary = "Element-wise addition (x + y).";
-  let description = [{
-    Performs element-wise addition of tensor `x` and tensor `y`, producing a tensor `z`.
-  }];
-  let arguments = (ins
-    Atir_Tensor:$x,
-    Atir_Tensor:$y
-  );
-  let results = (outs
-    Atir_Tensor:$z
-  );
-  let assemblyFormat = [{
-    $x `,` $y attr-dict `:` functional-type(operands, results)
-  }];
-}
-
 def Atir_RsqrtOp : Atir_Op<"Rsqrt", [Pure, SameOperandsAndResultType, Elementwise]> {
   let summary = "Computes reciprocal of square root element-wise.";
   let description = [{
@@ -1206,7 +1194,7 @@ def Atir_RsqrtOp : Atir_Op<"Rsqrt", [Pure, SameOperandsAndResultType, Elementwis
   }];
 }
 
-def Atir_TopKOp : Atir_Op<"TopK", [Pure]> {
+def Atir_TopKOp : Atir_Op<"TopK", !listconcat([Pure], Interfaces)> {
   let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
   let description = [{
     Find the values and indices of the `k` largest elements along the last dimension.
@@ -1226,22 +1214,23 @@ def Atir_TopKOp : Atir_Op<"TopK", [Pure]> {
   }];
 }
 
-def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMinOp", [Pure]> {
+def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMin", !listconcat([Pure], Interfaces)> {
   let summary = "Computes the minimum value in each segment of the tensor.";
   let description = [{
     Aggregates elements of the input tensor into segments specified by segmentIds (unsorted),
     and computes the minimum value for each segment. The output tensor has shape [num_segments] + input.shape[1:].
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$segmentIds,
-    I32Attr:$numSegments
+    Atir_Tensor:$numSegments
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat=[{
-    $input `,` $segmentIds attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
   }];
 }
 
@@ -1261,22 +1250,23 @@ def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([Pure,
   }];
 }
 
-def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", [Pure, ResultsBroadcastableShape]> {
+def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
   let summary = "Scatter update tensor values";
   let description = [{
     Updates values of the input tensor at specified indices with values from the updates tensor,
     and returns a new tensor (non-in-place update). 
   }];
   let arguments = (ins
+    Atir_Tensor:$output,
     Atir_Tensor:$input,
     Atir_Tensor:$indices,
     Atir_Tensor:$updates
   );
   let results = (outs
-    Atir_Tensor:$output
+    Atir_Tensor:$result
   );
   let assemblyFormat=[{
-    operands attr-dict `:` functional-type(operands, results)
+    $output `,` $input `,` $indices `,` $updates attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($updates) `->` type($result)
   }];
 }
 
@@ -1383,7 +1373,7 @@ def Atir_CompareOp : Atir_Op<"Compare", !listconcat([Pure, ResultsBroadcastableS
   }];
 }
 
-def Atir_DivideOp : Atir_Op<"Divide", [Pure]> {
+def Atir_DivideOp : Atir_Op<"Divide", !listconcat([Pure], Interfaces)> {
   let summary = "Element-wise division with broadcasting support";
   let description = [{
     Computes element-wise division of two tensors.
