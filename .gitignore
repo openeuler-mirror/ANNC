@@ -1,5 +1,6 @@
 .vscode
 .venv
+AGENTS.md
 
 bazel-*
 output
@@ -11,4 +12,5 @@ proxy
 __pycache__
 *.whl
 build/
+install/
 tf_protos_minimal/
