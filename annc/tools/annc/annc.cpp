@@ -12,6 +12,12 @@ namespace fs = std::filesystem;
 
 using namespace std;
 
+static const char* KERNEL_LIB_PATH = ANNC_KERNEL_LIB_PATH;
+
+string getKernelLibPath() {
+    return KERNEL_LIB_PATH;
+}
+
 // 
 class CommandExecutor {
 public:
@@ -459,7 +465,8 @@ private:
         
         string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
-        // 
+        command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        //
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
         command += " -DN=" + to_string(config.N);
@@ -478,6 +485,7 @@ private:
         string sharedLibName = config.mLirSymbolName + ".so";
         
         string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
+        command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         
         logCommand(command);
