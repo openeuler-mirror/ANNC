@@ -59,11 +59,11 @@ PIPELINES = {
     "aarch64-matmul-tiling": [
         "atir-select-lowering-strategy",
         "convert-atir-to-linalg",
+        "annc-one-shot-bufferize",
         "cache-parallel",
         "cache-reduction",
         "vector-common-parallel",
         "vector-reduction",
-        "annc-one-shot-bufferize",
     ],
     "fast-codegen-affine": [
         "atir-fast-codegen",

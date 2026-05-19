@@ -17,6 +17,10 @@ add_mlir_library(AArch64Codegen
         MLIRParser
         MLIRRewrite
         MLIRTransforms
+        MLIRAffineDialect
+        MLIRArithDialect
+        MLIRMemRefDialect
+        MLIRFuncDialect
         MLIRBufferizationTransforms
         MLIRLinalgDialect
         MLIRLinalgTransforms

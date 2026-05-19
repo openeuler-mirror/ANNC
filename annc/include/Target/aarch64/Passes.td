@@ -20,6 +20,8 @@ def CacheParallel : Pass<"cache-parallel", "ModuleOp"> {
   let summary = "cache parallel on linalg op";
   let constructor = "createCacheParallel()";
   let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::arith::ArithDialect",
     "mlir::vector::VectorDialect"
@@ -31,6 +33,8 @@ def CacheReduction : Pass<"cache-reduction", "ModuleOp"> {
   let summary = "cache reduction on linalg op";
   let constructor = "createCacheReduction()";
   let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::arith::ArithDialect",
     "mlir::vector::VectorDialect"
@@ -41,6 +45,8 @@ def VectorCommonParallel : Pass<"vector-common-parallel", "ModuleOp"> {
   let summary = "vector common parallel on linalg op";
   let constructor = "createVectorCommonParallel()";
   let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::arith::ArithDialect",
     "mlir::vector::VectorDialect"
@@ -52,6 +58,8 @@ def VectorReduction : Pass<"vector-reduction", "ModuleOp"> {
   let summary = "vector reduction on linalg op";
   let constructor = "createVectorReduction()";
   let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::arith::ArithDialect",
     "mlir::vector::VectorDialect"
