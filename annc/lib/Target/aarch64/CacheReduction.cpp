@@ -36,111 +36,200 @@ class CacheReduction : public CacheReductionBase<CacheReduction>
     ModuleOp module = getOperation();
     auto ctx = module->getContext();
     module.walk([&](linalg::MatmulOp matmulOp) {
-      constexpr StringLiteral kConfigAttrName = "lowering_config";
-      auto attr = matmulOp->getAttr(kConfigAttrName);
-      auto lowering_config_attr = llvm::dyn_cast<atir::LoweringConfigAttr>(attr);
+      //                if (failed(matmulCacheReduction(matmulOp))) {
+      //                    signalPassFailure();
+      //                }
 
-      OpBuilder builder(matmulOp);
-      Location loc = matmulOp.getLoc();
-
-      Value A = matmulOp.getInputs()[0];
-      Value B = matmulOp.getInputs()[1];
-      Value C = matmulOp.getOutputs()[0];
-
-      auto aType = llvm::dyn_cast<RankedTensorType>(A.getType());
-      auto bType = llvm::dyn_cast<RankedTensorType>(B.getType());
-      auto cType = llvm::dyn_cast<RankedTensorType>(C.getType());
-
-      int64_t M = aType.getShape()[0];
-      int64_t K = aType.getShape()[1];
-      int64_t N = bType.getShape()[1];
-
-      std::vector<int64_t> cache_reduction_config  = lowering_config_attr.getLoweringConfigCacheReduction();
-
-      int64_t tileK = cache_reduction_config[2];
-
-      Value accInit = C;
-
-      Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-      Value K_value = builder.create<arith::ConstantIndexOp>(loc, K);
-      Value tileK_value = builder.create<arith::ConstantIndexOp>(loc, tileK);
-
-      auto a_pack = builder.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{M, tileK}, aType.getElementType());
-
-      auto b_pack = builder.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{tileK, N}, bType.getElementType());
-
-      auto forOp = builder.create<scf::ForOp>(loc, zero, K_value, tileK_value, ValueRange{accInit});
-
-      builder.setInsertionPointToStart(forOp.getBody());
+      if (failed(matmulCacheReductionAffine(matmulOp))) {
+        signalPassFailure();
+      }
 
 
-      Value ivK = forOp.getInductionVar();
-      Value accIter = forOp.getRegionIterArgs()[0];
-
-      SmallVector<OpFoldResult> apack_offsets;
-      apack_offsets.push_back(builder.getIndexAttr(0));
-      apack_offsets.push_back(ivK);
-      SmallVector<OpFoldResult> apack_sizes;
-      apack_sizes.push_back(builder.getIndexAttr(M));
-      apack_sizes.push_back(builder.getIndexAttr(tileK));
-      SmallVector<OpFoldResult> apack_stridess;
-      apack_stridess.push_back(builder.getIndexAttr(1));
-      apack_stridess.push_back(builder.getIndexAttr(1));
-
-      // A_k = A[:, k:k+tileK]
-      Value Ak = builder.create<tensor::ExtractSliceOp>(
-          loc, A,
-          apack_offsets,
-          apack_sizes,
-          apack_stridess);
-
-      SmallVector<OpFoldResult> bpack_offsets;
-      bpack_offsets.push_back(ivK);
-      bpack_offsets.push_back(builder.getIndexAttr(0));
-      SmallVector<OpFoldResult> bpack_sizes;
-      bpack_sizes.push_back(builder.getIndexAttr(tileK));
-      bpack_sizes.push_back(builder.getIndexAttr(N));
-      SmallVector<OpFoldResult> bpack_stridess;
-      bpack_stridess.push_back(builder.getIndexAttr(1));
-      bpack_stridess.push_back(builder.getIndexAttr(1));
-
-      Value Bk = builder.create<tensor::ExtractSliceOp>(
-          loc, B,
-          bpack_offsets,
-          bpack_sizes,
-          bpack_stridess);
-
-      builder.create<linalg::CopyOp>(
-          loc,
-          ValueRange{Ak},
-          ValueRange{a_pack}
-      );
-
-      builder.create<linalg::CopyOp>(
-          loc,
-          ValueRange{Bk},
-          ValueRange{b_pack}
-      );
-      auto cacheReduceMatmul = builder.create<linalg::MatmulOp>(
-          loc, ValueRange{a_pack, b_pack}, ValueRange{accIter});
-      Value newAcc = cacheReduceMatmul.getResult(0);
-
-      cacheReduceMatmul->setAttr(kConfigAttrName,
-                                 matmulOp->getAttr(kConfigAttrName));
-
-      builder.create<scf::YieldOp>(loc, newAcc);
-
-      matmulOp->getParentOp()->dump();
-
-      RewritePatternSet patterns(ctx);
-
-
-      builder.setInsertionPointAfter(forOp);
-      matmulOp.replaceAllUsesWith(forOp);
-      matmulOp.erase();
     });
   }
 
+  LogicalResult matmulCacheReduction(linalg::MatmulOp matmulOp) {
+    constexpr StringLiteral kConfigAttrName = "lowering_config";
+    auto attr = matmulOp->getAttr(kConfigAttrName);
+    auto lowering_config_attr = llvm::dyn_cast<atir::LoweringConfigAttr>(attr);
+
+    OpBuilder builder(matmulOp);
+    Location loc = matmulOp.getLoc();
+
+    Value A = matmulOp.getInputs()[0];
+    Value B = matmulOp.getInputs()[1];
+    Value C = matmulOp.getOutputs()[0];
+
+    auto aType = llvm::dyn_cast<RankedTensorType>(A.getType());
+    auto bType = llvm::dyn_cast<RankedTensorType>(B.getType());
+    auto cType = llvm::dyn_cast<RankedTensorType>(C.getType());
+    int64_t M = aType.getShape()[0];
+    int64_t K = aType.getShape()[1];
+    int64_t N = bType.getShape()[1];
+
+    std::vector<int64_t> cache_reduction_config  = lowering_config_attr.getLoweringConfigCacheReduction();
+
+    int64_t tileK = cache_reduction_config[2];
+
+    Value accInit = C;
+
+    Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+    Value K_value = builder.create<arith::ConstantIndexOp>(loc, K);
+    Value tileK_value = builder.create<arith::ConstantIndexOp>(loc, tileK);
+
+    //                auto aMemrefType = MemRefType::get({M, tileK}, aType.getElementType());
+    //                auto bMemrefType = MemRefType::get({tileK, N}, bType.getElementType());
+
+    //                auto a_alloca = builder.create<memref::AllocaOp>(loc,aMemrefType);
+    //                auto b_alloca = builder.create<memref::AllocaOp>(loc,bMemrefType);
+
+    //                auto a_pack = builder.create<bufferization::ToTensorOp>(loc, RankedTensorType::get({M,tileK}, aType.getElementType()), a_alloca, true, true);
+    //                auto b_pack = builder.create<bufferization::ToTensorOp>(loc, RankedTensorType::get({tileK,N}, bType.getElementType()), b_alloca, true, true);
+
+    auto a_pack = builder.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{M, tileK}, aType.getElementType());
+    auto b_pack = builder.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{tileK, N}, bType.getElementType());
+
+
+
+    auto forOp = builder.create<scf::ForOp>(loc, zero, K_value, tileK_value, ValueRange{accInit});
+
+    builder.setInsertionPointToStart(forOp.getBody());
+
+
+    Value ivK = forOp.getInductionVar();
+    Value accIter = forOp.getRegionIterArgs()[0];
+
+    SmallVector<OpFoldResult> apack_offsets;
+    apack_offsets.push_back(builder.getIndexAttr(0));
+    apack_offsets.push_back(ivK);
+    SmallVector<OpFoldResult> apack_sizes;
+    apack_sizes.push_back(builder.getIndexAttr(M));
+    apack_sizes.push_back(builder.getIndexAttr(tileK));
+    SmallVector<OpFoldResult> apack_stridess;
+    apack_stridess.push_back(builder.getIndexAttr(1));
+    apack_stridess.push_back(builder.getIndexAttr(1));
+
+    // A_k = A[:, k:k+tileK]
+    Value Ak = builder.create<tensor::ExtractSliceOp>(
+        loc, A,
+        apack_offsets,
+        apack_sizes,
+        apack_stridess);
+
+    SmallVector<OpFoldResult> bpack_offsets;
+    bpack_offsets.push_back(ivK);
+    bpack_offsets.push_back(builder.getIndexAttr(0));
+    SmallVector<OpFoldResult> bpack_sizes;
+    bpack_sizes.push_back(builder.getIndexAttr(tileK));
+    bpack_sizes.push_back(builder.getIndexAttr(N));
+    SmallVector<OpFoldResult> bpack_stridess;
+    bpack_stridess.push_back(builder.getIndexAttr(1));
+    bpack_stridess.push_back(builder.getIndexAttr(1));
+
+    Value Bk = builder.create<tensor::ExtractSliceOp>(
+        loc, B,
+        bpack_offsets,
+        bpack_sizes,
+        bpack_stridess);
+
+    builder.create<linalg::CopyOp>(
+        loc,
+        ValueRange{Ak},
+        ValueRange{a_pack}
+    );
+
+    builder.create<linalg::CopyOp>(
+        loc,
+        ValueRange{Bk},
+        ValueRange{b_pack}
+    );
+    auto cacheReduceMatmul = builder.create<linalg::MatmulOp>(
+        loc, ValueRange{a_pack, b_pack}, ValueRange{accIter});
+    Value newAcc = cacheReduceMatmul.getResult(0);
+
+    cacheReduceMatmul->setAttr(kConfigAttrName,
+                               matmulOp->getAttr(kConfigAttrName));
+
+    builder.create<scf::YieldOp>(loc, newAcc);
+    matmulOp.replaceAllUsesWith(forOp);
+    matmulOp.erase();
+    return success();
+  }
+
+  LogicalResult matmulCacheReductionAffine(linalg::MatmulOp matmulOp) {
+    constexpr  StringLiteral configAttrName = "lowering_config";
+    auto attr = matmulOp->getAttr(configAttrName);
+    auto lowering_config_attr = llvm::dyn_cast<atir::LoweringConfigAttr>(attr);
+
+    std::vector<int64_t> cache_reduction_config  = lowering_config_attr.getLoweringConfigCacheReduction();
+
+    int64_t tileK = cache_reduction_config[2];
+
+    OpBuilder builder(matmulOp);
+    Location loc = matmulOp.getLoc();
+
+    Value A = matmulOp.getInputs()[0];
+    Value B = matmulOp.getInputs()[1];
+    Value C = matmulOp.getOutputs()[0];
+
+    auto aType = llvm::dyn_cast<MemRefType>(A.getType());
+    auto bType = llvm::dyn_cast<MemRefType>(B.getType());
+    auto cType = llvm::dyn_cast<MemRefType>(C.getType());
+
+    int64_t M = aType.getShape()[0];
+    int64_t K = aType.getShape()[1];
+    int64_t N = bType.getShape()[1];
+
+    auto forOp = builder.create<affine::AffineForOp>(loc, 0, K, tileK);
+
+    builder.setInsertionPointToStart(forOp.getBody());
+    Value k = forOp.getInductionVar();
+
+    SmallVector<OpFoldResult> a_offsets = {
+        builder.getIndexAttr(0),
+        k
+    };
+    SmallVector<OpFoldResult> a_sizes = {
+        builder.getIndexAttr(M),
+        builder.getIndexAttr(tileK)
+    };
+    SmallVector<OpFoldResult> a_strides = {
+        builder.getIndexAttr(1),
+        builder.getIndexAttr(1)
+    };
+
+    Value Asub = builder.create<memref::SubViewOp>(
+        loc,
+        A,
+        a_offsets,
+        a_sizes,
+        a_strides);
+
+    SmallVector<OpFoldResult> b_offsets = {
+        k,
+        builder.getIndexAttr(0)
+    };
+    SmallVector<OpFoldResult> b_sizes = {
+        builder.getIndexAttr(tileK),
+        builder.getIndexAttr(N)
+    };
+    SmallVector<OpFoldResult> b_strides = {
+        builder.getIndexAttr(1),
+        builder.getIndexAttr(1)
+    };
+
+    Value Bsub = builder.create<memref::SubViewOp>(
+        loc,
+        B,
+        b_offsets,
+        b_sizes,
+        b_strides);
+
+    auto new_matmul = builder.create<linalg::MatmulOp>(loc, ValueRange{Asub, Bsub}, ValueRange{C});
+    new_matmul->setAttr(configAttrName, attr);
+    matmulOp->erase();
+    return success();
+  }
 
 };
 
