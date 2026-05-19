@@ -14,5 +14,6 @@ void registerAllAtirPasses() {
     atir::registerAtirEltwiseFusionPass();
     atir::registerAtirLLMCodeGenPass();
     atir::registerAtirPruneFuncPass();
+    atir::registerAtirSelectLoweringStrategyPass();
 }
 }  // namespace atir
