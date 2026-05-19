@@ -51,6 +51,20 @@ PIPELINES = {
     "select-lowering-strategy": [
         "atir-select-lowering-strategy",
     ],
+    "linalg-cache-parallel": [
+        "atir-select-lowering-strategy",
+        "convert-atir-to-linalg",
+        "cache-parallel",
+    ],
+    "aarch64-matmul-tiling": [
+        "atir-select-lowering-strategy",
+        "convert-atir-to-linalg",
+        "cache-parallel",
+        "cache-reduction",
+        "vector-common-parallel",
+        "vector-reduction",
+        "annc-one-shot-bufferize",
+    ],
     "fast-codegen-affine": [
         "atir-fast-codegen",
         "convert-atir-to-affine",
@@ -60,8 +74,8 @@ PIPELINES = {
 
 def main() -> None:
     run_pipeline(
-        "select-lowering-strategy",
-        PIPELINES["select-lowering-strategy"],
+        "aarch64-matmul-tiling",
+        PIPELINES["aarch64-matmul-tiling"],
     )
 
 
