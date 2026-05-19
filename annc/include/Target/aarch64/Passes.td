@@ -28,6 +28,19 @@ def CacheParallel : Pass<"cache-parallel", "ModuleOp"> {
   ];
 }
 
+/* packed affine matmul kernel */
+def MatmulPackAffine : Pass<"matmul-pack-affine", "ModuleOp"> {
+  let summary = "packed affine matmul kernel optimization";
+  let constructor = "createMatmulPackAffine()";
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::vector::VectorDialect"
+  ];
+}
+
 /* cache reduction */
 def CacheReduction : Pass<"cache-reduction", "ModuleOp"> {
   let summary = "cache reduction on linalg op";

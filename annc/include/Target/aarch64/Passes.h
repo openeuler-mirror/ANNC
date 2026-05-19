@@ -19,6 +19,7 @@ namespace annc {
 
 std::unique_ptr<mlir::Pass> createKPGemmOneShotBufferize();
 std::unique_ptr<mlir::Pass> createCacheParallel();
+std::unique_ptr<mlir::Pass> createMatmulPackAffine();
 std::unique_ptr<mlir::Pass> createCacheReduction();
 std::unique_ptr<mlir::Pass> createVectorCommonParallel();
 std::unique_ptr<mlir::Pass> createVectorReduction();
