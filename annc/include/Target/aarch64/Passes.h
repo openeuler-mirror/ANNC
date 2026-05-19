@@ -1,5 +1,5 @@
-#ifndef PIMP_MLIR_AARCH64_CODEGEN_PASSES_H
-#define PIMP_MLIR_AARCH64_CODEGEN_PASSES_H
+#ifndef ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
+#define ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
 
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -17,6 +17,10 @@ using namespace mlir;
 namespace annc {
 
 std::unique_ptr<mlir::Pass> createKPGemmOneShotBufferize();
+std::unique_ptr<mlir::Pass> createCacheParallel();
+std::unique_ptr<mlir::Pass> createCacheReduction();
+std::unique_ptr<mlir::Pass> createVectorCommonParallel();
+std::unique_ptr<mlir::Pass> createVectorReduction();
 
 #define GEN_PASS_REGISTRATION
 #define GEN_PASS_CLASSES
