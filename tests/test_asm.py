@@ -65,6 +65,12 @@ PIPELINES = {
         "vector-common-parallel",
         "vector-reduction",
     ],
+    "aarch64-matmul-pack-affine": [
+        "atir-select-lowering-strategy",
+        "convert-atir-to-linalg",
+        "annc-one-shot-bufferize",
+        "matmul-pack-affine",
+    ],
     "fast-codegen-affine": [
         "atir-fast-codegen",
         "convert-atir-to-affine",
@@ -74,8 +80,8 @@ PIPELINES = {
 
 def main() -> None:
     run_pipeline(
-        "aarch64-matmul-tiling",
-        PIPELINES["aarch64-matmul-tiling"],
+        "aarch64-matmul-pack-affine",
+        PIPELINES["aarch64-matmul-pack-affine"],
     )
 
 
