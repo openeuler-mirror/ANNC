@@ -407,9 +407,9 @@ private:
 
     // step4.o_mlir
     void extractMLIRSymbolName() {
-        log("Extracting MLIR symbol names from step4.o");
+        log("Extracting defined MLIR C interface symbols from step4.o");
         
-        string command = "nm \"" + (tempDir / "step4.o").string() + "\"";
+        string command = "nm --defined-only --extern-only \"" + (tempDir / "step4.o").string() + "\"";
         string output;
         
         if (!CommandExecutor::executeCommand(command, output)) {
@@ -417,37 +417,34 @@ private:
             return;
         }
         
-        // nm_mlir
+        // Only consider symbols that are both defined in this object and
+        // externally visible. This avoids treating imported custom call
+        // declarations as the final shared-library entry symbol.
         stringstream ss(output);
         string line;
         while (getline(ss, line)) {
-            // nm: "  "
-            size_t space1 = line.find(' ');
-            size_t space2 = line.rfind(' ');
-            
-            if (space1 != string::npos && space2 != string::npos && space1 < space2) {
-                string symbolName = line.substr(space2 + 1);
-                if (symbolName.find("_mlir") == 0) {
-                    // _mlir_ciface_
-                    if (symbolName.find("_mlir_ciface_") == 0) {
-                        // _mlir_ciface_
-                        string libName = symbolName.substr(13); // "_mlir_ciface_"13
-                        // .so
-                        for (char &c : libName) {
-                            if (!isalnum(c) && c != '_') {
-                                c = '_';
-                            }
-                        }
-                        config.mLirSymbolName = libName;
-                        log("Found MLIR symbol: " + symbolName + ", library name: " + libName + ".so");
-                        break;
+            string address;
+            string symbolType;
+            string symbolName;
+            stringstream lineStream(line);
+            lineStream >> address >> symbolType >> symbolName;
+
+            if (symbolName.find("_mlir_ciface_") == 0) {
+                string libName = symbolName.substr(13); // "_mlir_ciface_" = 13
+                for (char &c : libName) {
+                    if (!isalnum(c) && c != '_') {
+                        c = '_';
                     }
                 }
+                config.mLirSymbolName = libName;
+                log("Found exported MLIR C interface symbol: " + symbolName +
+                    ", library name: " + libName + ".so");
+                break;
             }
         }
         
         if (config.mLirSymbolName.empty()) {
-            log("Warning: No _mlir_ciface_ symbol found, using default name");
+            log("Warning: No defined _mlir_ciface_ symbol found, using default name");
         }
     }
     
@@ -466,6 +463,8 @@ private:
         string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+                   " -lANNCThreadPool -Wl,--no-whole-archive";
         //
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
@@ -486,6 +485,8 @@ private:
         
         string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+                   " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         
         logCommand(command);

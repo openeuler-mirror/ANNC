@@ -22,7 +22,20 @@ add_llvm_executable(annc-asm
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(annc-asm PRIVATE ${LIBS})
+target_link_libraries(annc-asm PRIVATE 
+  "-Wl,--whole-archive" 
+  AtirPasses 
+  "-Wl,--no-whole-archive"
+  ${dialect_libs}
+  ${conversion_libs}
+  MLIROptLib
+  MLIRParser
+  AtirDialect
+  AtirBuilder
+  AtirToAffineConversion
+  AtirToLinalgConversion
+  AArch64Codegen
+)
 llvm_update_compile_flags(annc-asm)
 mlir_check_all_link_libraries(annc-asm)
 install(TARGETS annc-asm DESTINATION bin)

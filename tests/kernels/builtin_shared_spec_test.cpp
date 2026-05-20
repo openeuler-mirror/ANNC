@@ -72,7 +72,7 @@ int tests_failed = 0;
 TEST(BuiltinRegistryExposesMatMulDefault) {
     auto symbolOpt = KernelRegistry::instance().lookupKernelSymbol("MatMul", "aarch64");
     EXPECT_TRUE(symbolOpt.has_value());
-    EXPECT_HAS_PREFIX(*symbolOpt, "ANNCKernel_matmul_kernel_specs_");
+    EXPECT_HAS_PREFIX(*symbolOpt, "ANNCKernel_matmul_");
     EXPECT_HAS_SUFFIX(*symbolOpt, "_auto");
 }
 
@@ -83,7 +83,7 @@ TEST(BuiltinResolverFindsMatMulDefault) {
 
     auto symbol = ResolveKernelSymbol(request);
     EXPECT_TRUE(symbol.has_value());
-    EXPECT_HAS_PREFIX(*symbol, "ANNCKernel_matmul_kernel_specs_");
+    EXPECT_HAS_PREFIX(*symbol, "ANNCKernel_matmul_");
     EXPECT_HAS_SUFFIX(*symbol, "_auto");
 }
 
@@ -101,7 +101,7 @@ TEST(BuiltinMatMulWrapperRuns) {
 
     auto kernel = loadKernelApi<void (*)(AnncMemRef*, AnncMemRef*, AnncMemRef*)>(
         symbolOpt->c_str());
-    kernel(&output, &lhs, &rhs);
+    kernel(&lhs, &rhs, &output);
 
     EXPECT_EQ(outputData[0], 58.0f);
     EXPECT_EQ(outputData[1], 64.0f);

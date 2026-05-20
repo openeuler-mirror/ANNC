@@ -22,4 +22,5 @@ add_mlir_library(AtirToLinalgConversion
         MLIRFuncDialect
         MLIRMemRefDialect
         CommonConversion
+        ANNCKernel
 )
