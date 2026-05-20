@@ -4,38 +4,19 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-// Minimal ABI mirror used by the simulated frontend adapter.
-struct AnncThreadPoolCtx {
-    void* impl = nullptr;
-    int (*num_threads)(void* impl) = nullptr;
-    bool (*in_parallel_region)(void* impl) = nullptr;
-    void (*parallel_for)(
-        void* impl,
-        std::int64_t begin,
-        std::int64_t end,
-        std::int64_t grain_size,
-        void (*fn)(std::int64_t, std::int64_t, int, void*),
-        void* user_data) = nullptr;
-};
-
-struct AnncMemRef2DF32 {
-    float* allocated;
-    float* aligned;
-    std::int64_t offset;
-    std::int64_t sizes[2];
-    std::int64_t strides[2];
-};
+#include "Kernel/MemRefTypes.h"
+#include "Kernel/threadpool/ThreadPool.h"
 
 using KernelFn = void (*)(AnncMemRef2DF32*, AnncMemRef2DF32*, AnncMemRef2DF32*);
-using SetThreadPoolCtxFn = void (*)(AnncThreadPoolCtx*);
-using GetThreadPoolCtxFn = AnncThreadPoolCtx* (*)();
-using ClearThreadPoolCtxFn = void (*)();
+using SetThreadPoolFn = void (*)(annc::threadpool::AnncThreadPool*);
+using GetThreadPoolFn = annc::threadpool::AnncThreadPool* (*)();
+using ClearThreadPoolFn = void (*)();
 
-// Runtime knobs so one driver can cover multiple .so/shape cases.
 struct DriverConfig {
     std::string soPath = "./demo.so";
     std::int64_t m = 128;
@@ -46,12 +27,121 @@ struct DriverConfig {
     bool relu = false;
 };
 
-// Fake frontend-owned threadpool plus a few counters for validation.
-struct FakeTfThreadPool {
-    int numThreads = 4;
-    bool inParallel = false;
+struct FakePoolTrace {
     int parallelForCalls = 0;
     std::vector<std::pair<std::int64_t, std::int64_t>> chunks;
+    std::optional<std::int64_t> lastCostPerUnit;
+    std::optional<std::int64_t> lastGrainSize;
+    std::string dispatchPath;
+
+    void reset() {
+        parallelForCalls = 0;
+        chunks.clear();
+        lastCostPerUnit.reset();
+        lastGrainSize.reset();
+        dispatchPath.clear();
+    }
+};
+
+struct FakeTfThreadPool {
+    int numThreads = 4;
+    int currentThreadId = -1;
+    bool inParallel = false;
+    FakePoolTrace trace;
+
+    int NumThreads() const {
+        return numThreads;
+    }
+
+    int CurrentThreadId() const {
+        return currentThreadId;
+    }
+
+    bool InParallelRegion() const {
+        return inParallel;
+    }
+
+    void ParallelFor(std::int64_t total,
+                     const std::function<void(std::int64_t, std::int64_t)>& fn) {
+        trace.dispatchPath = "tf_default";
+        trace.lastCostPerUnit.reset();
+        trace.lastGrainSize = 1;
+        dispatch(total, 1, fn);
+    }
+
+    void ParallelForAdaptive(std::int64_t total,
+                             std::int64_t costPerUnit,
+                             const std::function<void(std::int64_t, std::int64_t)>& fn) {
+        trace.dispatchPath = "tf_cost";
+        trace.lastCostPerUnit = costPerUnit;
+        trace.lastGrainSize.reset();
+        const std::int64_t adaptiveBlock =
+            std::max<std::int64_t>(1, total / std::max(numThreads, 1));
+        dispatch(total, adaptiveBlock, fn);
+    }
+
+    void ParallelForFixed(std::int64_t total,
+                          std::int64_t blockSize,
+                          const std::function<void(std::int64_t, std::int64_t)>& fn) {
+        trace.dispatchPath = "tf_fixed";
+        trace.lastCostPerUnit.reset();
+        trace.lastGrainSize = blockSize;
+        dispatch(total, blockSize, fn);
+    }
+
+private:
+    void dispatch(std::int64_t total,
+                  std::int64_t blockSize,
+                  const std::function<void(std::int64_t, std::int64_t)>& fn) {
+        trace.parallelForCalls++;
+
+        const std::int64_t chunk = std::max<std::int64_t>(blockSize, 1);
+        currentThreadId = 0;
+        inParallel = true;
+        for (std::int64_t begin = 0; begin < total; begin += chunk) {
+            const std::int64_t end = std::min(begin + chunk, total);
+            trace.chunks.emplace_back(begin, end);
+            fn(begin, end);
+        }
+        inParallel = false;
+        currentThreadId = -1;
+    }
+};
+
+struct FakeTfThreadPoolAdapter : public annc::threadpool::AnncThreadPool {
+    explicit FakeTfThreadPoolAdapter(FakeTfThreadPool* pool) : pool(pool) {}
+
+    int num_threads() const override {
+        return pool->NumThreads();
+    }
+
+    bool in_parallel_region() const override {
+        return pool->InParallelRegion();
+    }
+
+    void parallel_for(
+        std::int64_t total,
+        const annc::threadpool::ParallelForOptions& options,
+        const std::function<void(std::int64_t, std::int64_t)>& fn) override {
+        if (options.cost_per_unit.has_value()) {
+            pool->ParallelForAdaptive(total, *options.cost_per_unit, fn);
+            return;
+        }
+        if (options.grain_size.has_value()) {
+            pool->ParallelForFixed(total, *options.grain_size, fn);
+            return;
+        }
+        pool->ParallelFor(total, fn);
+    }
+
+private:
+    FakeTfThreadPool* pool;
+};
+
+struct PreparedInputs {
+    std::vector<float> lhs;
+    std::vector<float> rhs;
+    std::vector<float> expected;
 };
 
 void usage(const char* argv0) {
@@ -66,7 +156,6 @@ void usage(const char* argv0) {
         << "  --relu              Apply relu after matmul when building expected output\n";
 }
 
-// Test helper: fail fast on any mismatch.
 void require(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << "\n";
@@ -92,7 +181,6 @@ float parseFloat(const char* text, const char* flag) {
     return value;
 }
 
-// Parse command-line options once so main() stays linear.
 DriverConfig parseArgs(int argc, char** argv) {
     DriverConfig cfg;
     for (int i = 1; i < argc; ++i) {
@@ -146,38 +234,6 @@ std::string inferKernelSymbolFromSoPath(const std::string& soPath) {
     return "_mlir_ciface_" + base;
 }
 
-// Frontend threadpool callbacks exposed through AnncThreadPoolCtx.
-int fakeNumThreads(void* impl) {
-    return static_cast<FakeTfThreadPool*>(impl)->numThreads;
-}
-
-bool fakeInParallelRegion(void* impl) {
-    return static_cast<FakeTfThreadPool*>(impl)->inParallel;
-}
-
-void fakeParallelFor(void* impl,
-                     std::int64_t begin,
-                     std::int64_t end,
-                     std::int64_t grainSize,
-                     void (*fn)(std::int64_t, std::int64_t, int, void*),
-                     void* userData) {
-    auto* pool = static_cast<FakeTfThreadPool*>(impl);
-    pool->parallelForCalls++;
-
-    const std::int64_t total = end - begin;
-    const int workers = std::max(pool->numThreads, 1);
-    const std::int64_t baseChunk = (total + workers - 1) / workers;
-    const std::int64_t chunk = std::max(baseChunk, std::max<std::int64_t>(grainSize, 1));
-
-    int workerId = 0;
-    for (std::int64_t chunkBegin = begin; chunkBegin < end; chunkBegin += chunk) {
-        const std::int64_t chunkEnd = std::min(chunkBegin + chunk, end);
-        pool->chunks.emplace_back(chunkBegin, chunkEnd);
-        fn(chunkBegin, chunkEnd, workerId++, userData);
-    }
-}
-
-// Build a row-major memref descriptor over an existing buffer.
 AnncMemRef2DF32 makeMemRef2D(float* data, std::int64_t rows, std::int64_t cols) {
     AnncMemRef2DF32 memref{};
     memref.allocated = data;
@@ -190,7 +246,6 @@ AnncMemRef2DF32 makeMemRef2D(float* data, std::int64_t rows, std::int64_t cols) 
     return memref;
 }
 
-// Deterministic inputs keep the reference stable across runs.
 std::vector<float> makeLhs(std::int64_t m, std::int64_t k) {
     std::vector<float> data(static_cast<std::size_t>(m * k));
     for (std::int64_t i = 0; i < m; ++i) {
@@ -213,7 +268,6 @@ std::vector<float> makeRhs(std::int64_t k, std::int64_t n) {
     return data;
 }
 
-// Optional post-ops keep the driver reusable for simple fused examples.
 float applyPostOps(float value, const DriverConfig& cfg) {
     value += cfg.postAdd;
     if (cfg.relu && value < 0.0f) {
@@ -222,7 +276,6 @@ float applyPostOps(float value, const DriverConfig& cfg) {
     return value;
 }
 
-// Scalar reference used to validate the loaded kernel.
 std::vector<float> referenceMatmul(const std::vector<float>& lhs,
                                    const std::vector<float>& rhs,
                                    const DriverConfig& cfg) {
@@ -240,63 +293,19 @@ std::vector<float> referenceMatmul(const std::vector<float>& lhs,
     return output;
 }
 
+PreparedInputs prepareInputs(const DriverConfig& cfg) {
+    PreparedInputs prepared;
+    prepared.lhs = makeLhs(cfg.m, cfg.k);
+    prepared.rhs = makeRhs(cfg.k, cfg.n);
+    prepared.expected = referenceMatmul(prepared.lhs, prepared.rhs, cfg);
+    return prepared;
+}
+
 bool nearlyEqual(float lhs, float rhs, float eps = 1e-4f) {
     return std::fabs(lhs - rhs) <= eps;
 }
 
-int main(int argc, char** argv) {
-    const DriverConfig cfg = parseArgs(argc, argv);
-    const std::string symbol = inferKernelSymbolFromSoPath(cfg.soPath);
-
-    // 1. Load the generated kernel .so.
-    void* handle = dlopen(cfg.soPath.c_str(), RTLD_NOW | RTLD_LOCAL);
-    const char* dlopenError = dlerror();
-    require(handle != nullptr, dlopenError != nullptr ? dlopenError : "dlopen failed");
-
-    // 2. Resolve the kernel entry and threadpool bridge APIs.
-    auto kernel = reinterpret_cast<KernelFn>(dlsym(handle, symbol.c_str()));
-    auto setThreadPoolCtx = reinterpret_cast<SetThreadPoolCtxFn>(dlsym(handle, "annc_set_current_threadpool_ctx"));
-    auto getThreadPoolCtx = reinterpret_cast<GetThreadPoolCtxFn>(dlsym(handle, "annc_get_current_threadpool_ctx"));
-    auto clearThreadPoolCtx = reinterpret_cast<ClearThreadPoolCtxFn>(dlsym(handle, "annc_clear_current_threadpool_ctx"));
-
-    require(kernel != nullptr, std::string("failed to load kernel symbol: ") + symbol);
-    require(setThreadPoolCtx != nullptr, "failed to load annc_set_current_threadpool_ctx");
-    require(getThreadPoolCtx != nullptr, "failed to load annc_get_current_threadpool_ctx");
-    require(clearThreadPoolCtx != nullptr, "failed to load annc_clear_current_threadpool_ctx");
-
-    // 3. Build a frontend-owned threadpool and wrap it in AnncThreadPoolCtx.
-    FakeTfThreadPool fakeTfPool{};
-    fakeTfPool.numThreads = cfg.threads;
-
-    AnncThreadPoolCtx threadPoolCtx{};
-    threadPoolCtx.impl = &fakeTfPool;
-    threadPoolCtx.num_threads = &fakeNumThreads;
-    threadPoolCtx.in_parallel_region = &fakeInParallelRegion;
-    threadPoolCtx.parallel_for = &fakeParallelFor;
-
-    // 4. Prepare inputs, output buffer, and scalar reference.
-    std::vector<float> lhs = makeLhs(cfg.m, cfg.k);
-    std::vector<float> rhs = makeRhs(cfg.k, cfg.n);
-    std::vector<float> expected = referenceMatmul(lhs, rhs, cfg);
-    std::vector<float> output(static_cast<std::size_t>(cfg.m * cfg.n), 0.0f);
-
-    auto lhsMemRef = makeMemRef2D(lhs.data(), cfg.m, cfg.k);
-    auto rhsMemRef = makeMemRef2D(rhs.data(), cfg.k, cfg.n);
-    auto outMemRef = makeMemRef2D(output.data(), cfg.m, cfg.n);
-
-    // 5. Install the frontend threadpool into the exported TLS bridge.
-    setThreadPoolCtx(&threadPoolCtx);
-    require(getThreadPoolCtx() == &threadPoolCtx, "threadpool ctx was not installed into TLS bridge");
-
-    // 6. Call the generated MLIR C interface symbol.
-    kernel(&lhsMemRef, &rhsMemRef, &outMemRef);
-
-    // 7. The adapter owns cleanup of the TLS bridge.
-    require(getThreadPoolCtx() == &threadPoolCtx, "threadpool ctx changed unexpectedly during kernel call");
-    clearThreadPoolCtx();
-    require(getThreadPoolCtx() == nullptr, "threadpool ctx was not cleared from TLS bridge");
-
-    // 8. Check numerical correctness.
+void verifyOutput(const std::vector<float>& output, const std::vector<float>& expected) {
     for (std::size_t i = 0; i < output.size(); ++i) {
         if (!nearlyEqual(output[i], expected[i])) {
             std::cerr << "FAIL: output mismatch at index " << i
@@ -305,27 +314,106 @@ int main(int argc, char** argv) {
             std::exit(1);
         }
     }
+}
 
-    // 9. Check that the kernel actually used the injected threadpool.
-    require(fakeTfPool.parallelForCalls > 0, "kernel did not use frontend-provided threadpool callback");
-    require(!fakeTfPool.chunks.empty(), "parallel_for produced no work chunks");
-
-    std::cout << "PASS: threadpool-aware kernel driver\n";
-    std::cout << "  so=" << cfg.soPath << "\n";
+void printTrace(const char* label,
+                const DriverConfig& cfg,
+                const std::string& soPath,
+                const std::string& symbol,
+                const FakePoolTrace& trace,
+                float firstOutput,
+                float lastOutput) {
+    std::cout << "PASS: " << label << "\n";
+    std::cout << "  so=" << soPath << "\n";
     std::cout << "  symbol=" << symbol << "\n";
     std::cout << "  m=" << cfg.m << " k=" << cfg.k << " n=" << cfg.n
               << " threads=" << cfg.threads
               << " post_add=" << cfg.postAdd
               << " relu=" << (cfg.relu ? "true" : "false") << "\n";
-    std::cout << "  parallel_for_calls=" << fakeTfPool.parallelForCalls
-              << " chunks=" << fakeTfPool.chunks.size() << '\n';
+    std::cout << "  dispatch=" << trace.dispatchPath;
+    if (trace.lastCostPerUnit.has_value()) {
+        std::cout << " cost_per_unit=" << *trace.lastCostPerUnit;
+    }
+    if (trace.lastGrainSize.has_value()) {
+        std::cout << " grain_size=" << *trace.lastGrainSize;
+    }
+    std::cout << "\n";
+    std::cout << "  parallel_for_calls=" << trace.parallelForCalls
+              << " chunks=" << trace.chunks.size() << "\n";
     std::cout << "  chunk_ranges=";
-    for (const auto& chunk : fakeTfPool.chunks) {
+    for (const auto& chunk : trace.chunks) {
         std::cout << " [" << chunk.first << ", " << chunk.second << ")";
     }
     std::cout << "\n";
-    std::cout << "  first_output=" << output.front()
-              << " last_output=" << output.back() << "\n";
+    std::cout << "  first_output=" << firstOutput
+              << " last_output=" << lastOutput << "\n";
+}
+
+void runKernelWithAdapter(const char* label,
+                          KernelFn kernel,
+                          SetThreadPoolFn setThreadPool,
+                          GetThreadPoolFn getThreadPool,
+                          ClearThreadPoolFn clearThreadPool,
+                          annc::threadpool::AnncThreadPool& threadPool,
+                          const FakePoolTrace& trace,
+                          const PreparedInputs& prepared,
+                          const DriverConfig& cfg,
+                          const std::string& soPath,
+                          const std::string& symbol) {
+    std::vector<float> output(static_cast<std::size_t>(cfg.m * cfg.n), 0.0f);
+    auto lhsMemRef = makeMemRef2D(const_cast<float*>(prepared.lhs.data()), cfg.m, cfg.k);
+    auto rhsMemRef = makeMemRef2D(const_cast<float*>(prepared.rhs.data()), cfg.k, cfg.n);
+    auto outMemRef = makeMemRef2D(output.data(), cfg.m, cfg.n);
+
+    setThreadPool(&threadPool);
+    require(getThreadPool() == &threadPool, "threadpool was not installed into TLS bridge");
+
+    kernel(&lhsMemRef, &rhsMemRef, &outMemRef);
+
+    require(getThreadPool() == &threadPool, "threadpool changed unexpectedly during kernel call");
+    clearThreadPool();
+    require(getThreadPool() == nullptr, "threadpool was not cleared from TLS bridge");
+
+    verifyOutput(output, prepared.expected);
+    require(trace.parallelForCalls > 0, "kernel did not use frontend-provided threadpool callback");
+    require(!trace.chunks.empty(), "parallel_for produced no work chunks");
+
+    printTrace(label, cfg, soPath, symbol, trace, output.front(), output.back());
+}
+
+int main(int argc, char** argv) {
+    const DriverConfig cfg = parseArgs(argc, argv);
+    const std::string symbol = inferKernelSymbolFromSoPath(cfg.soPath);
+    const PreparedInputs prepared = prepareInputs(cfg);
+
+    void* handle = dlopen(cfg.soPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    const char* dlopenError = dlerror();
+    require(handle != nullptr, dlopenError != nullptr ? dlopenError : "dlopen failed");
+
+    auto kernel = reinterpret_cast<KernelFn>(dlsym(handle, symbol.c_str()));
+    auto setThreadPool = reinterpret_cast<SetThreadPoolFn>(dlsym(handle, "annc_set_current_threadpool"));
+    auto getThreadPool = reinterpret_cast<GetThreadPoolFn>(dlsym(handle, "annc_get_current_threadpool"));
+    auto clearThreadPool = reinterpret_cast<ClearThreadPoolFn>(dlsym(handle, "annc_clear_current_threadpool"));
+
+    require(kernel != nullptr, std::string("failed to load kernel symbol: ") + symbol);
+    require(setThreadPool != nullptr, "failed to load annc_set_current_threadpool");
+    require(getThreadPool != nullptr, "failed to load annc_get_current_threadpool");
+    require(clearThreadPool != nullptr, "failed to load annc_clear_current_threadpool");
+
+    FakeTfThreadPool tfPool{};
+    tfPool.numThreads = cfg.threads;
+    FakeTfThreadPoolAdapter tfAdapter(&tfPool);
+    runKernelWithAdapter("threadpool-aware kernel driver (tensorflow adapter)",
+                         kernel,
+                         setThreadPool,
+                         getThreadPool,
+                         clearThreadPool,
+                         tfAdapter,
+                         tfPool.trace,
+                         prepared,
+                         cfg,
+                         cfg.soPath,
+                         symbol);
 
     dlclose(handle);
     return 0;

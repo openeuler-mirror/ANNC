@@ -1,5 +1,5 @@
 add_library(ANNCThreadPool STATIC
-    threadpool/ThreadPoolContext.cpp
+    threadpool/ThreadPool.cpp
     threadpool/Parallel.cpp
 )
 

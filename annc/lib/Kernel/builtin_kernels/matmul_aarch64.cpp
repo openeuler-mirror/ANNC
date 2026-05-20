@@ -1,10 +1,10 @@
-#include "Kernel/threadpool/ThreadPoolContext.h"
+#include "Kernel/threadpool/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
 #include "Kernel/threadpool/Parallel.h"
 
 namespace {
 
-void matmul_aarch64_impl(annc::runtime::AnncThreadPoolCtx* ctx,
+void matmul_aarch64_impl(annc::threadpool::AnncThreadPool* thread_pool,
                          AnncMemRef2DF32* lhs,
                          AnncMemRef2DF32* rhs,
                          AnncMemRef2DF32* output) {
@@ -16,7 +16,7 @@ void matmul_aarch64_impl(annc::runtime::AnncThreadPoolCtx* ctx,
     int64_t N = output->sizes[1];
     int64_t K = lhs->sizes[1];
 
-    annc::kernels::parallel_for(ctx, 0, M, 1, [&](int64_t begin, int64_t end) {
+    annc::kernels::parallel_for(thread_pool, M, [&](int64_t begin, int64_t end) {
         for (int64_t i = begin; i < end; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 float sum = 0.0f;

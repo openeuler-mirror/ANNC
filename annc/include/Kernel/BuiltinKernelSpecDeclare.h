@@ -3,7 +3,7 @@
 
 #include "Kernel/KernelRegistry.h"
 #include "Kernel/KernelAPIMacros.h"
-#include "Kernel/threadpool/ThreadPoolContext.h"
+#include "Kernel/threadpool/ThreadPool.h"
 
 #ifndef ANNC_BUILTIN_KERNEL_SPECS_FILE
 #error "ANNC_BUILTIN_KERNEL_SPECS_FILE must be defined before including BuiltinKernelSpecDeclare.h"

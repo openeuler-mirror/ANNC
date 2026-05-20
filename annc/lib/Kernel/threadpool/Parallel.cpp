@@ -7,76 +7,62 @@ namespace kernels {
 
 namespace {
 
-void runSerial(std::int64_t begin,
-               std::int64_t end,
+void runSerial(std::int64_t total,
                const std::function<void(std::int64_t, std::int64_t)>& fn) {
-    if (begin >= end) {
+    if (total <= 0) {
         return;
     }
-    fn(begin, end);
-}
-
-struct ParallelForThunk {
-    const std::function<void(std::int64_t, std::int64_t)>* fn = nullptr;
-};
-
-void invokeParallelForThunk(std::int64_t begin,
-                            std::int64_t end,
-                            int /*worker_id*/,
-                            void* user_data) {
-    auto* thunk = static_cast<ParallelForThunk*>(user_data);
-    (*thunk->fn)(begin, end);
+    fn(0, total);
 }
 
 } // namespace
 
-int num_threads(runtime::AnncThreadPoolCtx* ctx) {
-    if (ctx == nullptr || ctx->num_threads == nullptr) {
+int num_threads(threadpool::AnncThreadPool* thread_pool) {
+    if (thread_pool == nullptr) {
         return 1;
     }
 
-    const int threads = ctx->num_threads(ctx->impl);
+    const int threads = thread_pool->num_threads();
     return threads > 0 ? threads : 1;
 }
 
-bool in_parallel_region(runtime::AnncThreadPoolCtx* ctx) {
-    if (ctx == nullptr || ctx->in_parallel_region == nullptr) {
+bool in_parallel_region(threadpool::AnncThreadPool* thread_pool) {
+    if (thread_pool == nullptr) {
         return false;
     }
-    return ctx->in_parallel_region(ctx->impl);
+    return thread_pool->in_parallel_region();
 }
 
 void parallel_for(
-    runtime::AnncThreadPoolCtx* ctx,
-    std::int64_t begin,
-    std::int64_t end,
-    std::int64_t grain_size,
+    threadpool::AnncThreadPool* thread_pool,
+    std::int64_t total,
+    const threadpool::ParallelForOptions& options,
     const std::function<void(std::int64_t, std::int64_t)>& fn) {
-    if (begin >= end) {
+    if (total <= 0) {
         return;
     }
 
-    grain_size = std::max<std::int64_t>(grain_size, 1);
+    const std::int64_t grain_size =
+        std::max<std::int64_t>(options.grain_size.value_or(1), 1);
     const bool should_run_parallel =
-        ctx != nullptr &&
-        ctx->parallel_for != nullptr &&
-        (end - begin) > grain_size &&
-        num_threads(ctx) > 1 &&
-        !in_parallel_region(ctx);
+        thread_pool != nullptr &&
+        total > grain_size &&
+        num_threads(thread_pool) > 1 &&
+        !in_parallel_region(thread_pool);
 
     if (!should_run_parallel) {
-        runSerial(begin, end, fn);
+        runSerial(total, fn);
         return;
     }
 
-    ParallelForThunk thunk{&fn};
-    ctx->parallel_for(
-        ctx->impl,
-        begin,
-        end,
-        grain_size,
-        &invokeParallelForThunk,
-        &thunk);
+    thread_pool->parallel_for(total, options, fn);
+}
+
+void parallel_for(
+    threadpool::AnncThreadPool* thread_pool,
+    std::int64_t total,
+    const std::function<void(std::int64_t, std::int64_t)>& fn) {
+    parallel_for(thread_pool, total, threadpool::ParallelForOptions{}, fn);
 }
 
 } // namespace kernels

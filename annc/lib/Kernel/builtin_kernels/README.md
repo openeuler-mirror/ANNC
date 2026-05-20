@@ -1,34 +1,43 @@
-# ANNC 内置 Kernel 编写指南
+# ANNC 手写 Kernel 编写指南
 
-这份文档只讲当前仓里推荐的 hand-written builtin kernel 写法。
+这份文档只讲“怎么写一个 hand-written builtin kernel”。
 
-## 核心约定
+## 1. 你需要写什么
 
-1. builtin kernel 的内部实现统一写成：
+每个 kernel 通常对应两个文件：
+
+1. `xxx_aarch64.cpp`
+2. `xxx_kernel_specs.inc`
+
+前者写实现，后者写注册和 wrapper 形状。
+
+## 2. 实现函数怎么写
+
+推荐形状：
 
 ```cpp
-void impl(::annc::runtime::AnncThreadPoolCtx* ctx, typed_memref_args...);
+void impl(::annc::threadpool::AnncThreadPool* thread_pool,
+          typed_memref_args...);
 ```
 
-2. `_mlir_ciface_*` wrapper 的 ABI 保持原有 memref 参数形状，不额外暴露 `ctx` 首参。
-3. `ctx` 只承载宿主前端提供的线程池 / 并行能力。
-4. `input/output` 这类真正的算子数据参数继续显式放在函数参数里，不要塞进 `ctx`。
-5. spec 里直接写 wrapper body，通过 `getCurrentThreadPoolCtx()` 取 bridge ctx，再转给 `impl(ctx, ...)`。
+说明：
 
-## 最小例子
+- `thread_pool` 是当前调用可用的线程池抽象
+- 真正的输入输出数据仍然显式写在参数里
+- 不要把算子数据塞进线程池对象
 
-实现文件：`my_add_aarch64.cpp`
+最小例子：
 
 ```cpp
-#include "Kernel/threadpool/ThreadPoolContext.h"
+#include "Kernel/threadpool/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
 
 namespace {
 
-void my_add_impl(::annc::runtime::AnncThreadPoolCtx* ctx,
+void my_add_impl(::annc::threadpool::AnncThreadPool* thread_pool,
                  AnncMemRef1DF32* output,
                  AnncMemRef1DF32* input) {
-    (void)ctx;
+    (void)thread_pool;
 
     float* out = ANNC_MEMREF_DATA(*output);
     const float* in = ANNC_MEMREF_DATA(*input);
@@ -42,64 +51,66 @@ void my_add_impl(::annc::runtime::AnncThreadPoolCtx* ctx,
 } // namespace
 ```
 
-spec 文件：`my_add_kernel_specs.inc`
+## 3. spec 怎么写
+
+spec 负责两件事：
+
+1. 注册逻辑算子名和 backend
+2. 定义 `_mlir_ciface_*` wrapper 的参数形状
+
+最小例子：
 
 ```cpp
 ANNC_KERNEL(
     Name("MyAdd").Backend("aarch64"),
     (AnncMemRef1DF32* output,
      AnncMemRef1DF32* input),
-    { my_add_impl(::annc::runtime::getCurrentThreadPoolCtx(), output, input); })
+    { my_add_impl(::annc::threadpool::getCurrentThreadPool(), output, input); })
 ```
 
-这表示：
+这里的含义是：
 
 - 算子名是 `MyAdd`
 - backend 是 `aarch64`
 - wrapper ABI 是 `(output, input)`
-- wrapper 会先从 bridge TLS 取当前 ctx，再转给 `my_add_impl(ctx, output, input)`
+- wrapper 从 TLS bridge 取当前线程池，再转给实现函数
 
-## `AnncThreadPoolCtx` 里有什么
+## 4. 什么时候用并行 helper
 
-当前只保留一层数据结构：
-
-```cpp
-struct AnncThreadPoolCtx {
-    void* impl;
-
-    int (*num_threads)(void* impl);
-    bool (*in_parallel_region)(void* impl);
-    void (*parallel_for)(...);
-};
-```
-
-它表达的是“宿主前端提供给这次 kernel 调用的并行能力句柄”，不是线程池对象本体，也不是通用大 runtime ctx。
-
-## 推荐写法
-
-默认 kernel：
+如果 kernel 需要并行，优先用：
 
 ```cpp
-void my_kernel_impl(::annc::runtime::AnncThreadPoolCtx* ctx,
-                    AnncMemRef1DF32* output,
-                    AnncMemRef1DF32* input);
+#include "Kernel/threadpool/Parallel.h"
+
+annc::kernels::parallel_for(thread_pool, total, fn);
+annc::kernels::parallel_for(thread_pool, total, options, fn);
 ```
 
-spec：
+最常用的是简洁版：
 
 ```cpp
-ANNC_KERNEL(
-    Name("MyKernel").Backend("aarch64"),
-    (AnncMemRef1DF32* output,
-     AnncMemRef1DF32* input),
-    { my_kernel_impl(::annc::runtime::getCurrentThreadPoolCtx(), output, input); })
+annc::kernels::parallel_for(thread_pool, total,
+                            [&](int64_t begin, int64_t end) {
+    for (int64_t i = begin; i < end; ++i) {
+        ...
+    }
+});
 ```
 
-带类型约束的 kernel：
+如果需要调度提示，再传 `options`：
+
+```cpp
+annc::threadpool::ParallelForOptions options;
+options.grain_size = 16;
+
+annc::kernels::parallel_for(thread_pool, total, options, fn);
+```
+
+## 5. 带类型约束的写法
 
 ```cpp
 template <typename T>
-void my_scale_impl(::annc::runtime::AnncThreadPoolCtx* ctx,
+void my_scale_impl(::annc::threadpool::AnncThreadPool* thread_pool,
                    AnncMemRef* output,
                    AnncMemRef* input);
 
@@ -108,39 +119,36 @@ ANNC_KERNEL(
         .Backend("aarch64")
         .TypeConstraint<float>("Tdata"),
     (AnncMemRef* output, AnncMemRef* input),
-    { my_scale_impl<float>(::annc::runtime::getCurrentThreadPoolCtx(), output, input); })
+    { my_scale_impl<float>(::annc::threadpool::getCurrentThreadPool(), output, input); })
 ```
 
-## wrapper 什么时候写复杂一点
+## 6. wrapper 什么时候写复杂一点
 
-如果 wrapper 不只是简单转调，例如还需要：
+如果 wrapper 不只是简单转调，比如还需要：
 
 - 参数重排
 - 额外检查
 - 预处理 / 后处理
 
-那就直接在 body 里展开，例如：
+就直接在 body 里展开：
 
 ```cpp
 ANNC_KERNEL(
     Name("MyKernel").Backend("aarch64"),
     (AnncMemRef* output, AnncMemRef* input),
     {
-        // extra logic
-        auto* ctx = ::annc::runtime::getCurrentThreadPoolCtx();
-        my_kernel_impl(ctx, output, input);
+        auto* thread_pool = ::annc::threadpool::getCurrentThreadPool();
+        my_kernel_impl(thread_pool, output, input);
     })
 ```
 
-## 新增 kernel 的步骤
+## 7. 新增 kernel 的步骤
 
 1. 在 `builtin_kernels/` 下新增 `xxx_aarch64.cpp`
 2. 在同目录新增 `xxx_kernel_specs.inc`
 3. 重新构建
 
-## 当前目录里的参考实现
+## 8. 参考实现
 
 - 默认 kernel：[`matmul_aarch64.cpp`](matmul_aarch64.cpp)
 - 默认 kernel spec：[`matmul_kernel_specs.inc`](matmul_kernel_specs.inc)
-- 类型特化 kernel：[`typed_scale_aarch64.cpp`](typed_scale_aarch64.cpp)
-- 类型特化 spec：[`typed_scale_kernel_specs.inc`](typed_scale_kernel_specs.inc)
