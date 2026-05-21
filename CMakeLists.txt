@@ -28,7 +28,22 @@ find_package(Python COMPONENTS Interpreter Development REQUIRED)
 find_package(nanobind CONFIG REQUIRED)
 
 set(TENSORFLOW_LIBRARY_DIR $ENV{TENSORFLOW_LIBRARY_DIR})
-set(TENSORFLOW_INCLUDE_DIRS "${TENSORFLOW_LIBRARY_DIR}/include")
+if(NOT TENSORFLOW_LIBRARY_DIR)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_lib())"
+    OUTPUT_VARIABLE TENSORFLOW_LIBRARY_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+endif()
+
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_include())"
+  OUTPUT_VARIABLE TENSORFLOW_INCLUDE_DIRS
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT TENSORFLOW_INCLUDE_DIRS)
+  set(TENSORFLOW_INCLUDE_DIRS "${TENSORFLOW_LIBRARY_DIR}/include")
+endif()
 
 find_library(TENSORFLOW_FRAMEWORK_LIB
   NAMES tensorflow_framework
@@ -59,7 +74,6 @@ set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
-
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -76,9 +90,10 @@ include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
 
 include_directories(${CMAKE_SOURCE_DIR}/annc/include)
-include_directories(${CMAKE_SOURCE_DIR}/build/annc/include)
+include_directories(${CMAKE_BINARY_DIR}/annc/include)
 
 include_directories(${CMAKE_SOURCE_DIR}/third_party/json/include)
 
 add_subdirectory(annc)
 add_subdirectory(python)
+add_subdirectory(tensorflow_addons)
