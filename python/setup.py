@@ -5,7 +5,7 @@ from setuptools import find_packages
 import os
 import shutil
 
-project, version = 'annc', '0.0.3'
+project, version = 'annc', '0.0.4'
 
 
 def collect_install_patches():

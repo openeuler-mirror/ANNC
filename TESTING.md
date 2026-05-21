@@ -91,15 +91,6 @@ mkdir tensorflow_serving/custom_ops
 ```
 
 6） 将ANNC提供的开源算子库拷贝到自定义算子文件夹下
-若通过方式一安装，算子库位于/usr/include/annc：
-```
-cp /usr/include/annc/fused_sparse_embedding.cc tensorflow_serving/custom_ops/
-cp /usr/include/annc/fused_dnn_embedding_with_hash_bucket.cc tensorflow_serving/custom_ops/
-cp /usr/include/annc/fused_linear_embdedding_with_hash_bucket.cc tensorflow_serving/custom_ops/
-cp /usr/include/annc/fused_embdedding_with_hash_bucket.cc tensorflow_serving/custom_ops/
-```
-
-若通过方式二安装，算子库位于$ANNC/python/tensorflow/kernels：
 
 ```
 cp $ANNC/python/tensorflow/kernels/fused_sparse_embedding.cc tensorflow_serving/custom_ops/
@@ -183,15 +174,7 @@ void upb_status_seterrmsg(upb_status *status, const char *msg) {
 export TF_PATH="$HOME/serving/output/XXX/external/org_tensorflow"
 export XLA_PATH="$HOME/serving/output/XXX/external/org_tensorflow/third_party/xla"
 
-# 通过方式一安装的ANNC：
-cd /usr/include/annc/tfserver/xla
-# 修改xla2.sh前两行为：
-TF_PATCH_PATH="$ANNC" 
-PATH_OF_PATCHES="$ANNC/xla"
-export ANNC_PATH=/usr/include/annc
-bash xla2.sh
 
-# 通过方式二安装的ANNC：
 cd $ANNC/install/tfserver/xla
 export ANNC_PATH=$ANNC
 bash xla2.sh
@@ -219,7 +202,7 @@ git clone https://gitcode.com/openeuler/sra_benchmark.git
 
 ```
 # 运行模型转换
-annc-opt -I /path/to/DeepFM_cf/1730800001/1 \
+annc-opt -I /path/to/DeepFM/1730800001/1 \
     -O folding/1 \
    layout_matmul
 cp folding/1/saved_model.pbtxt /path/to/deepfm_cf/1/
