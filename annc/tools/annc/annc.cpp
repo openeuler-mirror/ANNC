@@ -480,8 +480,9 @@ private:
         log("Step 5: ");
         
         string inputFile = "step4.o";
-        // step4.o_mlir
-        string sharedLibName = config.mLirSymbolName + ".so";
+        string sharedLibName = config.outputFile.empty()
+                                   ? config.mLirSymbolName + ".so"
+                                   : config.outputFile;
         
         string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";

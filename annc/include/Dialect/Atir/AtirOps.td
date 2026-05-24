@@ -72,7 +72,8 @@ def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
     `--grouping-plugin` is highly recommend. 
   }];
   let arguments = (ins Variadic<Atir_Tensor>:$inputs,
-                       StrAttr:$opType);
+                       StrAttr:$opType,
+                       OptionalAttr<DictionaryAttr>:$metadata);
   let results = (outs Variadic<Atir_Tensor>:$output);
   let assemblyFormat = [{
     ( `(` $inputs^ `)` )?

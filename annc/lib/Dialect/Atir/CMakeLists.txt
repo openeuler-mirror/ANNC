@@ -9,7 +9,7 @@ add_mlir_library(AtirDialect
 
     ADDITIONAL_HEADER_DIRS
     ${CMAKE_SOURCE_DIR}/annc/include
-    ${CMAKE_SOURCE_DIR}/build/annc/include
+    ${CMAKE_BINARY_DIR}/annc/include
 
     DEPENDS
     AtirTableGen

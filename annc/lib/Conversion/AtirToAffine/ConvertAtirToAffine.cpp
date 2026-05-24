@@ -35,6 +35,9 @@ namespace atir {
             target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
                 return atirTypeConverter.isLegal(op->getOperandTypes());
             });
+            target.addDynamicallyLegalOp<atir::CustomizeOp>([&](atir::CustomizeOp op) {
+                return op.getOpType() == "ANNCFused";
+            });
             if (failed(applyPartialConversion(getOperation(),target,std::move(patterns)))){
                 signalPassFailure();
             }

@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <filesystem>
 
 using namespace tensorflow;
 using annc::NodeInfo;
@@ -11,13 +12,32 @@ using annc::OutputInfo;
 StandalonePbParser::StandalonePbParser(const std::string& model_path) 
     : model_path_(model_path) {}
 
+// 加载模型
 bool StandalonePbParser::loadModel() {
     saved_model_ = std::make_unique<SavedModel>();
+    graph_def_ = std::make_unique<GraphDef>();
+
+    namespace fs = std::filesystem;
+    if (fs::is_regular_file(model_path_)) {
+        std::ifstream graph_file(model_path_, std::ios::binary);
+        if (!graph_file) {
+            std::cerr << "Error: Cannot open GraphDef at " << model_path_ << std::endl;
+            return false;
+        }
+        if (!graph_def_->ParseFromIstream(&graph_file)) {
+            std::cerr << "Error: Failed to parse GraphDef at " << model_path_ << std::endl;
+            return false;
+        }
+        gdef_ = graph_def_.get();
+        return true;
+    }
+
     std::string pb_path = model_path_ + "/saved_model.pb";
     
     std::ifstream pb_file(pb_path, std::ios::binary);
     if (!pb_file) {
-        std::cerr << "Error: Cannot open SavedModel at " << pb_path << std::endl;
+        std::cerr << "Error: Cannot open SavedModel at " << pb_path
+                  << " (need binary saved_model.pb, not .pbtxt)" << std::endl;
         return false;
     }
     if (!saved_model_->ParseFromIstream(&pb_file)) {
@@ -41,19 +61,23 @@ bool StandalonePbParser::parse() {
     }
     
     std::vector<std::string> output_defs;
-    const auto& meta_graph = saved_model_->meta_graphs(0);
-    if (meta_graph.signature_def().count("serving_default")) {
+    if (saved_model_ && saved_model_->meta_graphs_size() > 0 &&
+        saved_model_->meta_graphs(0).signature_def().count("serving_default")) {
+        const auto& meta_graph = saved_model_->meta_graphs(0);
         const auto& sdef = meta_graph.signature_def().at("serving_default");
         for (const auto& output_elem : sdef.outputs()) {
             output_defs.push_back(output_elem.second.name());
         }
     }
-    
+
     if (output_defs.empty()) {
-        for (auto it = gdef_->node().rbegin(); it != gdef_->node().rend(); ++it) {
-            if (!isPlaceholder(*it) && it->op() != "Const") {
-                output_defs.push_back(it->name());
-                break;
+        // Bare GraphDef has no signature_def. Use broad candidate outputs and
+        // let filterConvertibleNodes keep the ATIR-supported subgraph. Picking
+        // only the last graph node often selects save/restore bookkeeping and
+        // drops the actual compute path.
+        for (const auto& node : gdef_->node()) {
+            if (!isPlaceholder(node) && node.op() != "Const" && node.op() != "NoOp") {
+                output_defs.push_back(node.name());
             }
         }
     }
@@ -93,7 +117,7 @@ bool StandalonePbParser::parse() {
             }
             continue;
         }
-        
+
         const NodeDef* node = node_map.at(output_name);
         std::string name = output_name;
         while (identity_redirect.count(name)) {
@@ -121,9 +145,10 @@ bool StandalonePbParser::parse() {
     for (const auto& node : nodes_) {
         processed_names.insert(node.name);
     }
-    
+
     for (const auto& node_name : pruned_nodes) {
         if (!node_map.count(node_name)) continue;
+
         const NodeDef* node = node_map.at(node_name);
         std::string name = node_name;
         while (identity_redirect.count(name)) {
@@ -141,7 +166,10 @@ bool StandalonePbParser::parse() {
         nodes_.push_back(std::move(info));
     }
 
+    filterConvertibleNodes();
+    // 拓扑排序：确保节点按依赖顺序排列（输入在前，输出在后）
     nodes_ = topologicalSort(nodes_);
+    inferMvpMatMulAddReluShapes();
     valid_ = true;
     return true;
 }
@@ -194,7 +222,7 @@ void StandalonePbParser::processIdentityNodes(
     
     for (const auto& node_name : pruned_nodes) {
         std::string name = getInputName(node_name);
-        if (!node_map.count(name)) continue;
+        if (!node_map.count(name)) continue;      
         const NodeDef* node = node_map.at(name);
         if (isIdentity(*node) && !node->input().empty()) {
             std::string input_name = getInputName(node->input(0));
@@ -221,6 +249,8 @@ void StandalonePbParser::processNode(
     const NodeDef* node,
     const std::unordered_map<std::string, std::string>& identity_redirect,
     annc::NodeInfo& info) {
+    info.tf_attrs["tf.name"] = node->name();
+    info.tf_attrs["tf.op"] = node->op();
     info.attrs.clear();
     for (const auto& kv : node->attr()) {
         const std::string& attrName = kv.first;
@@ -273,6 +303,7 @@ void StandalonePbParser::processNode(
             input_name = identity_redirect.at(input_name);
         }
         info.inputs.push_back(input_name);
+        info.tf_attrs["tf.input." + std::to_string(i)] = input_name;
     }
     auto attr_it = node->attr().find("_output_shapes");
     if (attr_it != node->attr().end()) {
@@ -304,7 +335,7 @@ void StandalonePbParser::processNode(
                        getTypeAttr("Tout", tf_dtype) ||
                        getTypeAttr("T", tf_dtype)) {
             }
-            std::string dtype = getDataTypeStr(tf_dtype);     
+            std::string dtype = getDataTypeStr(tf_dtype);
             OutputInfo output;
             output.name = (outputCount > 1 && j > 0) ? (info.name + ":" + std::to_string(j)) : info.name;
             output.shape = shape;
@@ -357,7 +388,155 @@ void StandalonePbParser::processNode(
     }
 }
 
-// 张量数据处理
+bool StandalonePbParser::isAtirConvertibleNode(const annc::NodeInfo& node) const {
+    if (node.isInputNode) {
+        return true;
+    }
+    if (node.op_type == "Const") {
+        return node.outputs.empty() || node.outputs[0].dtype != "string";
+    }
+    return annc::MLIRBuilder::isSupportedOp(node.op_type);
+}
+
+void StandalonePbParser::filterConvertibleNodes() {
+    std::unordered_map<std::string, size_t> node_index;
+    for (size_t i = 0; i < nodes_.size(); ++i) {
+        node_index[nodes_[i].name] = i;
+        for (const auto& output : nodes_[i].outputs) {
+            node_index[output.name] = i;
+        }
+    }
+
+    std::unordered_set<std::string> keep;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& node : nodes_) {
+            if (keep.count(node.name) || !isAtirConvertibleNode(node)) {
+                continue;
+            }
+            bool deps_ok = true;
+            for (const auto& input : node.inputs) {
+                std::string input_name = getInputName(input);
+                if (input_name.empty() || input_name[0] == '^') {
+                    continue;
+                }
+                auto it = node_index.find(input_name);
+                if (it != node_index.end() && !keep.count(nodes_[it->second].name)) {
+                    deps_ok = false;
+                    break;
+                }
+            }
+            if (deps_ok) {
+                keep.insert(node.name);
+                changed = true;
+            }
+        }
+    }
+
+    std::vector<annc::NodeInfo> filtered;
+    filtered.reserve(nodes_.size());
+    for (auto& node : nodes_) {
+        if (keep.count(node.name)) {
+            filtered.push_back(std::move(node));
+        }
+    }
+
+    bool has_output = false;
+    for (const auto& node : filtered) {
+        if (node.isOutputNode) {
+            has_output = true;
+            break;
+        }
+    }
+    if (!has_output) {
+        std::unordered_set<std::string> consumed;
+        for (const auto& node : filtered) {
+            for (const auto& input : node.inputs) {
+                std::string input_name = getInputName(input);
+                auto it = node_index.find(input_name);
+                if (it != node_index.end() && keep.count(nodes_[it->second].name)) {
+                    consumed.insert(nodes_[it->second].name);
+                }
+            }
+        }
+        for (auto& node : filtered) {
+            if (!node.isInputNode && node.op_type != "Const" && !consumed.count(node.name)) {
+                node.isOutputNode = true;
+            }
+        }
+    }
+
+    nodes_ = std::move(filtered);
+}
+
+void StandalonePbParser::inferMvpMatMulAddReluShapes() {
+    std::unordered_map<std::string, annc::NodeInfo*> by_name;
+    for (auto& node : nodes_) {
+        by_name[node.name] = &node;
+    }
+
+    for (auto& node : nodes_) {
+        if (node.op_type != "MatMul" || node.inputs.size() < 2 ||
+            node.outputs.empty() || node.outputs[0].shape.size() != 2) {
+            continue;
+        }
+
+        if (!node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
+            node.outputs[0].shape[0] = 2;
+        }
+        const std::vector<int64_t>& out_shape = node.outputs[0].shape;
+        annc::NodeInfo* lhs = by_name.count(node.inputs[0]) ? by_name[node.inputs[0]] : nullptr;
+        annc::NodeInfo* rhs = by_name.count(node.inputs[1]) ? by_name[node.inputs[1]] : nullptr;
+        if (!lhs || lhs->outputs.empty() || lhs->outputs[0].shape.size() != 2 ||
+            !rhs || rhs->outputs.empty()) {
+            continue;
+        }
+
+        int64_t k = lhs->outputs[0].shape[1];
+        if (k == -1) {
+            continue;
+        }
+        if (!lhs->outputs[0].shape.empty() && lhs->outputs[0].shape[0] == -1) {
+            lhs->outputs[0].shape[0] = 2;
+        }
+        rhs->outputs[0].shape = {k, out_shape[1]};
+        rhs->outputs[0].dtype = node.outputs[0].dtype;
+
+        for (auto& maybe_add : nodes_) {
+            if (maybe_add.op_type != "Add" || maybe_add.inputs.size() < 2 ||
+                maybe_add.outputs.empty()) {
+                continue;
+            }
+            if (!maybe_add.outputs[0].shape.empty() &&
+                maybe_add.outputs[0].shape[0] == -1) {
+                maybe_add.outputs[0].shape[0] = 2;
+            }
+            if (std::find(maybe_add.inputs.begin(), maybe_add.inputs.end(),
+                          node.name) == maybe_add.inputs.end()) {
+                continue;
+            }
+            for (const std::string& input : maybe_add.inputs) {
+                if (input == node.name) {
+                    continue;
+                }
+                annc::NodeInfo* bias = by_name.count(input) ? by_name[input] : nullptr;
+                if (bias && !bias->outputs.empty() && out_shape.size() == 2) {
+                    bias->outputs[0].shape = {out_shape[1]};
+                    bias->outputs[0].dtype = maybe_add.outputs[0].dtype;
+                }
+            }
+        }
+    }
+
+    for (auto& node : nodes_) {
+        if ((node.op_type == "Relu" || node.isOutputNode) && !node.outputs.empty() &&
+            !node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
+            node.outputs[0].shape[0] = 2;
+        }
+    }
+}
+
 bool StandalonePbParser::getTensorValue(
     const NodeDef* node,
     std::vector<uint8_t>& tensor_values,
@@ -512,13 +691,13 @@ std::vector<annc::NodeInfo> StandalonePbParser::topologicalSort(const std::vecto
         std::cerr << "Warning: Cycle detected in graph" << std::endl;
         return nodes;
     }
-    
+
     return sorted_nodes;
 }
 
 std::string StandalonePbParser::base64Encode(const std::vector<uint8_t>& data) {
     static const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    
+
     std::string result;
     result.reserve((data.size() + 2) / 3 * 4);
     

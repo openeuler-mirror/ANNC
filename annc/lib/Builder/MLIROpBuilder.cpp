@@ -8,6 +8,7 @@
 #include <complex>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <variant>
 
 using namespace mlir;
@@ -27,6 +28,47 @@ int32_t lookupTfIntMask(const NodeInfo &node, llvm::StringRef key) {
   if (it == node.attrs.end())
     return 0;
   return tfAttrToI32Mask(it->second);
+}
+
+std::string tfAttrValueToString(const NodeInfo::TfAttrValue &value) {
+  return std::visit([](const auto &v) -> std::string {
+    using T = std::decay_t<decltype(v)>;
+    if constexpr (std::is_same_v<T, std::string>) {
+      return v;
+    } else if constexpr (std::is_same_v<T, bool>) {
+      return v ? "true" : "false";
+    } else if constexpr (std::is_arithmetic_v<T>) {
+      return std::to_string(v);
+    } else {
+      std::ostringstream os;
+      for (size_t i = 0; i < v.size(); ++i) {
+        if (i > 0) os << ",";
+        if constexpr (std::is_same_v<typename T::value_type, bool>) {
+          os << (v[i] ? "true" : "false");
+        } else {
+          os << v[i];
+        }
+      }
+      return os.str();
+    }
+  }, value);
+}
+
+DictionaryAttr makeTfMetadata(OpBuilder& builder, const NodeInfo& node) {
+  SmallVector<NamedAttribute> attrs;
+  attrs.push_back(builder.getNamedAttr("tf.name", builder.getStringAttr(node.name)));
+  attrs.push_back(builder.getNamedAttr("tf.op", builder.getStringAttr(node.op_type)));
+  for (const auto& [key, value] : node.attrs) {
+    if (key == "tf.name" || key == "tf.op") {
+      continue;
+    }
+    attrs.push_back(builder.getNamedAttr(key, builder.getStringAttr(tfAttrValueToString(value))));
+  }
+  return DictionaryAttr::get(builder.getContext(), attrs);
+}
+
+void attachTfMetadata(Operation* op, OpBuilder& builder, const NodeInfo& node) {
+  op->setAttr("metadata", makeTfMetadata(builder, node));
 }
 
 void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
@@ -106,6 +148,16 @@ const llvm::StringMap<NodeHandler>& getNodeDispatchTable() {
   return table;
 }
 }  // namespace
+
+std::string MLIRBuilder::normalizeOpType(llvm::StringRef opType) {
+  if (opType == "AddV2") return "Add";
+  if (opType == "PlaceholderV2") return "Placeholder";
+  return opType.str();
+}
+
+bool MLIRBuilder::isSupportedOp(llvm::StringRef opType) {
+  return getNodeDispatchTable().contains(normalizeOpType(opType));
+}
 
 void MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
   auto unknownLoc = UnknownLoc::get(module_.getContext());
@@ -444,7 +496,7 @@ void MLIRBuilder::createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> out
 void MLIRBuilder::createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   auto loc = getLoc(builder_.getContext(), node.name);
   llvm::SmallVector<Type, 2> outTypes(outs.begin(), outs.end());
-  auto op = builder_.create<atir::CustomizeOp>(loc, outTypes, ins, builder_.getStringAttr(node.op_type));
+  auto op = builder_.create<atir::CustomizeOp>(loc, outTypes, ins, builder_.getStringAttr(node.op_type), makeTfMetadata(builder_, node));
   for (size_t i = 0; i < node.outputs.size(); ++i)
     tensorValues_[node.outputs[i].name] = op.getResult(static_cast<unsigned>(i));
 }
@@ -1060,6 +1112,7 @@ void MLIRBuilder::createMatMulOp(const NodeInfo& node, ArrayRef<Type> outs, Arra
       m_size ? builder_.getI32IntegerAttr(*m_size) : IntegerAttr(),
       n_size ? builder_.getI32IntegerAttr(*n_size) : IntegerAttr(),
       k_size ? builder_.getI32IntegerAttr(*k_size) : IntegerAttr());
+    attachTfMetadata(matmul.getOperation(), builder_, node);
     std::string outName = node.outputs[0].name;
     tensorValues_[outName] = matmul.getResult();
 }

@@ -11,8 +11,8 @@ set(LIBS
   ${conversion_libs}
 
   AtirDialect
-  AtirBuilder
   AtirPasses
+  ANNCHelper
   AtirToAffineConversion
   AtirToLinalgConversion
 )

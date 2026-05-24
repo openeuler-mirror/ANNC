@@ -259,7 +259,6 @@ void ConcatLoweringToAffine::Lowering(PatternRewriter& rewriter, ConcatOpAdaptor
 
 void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor adaptor, MatMulOp op) const
 {
-    MLIRContext *cxt = getContext();
     auto loc = op.getLoc();
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();

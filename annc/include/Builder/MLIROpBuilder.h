@@ -7,6 +7,7 @@
 
 #include "Dialect/Atir/AtirOps.h"
 #include "Helper.h"
+#include "llvm/ADT/StringRef.h"
 
 using namespace mlir;
 namespace annc {
@@ -29,7 +30,13 @@ struct NodeInfo {
         std::variant<int64_t, double, bool, std::string, std::vector<int64_t>,
                      std::vector<double>, std::vector<bool>,
                      std::vector<std::string>>;
+    // Typed TensorFlow attributes used to build ATIR op semantics, such as
+    // transpose_a, keep_dims, axis, and other compute-affecting options.
     std::unordered_map<std::string, TfAttrValue> attrs;
+    // String metadata preserved for GraphDef rewrite and converter recovery.
+    // Keep this separate from attrs so TF source names/inputs do not pollute
+    // typed ATIR attribute application.
+    std::unordered_map<std::string, std::string> tf_attrs;
     bool has_numBuckets = false;
     int64_t numBuckets = 0;
     bool isInputNode = false;
@@ -43,6 +50,8 @@ class MLIRBuilder {
   virtual ~MLIRBuilder() = default;
 
   void buildFromNodes(const std::vector<NodeInfo>& nodes);
+  static std::string normalizeOpType(llvm::StringRef opType);
+  static bool isSupportedOp(llvm::StringRef opType);
 
   void createAddNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
