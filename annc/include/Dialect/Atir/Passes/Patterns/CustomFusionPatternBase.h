@@ -68,7 +68,11 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     //
     auto callee = StringAttr::get(rewriter.getContext(), getKernelName(anchor,fusedOps));
 
-    auto customCallOp = rewriter.create<CustomizeOp>(anchor.getLoc(), resultTypes, inputValues, callee);
+    // metadata is initialized as an empty DictionaryAttr here; runtime
+    // attributes (kernel_name, shared_lib_path, Nconstants, etc.) will be
+    // populated by downstream passes (e.g. the ANNC compilation pipeline).
+    auto customCallOp = rewriter.create<CustomizeOp>(
+        anchor.getLoc(), resultTypes, inputValues, callee, DictionaryAttr());
 
     //replace
     for (auto [oldV, newV] : llvm::zip(outputValues, customCallOp.getResults())) {

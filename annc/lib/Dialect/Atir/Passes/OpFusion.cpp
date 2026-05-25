@@ -1,11 +1,15 @@
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
+
+#include "Helper.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/SHA256.h"
+#include "llvm/Support/raw_ostream.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/Attributes.h"
-#include "llvm/Support/SHA256.h"
-#include "llvm/ADT/SmallString.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -13,131 +17,204 @@ using namespace atir;
 
 namespace {
 
-std::string getFusedFuncName(Type aType, Type bType, Type biasType, Type resultType) {
-  std::string sig;
-  llvm::raw_string_ostream os(sig);
-  os << "fused_matmul_add_relu_";
-  aType.print(os); os << "_";
-  bType.print(os); os << "_";
-  biasType.print(os); os << "_";
-  resultType.print(os);
+static std::string sanitizeName(std::string name) {
+  for (char &c : name) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
+  }
+  return name;
+}
 
+static std::string getTfName(Operation *op) {
+  if (!op) return "";
+  if (auto dict = op->getAttrOfType<DictionaryAttr>("metadata")) {
+    if (auto attr = dyn_cast_or_null<StringAttr>(dict.get("tf.name"))) {
+      return attr.str();
+    }
+  }
+  return annc::getLocName(op);
+}
+
+static std::string getValueName(Value value) {
+  if (auto tensorType = dyn_cast<atir::TensorType>(value.getType())) {
+    std::string name = tensorType.getValueOfName();
+    if (!name.empty()) return name;
+  }
+  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (auto loc = dyn_cast<NameLoc>(blockArg.getLoc())) return loc.getName().str();
+    return "arg" + std::to_string(blockArg.getArgNumber());
+  }
+  if (Operation *op = value.getDefiningOp()) {
+    return getTfName(op);
+  }
+  return "";
+}
+
+static std::string getStableMatMulKernelName(Operation *matmul) {
+  std::string sig = getTfName(matmul);
   SHA256 sha;
   sha.update(sig);
   auto hash = sha.final();
-  SmallString<64> hex;
-  for (size_t i = 0; i < 8; ++i) {
-    hex += llvm::toHex(hash[i]);
-  }
-  return ("fused_matmul_add_relu_" + hex).str();
+  SmallString<16> hex;
+  for (size_t i = 0; i < 4; ++i) hex += llvm::toHex(hash[i]);
+  return ("fused_matmul_" + hex).str();
 }
 
-func::FuncOp getOrCreateFusedFunc(ModuleOp module, Type matmulOutputType,
-                            Type aType, Type bType, Type cType,Type biasType, Type resultType,
-                            PatternRewriter &rewriter) {
-  std::string funcName = getFusedFuncName(aType, bType, biasType, resultType);
+static ArrayAttr makeStringArray(MLIRContext *ctx, ArrayRef<std::string> values) {
+  SmallVector<Attribute> attrs;
+  for (const auto &value : values) attrs.push_back(StringAttr::get(ctx, value));
+  return ArrayAttr::get(ctx, attrs);
+}
 
-  if (auto existing = module.lookupSymbol<func::FuncOp>(funcName))
+static ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
+  SmallVector<Attribute> attrs;
+  Builder b(ctx);
+  for (int64_t value : values) attrs.push_back(b.getI64IntegerAttr(value));
+  return ArrayAttr::get(ctx, attrs);
+}
+
+static int64_t getRank(Type type) {
+  if (auto tensorType = dyn_cast<atir::TensorType>(type)) {
+    return static_cast<int64_t>(tensorType.getShape().size());
+  }
+  return 0;
+}
+
+static std::string shapeToString(Type type) {
+  auto tensorType = dyn_cast<atir::TensorType>(type);
+  if (!tensorType) return "";
+
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  llvm::interleaveComma(tensorType.getShape(), os,
+                        [&](int64_t dim) { os << dim; });
+  return os.str();
+}
+
+static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
+                                     StringRef kernelName, MatMulOp matmulOp) {
+  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
     return existing;
+  }
 
-  auto funcType = rewriter.getFunctionType({aType, bType, cType, biasType},  resultType);
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
 
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), funcName, funcType);
+  SmallVector<Type> inputTypes = {
+      matmulOp.getLhs().getType(), matmulOp.getRhs().getType(),
+      matmulOp.getC().getType()};
+  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
+  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
   func.setPrivate();
-
-MLIRContext *ctx = func.getContext();
-  auto emitCAttr = UnitAttr::get(ctx);
-  func->setAttr("llvm.emit_c_interface", emitCAttr);
-
-  func->setAttr("fusion.pattern", StringAttr::get(rewriter.getContext(), "matmul_add_relu"));
+  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
+  func->setAttr("fusion.pattern", rewriter.getStringAttr("matmul"));
+  func->setAttr("annc.kernel", rewriter.getUnitAttr());
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
+  Value lhs = entry->getArgument(0);
+  Value rhs = entry->getArgument(1);
+  Value c = entry->getArgument(2);
 
-  Value A = entry->getArgument(0);
-  Value B = entry->getArgument(1);
-  Value C = entry->getArgument(2);
-  Value bias = entry->getArgument(3);
-  bool hasBias = false;
-  SmallVector<Value> matmulInputs = {A, B, C, };
-  auto matmul = rewriter.create<MatMulOp>(
-      func.getLoc(), matmulOutputType, A, B, C, Value{},rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false), //  right_transpose
-      rewriter.getBoolAttr(false), // left_transpose
-      rewriter.getBoolAttr(false),  // output_transpose
-      rewriter.getBoolAttr(false),   // do_relu
-      rewriter.getF32FloatAttr(-1.0f),  // relu_limit
-      IntegerAttr(),
-      IntegerAttr(),
-      IntegerAttr(),
-      IntegerAttr(),
-      IntegerAttr(),
-      IntegerAttr());
-
-  SmallVector<Value> addInputs = {matmul.getResult(), bias};
-  auto doReluAttr = rewriter.getBoolAttr(false);
-  auto reluLimitAttr = rewriter.getF32FloatAttr(-1.0f);
-  auto addOutput = rewriter.create<atir::BufferOp>(func.getLoc(), matmulOutputType);
-  auto add = rewriter.create<AddOp>(
-      func.getLoc(), matmulOutputType, addOutput.getResult(), addInputs, doReluAttr, reluLimitAttr, FloatAttr());
-
-  auto reluOutput = rewriter.create<atir::BufferOp>(func.getLoc(), resultType);
-  auto relu = rewriter.create<ReluOp>(
-      func.getLoc(), resultType, reluOutput.getResult(), add.getResult(), rewriter.getF32FloatAttr(-1.0f));
-
-  rewriter.create<func::ReturnOp>(func.getLoc(), relu.getResult());
+  // Keep the public fused kernel symbol stable while delegating the actual
+  // MatMul body to the registered builtin kernel during lowering.
+  SmallVector<NamedAttribute> matmulAttrs;
+  matmulAttrs.push_back(
+      rewriter.getNamedAttr("opType", rewriter.getStringAttr("MatMul")));
+  rewriter.create<CustomizeOp>(
+      func.getLoc(), TypeRange{}, ValueRange{lhs, rhs, c}, matmulAttrs);
+  rewriter.create<func::ReturnOp>(func.getLoc());
 
   return func;
 }
 
-struct FuseMatMulAddReluAsCallPattern : public OpRewritePattern<ReluOp> {
-  using OpRewritePattern<ReluOp>::OpRewritePattern;
+struct FuseMatMulAsCustomizePattern : public OpRewritePattern<MatMulOp> {
+  using OpRewritePattern<MatMulOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(ReluOp relu,
+  LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
-    auto addOp = dyn_cast_or_null<AddOp>(relu.getInput().getDefiningOp());
-    if (!addOp) return failure();
-    auto inputs = addOp.getInputs();
-    Value lhs = inputs[0];
-    Value rhs = inputs[1];
-    MatMulOp matmulOp = nullptr;
-    Value bias;
+    if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
 
+    // Keep TensorFlow input order fixed-first, dynamic-second so ANNCFused can
+    // infer the output shape from input_x while using weight's last dimension.
+    SmallVector<Value> fusedInputs = {
+        matmulOp.getRhs(), matmulOp.getLhs()};
+    SmallVector<Type> fusedResultTypes = {matmulOp.getResult().getType()};
 
-    if (auto mm = dyn_cast_or_null<MatMulOp>(lhs.getDefiningOp())) {
-      matmulOp = mm;
-      bias = rhs;
-    } else if (auto mm = dyn_cast_or_null<MatMulOp>(rhs.getDefiningOp())) {
-      matmulOp = mm;
-      bias = lhs;
-    } else {
-      return failure();
-    }
-
-    ModuleOp module = relu->getParentOfType<ModuleOp>();
+    std::string matmulName = getTfName(matmulOp);
+    std::string kernelName = getStableMatMulKernelName(matmulOp);
+    std::string clusterName = sanitizeName("annc_fused_" + matmulName);
+    ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
     if (!module) return failure();
-    Type aType = matmulOp.getLhs().getType();
-    Type bType = matmulOp.getRhs().getType();
-    Type cType  = matmulOp.getC().getType();
+    createKernelFunc(module, rewriter, kernelName, matmulOp);
 
-    Type matmulOutputType = matmulOp.getResult().getType();
-    Type biasType = bias.getType();
-    Type resultType = relu.getResult().getType();
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr(
+        "fusion.pattern", rewriter.getStringAttr("matmul")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.nodes", makeStringArray(rewriter.getContext(), {matmulName})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.inputs", makeStringArray(rewriter.getContext(),
+                                     {getValueName(matmulOp.getRhs()),
+                                      getValueName(matmulOp.getLhs())})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.input_shapes",
+        makeStringArray(rewriter.getContext(),
+                        {shapeToString(matmulOp.getRhs().getType()),
+                         shapeToString(matmulOp.getLhs().getType())})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.output_shape",
+        rewriter.getStringAttr(shapeToString(matmulOp.getResult().getType()))));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("mlir_ciface")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.output", rewriter.getStringAttr(matmulName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "Nconstants", rewriter.getI64IntegerAttr(0)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "Nfixed", rewriter.getI64IntegerAttr(1)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "Ndynamic", rewriter.getI64IntegerAttr(1)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "num_outputs", rewriter.getI64IntegerAttr(1)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "output_ranks",
+        makeI64Array(rewriter.getContext(), {getRank(matmulOp.getResult().getType())})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "input_ranks",
+        makeI64Array(rewriter.getContext(),
+                     {getRank(matmulOp.getRhs().getType()),
+                      getRank(matmulOp.getLhs().getType())})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "output_shapes",
+        makeStringArray(rewriter.getContext(),
+                        {shapeToString(matmulOp.getResult().getType())})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {1, 0, 2})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "symbolic_signature", rewriter.getStringAttr("F:0|S:1;?,?")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
 
-    func::FuncOp fusedFunc = getOrCreateFusedFunc(module,matmulOutputType, aType, bType,cType, biasType, resultType, rewriter);
-    auto call = rewriter.create<func::CallOp>(relu.getLoc(), fusedFunc,
-                                        ValueRange{ matmulOp.getLhs(), matmulOp.getRhs(), matmulOp.getC(), bias});
+    SmallVector<NamedAttribute> customAttrs;
+    customAttrs.push_back(
+        rewriter.getNamedAttr("opType", rewriter.getStringAttr("ANNCFused")));
+    customAttrs.push_back(rewriter.getNamedAttr(
+        "metadata", DictionaryAttr::get(rewriter.getContext(), metadata)));
+    auto fused = rewriter.create<CustomizeOp>(
+        matmulOp.getLoc(), fusedResultTypes, fusedInputs, customAttrs);
 
-    rewriter.replaceOp(relu, call.getResult(0));
-    rewriter.eraseOp(addOp);
-    rewriter.eraseOp(matmulOp);
+    rewriter.replaceOp(matmulOp, fused.getResults());
     return success();
   }
 };
 
-} // anonymous namespace
+}  // namespace
 
 namespace atir {
 class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
@@ -150,7 +227,7 @@ public:
     if (!mainFunc) return;
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<FuseMatMulAddReluAsCallPattern>(&getContext());
+    patterns.add<FuseMatMulAsCustomizePattern>(&getContext());
 
     if (failed(applyPatternsAndFoldGreedily(mainFunc, std::move(patterns)))) {
       signalPassFailure();
@@ -161,4 +238,4 @@ public:
 std::unique_ptr<OperationPass<ModuleOp>> createAtirOpFusionPass() {
   return std::make_unique<AtirOpFusionPass>();
 }
-} // namespace atir
+}  // namespace atir

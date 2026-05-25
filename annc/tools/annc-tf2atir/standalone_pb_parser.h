@@ -32,6 +32,7 @@ private:
     
     // SavedModel 数据
     std::unique_ptr<tensorflow::SavedModel> saved_model_;
+    std::unique_ptr<tensorflow::GraphDef> graph_def_;
     const tensorflow::GraphDef* gdef_ = nullptr;
 
     // 内部方法
@@ -50,6 +51,9 @@ private:
     void processNode(const tensorflow::NodeDef* node,
                      const std::unordered_map<std::string, std::string>& identity_redirect,
                      annc::NodeInfo& info);
+    bool isAtirConvertibleNode(const annc::NodeInfo& node) const;
+    void filterConvertibleNodes();
+    void inferMvpMatMulAddReluShapes();
     
     // 张量数据处理
     bool getTensorValue(const tensorflow::NodeDef* node,

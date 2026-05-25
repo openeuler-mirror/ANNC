@@ -7,6 +7,8 @@
 #include <map>
 #include <unordered_map>
 #include <queue>
+#include <algorithm>
+#include <sstream>
 #include "llvm/ADT/DenseMap.h"
 
 #include "Dialect/Atir/AtirOps.h"
@@ -30,11 +32,291 @@
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "google/protobuf/text_format.h"
 
 using namespace mlir;
 using namespace annc;
+
+namespace {
+
+static OwningOpRef<ModuleOp> parseModuleFromFile(StringRef path,
+                                                 MLIRContext *context) {
+  return parseSourceFile<ModuleOp>(path, context);
+}
+
+static std::string cleanTensorName(std::string name) {
+  if (!name.empty() && name[0] == '^') name = name.substr(1);
+  size_t colon = name.find(':');
+  if (colon != std::string::npos) name = name.substr(0, colon);
+  return name;
+}
+
+static std::string tensorSuffix(const std::string &name) {
+  if (!name.empty() && name[0] == '^') return "";
+  size_t colon = name.find(':');
+  return colon == std::string::npos ? "" : name.substr(colon);
+}
+
+static const tensorflow::NodeDef *findNode(
+    const tensorflow::GraphDef &graph, const std::string &name) {
+  for (const auto &node : graph.node()) {
+    if (node.name() == name) return &node;
+  }
+  return nullptr;
+}
+
+static int outputRank(const tensorflow::NodeDef &node) {
+  auto it = node.attr().find("_output_shapes");
+  if (it != node.attr().end() && it->second.list().shape_size() > 0) {
+    return it->second.list().shape(0).dim_size();
+  }
+  auto shapeIt = node.attr().find("shape");
+  if (shapeIt != node.attr().end()) {
+    return shapeIt->second.shape().dim_size();
+  }
+  return 2;
+}
+
+static tensorflow::DataType nodeDType(const tensorflow::NodeDef &node) {
+  auto t = node.attr().find("T");
+  if (t != node.attr().end()) return t->second.type();
+  auto dtype = node.attr().find("dtype");
+  if (dtype != node.attr().end()) return dtype->second.type();
+  return tensorflow::DT_FLOAT;
+}
+
+static bool writeBinaryGraphDef(const tensorflow::GraphDef &graph,
+                                const std::string &path) {
+  std::string out;
+  if (!graph.SerializeToString(&out)) return false;
+  return tensorflow::WriteStringToFile(tensorflow::Env::Default(), path, out).ok();
+}
+
+static bool readBinaryGraphDef(const std::string &path,
+                               tensorflow::GraphDef *graph) {
+  std::string data;
+  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data).ok()) {
+    return false;
+  }
+  return graph->ParseFromString(data);
+}
+
+static bool readTextGraphDef(const std::string &path,
+                             tensorflow::GraphDef *graph) {
+  std::string data;
+  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data).ok()) {
+    return false;
+  }
+  return google::protobuf::TextFormat::ParseFromString(data, graph);
+}
+
+struct FusionInfo {
+  std::string name;
+  std::string pattern;
+  std::string kernelName;
+  std::string outputTensor;
+  std::vector<std::string> originalNodes;
+  std::vector<std::string> inputs;
+  std::vector<std::vector<int64_t>> inputShapes;
+  std::vector<int64_t> outputShape;
+  std::string abi = "mlir_ciface";
+  int64_t nConstants = 0;
+  int64_t nFixed = 0;
+  int64_t nDynamic = 0;
+  int64_t numOutputs = 1;
+  std::vector<int64_t> outputRanks;
+  std::vector<int64_t> inputRanks;
+  std::vector<int64_t> dynamicDims;
+  std::vector<int64_t> kernelArgOrder;
+  std::string symbolicSignature;
+  std::string fallbackFunction;
+};
+
+static std::optional<FusionInfo> readFusionInfoJson(const std::string &path) {
+  std::ifstream in(path);
+  if (!in.is_open()) return std::nullopt;
+  nlohmann::json j;
+  try {
+    in >> j;
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+
+  FusionInfo info;
+  info.name = j.value("name", "");
+  info.pattern = j.value("pattern", "");
+  info.kernelName = j.value("kernel_name", "");
+  info.outputTensor = j.value("output_tensor", "");
+  info.originalNodes = j.value("original_nodes", std::vector<std::string>{});
+  info.inputs = j.value("inputs", std::vector<std::string>{});
+  info.inputShapes =
+      j.value("input_shapes", std::vector<std::vector<int64_t>>{});
+  info.outputShape = j.value("output_shape", std::vector<int64_t>{});
+  info.abi = j.value("abi", "mlir_ciface");
+  if (info.abi.empty()) info.abi = "mlir_ciface";
+  info.nConstants = j.value("n_constants", int64_t{0});
+  info.nFixed = j.value("n_fixed", int64_t{0});
+  info.nDynamic = j.value("n_dynamic", int64_t{0});
+  info.numOutputs = j.value("num_outputs", int64_t{1});
+  info.outputRanks = j.value("output_ranks", std::vector<int64_t>{});
+  info.inputRanks = j.value("input_ranks", std::vector<int64_t>{});
+  info.dynamicDims = j.value("dynamic_dims", std::vector<int64_t>{});
+  info.kernelArgOrder = j.value("kernel_arg_order", std::vector<int64_t>{});
+  info.symbolicSignature = j.value("symbolic_signature", "");
+  info.fallbackFunction = j.value("fallback_function", "");
+
+  if (info.name.empty() || info.originalNodes.empty() || info.inputs.empty() ||
+      info.outputTensor.empty()) {
+    return std::nullopt;
+  }
+  return info;
+}
+
+static std::string chooseFusionDevice(const tensorflow::GraphDef &graph,
+                                      const FusionInfo &fusion) {
+  const tensorflow::NodeDef *output = findNode(graph, fusion.outputTensor);
+  if (output && !output->device().empty()) return output->device();
+
+  for (const auto &nodeName : fusion.originalNodes) {
+    const tensorflow::NodeDef *node = findNode(graph, nodeName);
+    if (node && !node->device().empty()) return node->device();
+  }
+
+  for (const auto &input : fusion.inputs) {
+    const tensorflow::NodeDef *node = findNode(graph, cleanTensorName(input));
+    if (node && !node->device().empty()) return node->device();
+  }
+
+  return "/job:localhost/replica:0/task:0/device:CPU:0";
+}
+
+static bool rewriteGraphDefWithANNCFused(
+    const FusionInfo &fusionInfo, const std::string &inputGraphPath,
+    const std::string &outputGraphPath,
+    const std::string &kernelName, const std::string &sharedLibPath,
+    bool textFormat, bool verbose) {
+  tensorflow::GraphDef graph;
+  if (!readBinaryGraphDef(inputGraphPath, &graph) &&
+      !readTextGraphDef(inputGraphPath, &graph)) {
+    llvm::errs() << "[annc-converter] Error: failed to read GraphDef: "
+                 << inputGraphPath << "\n";
+    return false;
+  }
+
+  FusionInfo fusion = fusionInfo;
+  if (!kernelName.empty()) fusion.kernelName = kernelName;
+
+  if (verbose) {
+    llvm::outs() << "[annc-converter] Rewriting fusion node from ATIR: "
+                 << fusion.name << " pattern=" << fusion.pattern << "\n";
+  }
+
+  std::set<std::string> removed(fusion.originalNodes.begin(),
+                                fusion.originalNodes.end());
+  for (const auto &node : graph.node()) {
+    if (node.op() == "ReadVariableOp" && node.input_size() > 0) {
+      std::string src = cleanTensorName(node.input(0));
+      if (std::find(fusion.inputs.begin(), fusion.inputs.end(), src) !=
+          fusion.inputs.end()) {
+        removed.insert(node.name());
+      }
+    }
+    if ((node.op() == "VarIsInitializedOp" || node.op() == "AssignVariableOp") &&
+        node.input_size() > 0) {
+      std::string src = cleanTensorName(node.input(0));
+      if (std::find(fusion.inputs.begin(), fusion.inputs.end(), src) !=
+          fusion.inputs.end()) {
+        removed.insert(node.name());
+      }
+    }
+  }
+
+  const tensorflow::NodeDef *reluNode = findNode(graph, fusion.outputTensor);
+  int rank = reluNode ? outputRank(*reluNode) : 2;
+  tensorflow::DataType dtype = reluNode ? nodeDType(*reluNode) : tensorflow::DT_FLOAT;
+
+  tensorflow::GraphDef rewritten;
+  for (const auto &node : graph.node()) {
+    if (removed.count(node.name())) continue;
+    tensorflow::NodeDef *out = rewritten.add_node();
+    *out = node;
+
+    out->clear_input();
+    for (const auto &input : node.input()) {
+      std::string prefix;
+      std::string clean = input;
+      if (!clean.empty() && clean[0] == '^') {
+        prefix = "^";
+        clean = clean.substr(1);
+      }
+      std::string src = cleanTensorName(clean);
+      if (src == fusion.outputTensor) {
+        out->add_input(prefix + fusion.name + tensorSuffix(clean));
+      } else if (!removed.count(src)) {
+        out->add_input(input);
+      }
+    }
+  }
+
+  tensorflow::NodeDef *fused = rewritten.add_node();
+  fused->set_name(fusion.name);
+  fused->set_op("ANNCFused");
+  fused->set_device(chooseFusionDevice(graph, fusion));
+  for (const auto &input : fusion.inputs) fused->add_input(input);
+
+  auto *attrs = fused->mutable_attr();
+  (*attrs)["kernel_name"].set_s(fusion.kernelName);
+  (*attrs)["shared_lib_path"].set_s(sharedLibPath);
+  (*attrs)["abi"].set_s(fusion.abi);
+  (*attrs)["num_outputs"].set_i(fusion.numOutputs);
+  (*attrs)["T"].set_type(dtype);
+  auto *rankList = (*attrs)["output_ranks"].mutable_list();
+  if (fusion.outputRanks.empty()) {
+    rankList->add_i(rank);
+  } else {
+    for (int64_t value : fusion.outputRanks) rankList->add_i(value);
+  }
+  auto *inputRanks = (*attrs)["input_ranks"].mutable_list();
+  if (fusion.inputRanks.empty()) {
+    for (const auto &shape : fusion.inputShapes) {
+      inputRanks->add_i(static_cast<int64_t>(shape.size()));
+    }
+  } else {
+    for (int64_t value : fusion.inputRanks) inputRanks->add_i(value);
+  }
+  auto *outputShapes = (*attrs)["output_shapes"].mutable_list();
+  if (!fusion.outputShape.empty()) {
+    std::string shape;
+    for (size_t i = 0; i < fusion.outputShape.size(); ++i) {
+      if (i > 0) shape += ",";
+      shape += std::to_string(fusion.outputShape[i]);
+    }
+    outputShapes->add_s(shape);
+  }
+  auto *kernelArgOrder = (*attrs)["kernel_arg_order"].mutable_list();
+  for (int64_t value : fusion.kernelArgOrder) kernelArgOrder->add_i(value);
+  auto *dynamicDims = (*attrs)["dynamic_dims"].mutable_list();
+  for (int64_t value : fusion.dynamicDims) dynamicDims->add_i(value);
+  (*attrs)["symbolic_signature"].set_s(fusion.symbolicSignature);
+  (*attrs)["Nconstants"].set_i(fusion.nConstants);
+  (*attrs)["Nfixed"].set_i(fusion.nFixed);
+  (*attrs)["Ndynamic"].set_i(fusion.nDynamic);
+  (*attrs)["fallback_function"].mutable_func()->set_name(fusion.fallbackFunction);
+  (*attrs)["fusion_pattern"].set_s(fusion.pattern);
+  for (const auto &node : fusion.originalNodes) {
+    (*attrs)["annc_original_nodes"].mutable_list()->add_s(node);
+  }
+
+  if (textFormat) {
+    return tensorflow::WriteStringToFile(tensorflow::Env::Default(), outputGraphPath,
+                                         rewritten.DebugString()).ok();
+  }
+  return writeBinaryGraphDef(rewritten, outputGraphPath);
+}
+
+}  // namespace
 
 // ============================================================================
 // Step 1-2: Atir MLIR → NodeInfo 解析器
@@ -1048,7 +1330,7 @@ int main(int argc, char **argv) {
 
   llvm::cl::opt<std::string> inputFilename(
       llvm::cl::Positional, llvm::cl::desc("<input .mlir/.bin>"),
-      llvm::cl::Required);
+      llvm::cl::Optional);
 
   llvm::cl::opt<std::string> outputFilename(
       "o", llvm::cl::desc("Output file"),
@@ -1060,8 +1342,73 @@ int main(int argc, char **argv) {
   llvm::cl::opt<bool> text_format("text_format", llvm::cl::desc("Output in text format (.pbtxt) instead of binary (.pb)"),
                                    llvm::cl::init(false));
 
+  llvm::cl::opt<bool> graphdef_rewrite(
+      "tf-graphdef-rewrite",
+      llvm::cl::desc("Rewrite an input TensorFlow GraphDef with ANNCFused"));
+
+  llvm::cl::opt<std::string> input_graphdef(
+      "input_graphdef", llvm::cl::desc("Input TensorFlow GraphDef path"),
+      llvm::cl::value_desc("path"));
+
+  llvm::cl::opt<std::string> output_graphdef(
+      "output_graphdef", llvm::cl::desc("Output TensorFlow GraphDef path"),
+      llvm::cl::value_desc("path"));
+
+  llvm::cl::opt<std::string> kernel_name(
+      "kernel_name", llvm::cl::desc("ANNCFused kernel name"),
+      llvm::cl::init(""));
+
+  llvm::cl::opt<std::string> shared_lib_path(
+      "shared_lib_path", llvm::cl::desc("ANNCFused shared library path"),
+      llvm::cl::init(""));
+
+  llvm::cl::opt<std::string> metadata_json(
+      "metadata_json", llvm::cl::desc("ANNCFused metadata JSON path"),
+      llvm::cl::init(""));
+
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "annc-converter: Atir MLIR → TF SavedModel\n");
+
+  if (graphdef_rewrite) {
+    if (inputFilename.empty()) {
+      llvm::errs() << "[annc-converter] Error: optimized ATIR input is required "
+                      "for --tf-graphdef-rewrite\n";
+      return 1;
+    }
+    if (input_graphdef.empty() || output_graphdef.empty()) {
+      llvm::errs() << "[annc-converter] Error: --input_graphdef and "
+                      "--output_graphdef are required for --tf-graphdef-rewrite\n";
+      return 1;
+    }
+    if (shared_lib_path.empty()) {
+      llvm::errs() << "[annc-converter] Error: --shared_lib_path is required\n";
+      return 1;
+    }
+    if (metadata_json.empty()) {
+      llvm::errs() << "[annc-converter] Error: --metadata_json is required "
+                      "for --tf-graphdef-rewrite\n";
+      return 1;
+    }
+
+    auto fusion = readFusionInfoJson(metadata_json);
+    if (!fusion.has_value()) {
+      llvm::errs() << "[annc-converter] Error: failed to read ANNCFused "
+                      "metadata JSON: "
+                   << metadata_json << "\n";
+      return 1;
+    }
+
+    return rewriteGraphDefWithANNCFused(*fusion, input_graphdef, output_graphdef,
+                                        kernel_name, shared_lib_path,
+                                        text_format, verbose)
+               ? 0
+               : 1;
+  }
+
+  if (inputFilename.empty()) {
+    llvm::errs() << "[annc-converter] Error: input file is required\n";
+    return 1;
+  }
 
   // 1. 注册方言
   DialectRegistry registry;
@@ -1070,7 +1417,7 @@ int main(int argc, char **argv) {
   context.loadAllAvailableDialects();
 
   // 2. 加载 MLIR 文件 (支持 .mlir 文本和 .bin bytecode)
-  OwningOpRef<ModuleOp> module = parseSourceFile<ModuleOp>(inputFilename, &context);
+  OwningOpRef<ModuleOp> module = parseModuleFromFile(inputFilename, &context);
 
   if (!module) {
     llvm::errs() << "[annc-converter] Error: failed to parse MLIR file: "
