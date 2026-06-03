@@ -17,10 +17,75 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/json)
 
+# nlohmann_json is referenced by libraries in the MLIR export set
+install(TARGETS nlohmann_json EXPORT MLIRTargets)
+
 set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 
 set(LLVM_ENABLE_ASSERTIONS ON)
 
+# Fetch LLVM/MLIR source at configure time
+include(FetchContent)
+
+# LLVM 裁剪选项 — 只编译 AArch64 后端 + MLIR
+set(LLVM_TARGETS_TO_BUILD "AArch64" CACHE STRING "")
+set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "")
+set(LLVM_ENABLE_RTTI ON CACHE BOOL "")
+set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "")
+set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "")
+set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "")
+set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "")
+set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "")
+set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "")
+set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "")
+set(LLVM_ENABLE_EH ON CACHE BOOL "")
+set(LLVM_ENABLE_WERROR OFF CACHE BOOL "")
+set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "")
+
+FetchContent_Declare(llvm
+  GIT_REPOSITORY https://gitee.com/mirrors/LLVM.git
+  GIT_TAG        llvmorg-21.1.3
+  GIT_SHALLOW    TRUE
+  SOURCE_DIR     ${CMAKE_SOURCE_DIR}/third_party/llvm
+)
+FetchContent_GetProperties(llvm)
+if(NOT llvm_POPULATED)
+  if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/llvm/llvm/CMakeLists.txt")
+    message(STATUS "LLVM source already exists, skipping fetch")
+    set(llvm_POPULATED ON CACHE INTERNAL "LLVM populated" FORCE)
+    set(llvm_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/llvm" CACHE INTERNAL "LLVM source dir" FORCE)
+    set(llvm_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/llvm-build" CACHE INTERNAL "LLVM binary dir" FORCE)
+  else()
+    message(STATUS "Fetching LLVM/MLIR from gitee.com/mirrors/LLVM.git (llvmorg-21.1.3) ...")
+    FetchContent_Populate(llvm)
+  endif()
+endif()
+
+# LLVM monorepo: CMakeLists.txt 入口在 llvm/ 子目录
+add_subdirectory(${llvm_SOURCE_DIR}/llvm ${llvm_BINARY_DIR})
+
+set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
+set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
+
+# LLVM/MLIR cmake 模块路径不能通过 add_subdirectory 自动传播到顶层作用域
+list(APPEND CMAKE_MODULE_PATH "${llvm_SOURCE_DIR}/llvm/cmake/modules")
+list(APPEND CMAKE_MODULE_PATH "${llvm_SOURCE_DIR}/mlir/cmake/modules")
+
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+include(HandleLLVMOptions)
+
+# LLVM_INCLUDE_DIRS/MLIR_INCLUDE_DIRS 只在安装配置中存在, 构建树中需显式指定
+include_directories(${llvm_SOURCE_DIR}/llvm/include)
+include_directories(${llvm_BINARY_DIR}/include)
+include_directories(${llvm_SOURCE_DIR}/mlir/include)
+include_directories(${llvm_BINARY_DIR}/tools/mlir/include)
+
+# 供下游工具的 find_package(MLIR) 使用 (build-tree MLIRConfig.cmake)
+set(MLIR_DIR "${CMAKE_BINARY_DIR}/lib/cmake/mlir")
+
+set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 REQUIRED)
 include_directories(${pybind11_INCLUDE_DIRS})
 
@@ -67,27 +132,9 @@ message(STATUS "TensorFlow include dir: ${TENSORFLOW_INCLUDE_DIRS}")
 #message(STATUS "TensorFlow library dir: ${TENSORFLOW_LIBRARY_DIR}")
 message(STATUS "TensorFlow libraries: ${TENSORFLOW_LIBS}")
 
-find_package(MLIR REQUIRED CONFIG)
-set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
-set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
-
-message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
-list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
-list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-
-include(TableGen)
-include(AddLLVM)
-include(AddMLIR)
-include(HandleLLVMOptions)
-
-include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${MLIR_INCLUDE_DIRS})
 
 include_directories(${CMAKE_SOURCE_DIR}/annc/include)
 include_directories(${CMAKE_BINARY_DIR}/annc/include)

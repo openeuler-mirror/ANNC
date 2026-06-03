@@ -10,6 +10,7 @@ add_executable(annc annc.cpp)
 
 target_compile_definitions(annc PRIVATE
     ANNC_KERNEL_LIB_PATH="${CMAKE_INSTALL_PREFIX}/lib"
+    ANNC_C_COMPILER="${CMAKE_C_COMPILER}"
 )
 
 # bin
