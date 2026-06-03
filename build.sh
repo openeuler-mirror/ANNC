@@ -49,10 +49,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Initialize and update submodules
-git submodule init || { echo "git submodule init failed"; exit 1; }
-git submodule update || { echo "git submodule update failed"; exit 1; }
-
 # Create build directory (preserve LLVM build if exists)
 if [ -d "build" ] && [ "$CLEAN_BUILD" != "YES" ]; then
   echo "Using existing build directory (use --clean to force full rebuild)"
