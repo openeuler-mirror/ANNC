@@ -15,8 +15,29 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 
 # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-no_warn_duplicate_libraries")
 
-add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/json)
+include(FetchContent)
 
+# nlohmann/json v3.11.3 — header-only JSON library (MIT)
+FetchContent_Declare(json
+  GIT_REPOSITORY https://gitee.com/mirrors/nlohmann-json.git
+  GIT_TAG        v3.11.3
+  GIT_SHALLOW    TRUE
+  SOURCE_DIR     ${CMAKE_SOURCE_DIR}/third_party/json
+)
+FetchContent_GetProperties(json)
+if(NOT json_POPULATED)
+  if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/json/CMakeLists.txt")
+    message(STATUS "nlohmann/json source already exists, skipping fetch")
+    set(json_POPULATED ON CACHE INTERNAL "json populated" FORCE)
+    set(json_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/json" CACHE INTERNAL "json source dir" FORCE)
+    set(json_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/json-build" CACHE INTERNAL "json binary dir" FORCE)
+  else()
+    message(STATUS "Fetching nlohmann/json from gitee.com/mirrors/nlohmann-json.git (v3.11.3) ...")
+    # TODO: CMake 3.29+ 使用 FetchContent_MakeAvailable 替代 FetchContent_Populate
+    FetchContent_Populate(json)
+  endif()
+endif()
+add_subdirectory(${json_SOURCE_DIR} ${json_BINARY_DIR})
 # nlohmann_json is referenced by libraries in the MLIR export set
 install(TARGETS nlohmann_json EXPORT MLIRTargets)
 
@@ -25,7 +46,6 @@ set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 set(LLVM_ENABLE_ASSERTIONS ON)
 
 # Fetch LLVM/MLIR source at configure time
-include(FetchContent)
 
 # LLVM 裁剪选项 — 只编译 AArch64 后端 + MLIR
 set(LLVM_TARGETS_TO_BUILD "AArch64" CACHE STRING "")
@@ -57,6 +77,7 @@ if(NOT llvm_POPULATED)
     set(llvm_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/llvm-build" CACHE INTERNAL "LLVM binary dir" FORCE)
   else()
     message(STATUS "Fetching LLVM/MLIR from gitee.com/mirrors/LLVM.git (llvmorg-21.1.3) ...")
+    # TODO: CMake 3.29+ 使用 FetchContent_MakeAvailable 替代 FetchContent_Populate
     FetchContent_Populate(llvm)
   endif()
 endif()
@@ -139,7 +160,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 include_directories(${CMAKE_SOURCE_DIR}/annc/include)
 include_directories(${CMAKE_BINARY_DIR}/annc/include)
 
-include_directories(${CMAKE_SOURCE_DIR}/third_party/json/include)
+include_directories(${json_SOURCE_DIR}/include)
 
 add_subdirectory(annc)
 add_subdirectory(python)

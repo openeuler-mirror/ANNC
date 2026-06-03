@@ -16,7 +16,7 @@ proxy
 
 __pycache__
 *.whl
-build/
 install/
 tf_protos_minimal/
 third_party/llvm/
+third_party/json/
