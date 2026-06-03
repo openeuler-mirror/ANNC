@@ -26,6 +26,28 @@ bool KernelRegistry::exactMatch(const KernelInfo& info, const KernelQuery& query
            info.type_constraints == query.type_constraints;
 }
 
+bool KernelRegistry::genericMatch(const KernelInfo& info, const KernelQuery& query) {
+    if (info.op_type != query.op_type || info.backend != query.backend ||
+        info.type_constraints.size() != query.type_constraints.size()) {
+        return false;
+    }
+
+    for (const auto& requested : query.type_constraints) {
+        bool matched = false;
+        for (const auto& available : info.type_constraints) {
+            if (available.name == requested.name && available.any_type) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void KernelRegistry::registerKernel(KernelInfo info) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -81,6 +103,11 @@ std::optional<KernelInfo> KernelRegistry::lookupKernel(const KernelQuery& query)
     if (!query.type_constraints.empty()) {
         for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
             if (exactMatch(it->info, query)) {
+                return it->info;
+            }
+        }
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+            if (genericMatch(it->info, query)) {
                 return it->info;
             }
         }

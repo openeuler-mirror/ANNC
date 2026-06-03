@@ -1,4 +1,5 @@
 #include "Dialect/Atir/AtirOps.h"
+#include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
 
 #include "Helper.h"
@@ -117,9 +118,16 @@ static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
 
   // Keep the public fused kernel symbol stable while delegating the actual
   // MatMul body to the registered builtin kernel during lowering.
+  auto schema = CustomOpSchema::get("MatMul")
+      .TypeVar("T")
+      .MemRefArg("lhs", 2, "T")
+      .MemRefArg("rhs", 2, "T")
+      .MemRefArg("output", 2, "T");
   SmallVector<NamedAttribute> matmulAttrs;
   matmulAttrs.push_back(
       rewriter.getNamedAttr("opType", rewriter.getStringAttr("MatMul")));
+  matmulAttrs.push_back(rewriter.getNamedAttr(
+      "metadata", schema.toMetadata(rewriter.getContext())));
   rewriter.create<CustomizeOp>(
       func.getLoc(), TypeRange{}, ValueRange{lhs, rhs, c}, matmulAttrs);
   rewriter.create<func::ReturnOp>(func.getLoc());

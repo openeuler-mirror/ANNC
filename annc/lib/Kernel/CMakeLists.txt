@@ -9,6 +9,7 @@ add_library(ANNCKernel
 )
 
 install(TARGETS ANNCThreadPool ANNCKernel
+        EXPORT MLIRTargets
         ARCHIVE DESTINATION lib)
 
 add_subdirectory(builtin_kernels)
