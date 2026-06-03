@@ -17,7 +17,7 @@ target_link_libraries(TFAdaptor PUBLIC
 )
 
 target_include_directories(TFAdaptor PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
     ${TENSORFLOW_INCLUDE_DIRS}
 )

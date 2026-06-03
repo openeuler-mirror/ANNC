@@ -83,3 +83,19 @@ add_mlir_python_modules(ANNCPythonModules
   COMMON_CAPI_LINK_LIBS
     ANNCPythonCAPI
   )
+
+# The ANNC python modules targets symlink generated MLIR Python files (like
+# _ops_gen.py). When building with -j, the ANNC sub-targets can race ahead
+# of the MLIR targets that generate these files. Add per-target dependencies
+# to ensure each ANNC symlink target waits for its MLIR counterpart.
+_flatten_mlir_python_targets(_all_mlir_src_targets MLIRPythonSources)
+foreach(_src_tgt ${_all_mlir_src_targets})
+  get_target_property(_src_type ${_src_tgt} mlir_python_SOURCES_TYPE)
+  if(_src_type STREQUAL "pure")
+    set(_annc_tgt "ANNCPythonModules.sources.${_src_tgt}")
+    set(_mlir_mod_tgt "MLIRPythonModules.sources.${_src_tgt}")
+    if(TARGET ${_annc_tgt} AND TARGET ${_mlir_mod_tgt})
+      add_dependencies(${_annc_tgt} ${_mlir_mod_tgt})
+    endif()
+  endif()
+endforeach()

@@ -13,9 +13,18 @@ namespace fs = std::filesystem;
 using namespace std;
 
 static const char* KERNEL_LIB_PATH = ANNC_KERNEL_LIB_PATH;
+static const char* DEFAULT_C_COMPILER = ANNC_C_COMPILER;
 
 string getKernelLibPath() {
     return KERNEL_LIB_PATH;
+}
+
+string getCCompiler() {
+    const char* env = getenv("ANNC_CLANG");
+    if (env && env[0] != '\0') {
+        return string(env);
+    }
+    return string(DEFAULT_C_COMPILER);
 }
 
 // 
@@ -460,7 +469,7 @@ private:
             return false;
         }
         
-        string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = getCCompiler() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
@@ -484,7 +493,7 @@ private:
                                    ? config.mLirSymbolName + ".so"
                                    : config.outputFile;
         
-        string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = getCCompiler() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
@@ -509,7 +518,7 @@ private:
         setenv("ANNC_LIBRARY_NAME", libName.c_str(), 1);
         
         // 
-        string command = "clang -O3 \"" + config.testFile + "\"";
+        string command = getCCompiler() + " -O3 \"" + config.testFile + "\"";
         // 
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
