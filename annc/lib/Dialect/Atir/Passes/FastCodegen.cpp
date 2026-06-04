@@ -15,11 +15,20 @@ namespace atir {
     class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
     public:
         AtirFastCodegenPass() = default;
+        AtirFastCodegenPass(const AtirFastCodegenPass &) = default;
 
         void runOnOperation() override {
-            llvm::dbgs() << "this is PimpFastCodegenPass\n";
             auto m = getOperation();
             auto ctx = m.getContext();
+
+            // Set annc.enable_kdnn module attribute from the --enable-kdnn option.
+            // This flag controls whether KDNN optimized kernels are preferred
+            // over aarch64 defaults during kernel resolution.
+            if (enableKdnn) {
+                m->setAttr("annc.enable_kdnn", BoolAttr::get(ctx, true));
+                llvm::dbgs() << "ANNC: KDNN optimization enabled\n";
+            }
+
             GreedyRewriteConfig config;
             config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
 

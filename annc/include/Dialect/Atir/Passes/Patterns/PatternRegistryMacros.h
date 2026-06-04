@@ -3,10 +3,17 @@
 
 #include "PatternRegistry.h"
 
-/// New Automated Registration Macro
+/// Register a custom fusion pattern.
 /// Usage:
 ///   struct MyPattern : public CustomFusionPatternBase<AnchorOp> { ... };
 ///   REGISTER_CUSTOM_PATTERN(MyPattern)
+///
+/// For patterns that only make sense when a specific kernel library is
+/// compiled in, wrap the registration with the corresponding macro guard:
+///
+///   #ifdef ANNC_ENABLE_KDNN_ADAPTOR
+///   REGISTER_CUSTOM_PATTERN(KdnnBatchMatmulRewrite)
+///   #endif
 #define REGISTER_CUSTOM_PATTERN(PatternType) \
   namespace { \
     static const bool __registered_##PatternType = \

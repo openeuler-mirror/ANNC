@@ -3,8 +3,10 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "Dialect/Atir//AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/PassManager.h"
 #include "llvm/Support/Debug.h"
+#include "Kernel/KernelPriorityResolver.h"
 
 namespace atir {
 
@@ -30,10 +32,26 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       AnchorOp anchor,
       mlir::PatternRewriter &rewriter) const override {
     SmallVector<Operation *> fusedOps;
-    auto matvchres = matchFusion(anchor, fusedOps);
-    if (failed(matvchres)) {
+    auto matchres = matchFusion(anchor, fusedOps);
+    if (failed(matchres)) {
       return failure();
     }
+
+    // Check whether any builtin kernel is available for this op.
+    // If no kernel exists for any backend, the pattern should not fire —
+    // the op will take its default lowering path instead.
+    auto kernelName = getKernelName(anchor, fusedOps);
+    auto module = anchor->template getParentOfType<mlir::ModuleOp>();
+    auto attr = module->template getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
+    bool enableKdnn = attr && attr.getValue();
+    annc::kernels::KernelResolveRequest req;
+    req.op_type = kernelName;
+    if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
+      llvm::dbgs() << "ANNC: No builtin kernel available for '" << kernelName
+                   << "', skipping CustomizeOp rewrite\n";
+      return failure();
+    }
+
     SmallVector<Value> inputValues;
 
     llvm::SmallDenseSet<Operation *> fusedSet(fusedOps.begin(), fusedOps.end());
@@ -66,7 +84,7 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       resultTypes.push_back(value.getType());
     }
     //
-    auto callee = StringAttr::get(rewriter.getContext(), getKernelName(anchor,fusedOps));
+    auto callee = StringAttr::get(rewriter.getContext(), kernelName);
 
     // metadata is initialized as an empty DictionaryAttr here; runtime
     // attributes (kernel_name, shared_lib_path, Nconstants, etc.) will be
@@ -88,5 +106,5 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
   }
 };
 
-}
+}// namespace atir
 #endif  // ANNC_CUSTOMFUSIONPATTERNBASE_H

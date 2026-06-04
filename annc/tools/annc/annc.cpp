@@ -474,6 +474,10 @@ private:
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+        command += " -L" KDNN_LIB_DIR " -lkdnn";
+        command += " -Wl,-rpath," KDNN_LIB_DIR;
+#endif
         //
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
@@ -497,6 +501,10 @@ private:
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+        command += " -L" KDNN_LIB_DIR " -lkdnn";
+        command += " -Wl,-rpath," KDNN_LIB_DIR;
+#endif
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         
         logCommand(command);

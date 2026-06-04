@@ -86,3 +86,20 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
 REGISTER_CUSTOM_PATTERN(MatmulAddReluToCustomCallRewrite);
 REGISTER_CUSTOM_PATTERN(MatmulAddToCustomCallRewrite);
 REGISTER_CUSTOM_PATTERN(MatmulToCustomCallRewrite);
+
+// ---------------------------------------------------------------------------
+// Patterns for ops that only exist in external kernel libraries.
+// These are guarded by the corresponding compile-time macro so that the
+// pattern code is only compiled when the library is available.
+// At runtime, CustomFusionPatternBase::matchAndRewrite automatically checks
+// hasAnyAvailableKernel() — if the kernel isn't available (e.g. kdnn is
+// compiled in but --enable-kdnn is not passed), the pattern returns failure
+// and the op falls through to its default lowering.
+//
+// Example:
+//   #ifdef ANNC_ENABLE_KDNN_ADAPTOR
+//   struct KdnnBatchMatmulRewrite
+//       : public CustomFusionPatternBase<BatchMatmulOp> { ... };
+//   REGISTER_CUSTOM_PATTERN(KdnnBatchMatmulRewrite)
+//   #endif
+// ---------------------------------------------------------------------------
