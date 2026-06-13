@@ -43,7 +43,7 @@ install(TARGETS nlohmann_json EXPORT MLIRTargets)
 
 set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 
-set(LLVM_ENABLE_ASSERTIONS ON)
+set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable assertions")
 
 # Fetch LLVM/MLIR source at configure time
 
@@ -131,6 +131,11 @@ if(NOT TENSORFLOW_INCLUDE_DIRS)
   set(TENSORFLOW_INCLUDE_DIRS "${TENSORFLOW_LIBRARY_DIR}/include")
 endif()
 
+# Allow finding versioned TF shared libraries when the unversioned .so symlink is absent.
+# Scope the suffix change so it does not leak to other find_library calls.
+set(_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES .so.2)
+
 find_library(TENSORFLOW_FRAMEWORK_LIB
   NAMES tensorflow_framework
   PATHS ${TENSORFLOW_LIBRARY_DIR}
@@ -142,6 +147,8 @@ find_library(TENSORFLOW_CC_LIB
   PATHS ${TENSORFLOW_LIBRARY_DIR}
   NO_DEFAULT_PATH
 )
+
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES})
 
 if (NOT TENSORFLOW_FRAMEWORK_LIB OR NOT TENSORFLOW_CC_LIB)
   message(FATAL_ERROR "Could not find TensorFlow libraries. Please ensure they are installed.")

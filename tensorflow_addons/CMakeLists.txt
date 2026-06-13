@@ -54,8 +54,29 @@ if(NOT EXISTS "${TF_INCLUDE_DIR}/tensorflow")
     message(FATAL_ERROR "TensorFlow headers not found at ${TF_INCLUDE_DIR}")
 endif()
 
-if(NOT DEFINED TENSORFLOW_LIBS AND NOT EXISTS "${TF_LIB_DIR}/libtensorflow_framework.so")
-    message(FATAL_ERROR "TensorFlow framework library not found at ${TF_LIB_DIR}")
+# Resolve TF libraries, preferring libraries passed from the parent build.
+# When built standalone, search with .so.2 suffix support in case the
+# unversioned .so symlink is absent.
+if(DEFINED TENSORFLOW_LIBS)
+    set(TENSORFLOW_LOCAL_LIBS ${TENSORFLOW_LIBS})
+else()
+    set(_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES .so.2)
+    find_library(TENSORFLOW_FRAMEWORK_LIB
+        NAMES tensorflow_framework
+        PATHS ${TF_LIB_DIR}
+        NO_DEFAULT_PATH
+    )
+    find_library(TENSORFLOW_CC_LIB
+        NAMES tensorflow_cc
+        PATHS ${TF_LIB_DIR}
+        NO_DEFAULT_PATH
+    )
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ${_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES})
+    if(NOT TENSORFLOW_FRAMEWORK_LIB OR NOT TENSORFLOW_CC_LIB)
+        message(FATAL_ERROR "TensorFlow libraries not found in ${TF_LIB_DIR}")
+    endif()
+    set(TENSORFLOW_LOCAL_LIBS ${TENSORFLOW_FRAMEWORK_LIB} ${TENSORFLOW_CC_LIB})
 endif()
 
 add_compile_options(
@@ -85,23 +106,19 @@ add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 target_link_directories(annc_optimizer PRIVATE ${TF_LIB_DIR})
 target_link_directories(annc_fused_op PRIVATE ${TF_LIB_DIR})
 
-if(DEFINED TENSORFLOW_LIBS)
-    foreach(tgt annc_optimizer annc_fused_op)
-        target_link_libraries(${tgt} PRIVATE ${TENSORFLOW_LIBS})
-    endforeach()
+foreach(tgt annc_optimizer annc_fused_op)
+    target_link_libraries(${tgt} PRIVATE ${TENSORFLOW_LOCAL_LIBS})
+endforeach()
+set_target_properties(annc_optimizer annc_fused_op PROPERTIES
+    BUILD_RPATH "${TF_LIB_DIR}"
+    INSTALL_RPATH "${TF_LIB_DIR}"
+)
+
+# When built standalone, preserve the original behavior of keeping the TF
+# libraries linked even if no symbols are directly referenced.
+if(NOT DEFINED TENSORFLOW_LIBS)
     set_target_properties(annc_optimizer annc_fused_op PROPERTIES
-        BUILD_RPATH "${TF_LIB_DIR}"
-        INSTALL_RPATH "${TF_LIB_DIR}"
-    )
-else()
-    foreach(tgt annc_optimizer annc_fused_op)
-        target_link_libraries(${tgt} PRIVATE
-            ${TF_LIB_DIR}/libtensorflow_framework.so
-            ${TF_LIB_DIR}/libtensorflow_cc.so
-        )
-    endforeach()
-    set_target_properties(annc_optimizer annc_fused_op PROPERTIES
-        LINK_FLAGS "-Wl,--no-as-needed -Wl,-rpath,${TF_LIB_DIR}"
+        LINK_FLAGS "-Wl,--no-as-needed"
     )
 endif()
 

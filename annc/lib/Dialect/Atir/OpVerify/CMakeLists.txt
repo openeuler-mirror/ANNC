@@ -25,4 +25,4 @@ add_mlir_library(AtirOpVerify
 )
 
 target_include_directories(AtirOpVerify PUBLIC ${TENSORFLOW_INCLUDE_DIRS})
-target_link_libraries(AtirOpVerify PUBLIC ${TENSORFLOW_LIBRARY_DIR}/libtensorflow_framework.so.2)
+target_link_libraries(AtirOpVerify PUBLIC ${TENSORFLOW_FRAMEWORK_LIB})
