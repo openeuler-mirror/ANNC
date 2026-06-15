@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-# 使用说明
+REQUIRED_PROTOC_VERSION="3.21.9"
+
 USAGE="Usage: $0 [OPTIONS]
 
 Options:
@@ -9,9 +10,11 @@ Options:
   -h, --help          Show this help message
 
 Requirements:
-  - protoc (Protocol Buffers compiler) version 3.14.0
-  - The script will automatically attempt to install protobuf-devel-3.14.0 using yum if protoc is not found
-  - Note: Automatic installation requires root privileges (run with sudo)
+  - protoc (Protocol Buffers compiler) version ${REQUIRED_PROTOC_VERSION}
+  - The script will automatically download protoc ${REQUIRED_PROTOC_VERSION} if the
+    system protoc version does not match
+  - protoc ${REQUIRED_PROTOC_VERSION} must match the TensorFlow bundled protobuf
+    version to avoid header/library version conflicts at compile time
 
 Example:
   $0                          # Use current directory
@@ -39,50 +42,55 @@ done
 
 cd "${WORK_DIR}"
 
-# 检查并安装依赖（仅使用 yum）
-check_and_install_dependencies() {
-  echo "Checking dependencies..."
-  
-  # 检查 protoc 是否已经安装
-  if command -v protoc &> /dev/null; then
-    echo "protoc is already installed."
+resolve_protoc() {
+  local protoc_bin="${PROTOC_BIN:-}"
+  if [ -n "${protoc_bin}" ]; then
+    echo "${protoc_bin}"
     return 0
   fi
-  
-  echo "protoc is not installed. Attempting to install automatically..."
-  
-  # 检查 yum 是否可用
-  if ! command -v yum &> /dev/null; then
-    echo "Error: yum package manager is not available."
-    echo "Please manually install protobuf-devel-3.14.0."
-    exit 1
+
+  local system_protoc
+  system_protoc="$(command -v protoc 2>/dev/null || true)"
+  if [ -n "${system_protoc}" ]; then
+    local version
+    version=$("${system_protoc}" --version 2>/dev/null | awk '{print $2}')
+    if [ "${version}" = "${REQUIRED_PROTOC_VERSION}" ]; then
+      echo "${system_protoc}"
+      return 0
+    fi
+    echo "System protoc version is ${version}, but ${REQUIRED_PROTOC_VERSION} is required (must match TensorFlow bundled protobuf)." >&2
   fi
-  
-  # 检查是否有 root 权限
-  if [[ $EUID -ne 0 ]]; then
-    echo "Error: Need root privileges to install packages. Please run with sudo."
-    echo "Alternatively, you can manually install protobuf-devel-3.14.0 using: yum install protobuf-devel-3.14.0"
-    exit 1
-  fi
-  
-  echo "Installing protobuf-devel-3.14.0 using yum..."
-  yum install -y protobuf-devel-3.14.0
-  
-  # 验证安装是否成功
-  if command -v protoc &> /dev/null; then
-    echo "protoc installation successful."
+
+  local local_protoc="${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}/bin/protoc"
+  if [ -x "${local_protoc}" ]; then
+    echo "${local_protoc}"
     return 0
-  else
-    echo "Error: Failed to install protoc. Please try installing manually: yum install protobuf-devel-3.14.0"
-    exit 1
   fi
+
+  echo "Downloading protoc ${REQUIRED_PROTOC_VERSION} for aarch64..." >&2
+  mkdir -p "${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}"
+  local tmpzip
+  tmpzip="$(mktemp /tmp/protoc-XXXXXX.zip)"
+  curl -L -o "${tmpzip}" \
+    "https://github.com/protocolbuffers/protobuf/releases/download/v21.9/protoc-21.9-linux-aarch_64.zip"
+  unzip -o "${tmpzip}" -d "${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}"
+  rm -f "${tmpzip}"
+
+  if [ -x "${local_protoc}" ]; then
+    echo "${local_protoc}"
+    return 0
+  fi
+
+  echo "Error: Failed to download protoc ${REQUIRED_PROTOC_VERSION}." >&2
+  exit 1
 }
 
-check_and_install_dependencies
+PROTOC_BIN="$(resolve_protoc)"
+echo "Using protoc: ${PROTOC_BIN} ($("${PROTOC_BIN}" --version))"
 
 # TensorFlow proto 版本
 TF_TAG=v2.20.0
-REPO_BASE="https://raw.githubusercontent.com/tensorflow/tensorflow/${TF_TAG}"
+REPO_BASE="https://gitee.com/mirrors/tensorflow/raw/${TF_TAG}"
 echo "Downloading TensorFlow proto files (version ${TF_TAG})..."
 mkdir -p tf_protos_minimal/tensorflow/core/framework tf_protos_minimal/tensorflow/core/protobuf
 
@@ -123,7 +131,7 @@ cd tf_protos_minimal
 OUT_DIR=gen_code
 mkdir -p "${OUT_DIR}"
 
-protoc \
+"${PROTOC_BIN}" \
   -I. \
   --cpp_out="${OUT_DIR}" \
   tensorflow/core/framework/attr_value.proto \

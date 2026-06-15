@@ -370,42 +370,6 @@ Block &SwitchCaseOp::getCaseBlock(unsigned idx) {
 }
 
 //===----------------------------------------------------------------------===//
-// IdentityOp
-//===----------------------------------------------------------------------===//
-
-OpFoldResult IdentityOp::fold(FoldAdaptor adaptor) {
-  return getInput();
-}
-
-//===----------------------------------------------------------------------===//
-// ShapeOp
-//===----------------------------------------------------------------------===//
-
-LogicalResult ShapeOp::verify() {
-  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
-  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
-  // 1D
-  if (outputType.getShape().size() != 1) {
-    return emitOpError() << "output must be 1D tensor, got rank "
-                         << outputType.getShape().size();
-  }
-  // 
-  Type elementType = outputType.getElementType();
-  if (!elementType.isInteger(32) && !elementType.isInteger(64)) {
-    return emitOpError() << "output element type must be i32 or i64, got "
-                         << elementType;
-  }
-  // 
-  int64_t inputRank = inputType.getShape().size();
-  int64_t outputDim = outputType.getShape()[0];
-  if (inputRank >= 0 && outputDim >= 0 && outputDim != inputRank) {
-    return emitOpError() << "output dimension (" << outputDim
-                         << ") must match input rank (" << inputRank << ")";
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // SizeOp
 //===----------------------------------------------------------------------===//
 

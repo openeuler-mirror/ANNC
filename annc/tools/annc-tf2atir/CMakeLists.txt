@@ -11,14 +11,15 @@ file(GLOB_RECURSE PROTO_SRCS "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code/*.p
 add_executable(annc-tf2atir
     annc-tf2atir.cpp
     standalone_pb_parser.cpp
+    absl_log_shim.cpp
     ${PROTO_SRCS}
 )
 
 target_include_directories(annc-tf2atir BEFORE PRIVATE
     "${CMAKE_SOURCE_DIR}/annc/include"
     "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code"
-    "${PROTOBUF_INCLUDE_DIRS}"
     "${TENSORFLOW_INCLUDE_DIRS}"
+    "${Protobuf_INCLUDE_DIRS}"
 )
 target_include_directories(annc-tf2atir PRIVATE
     "${MLIR_INCLUDE_DIRS}"
@@ -36,7 +37,6 @@ endif()
 add_definitions(-DABSL_MIN_LOG_LEVEL=4)
 
 target_link_libraries(annc-tf2atir PRIVATE
-    ${Protobuf_LIBRARIES}
     ${TENSORFLOW_FRAMEWORK_LIB}
 )
 
@@ -61,3 +61,4 @@ target_link_libraries(annc-tf2atir PRIVATE
     ${MLIR_LIBS}
     ${llvm_libs}
 )
+install(TARGETS annc-tf2atir DESTINATION bin)

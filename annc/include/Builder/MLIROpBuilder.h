@@ -95,6 +95,7 @@ class MLIRBuilder {
   void createPadNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseToDenseNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSparseFillEmptyRowsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseSegmentSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createSparseSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
@@ -110,6 +111,13 @@ class MLIRBuilder {
   void createAbsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createRsqrtNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createZerosLikeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSqueezeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSquareNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSquaredDifferenceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createReduceMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSoftmaxNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createSplitNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createPowNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
 
   // Op handlers will be added in subsequent PRs
   void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);

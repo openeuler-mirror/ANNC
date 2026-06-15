@@ -12,6 +12,7 @@
 // 包含 protoc 生成的核心头文件
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/protobuf/saved_model.pb.h"
 
 // 引入Builder中的NodeInfo定义
@@ -19,7 +20,7 @@
 
 class StandalonePbParser {
 public:
-    explicit StandalonePbParser(const std::string& model_path);
+    explicit StandalonePbParser(const std::string& model_path, int64_t default_batch_size = 2);
     bool parse();
 
     bool isValid() const { return valid_; }
@@ -27,6 +28,7 @@ public:
 
 private:
     std::string model_path_;
+    int64_t default_batch_size_ = 2;
     bool valid_ = false;
     std::vector<annc::NodeInfo> nodes_;
     
