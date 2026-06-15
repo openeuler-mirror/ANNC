@@ -76,7 +76,7 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   auto add = [&m](llvm::ArrayRef<llvm::StringRef> keys, NodeHandler h) {
     for (llvm::StringRef k : keys) m[k] = h;
   };
-  add({"Add", "AddV2", "AddN"}, &MLIRBuilder::createAddNode);
+  add({"Add", "AddV2", "AddN", "BiasAdd"}, &MLIRBuilder::createAddNode);
   add({"Mul"}, &MLIRBuilder::createMulNode);
   add({"Sub"}, &MLIRBuilder::createSubNode);
   add({"Div", "RealDiv", "Divide"}, &MLIRBuilder::createRealDivNode);
@@ -97,7 +97,7 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"ParallelDynamicStitch"}, &MLIRBuilder::createParallelDynamicStitchNode);
   add({"Select", "SelectV2", "Where"}, &MLIRBuilder::createWhereNode);
   add({"Variable", "VariableV2", "VarHandleOp"}, &MLIRBuilder::createVariableNode);
-  add({"Identity", "IdentityN"}, &MLIRBuilder::createIdentityNode);
+  add({"Identity", "IdentityN", "ReadVariableOp", "StopGradient"}, &MLIRBuilder::createIdentityNode);
   add({"Shape"}, &MLIRBuilder::createShapeNode);
   add({"Size"}, &MLIRBuilder::createSizeNode);
   add({"Fill"}, &MLIRBuilder::createFillNode);
@@ -119,6 +119,7 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"Pad", "PadV2"}, &MLIRBuilder::createPadNode);
   add({"SparseToDense"}, &MLIRBuilder::createSparseToDenseNode);
   add({"SparseReshape"}, &MLIRBuilder::createSparseReshapeNode);
+  add({"SparseFillEmptyRows"}, &MLIRBuilder::createSparseFillEmptyRowsNode);
   add({"SparseSegmentSum", "SparseSegmentSumWithNumSegments"},
       &MLIRBuilder::createSparseSegmentSumNode);
   add({"SparseSegmentMin", "SparseSegmentMinWithNumSegments"},
@@ -135,6 +136,15 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"ZerosLike"}, &MLIRBuilder::createZerosLikeNode);
   add({"Relu"}, &MLIRBuilder::createReluNode);
   add({"Sigmoid", "Logistic"}, &MLIRBuilder::createLogisticNode);
+  add({"Abs"}, &MLIRBuilder::createAbsNode);
+  add({"Rsqrt"}, &MLIRBuilder::createRsqrtNode);
+  add({"Squeeze"}, &MLIRBuilder::createSqueezeNode);
+  add({"Square"}, &MLIRBuilder::createSquareNode);
+  add({"SquaredDifference"}, &MLIRBuilder::createSquaredDifferenceNode);
+  add({"Mean"}, &MLIRBuilder::createReduceMeanNode);
+  add({"Softmax"}, &MLIRBuilder::createSoftmaxNode);
+  add({"Split"}, &MLIRBuilder::createSplitNode);
+  add({"Pow"}, &MLIRBuilder::createPowNode);
   
 }
 
@@ -289,6 +299,7 @@ mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
     else if (dtype == "uint64") fillZeros(sizeof(uint64_t));
     else if (dtype == "complex64") fillZeros(sizeof(float) * 2);
     else if (dtype == "complex128") fillZeros(sizeof(double) * 2);
+    else if (dtype == "string") fillZeros(sizeof(int32_t));
   }
 
   auto emitConstant = [&](DenseElementsAttr elems, Type eltType,
@@ -476,8 +487,16 @@ mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
     return emitConstant(elems, ComplexType::get(builder_.getF64Type()));
   }
   if (dtype == "string") {
-    llvm::report_fatal_error(
-        "Constant tf.string from raw_data is not supported in MLIROpBuilder");
+    // String constants (e.g., ignore_value markers) used for filtering ops.
+    // ANNC has no native string support; emit an i32 placeholder to keep the
+    // graph structure intact for analysis.
+    size_t elemCount = elementCountFromShape();
+    std::vector<int32_t> zeros(elemCount, 0);
+    elems = DenseElementsAttr::get(
+        RankedTensorType::get(shape, builder_.getI32Type()),
+        ArrayRef<int32_t>(zeros));
+    return emitConstant(elems, builder_.getI32Type(),
+                        builder_.getStringAttr("string"));
   }
 
   llvm::report_fatal_error(llvm::StringRef("Unsupported data type for constant: " +
@@ -1448,5 +1467,94 @@ void MLIRBuilder::createLogisticNode(const NodeInfo& node, ArrayRef<Type> outs, 
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::LogisticOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createAbsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::AbsOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createRsqrtNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::RsqrtOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createSparseFillEmptyRowsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 4) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value indices = ins[0];
+  Value values = ins[1];
+  Value denseShape = ins[2];
+  Value defaultValue = ins[3];
+  auto sparseOp = builder_.create<atir::SparseFillEmptyRowsOp>(loc, outs, indices, values, denseShape, defaultValue);
+  if (node.outputs.size() >= 1) tensorValues_[node.outputs[0].name] = sparseOp.getOutputIndices();
+  if (node.outputs.size() >= 2) tensorValues_[node.outputs[1].name] = sparseOp.getOutputValues();
+  if (node.outputs.size() >= 3) tensorValues_[node.outputs[2].name] = sparseOp.getEmptyRowIndicator();
+  if (node.outputs.size() >= 4) tensorValues_[node.outputs[3].name] = sparseOp.getReverseIndexMap();
+}
+void MLIRBuilder::createSqueezeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  std::vector<int64_t> shape = node.outputs.empty() ? std::vector<int64_t>{} : node.outputs[0].shape;
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::ReshapeOp>(loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getI64ArrayAttr(shape));
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createSquareNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::MulOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[0]));
+}
+void MLIRBuilder::createSquaredDifferenceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto subBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto subOp = builder_.create<atir::SubOp>(loc, outs[0], subBuffer.getResult(), ins[0], ins[1]);
+  auto outBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto mulOp = builder_.create<atir::MulOp>(loc, outs[0], outBuffer.getResult(), subOp.getResult(), subOp.getResult());
+  tensorValues_[node.outputs[0].name] = mulOp.getResult();
+}
+void MLIRBuilder::createReduceMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  Value input = ins[0];
+  Value indices = ins[1];
+  bool keep_dims = false;
+  auto it = node.attrs.find("keep_dims");
+  if (it != node.attrs.end() && std::holds_alternative<bool>(it->second))
+    keep_dims = std::get<bool>(it->second);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  auto op = builder_.create<atir::ReduceMeanOp>(
+      loc, outs[0], outputBuffer.getResult(), input, indices, builder_.getBoolAttr(keep_dims));
+  tensorValues_[node.outputs[0].name] = op.getResult();
+}
+void MLIRBuilder::createSoftmaxNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::SoftmaxOp>(loc, outs[0], outputBuffer.getResult(), ins[0]));
+}
+void MLIRBuilder::createSplitNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  int64_t num_split = 2;
+  auto it = node.attrs.find("num_split");
+  if (it != node.attrs.end() && std::holds_alternative<int64_t>(it->second))
+    num_split = std::get<int64_t>(it->second);
+  auto op = builder_.create<atir::SplitOp>(
+      loc, outs, ins[0], ins[1], builder_.getI64IntegerAttr(num_split));
+  for (size_t i = 0; i < node.outputs.size(); ++i)
+    tensorValues_[node.outputs[i].name] = op.getResult(static_cast<unsigned>(i));
+}
+void MLIRBuilder::createPowNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  if (ins.size() < 2) { createUnsupportedNode(node, outs, ins); return; }
+  auto loc = getLoc(builder_.getContext(), node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  SINGLE_OUT(builder_.create<atir::PowOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1]));
 }
 }  // namespace annc

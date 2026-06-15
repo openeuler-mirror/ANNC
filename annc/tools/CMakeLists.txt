@@ -1,6 +1,5 @@
 add_subdirectory(annc-opt)
 add_subdirectory(annc-verify)
-add_subdirectory(tf-adaptor)
 add_subdirectory(annc-asm)
 add_subdirectory(annc)
 add_subdirectory(annc-converter)

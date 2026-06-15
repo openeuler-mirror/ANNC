@@ -354,8 +354,7 @@ def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure, SameOperandsAndResultElementType,
-    SameOperandsAndResultShape], Interfaces)> {
+def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure], Interfaces)> {
   let summary = "Identity operation";
   let description = [{
     Returns the input tensor as-is. This op is often used for 
@@ -366,7 +365,7 @@ def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure, SameOperandsAndResu
   let assemblyFormat = [{
     $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
   }];
-  let hasFolder = 1;
+  let hasFolder = 0;
 }
 
 def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
@@ -384,7 +383,6 @@ def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
   let assemblyFormat = [{
     $input attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect,
@@ -1525,6 +1523,82 @@ def Atir_TransposeOp : Atir_Op<"Transpose", !listconcat([Pure], Interfaces)> {
   );
   let assemblyFormat = [{
     $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_ReduceMeanOp : Atir_Op<"ReduceMean"> {
+  let summary = "Compute the mean of tensor elements over specified axes";
+  let description = [{
+    Computes the mean of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`.
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_SoftmaxOp : Atir_Op<"Softmax", [Pure]> {
+  let summary = "Softmax operation";
+  let description = [{
+    Computes softmax activations. For each element `x_i` in the input tensor,
+    computes `exp(x_i) / sum(exp(x_j))` over the last dimension.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SplitOp : Atir_Op<"Split"> {
+  let summary = "Split a tensor into multiple sub-tensors";
+  let description = [{
+    Splits a tensor into `num_split` tensors along one dimension.
+    The split dimension is provided as a scalar tensor.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$split_dim,
+    Atir_Tensor:$value,
+    I64Attr:$num_split
+  );
+  let results = (outs
+    Variadic<Atir_Tensor>:$output
+  );
+  let assemblyFormat = [{
+    $split_dim `,` $value attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_PowOp : Atir_Op<"Pow", [Pure]> {
+  let summary = "Element-wise power operation";
+  let description = [{
+    Computes `lhs ^ rhs` element-wise.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $lhs `,` $rhs attr-dict `:` type($output) `,` type($lhs) `,` type($rhs) `->` type($result)
   }];
 }
 

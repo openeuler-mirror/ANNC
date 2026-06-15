@@ -9,8 +9,8 @@ using annc::NodeInfo;
 using annc::OutputInfo;
 
 // 构造函数
-StandalonePbParser::StandalonePbParser(const std::string& model_path) 
-    : model_path_(model_path) {}
+StandalonePbParser::StandalonePbParser(const std::string& model_path, int64_t default_batch_size)
+    : model_path_(model_path), default_batch_size_(default_batch_size) {}
 
 // 加载模型
 bool StandalonePbParser::loadModel() {
@@ -159,7 +159,7 @@ bool StandalonePbParser::parse() {
         NodeInfo info;
         info.name = name;
         info.op_type = (node->op() == "AddV2") ? "Add" : node->op();
-        if (isPlaceholder(*node) || isVariable(*node)) {
+        if (isPlaceholder(*node)) {
             info.isInputNode = true;
         }
         processNode(node, identity_redirect, info);
@@ -167,8 +167,41 @@ bool StandalonePbParser::parse() {
     }
 
     filterConvertibleNodes();
+
     // 拓扑排序：确保节点按依赖顺序排列（输入在前，输出在后）
     nodes_ = topologicalSort(nodes_);
+
+    // Propagate actual weight shapes from variable reader nodes to VariableV2 nodes
+    // (moved after topologicalSort so shape propagation affects the final nodes_)
+    for (const auto& node_name : pruned_nodes) {
+        if (!node_map.count(node_name)) continue;
+        const NodeDef* node = node_map.at(node_name);
+        bool is_reader = isIdentity(*node) || node->op() == "ReadVariableOp";
+        if (!is_reader) continue;
+        std::string target;
+        if (node->input_size() > 0) {
+            target = getInputName(node->input(0));
+        }
+        if (target.empty()) {
+            auto it = identity_redirect.find(node->name());
+            if (it != identity_redirect.end()) target = it->second;
+        }
+        if (target.empty()) continue;
+        while (identity_redirect.count(target)) target = identity_redirect.at(target);
+        for (auto& ni : nodes_) {
+            if (ni.name == target && (ni.op_type == "VariableV2" || ni.op_type == "VarHandleOp")) {
+                auto attr_it = node->attr().find("_output_shapes");
+                if (attr_it != node->attr().end() && attr_it->second.list().shape_size() > 0) {
+                    std::vector<int64_t> shape = shapeFromProto(attr_it->second.list().shape(0));
+                    if (!shape.empty()) {
+                        ni.outputs[0].shape = shape;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
     inferMvpMatMulAddReluShapes();
     valid_ = true;
     return true;
@@ -198,7 +231,6 @@ void StandalonePbParser::pruneGraph(
         std::string cur_name = worklist.front();
         worklist.pop();
         const NodeDef* node = node_map.at(cur_name);
-        if (isVariable(*node)) continue;
         for (const std::string& input_tensor : node->input()) {
             std::string input_name = getInputName(input_tensor);
             if (input_name.empty() || input_name[0] == '^') continue;
@@ -393,7 +425,7 @@ bool StandalonePbParser::isAtirConvertibleNode(const annc::NodeInfo& node) const
         return true;
     }
     if (node.op_type == "Const") {
-        return node.outputs.empty() || node.outputs[0].dtype != "string";
+        return true;
     }
     return annc::MLIRBuilder::isSupportedOp(node.op_type);
 }
@@ -467,6 +499,18 @@ void StandalonePbParser::filterConvertibleNodes() {
         }
     }
 
+    std::cerr << "filterConvertibleNodes: " << filtered.size() << "/" << nodes_.size() << " nodes kept\n";
+    // DEBUG: show what important ops are filtered and why
+    std::map<std::string,std::pair<int,int>> op_stats; // op → {kept, filtered}
+    for (auto& node : nodes_) {
+        bool is_kept = keep.count(node.name);
+        if (is_kept) op_stats[node.op_type].first++;
+        else op_stats[node.op_type].second++;
+    }
+    for (auto& [op, cnt] : op_stats) {
+        if (cnt.second > 0)
+            std::cerr << "  op " << op << ": kept=" << cnt.first << " filtered=" << cnt.second << "\n";
+    }
     nodes_ = std::move(filtered);
 }
 
@@ -483,7 +527,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
         }
 
         if (!node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
-            node.outputs[0].shape[0] = 2;
+            node.outputs[0].shape[0] = default_batch_size_;
         }
         const std::vector<int64_t>& out_shape = node.outputs[0].shape;
         annc::NodeInfo* lhs = by_name.count(node.inputs[0]) ? by_name[node.inputs[0]] : nullptr;
@@ -498,7 +542,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
             continue;
         }
         if (!lhs->outputs[0].shape.empty() && lhs->outputs[0].shape[0] == -1) {
-            lhs->outputs[0].shape[0] = 2;
+            lhs->outputs[0].shape[0] = default_batch_size_;
         }
         rhs->outputs[0].shape = {k, out_shape[1]};
         rhs->outputs[0].dtype = node.outputs[0].dtype;
@@ -510,7 +554,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
             }
             if (!maybe_add.outputs[0].shape.empty() &&
                 maybe_add.outputs[0].shape[0] == -1) {
-                maybe_add.outputs[0].shape[0] = 2;
+                maybe_add.outputs[0].shape[0] = default_batch_size_;
             }
             if (std::find(maybe_add.inputs.begin(), maybe_add.inputs.end(),
                           node.name) == maybe_add.inputs.end()) {
@@ -532,7 +576,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
     for (auto& node : nodes_) {
         if ((node.op_type == "Relu" || node.isOutputNode) && !node.outputs.empty() &&
             !node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
-            node.outputs[0].shape[0] = 2;
+            node.outputs[0].shape[0] = default_batch_size_;
         }
     }
 }
