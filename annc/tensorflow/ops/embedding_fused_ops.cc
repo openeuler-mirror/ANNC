@@ -130,4 +130,12 @@ REGISTER_OP("KPFusedEmbeddingActionIdGather")
     .Attr("Tindices2: {int32, int64} = DT_INT32")
     .Output("output0: float")
     .SetShapeFn(shape_inference::UnknownShape);
+
+REGISTER_OP("KPFusedBatchMatMulAddSigmoid")
+    .Input("input0: float")
+    .Input("input1: float")
+    .Input("input2: float")
+    .Output("output0: float")
+    .SetShapeFn(shape_inference::UnknownShape);
+
 }  // namespace tensorflow

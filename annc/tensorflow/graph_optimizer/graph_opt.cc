@@ -678,6 +678,52 @@ class KPFusedEmbeddingActionIdGatherRewriter : public PatternRewriter {
   }
 };
 
+class KPFusedBatchMatMulAddSigmoidRewriter : public PatternRewriter {
+ public:
+  std::string name() const override { return "KPFusedBatchMatMulAddSigmoid"; }
+
+  bool match_and_rewrite(
+      const NodeDef* node, GraphDef* graph,
+      std::unordered_map<std::string, int>& node_indexes) override {
+    graph_ = graph;
+    indexes_ = &node_indexes;
+    CHECK_NODE_OK(node->op() == "Sigmoid" && node->input_size() == 1)
+
+    const NodeDef* add = get_node(node->input(0));
+    CHECK_NODE_OK(add->op() == "AddV2" && add->input_size() == 2)
+
+    int matmul_input_idx = -1;
+    int bias_input_idx = -1;
+    if (IsAnyBatchMatMul(*get_node(add->input(0)))) {
+      matmul_input_idx = 0;
+      bias_input_idx = 1;
+    } else if (IsAnyBatchMatMul(*get_node(add->input(1)))) {
+      matmul_input_idx = 1;
+      bias_input_idx = 0;
+    } else {
+      return false;
+    }
+
+    const NodeDef* batch_matmul = get_node(add->input(matmul_input_idx));
+    CHECK_NODE_OK(batch_matmul->input_size() == 2)
+
+    auto nodes = graph->mutable_node();
+    NodeDef* fused_node = nodes->Add();
+    fused_node->set_name(node->name() + fusion_appendix);
+    fused_node->set_op(name());
+    fused_node->set_device(node->device());
+    fused_node->add_input(batch_matmul->input(0));
+    fused_node->add_input(batch_matmul->input(1));
+    fused_node->add_input(add->input(bias_input_idx));
+    nodes->SwapElements(node_indexes.at(node->name()), nodes->size() - 1);
+
+    VLOG(0) << "-- Add node: [" << fused_node->op() << "] "
+            << fused_node->name();
+    replace_all_users_with(node, 0, fused_node, 0, graph);
+    return true;
+  }
+};
+
 void run_graph_optimization(GraphDef* graph) {
   GraphOptimizer optimizer(graph);
 
@@ -694,6 +740,8 @@ void run_graph_optimization(GraphDef* graph) {
       getenv("ANNC_FUSED_EMB_ACTIONID_GATHER");
   const char* annc_fused_sps_reduce_nonzero =
       getenv("ANNC_FUSED_SPS_REDUCE_NONZERO");
+  const char* annc_fused_batchmatmul_add_sigmoid =
+      getenv("ANNC_FUSED_BATCHMATMUL_ADD_SIGMOID");
 
   bool enable_all =
       (annc_fused_all != nullptr) && strcmp(annc_fused_all, "1") == 0;
@@ -733,6 +781,10 @@ void run_graph_optimization(GraphDef* graph) {
       strcmp(annc_fused_sps_reduce_nonzero, "1") == 0)
     optimizer.register_rewriter(
         std::make_unique<KPFusedSparseSegmentReduceNonzeroRewriter>());
+  if (enable_all || (annc_fused_batchmatmul_add_sigmoid != nullptr &&
+                     strcmp(annc_fused_batchmatmul_add_sigmoid, "1") == 0))
+    optimizer.register_rewriter(
+        std::make_unique<KPFusedBatchMatMulAddSigmoidRewriter>());
   optimizer.optimize();
 }
 }  // namespace annc
