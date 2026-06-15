@@ -22,5 +22,6 @@ add_mlir_library(AtirToAffineConversion
         MLIRFuncDialect
         MLIRMemRefDialect
         CommonConversion
+        AtirDialect
         ANNCKernel
 )

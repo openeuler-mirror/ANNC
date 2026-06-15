@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "Kernel/KernelRegistry.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace annc {
 namespace kernels {
@@ -20,13 +19,6 @@ struct KernelResolveRequest {
     bool requiresSpecialization() const { return !type_constraints.empty(); }
 };
 
-/// Resolve a kernel symbol for the given op_type, backend, and optional
-/// type_constraints. This is the low-level lookup that does not consider
-/// priority chains — it queries a single backend directly.
-std::optional<std::string> resolveKernelSymbol(
-    llvm::StringRef opType, llvm::StringRef backend,
-    const std::vector<TypeConstraintInfo>& typeConstraints = {});
-
 /// Check whether any kernel is available for the given request under the
 /// specified kdnn configuration.
 /// This is the single source of truth for "can this op be lowered to a
@@ -35,12 +27,12 @@ std::optional<std::string> resolveKernelSymbol(
 bool hasAnyAvailableKernel(const KernelResolveRequest& request,
                            bool enableKdnn);
 
-/// Resolve the best available kernel symbol for the given request under the
+/// Resolve the best available kernel info for the given request under the
 /// specified kdnn configuration.
 /// Priority: kdnn (if enabled and kernel exists) → aarch64 (fallback).
 /// Returns std::nullopt if no kernel is available for any backend.
-std::optional<std::string> resolveBestKernel(const KernelResolveRequest& request,
-                                              bool enableKdnn);
+std::optional<KernelInfo> resolveBestKernelInfo(const KernelResolveRequest& request,
+                                                bool enableKdnn);
 
 } // namespace kernels
 } // namespace annc

@@ -32,10 +32,16 @@ struct MatmulAddReluToCustomCallRewrite : public CustomFusionPatternBase<MatMulO
     return success();
   }
 
-  std::string getKernelName(
+  std::string getCustomOpName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
     return "my_matmul_add_relu";
+  }
+
+  CustomOpSchema getCustomOpSchema(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    return CustomOpSchema::get("my_matmul_add_relu");
   }
 };
 
@@ -59,10 +65,16 @@ struct MatmulAddToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
     return success();
   }
 
-  std::string getKernelName(
+  std::string getCustomOpName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
     return "my_matmul_add";
+  }
+
+  CustomOpSchema getCustomOpSchema(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    return CustomOpSchema::get("my_matmul_add");
   }
 };
 
@@ -76,10 +88,20 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
     return success();
   }
 
-  std::string getKernelName(
+  std::string getCustomOpName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
     return "MatMul";
+  }
+
+  CustomOpSchema getCustomOpSchema(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    return CustomOpSchema::get("MatMul")
+        .TypeVar("T")
+        .MemRefArg("output", 2, "T")
+        .MemRefArg("lhs", 2, "T")
+        .MemRefArg("rhs", 2, "T");
   }
 };
 

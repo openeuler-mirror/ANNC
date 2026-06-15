@@ -21,6 +21,7 @@ add_mlir_library(AtirPasses
     MLIRRewrite
     MLIRTransforms
     MLIRDialect
+    ANNCKernel
     
     AtirShapeInferIntfc
     AtirInterpretIntfc

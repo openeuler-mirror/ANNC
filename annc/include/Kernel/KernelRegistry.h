@@ -17,9 +17,11 @@ namespace kernels {
 struct TypeConstraintInfo {
     std::string name;
     std::string cpp_type_name;
+    bool any_type = false;
 
     bool operator==(const TypeConstraintInfo& other) const noexcept {
-        return name == other.name && cpp_type_name == other.cpp_type_name;
+        return name == other.name && cpp_type_name == other.cpp_type_name &&
+               any_type == other.any_type;
     }
 };
 
@@ -89,6 +91,11 @@ public:
         return *this;
     }
 
+    KernelBuilder& AnyType(const char* name) {
+        type_constraints_.push_back(TypeConstraintInfo{name, "*", true});
+        return *this;
+    }
+
     KernelInfo Build(std::string symbolName, const char* sourceFile, int line) const {
         KernelInfo info;
         info.op_type = op_type_;
@@ -143,6 +150,7 @@ private:
 
     static bool sameSignature(const KernelInfo& lhs, const KernelInfo& rhs);
     static bool exactMatch(const KernelInfo& info, const KernelQuery& query);
+    static bool genericMatch(const KernelInfo& info, const KernelQuery& query);
 
     mutable std::mutex mutex_;
     std::map<std::string, std::map<std::string, std::vector<KernelEntry>>> registry_;

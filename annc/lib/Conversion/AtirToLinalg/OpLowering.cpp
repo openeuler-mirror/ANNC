@@ -1,8 +1,8 @@
 #include "Conversion/AtirToLinalg/OpLowering.h"
 #include "Conversion/Common/AtirLowering.h"
+#include "Conversion/Common/CustomizeCallLowering.h"
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "Kernel/KernelPriorityResolver.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -43,13 +43,6 @@ namespace {
         return res;
     }
 
-    std::optional<std::string> resolveKernelCallee(atir::CustomizeOp op, ModuleOp module) {
-        annc::kernels::KernelResolveRequest req;
-        req.op_type = op.getOpType().str();
-        auto attr = module->getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
-        bool enableKdnn = attr && attr.getValue();
-        return annc::kernels::resolveBestKernel(req, enableKdnn);
-    }
 }
 namespace atir
 {
@@ -124,59 +117,9 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
 
 void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter, atir::CustomizeOpAdaptor adaptor,
                                          atir::CustomizeOp op) const {
-
-  ModuleOp module = op->getParentOfType<ModuleOp>();
-  auto calleeName = resolveKernelCallee(op, module);
-  if (!calleeName.has_value()) {
-    op.emitError() << "failed to resolve kernel symbol for CustomizeOp '"
-                   << op.getOpType() << "'";
-    return;
-  }
-
-  SmallVector<mlir::Value> newOperands;
-  SmallVector<mlir::Type> inputMemRefTypes;
-  for (mlir::Value input : adaptor.getOperands()) {
-    newOperands.push_back(input);
-    inputMemRefTypes.push_back(input.getType());
-  }
-
-  SmallVector<mlir::Type> resultMemrefTypes;
-  for (mlir::Type resultType : op->getResultTypes()) {
-    if (auto tensorType = llvm::dyn_cast<TensorType>(resultType)) {
-      auto outMemrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
-      resultMemrefTypes.push_back(outMemrefType);
-    }else {
-      resultMemrefTypes.push_back(resultType);
-    }
-  }
-
-  auto funcType = rewriter.getFunctionType(inputMemRefTypes,resultMemrefTypes);
-
-  PatternRewriter::InsertionGuard guard(rewriter);
-
-  auto funcOp = module.lookupSymbol<func::FuncOp>(*calleeName);
-  if (!funcOp) {
-      rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<func::FuncOp>(op.getLoc(), *calleeName, funcType);
-      funcOp.setPrivate();
-      auto emitCAttr = UnitAttr::get(rewriter.getContext());
-      funcOp->setAttr("llvm.emit_c_interface", emitCAttr);
-  } else if (funcOp.getFunctionType() != funcType) {
-      op.emitError() << "resolved kernel callee '" << *calleeName
-                     << "' already exists with mismatched function type";
-      return;
-  }
-
-  rewriter.setInsertionPoint(op);
-
-  auto callOp = rewriter.create<func::CallOp>(
-      op.getLoc(),
-      *calleeName,
-      resultMemrefTypes,
-      newOperands);
-
-  rewriter.replaceOp(op, callOp);
+  lowerCustomizeOpToFuncCall(rewriter, adaptor, op);
 }
+
 
 void ReturnLoweringToLinalg::Lowering(PatternRewriter &rewriter, ReturnOpAdaptor adaptor, ReturnOp op) const {
     auto ret = adaptor.getResults();

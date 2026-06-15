@@ -2,6 +2,7 @@
 #define ANNC_CUSTOMFUSIONPATTERNBASE_H
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "Dialect/Atir//AtirOps.h"
+#include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/PassManager.h"
@@ -21,11 +22,13 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       AnchorOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const = 0;
 
-  virtual std::string getKernelName(
+  virtual std::string getCustomOpName(
       AnchorOp anchor,
-      llvm::ArrayRef<mlir::Operation *> fusedOps) const {
-    return anchor->getName().getStringRef().str();
-  }
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
+
+  virtual CustomOpSchema getCustomOpSchema(
+      AnchorOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
 
  public:
   mlir::LogicalResult matchAndRewrite(
@@ -34,21 +37,6 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     SmallVector<Operation *> fusedOps;
     auto matchres = matchFusion(anchor, fusedOps);
     if (failed(matchres)) {
-      return failure();
-    }
-
-    // Check whether any builtin kernel is available for this op.
-    // If no kernel exists for any backend, the pattern should not fire —
-    // the op will take its default lowering path instead.
-    auto kernelName = getKernelName(anchor, fusedOps);
-    auto module = anchor->template getParentOfType<mlir::ModuleOp>();
-    auto attr = module->template getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
-    bool enableKdnn = attr && attr.getValue();
-    annc::kernels::KernelResolveRequest req;
-    req.op_type = kernelName;
-    if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
-      llvm::dbgs() << "ANNC: No builtin kernel available for '" << kernelName
-                   << "', skipping CustomizeOp rewrite\n";
       return failure();
     }
 
@@ -83,14 +71,27 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     for (const auto &value: outputValues) {
       resultTypes.push_back(value.getType());
     }
-    //
-    auto callee = StringAttr::get(rewriter.getContext(), kernelName);
 
-    // metadata is initialized as an empty DictionaryAttr here; runtime
-    // attributes (kernel_name, shared_lib_path, Nconstants, etc.) will be
-    // populated by downstream passes (e.g. the ANNC compilation pipeline).
+    auto customOpName = getCustomOpName(anchor, fusedOps);
+    auto schema = getCustomOpSchema(anchor, fusedOps);
+    auto metadata = schema.toMetadata(rewriter.getContext());
+
+    auto module = anchor->template getParentOfType<mlir::ModuleOp>();
+    auto attr = module->template getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
+    bool enableKdnn = attr && attr.getValue();
+    annc::kernels::KernelResolveRequest req;
+    req.op_type = customOpName;
+    req.type_constraints = inferTypeConstraintsFromSchema(metadata, inputValues);
+    if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
+      llvm::dbgs() << "ANNC: No builtin kernel available for '" << customOpName
+                   << "', skipping CustomizeOp rewrite\n";
+      return failure();
+    }
+
+    auto callee = StringAttr::get(rewriter.getContext(), customOpName);
+
     auto customCallOp = rewriter.create<CustomizeOp>(
-        anchor.getLoc(), resultTypes, inputValues, callee, DictionaryAttr());
+        anchor.getLoc(), resultTypes, inputValues, callee, metadata);
 
     //replace
     for (auto [oldV, newV] : llvm::zip(outputValues, customCallOp.getResults())) {
