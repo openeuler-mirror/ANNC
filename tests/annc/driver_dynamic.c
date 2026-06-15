@@ -196,7 +196,8 @@ int main(void) {
     float expected = (float)K + 0.1f;
     int errors = 0;
 
-    for (int i = 0; i < 10; ++i) {
+    int samples = M * N < 10 ? M * N : 10;
+    for (int i = 0; i < samples; ++i) {
         printf("C[%d] = %f\n", i, C_buf[i]);
         if (fabsf(C_buf[i] - expected) > 1e-3f)
             errors++;

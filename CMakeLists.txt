@@ -165,3 +165,8 @@ include_directories(${json_SOURCE_DIR}/include)
 add_subdirectory(annc)
 add_subdirectory(python)
 add_subdirectory(tensorflow_addons)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
