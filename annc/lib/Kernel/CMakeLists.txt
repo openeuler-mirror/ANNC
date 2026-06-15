@@ -8,8 +8,9 @@ add_library(ANNCKernel
     KernelPriorityResolver.cpp
 )
 
-install(TARGETS ANNCThreadPool ANNCKernel
-        EXPORT MLIRTargets
-        ARCHIVE DESTINATION lib)
 
+install(TARGETS ANNCThreadPool ANNCKernel
+ 	         EXPORT MLIRTargets
+ 	         ARCHIVE DESTINATION lib)
+ 	 
 add_subdirectory(builtin_kernels)

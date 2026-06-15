@@ -2,18 +2,205 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstring>
+#include <cstdlib>
+#include <map>
 #include <optional>
 #include <sstream>
 
+#include "Kernel/MemRefTypes.h"
 #include "Kernel/threadpool/ThreadPool.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/threadpool.h"
 
 namespace tensorflow {
 
+struct AnncFusedProfileSample {
+  double load_library_us = 0.0;
+  double threadpool_setup_us = 0.0;
+  double input_memref_us = 0.0;
+  double output_alloc_us = 0.0;
+  double output_init_us = 0.0;
+  double output_memref_us = 0.0;
+  double arg_order_us = 0.0;
+  double kernel_us = 0.0;
+};
+
 namespace {
+
+using Clock = std::chrono::high_resolution_clock;
+using TimePoint = Clock::time_point;
+
+double ElapsedUs(TimePoint start, TimePoint end = Clock::now()) {
+  return std::chrono::duration<double, std::micro>(end - start).count();
+}
+
+bool IsAnncFusedProfilingEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ANNC_FUSED_PROFILE");
+    return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+int AnncFusedProfileInterval() {
+  static const int interval = [] {
+    const char* value = std::getenv("ANNC_FUSED_PROFILE_INTERVAL");
+    if (!value || value[0] == '\0') return 100000;
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || parsed <= 0) return 100000;
+    return static_cast<int>(parsed);
+  }();
+  return interval;
+}
+
+struct ProfileStats {
+  int count = 0;
+  double load_library_us = 0.0;
+  double threadpool_setup_us = 0.0;
+  double input_memref_us = 0.0;
+  double output_alloc_us = 0.0;
+  double output_init_us = 0.0;
+  double output_memref_us = 0.0;
+  double arg_order_us = 0.0;
+  double kernel_us = 0.0;
+  double total_us = 0.0;
+};
+
+mutex profile_stats_mu_(LINKER_INITIALIZED);
+
+template <typename T>
+std::string FormatVector(const std::vector<T>& values) {
+  std::ostringstream os;
+  os << "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) os << ",";
+    os << values[i];
+  }
+  os << "]";
+  return os.str();
+}
+
+void LogProfileStats(const char* tag, int total,
+                     const std::map<std::string, ProfileStats>& stats) {
+  LOG(INFO) << "[" << tag << "] ====== report (calls=" << total << ") ======";
+  for (const auto& [key, s] : stats) {
+    const double count = static_cast<double>(s.count);
+    LOG(INFO) << "[" << tag << "] key=" << key
+              << " count=" << s.count
+              << " avg_load_library=" << (s.load_library_us / count) << " us"
+              << " avg_threadpool_setup="
+              << (s.threadpool_setup_us / count) << " us"
+              << " avg_input_memref=" << (s.input_memref_us / count) << " us"
+              << " avg_output_alloc=" << (s.output_alloc_us / count) << " us"
+              << " avg_output_init=" << (s.output_init_us / count) << " us"
+              << " avg_output_memref=" << (s.output_memref_us / count) << " us"
+              << " avg_arg_order=" << (s.arg_order_us / count) << " us"
+              << " avg_kernel=" << (s.kernel_us / count) << " us"
+              << " avg_total=" << (s.total_us / count) << " us"
+              << " avg_overhead="
+              << ((s.total_us - s.kernel_us) / count) << " us";
+  }
+}
+
+std::string BuildProfileKey(OpKernelContext* context, int total_inputs,
+                            const std::vector<int>& input_ranks,
+                            const std::vector<std::string>& output_shapes,
+                            const std::string& kernel_name,
+                            const std::string& fusion_pattern) {
+  auto append_tensor_shape = [](std::ostringstream& os,
+                                const Tensor& tensor) {
+    os << tensor.dims() << "D[";
+    for (int d = 0; d < tensor.dims(); ++d) {
+      if (d > 0) os << "x";
+      os << tensor.dim_size(d);
+    }
+    os << "]";
+  };
+
+  auto append_output_shapes = [&output_shapes](std::ostringstream& os) {
+    if (output_shapes.empty()) return;
+    os << "_out=";
+    for (size_t i = 0; i < output_shapes.size(); ++i) {
+      if (i > 0) os << ",";
+      os << output_shapes[i];
+    }
+  };
+
+  if (fusion_pattern == "dnn_embedding_hash_bucket") {
+    std::ostringstream key;
+    key << kernel_name << "_pattern=" << fusion_pattern;
+    if (total_inputs > 0) {
+      key << "_weight=";
+      append_tensor_shape(key, context->input(0));
+    }
+    if (total_inputs > 1) {
+      key << "_input=";
+      append_tensor_shape(key, context->input(1));
+    }
+    append_output_shapes(key);
+    return key.str();
+  }
+
+  int lhs = -1;
+  int rhs = -1;
+  for (int i = 0; i < total_inputs; ++i) {
+    int rank = input_ranks.empty() ? context->input(i).dims() : input_ranks[i];
+    if (rank == 2) {
+      if (lhs < 0) {
+        lhs = i;
+      } else if (rhs < 0) {
+        rhs = i;
+      }
+    }
+  }
+
+  std::string key = kernel_name;
+  const bool use_matmul_profile =
+      fusion_pattern.empty() ||
+      fusion_pattern.find("matmul") != std::string::npos ||
+      kernel_name.find("matmul") != std::string::npos;
+  if (use_matmul_profile && lhs >= 0 && rhs >= 0) {
+    const Tensor& t0 = context->input(lhs);
+    const Tensor& t1 = context->input(rhs);
+    int64_t m = 0;
+    int64_t k = 0;
+    int64_t n = 0;
+    if (t0.dim_size(1) == t1.dim_size(0)) {
+      m = t0.dim_size(0);
+      k = t0.dim_size(1);
+      n = t1.dim_size(1);
+    } else {
+      m = t1.dim_size(0);
+      k = t1.dim_size(1);
+      n = t0.dim_size(1);
+    }
+    key += "_" + std::to_string(m) + "x" + std::to_string(k) + "x" +
+           std::to_string(n);
+    if (!fusion_pattern.empty()) {
+      key += "_pattern=" + fusion_pattern;
+    }
+    return key;
+  }
+
+  std::ostringstream generic_key;
+  generic_key << kernel_name;
+  if (!fusion_pattern.empty()) {
+    generic_key << "_pattern=" << fusion_pattern;
+  }
+  generic_key << "_inputs=";
+  for (int i = 0; i < total_inputs; ++i) {
+    if (i > 0) generic_key << ",";
+    append_tensor_shape(generic_key, context->input(i));
+  }
+  append_output_shapes(generic_key);
+  return generic_key.str();
+}
 
 class TensorFlowAnncThreadPool final
     : public annc::threadpool::AnncThreadPool {
@@ -119,14 +306,29 @@ struct RankedMemRefDescriptor<0> {
 
 template <int Rank>
 Status CreateRankedMemRef(const Tensor& tensor,
-                          RankedMemRefDescriptor<Rank>* ref) {
+                          RankedMemRefDescriptor<Rank>* ref,
+                          std::vector<AnncStringRef>* string_storage = nullptr) {
   if (tensor.dims() != Rank) {
     return errors::InvalidArgument("Expected rank ", Rank, ", got ",
                                    tensor.dims());
   }
 
-  ref->allocated =
-      const_cast<void*>(static_cast<const void*>(tensor.tensor_data().data()));
+  if (tensor.dtype() == DT_STRING) {
+    if (!string_storage) {
+      return errors::InvalidArgument("String tensor memref requires storage");
+    }
+    auto flat = tensor.flat<tstring>();
+    string_storage->resize(flat.size());
+    for (int64_t i = 0; i < flat.size(); ++i) {
+      const tstring& value = flat(i);
+      (*string_storage)[i] = AnncStringRef{value.data(),
+                                           static_cast<int64_t>(value.size())};
+    }
+    ref->allocated = string_storage->data();
+  } else {
+    ref->allocated =
+        const_cast<void*>(static_cast<const void*>(tensor.tensor_data().data()));
+  }
   ref->aligned = ref->allocated;
   ref->offset = 0;
 
@@ -141,9 +343,24 @@ Status CreateRankedMemRef(const Tensor& tensor,
 }
 
 Status CreateRankedMemRef(const Tensor& tensor,
-                          RankedMemRefDescriptor<0>* ref) {
+                          RankedMemRefDescriptor<0>* ref,
+                          std::vector<AnncStringRef>* string_storage = nullptr) {
   if (tensor.dims() != 0) {
     return errors::InvalidArgument("Expected rank 0, got ", tensor.dims());
+  }
+  if (tensor.dtype() == DT_STRING) {
+    if (!string_storage) {
+      return errors::InvalidArgument("String tensor memref requires storage");
+    }
+    auto scalar = tensor.scalar<tstring>();
+    string_storage->resize(1);
+    const tstring& value = scalar();
+    (*string_storage)[0] =
+        AnncStringRef{value.data(), static_cast<int64_t>(value.size())};
+    ref->allocated = string_storage->data();
+    ref->aligned = ref->allocated;
+    ref->offset = 0;
+    return OkStatus();
   }
 
   ref->allocated =
@@ -161,34 +378,42 @@ Status BuildRankedMemRefArg(const Tensor& tensor, int expected_rank,
                             std::array<RankedMemRefDescriptor<4>, 1>* rank4,
                             std::array<RankedMemRefDescriptor<5>, 1>* rank5,
                             std::array<RankedMemRefDescriptor<6>, 1>* rank6,
-                            void** arg) {
+                            void** arg,
+                            std::vector<AnncStringRef>* string_storage = nullptr) {
   switch (expected_rank) {
     case 0:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank0)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank0)[0], string_storage));
       *arg = &(*rank0)[0];
       return OkStatus();
     case 1:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank1)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank1)[0], string_storage));
       *arg = &(*rank1)[0];
       return OkStatus();
     case 2:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank2)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank2)[0], string_storage));
       *arg = &(*rank2)[0];
       return OkStatus();
     case 3:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank3)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank3)[0], string_storage));
       *arg = &(*rank3)[0];
       return OkStatus();
     case 4:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank4)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank4)[0], string_storage));
       *arg = &(*rank4)[0];
       return OkStatus();
     case 5:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank5)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank5)[0], string_storage));
       *arg = &(*rank5)[0];
       return OkStatus();
     case 6:
-      TF_RETURN_IF_ERROR(CreateRankedMemRef(tensor, &(*rank6)[0]));
+      TF_RETURN_IF_ERROR(
+          CreateRankedMemRef(tensor, &(*rank6)[0], string_storage));
       *arg = &(*rank6)[0];
       return OkStatus();
     default:
@@ -331,6 +556,7 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
       num_constants_(0),
       num_fixed_(0),
       num_dynamic_(0),
+      zero_initialize_outputs_(true),
       handle_(nullptr),
       mlir_ciface_func_(nullptr),
       annc_set_current_threadpool_(nullptr),
@@ -357,6 +583,10 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   OP_REQUIRES_OK(context, context->GetAttr("dynamic_dims", &dynamic_dims_));
   OP_REQUIRES_OK(context,
                  context->GetAttr("symbolic_signature", &symbolic_signature_str_));
+  if (context->HasAttr("fusion_pattern")) {
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("fusion_pattern", &fusion_pattern_));
+  }
   OP_REQUIRES_OK(context, context->GetAttr("T", &dtype_));
 
   if (context->HasAttr("shared_lib_path")) {
@@ -367,6 +597,14 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
     OP_REQUIRES_OK(context, context->GetAttr("abi", &abi_));
   } else {
     abi_ = "mlir_ciface";
+  }
+  if (context->HasAttr("zero_initialize_outputs")) {
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("zero_initialize_outputs",
+                                    &zero_initialize_outputs_));
+  }
+  if (fusion_pattern_ == "dnn_embedding_hash_bucket") {
+    zero_initialize_outputs_ = false;
   }
 
   OP_REQUIRES(context, !kernel_name_.empty(),
@@ -392,28 +630,74 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
 ANNCFusedOp::~ANNCFusedOp() {}
 
 void ANNCFusedOp::Compute(OpKernelContext* context) {
+  const bool profile_enabled = IsAnncFusedProfilingEnabled();
+  auto t_compute_start = profile_enabled ? Clock::now() : TimePoint{};
+  AnncFusedProfileSample profile_sample;
+
+  // ── Direct OpenBLAS MatMul fast path ──
+  {
+    static const char* kAnncBackend = getenv("ANNC_BACKEND");
+    auto lower = kernel_name_;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    if (kAnncBackend && strcmp(kAnncBackend, "openblas") == 0 &&
+        lower.find("matmul") != std::string::npos) {
+      OP_REQUIRES(
+          context, false,
+          errors::Unimplemented(
+              "ANNC_BACKEND=openblas direct MatMul path is not implemented"));
+    }
+  }
+
   OP_REQUIRES(context, !shared_lib_path_.empty(),
-              errors::InvalidArgument(
-                  "ANNCFused requires shared_lib_path produced by "
-                  "ANNCOptimizerPass"));
+              errors::InvalidArgument("ANNCFused requires shared_lib_path"));
 
   if (!loaded_ || current_so_path_ != shared_lib_path_) {
+    auto t_load_start = profile_enabled ? Clock::now() : TimePoint{};
     OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
+    if (profile_enabled) {
+      profile_sample.load_library_us = ElapsedUs(t_load_start);
+    }
     current_so_path_ = shared_lib_path_;
   }
 
+  auto t_threadpool_start = profile_enabled ? Clock::now() : TimePoint{};
   thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
   TensorFlowAnncThreadPool adapter(tf_thread_pool);
   ScopedAnncThreadPool scoped(tf_thread_pool ? &adapter : nullptr,
                               annc_set_current_threadpool_,
                               annc_get_current_threadpool_);
-  VLOG(2) << "ANNCFused "
-          << (tf_thread_pool && annc_set_current_threadpool_
-                  ? "installed TensorFlow CPU threadpool"
-                  : "running without TensorFlow CPU threadpool")
-          << " for kernel " << kernel_name_;
+  if (profile_enabled) {
+    profile_sample.threadpool_setup_us = ElapsedUs(t_threadpool_start);
+  }
 
-  OP_REQUIRES_OK(context, ExecuteMlirCifaceKernel(context));
+  OP_REQUIRES_OK(context, ExecuteMlirCifaceKernel(
+                              context, profile_enabled, &profile_sample));
+  if (!profile_enabled) {
+    return;
+  }
+  double total_us = ElapsedUs(t_compute_start);
+
+  static std::map<std::string, ProfileStats> stats;
+  static int total_calls = 0;
+  const int n = num_constants_ + num_fixed_ + num_dynamic_;
+  auto key = BuildProfileKey(context, n, input_ranks_, output_shapes_,
+                             kernel_name_, fusion_pattern_);
+  mutex_lock lock(profile_stats_mu_);
+  auto& s = stats[key];
+  s.count++;
+  s.load_library_us += profile_sample.load_library_us;
+  s.threadpool_setup_us += profile_sample.threadpool_setup_us;
+  s.input_memref_us += profile_sample.input_memref_us;
+  s.output_alloc_us += profile_sample.output_alloc_us;
+  s.output_init_us += profile_sample.output_init_us;
+  s.output_memref_us += profile_sample.output_memref_us;
+  s.arg_order_us += profile_sample.arg_order_us;
+  s.kernel_us += profile_sample.kernel_us;
+  s.total_us += total_us;
+  total_calls++;
+  if (total_calls % AnncFusedProfileInterval() == 0) {
+    LogProfileStats("ANNC-FUSED-PROFILE", total_calls, stats);
+  }
 }
 
 Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
@@ -422,19 +706,25 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
   auto it = lib_cache_.find(so_path);
   if (it != lib_cache_.end()) {
     handle_ = it->second;
-    VLOG(2) << "Using cached library handle for " << so_path;
   } else {
     handle_ = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle_) {
-      return errors::NotFound("Cannot load library ", so_path, ": ", dlerror());
+      const char* error = dlerror();
+      LOG(ERROR) << "[ANNC-FUSED-LOAD] dlopen failed so_path=" << so_path
+                 << " error=" << (error ? error : "<null>");
+      return errors::NotFound("Cannot load library ", so_path, ": ",
+                              error ? error : "<null>");
     }
     lib_cache_[so_path] = handle_;
-    VLOG(1) << "Loaded and cached new library: " << so_path;
   }
 
   std::string symbol_name = "_mlir_ciface_" + kernel_name_;
   void* symbol = dlsym(handle_, symbol_name.c_str());
   if (!symbol) {
+    const char* error = dlerror();
+    LOG(ERROR) << "[ANNC-FUSED-LOAD] dlsym failed symbol=" << symbol_name
+               << " so_path=" << so_path
+               << " error=" << (error ? error : "<null>");
     return errors::NotFound("Cannot find symbol ", symbol_name, " in ",
                             so_path);
   }
@@ -448,8 +738,6 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
           dlsym(handle_, "annc_get_current_threadpool"));
 
   if (!annc_set_current_threadpool_ || !annc_get_current_threadpool_) {
-    VLOG(1) << "ANNC threadpool TLS symbols were not found in " << so_path
-            << "; generated kernel will run without TensorFlow threadpool";
     annc_set_current_threadpool_ = nullptr;
     annc_get_current_threadpool_ = nullptr;
   }
@@ -458,13 +746,20 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
   return OkStatus();
 }
 
-Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context) {
+Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
+                                            bool profile_enabled,
+                                            AnncFusedProfileSample* profile_sample) {
   if (!mlir_ciface_func_) {
+    LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel symbol is null kernel="
+               << kernel_name_;
     return errors::FailedPrecondition("MLIR C interface kernel is not loaded");
   }
 
   const int expected_inputs = num_constants_ + num_fixed_ + num_dynamic_;
   if (context->num_inputs() != expected_inputs) {
+    LOG(ERROR) << "[ANNC-FUSED-EXEC] input count mismatch kernel="
+               << kernel_name_ << " expected=" << expected_inputs
+               << " actual=" << context->num_inputs();
     return errors::InvalidArgument("ANNCFused expected ", expected_inputs,
                                    " inputs, got ", context->num_inputs());
   }
@@ -478,13 +773,25 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context) {
   std::vector<std::array<RankedMemRefDescriptor<4>, 1>> rank4(total_memrefs);
   std::vector<std::array<RankedMemRefDescriptor<5>, 1>> rank5(total_memrefs);
   std::vector<std::array<RankedMemRefDescriptor<6>, 1>> rank6(total_memrefs);
+  std::vector<std::vector<AnncStringRef>> string_storage(total_memrefs);
 
+  auto t_input_memref_start = profile_enabled ? Clock::now() : TimePoint{};
   for (int i = 0; i < expected_inputs; ++i) {
     const Tensor& tensor = context->input(i);
     int rank = input_ranks_.empty() ? tensor.dims() : input_ranks_[i];
-    TF_RETURN_IF_ERROR(BuildRankedMemRefArg(
+    Status status = BuildRankedMemRefArg(
         tensor, rank, &rank0[i], &rank1[i], &rank2[i], &rank3[i], &rank4[i],
-        &rank5[i], &rank6[i], &memrefs[i]));
+        &rank5[i], &rank6[i], &memrefs[i], &string_storage[i]);
+    if (!status.ok()) {
+      LOG(ERROR) << "[ANNC-FUSED-EXEC] failed to build input memref kernel="
+                 << kernel_name_ << " input_index=" << i
+                 << " expected_rank=" << rank
+                 << " status=" << status.ToString();
+      return status;
+    }
+  }
+  if (profile_enabled && profile_sample) {
+    profile_sample->input_memref_us = ElapsedUs(t_input_memref_start);
   }
 
   for (int i = 0; i < num_outputs_; ++i) {
@@ -493,16 +800,47 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context) {
     TensorShape out_shape = InferOutputShape(context, i, output_ranks_[i],
                                              output_shapes_, num_constants_,
                                              num_fixed_);
-    TF_RETURN_IF_ERROR(context->allocate_output(i, out_shape, &output));
-    output->flat<float>().setZero();
+    auto t_output_alloc_start = profile_enabled ? Clock::now() : TimePoint{};
+    Status alloc_status = context->allocate_output(i, out_shape, &output);
+    if (!alloc_status.ok()) {
+      LOG(ERROR) << "[ANNC-FUSED-EXEC] allocate_output failed kernel="
+                 << kernel_name_ << " output_index=" << i
+                 << " shape=" << out_shape.DebugString()
+                 << " status=" << alloc_status.ToString();
+      return alloc_status;
+    }
+    if (profile_enabled && profile_sample) {
+      profile_sample->output_alloc_us += ElapsedUs(t_output_alloc_start);
+    }
+
+    if (zero_initialize_outputs_) {
+      auto t_output_init_start = profile_enabled ? Clock::now() : TimePoint{};
+      output->flat<float>().setZero();
+      if (profile_enabled && profile_sample) {
+        profile_sample->output_init_us += ElapsedUs(t_output_init_start);
+      }
+    }
 
     int memref_index = expected_inputs + i;
-    TF_RETURN_IF_ERROR(BuildRankedMemRefArg(
+    auto t_output_memref_start = profile_enabled ? Clock::now() : TimePoint{};
+    Status status = BuildRankedMemRefArg(
         *output, output_ranks_[i], &rank0[memref_index], &rank1[memref_index],
         &rank2[memref_index], &rank3[memref_index], &rank4[memref_index],
-        &rank5[memref_index], &rank6[memref_index], &memrefs[memref_index]));
+        &rank5[memref_index], &rank6[memref_index], &memrefs[memref_index],
+        &string_storage[memref_index]);
+    if (!status.ok()) {
+      LOG(ERROR) << "[ANNC-FUSED-EXEC] failed to build output memref kernel="
+                 << kernel_name_ << " output_index=" << i
+                 << " rank=" << output_ranks_[i]
+                 << " status=" << status.ToString();
+      return status;
+    }
+    if (profile_enabled && profile_sample) {
+      profile_sample->output_memref_us += ElapsedUs(t_output_memref_start);
+    }
   }
 
+  auto t_arg_order_start = profile_enabled ? Clock::now() : TimePoint{};
   std::vector<int> order = kernel_arg_order_;
   if (order.empty()) {
     // Legacy compatibility: the original ANNC pipeline produced kernels with
@@ -521,14 +859,30 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context) {
   args.reserve(order.size());
   for (int index : order) {
     if (index < 0 || index >= total_memrefs) {
+      LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel_arg_order out of range kernel="
+                 << kernel_name_ << " index=" << index
+                 << " total_memrefs=" << total_memrefs
+                 << " order=" << FormatVector(order);
       return errors::InvalidArgument("kernel_arg_order index ", index,
                                      " is out of range [0, ", total_memrefs,
                                      ")");
     }
     args.push_back(memrefs[index]);
   }
+  if (profile_enabled && profile_sample) {
+    profile_sample->arg_order_us = ElapsedUs(t_arg_order_start);
+  }
 
-  return CallMlirCiface(mlir_ciface_func_, args);
+  auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
+  Status status = CallMlirCiface(mlir_ciface_func_, args);
+  if (!status.ok()) {
+    LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel call failed kernel="
+               << kernel_name_ << " status=" << status.ToString();
+  }
+  if (profile_enabled && profile_sample) {
+    profile_sample->kernel_us = ElapsedUs(t_kernel_start);
+  }
+  return status;
 }
 
 }  // namespace tensorflow

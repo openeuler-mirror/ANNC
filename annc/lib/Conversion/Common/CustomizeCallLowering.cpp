@@ -2,6 +2,7 @@
 
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Kernel/KernelPriorityResolver.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -14,6 +15,7 @@ namespace atir {
 namespace {
 
 struct SchemaArg {
+  StringRef name;
   StringRef kind;
   int64_t rank = -1;
   StringRef typeVar;
@@ -30,30 +32,44 @@ std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata, StringRef name) {
 }
 
 std::optional<SmallVector<SchemaArg>>
-readSchemaArgs(DictionaryAttr metadata, size_t operandCount) {
+readSchemaArgs(DictionaryAttr metadata) {
+  auto names = getArrayAttr(metadata, "custom.arg_names");
   auto kinds = getArrayAttr(metadata, "custom.arg_kinds");
   auto ranks = getArrayAttr(metadata, "custom.arg_ranks");
   auto typeVars = getArrayAttr(metadata, "custom.arg_type_vars");
-  if (!kinds || !ranks || !typeVars) {
+  if (!names || !kinds || !ranks || !typeVars) {
     return std::nullopt;
   }
-  if (kinds->size() != ranks->size() || kinds->size() != typeVars->size() ||
-      kinds->size() != operandCount) {
+  if (names->size() != kinds->size() || kinds->size() != ranks->size() ||
+      kinds->size() != typeVars->size()) {
     return std::nullopt;
   }
 
   SmallVector<SchemaArg> args;
   args.reserve(kinds->size());
   for (size_t i = 0; i < kinds->size(); ++i) {
+    auto name = dyn_cast<StringAttr>((*names)[i]);
     auto kind = dyn_cast<StringAttr>((*kinds)[i]);
     auto rank = dyn_cast<IntegerAttr>((*ranks)[i]);
     auto typeVar = dyn_cast<StringAttr>((*typeVars)[i]);
-    if (!kind || !rank || !typeVar) {
+    if (!name || !kind || !rank || !typeVar) {
       return std::nullopt;
     }
-    args.push_back(SchemaArg{kind.getValue(), rank.getInt(), typeVar.getValue()});
+    args.push_back(
+        SchemaArg{name.getValue(), kind.getValue(), rank.getInt(),
+                  typeVar.getValue()});
   }
   return args;
+}
+
+std::optional<int64_t> readI64AttrArg(DictionaryAttr metadata, StringRef name) {
+  std::string attrName = "custom.attr.";
+  attrName += name.str();
+  auto attr = dyn_cast_or_null<IntegerAttr>(metadata.get(attrName));
+  if (!attr) {
+    return std::nullopt;
+  }
+  return attr.getInt();
 }
 
 std::optional<std::pair<ArrayRef<int64_t>, Type>>
@@ -71,17 +87,6 @@ getShapeAndElementType(Type type) {
   return std::nullopt;
 }
 
-MemRefType getConcreteMemRefType(Type type) {
-  if (auto memrefType = dyn_cast<MemRefType>(type)) {
-    return memrefType;
-  }
-  auto shapeAndElement = getShapeAndElementType(type);
-  if (!shapeAndElement) {
-    return {};
-  }
-  return MemRefType::get(shapeAndElement->first, shapeAndElement->second);
-}
-
 MemRefType getCanonicalMemRefType(MLIRContext *ctx, Type type, int64_t rank) {
   auto shapeAndElement = getShapeAndElementType(type);
   if (!shapeAndElement || static_cast<int64_t>(shapeAndElement->first.size()) != rank) {
@@ -92,6 +97,25 @@ MemRefType getCanonicalMemRefType(MLIRContext *ctx, Type type, int64_t rank) {
   SmallVector<int64_t> strides(rank, ShapedType::kDynamic);
   auto layout = StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides);
   return MemRefType::get(shape, shapeAndElement->second, layout);
+}
+
+bool isStringMemRefArg(StringRef opType, const SchemaArg &schemaArg) {
+  return opType == "KPFusedDnnEmbeddingWithHashBucket" &&
+         schemaArg.name == "input" && schemaArg.typeVar.empty();
+}
+
+MemRefType getCanonicalAbiMemRefType(MLIRContext *ctx, Type type,
+                                     const SchemaArg &schemaArg,
+                                     StringRef opType) {
+  auto canonicalType = getCanonicalMemRefType(ctx, type, schemaArg.rank);
+  if (!canonicalType || !isStringMemRefArg(opType, schemaArg)) {
+    return canonicalType;
+  }
+
+  SmallVector<int64_t> shape(schemaArg.rank, ShapedType::kDynamic);
+  SmallVector<int64_t> strides(schemaArg.rank, ShapedType::kDynamic);
+  auto layout = StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides);
+  return MemRefType::get(shape, IntegerType::get(ctx, 64), layout);
 }
 
 std::optional<annc::kernels::TypeConstraintInfo>
@@ -138,7 +162,7 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
                                 CustomizeOp op) {
   ModuleOp module = op->getParentOfType<ModuleOp>();
   auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
-  auto schemaArgs = readSchemaArgs(metadata, adaptor.getOperands().size());
+  auto schemaArgs = readSchemaArgs(metadata);
   if (!schemaArgs) {
     op.emitError() << "CustomizeOp '" << op.getOpType()
                    << "' is missing custom op schema metadata";
@@ -148,28 +172,49 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   SmallVector<annc::kernels::TypeConstraintInfo> typeBindings;
   SmallVector<Value> callOperands;
   SmallVector<Type> callOperandTypes;
+  SmallVector<Value> outputOperands;
 
   auto operands = adaptor.getOperands();
-  for (size_t index = 0; index < operands.size(); ++index) {
-    Value operand = operands[index];
-    const SchemaArg &schemaArg = (*schemaArgs)[index];
+  size_t operandIndex = 0;
+  for (const SchemaArg &schemaArg : *schemaArgs) {
+    if (schemaArg.kind == "i64_attr") {
+      auto value = readI64AttrArg(metadata, schemaArg.name);
+      if (!value) {
+        op.emitError() << "CustomizeOp '" << op.getOpType()
+                       << "' is missing i64 metadata argument '"
+                       << schemaArg.name << "'";
+        return;
+      }
+      auto constant = rewriter.create<arith::ConstantIntOp>(
+          op.getLoc(), *value, 64);
+      callOperands.push_back(constant.getResult());
+      callOperandTypes.push_back(rewriter.getI64Type());
+      continue;
+    }
+
     if (schemaArg.kind != "memref") {
       op.emitError() << "CustomizeOp '" << op.getOpType()
-                     << "' argument " << index
+                     << "' argument " << schemaArg.name
                      << " uses unsupported ABI kind '" << schemaArg.kind << "'";
       return;
     }
+    if (operandIndex >= operands.size()) {
+      op.emitError() << "CustomizeOp '" << op.getOpType()
+                     << "' has fewer operands than memref schema arguments";
+      return;
+    }
+    Value operand = operands[operandIndex];
     if (schemaArg.rank < 0) {
       op.emitError() << "dynamic-rank CustomizeOp ABI is not supported yet for op '"
                      << op.getOpType() << "'";
       return;
     }
 
-    auto canonicalType =
-        getCanonicalMemRefType(rewriter.getContext(), operand.getType(), schemaArg.rank);
+    auto canonicalType = getCanonicalAbiMemRefType(
+        rewriter.getContext(), operand.getType(), schemaArg, op.getOpType());
     if (!canonicalType) {
       op.emitError() << "CustomizeOp '" << op.getOpType() << "' argument "
-                     << index << " expects rank " << schemaArg.rank
+                     << schemaArg.name << " expects rank " << schemaArg.rank
                      << " memref, got " << operand.getType();
       return;
     }
@@ -184,6 +229,16 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     }
     callOperands.push_back(callOperand);
     callOperandTypes.push_back(canonicalType);
+    if (schemaArg.name == "output") {
+      outputOperands.push_back(operand);
+    }
+    ++operandIndex;
+  }
+
+  if (operandIndex != operands.size()) {
+    op.emitError() << "CustomizeOp '" << op.getOpType()
+                   << "' has more operands than memref schema arguments";
+    return;
   }
 
   annc::kernels::KernelResolveRequest req;
@@ -198,21 +253,15 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     return;
   }
 
-  SmallVector<Type> concreteResultTypes;
-  SmallVector<Type> callResultTypes;
-  for (Type resultType : op->getResultTypes()) {
-    auto concreteType = getConcreteMemRefType(resultType);
-    if (!concreteType) {
-      op.emitError() << "unsupported CustomizeOp result type " << resultType;
-      return;
-    }
-    concreteResultTypes.push_back(concreteType);
-    callResultTypes.push_back(
-        getCanonicalMemRefType(rewriter.getContext(), concreteType,
-                               concreteType.getRank()));
+  if (outputOperands.size() != op->getNumResults()) {
+    op.emitError() << "CustomizeOp '" << op.getOpType()
+                   << "' expects one schema output memref per result, got "
+                   << outputOperands.size() << " output operands for "
+                   << op->getNumResults() << " results";
+    return;
   }
 
-  auto funcType = rewriter.getFunctionType(callOperandTypes, callResultTypes);
+  auto funcType = rewriter.getFunctionType(callOperandTypes, TypeRange{});
 
   PatternRewriter::InsertionGuard guard(rewriter);
 
@@ -232,18 +281,13 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
 
   rewriter.setInsertionPoint(op);
 
-  auto callOp = rewriter.create<func::CallOp>(
-      op.getLoc(), kernelInfo->symbol_name, callResultTypes, callOperands);
+  rewriter.create<func::CallOp>(
+      op.getLoc(), kernelInfo->symbol_name, TypeRange{}, callOperands);
 
   SmallVector<Value> replacements;
-  for (auto [result, concreteType] :
-       llvm::zip(callOp.getResults(), concreteResultTypes)) {
-    if (result.getType() == concreteType) {
-      replacements.push_back(result);
-      continue;
-    }
-    replacements.push_back(
-        rewriter.create<memref::CastOp>(op.getLoc(), concreteType, result));
+  for (auto [result, output] : llvm::zip(op->getResults(), outputOperands)) {
+    (void)result;
+    replacements.push_back(output);
   }
   rewriter.replaceOp(op, replacements);
 }

@@ -82,44 +82,51 @@ parseShapeStrings(const std::vector<std::string> &shapes) {
   return parsed;
 }
 
-static std::optional<nlohmann::json> findANNCFusion(ModuleOp module) {
-  std::optional<nlohmann::json> result;
-  module.walk([&](atir::CustomizeOp op) {
-    if (result.has_value() || op.getOpType() != "ANNCFused") return;
-    auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
+static std::optional<nlohmann::json> fusionMetadataToJson(DictionaryAttr metadata) {
+  nlohmann::json info;
+  info["name"] = stringAttr(metadata, "tf.name");
+  info["pattern"] = stringAttr(metadata, "fusion.pattern");
+  info["kernel_name"] = stringAttr(metadata, "kernel_name");
+  info["output_tensor"] = stringAttr(metadata, "tf.output");
+  info["original_nodes"] = stringArrayAttr(metadata, "tf.nodes");
+  info["inputs"] = stringArrayAttr(metadata, "tf.inputs");
+  info["input_shapes"] =
+      parseShapeStrings(stringArrayAttr(metadata, "tf.input_shapes"));
+  info["output_shape"] =
+      parseShapeString(stringAttr(metadata, "tf.output_shape"));
+  std::string abi = stringAttr(metadata, "abi");
+  info["abi"] = abi.empty() ? "mlir_ciface" : abi;
+  info["n_constants"] = intAttr(metadata, "Nconstants");
+  info["n_fixed"] = intAttr(metadata, "Nfixed");
+  info["n_dynamic"] = intAttr(metadata, "Ndynamic");
+  info["num_outputs"] = intAttr(metadata, "num_outputs", 1);
+  info["output_ranks"] = intArrayAttr(metadata, "output_ranks");
+  info["input_ranks"] = intArrayAttr(metadata, "input_ranks");
+  info["dynamic_dims"] = intArrayAttr(metadata, "dynamic_dims");
+  info["kernel_arg_order"] = intArrayAttr(metadata, "kernel_arg_order");
+  info["symbolic_signature"] = stringAttr(metadata, "symbolic_signature");
+  info["fallback_function"] = stringAttr(metadata, "fallback_function");
+
+  if (info["name"].get<std::string>().empty() ||
+      info["original_nodes"].empty() || info["inputs"].empty() ||
+      info["output_tensor"].get<std::string>().empty()) {
+    return std::nullopt;
+  }
+  return info;
+}
+
+static nlohmann::json findANNCFusions(ModuleOp module) {
+  nlohmann::json fusions = nlohmann::json::array();
+  module.walk([&](func::FuncOp funcOp) {
+    if (!funcOp->hasAttr("annc.kernel")) return;
+
+    auto metadata = funcOp->getAttrOfType<DictionaryAttr>("fusion.metadata");
     if (!metadata) return;
 
-    nlohmann::json info;
-    info["name"] = stringAttr(metadata, "tf.name");
-    info["pattern"] = stringAttr(metadata, "fusion.pattern");
-    info["kernel_name"] = stringAttr(metadata, "kernel_name");
-    info["output_tensor"] = stringAttr(metadata, "tf.output");
-    info["original_nodes"] = stringArrayAttr(metadata, "tf.nodes");
-    info["inputs"] = stringArrayAttr(metadata, "tf.inputs");
-    info["input_shapes"] =
-        parseShapeStrings(stringArrayAttr(metadata, "tf.input_shapes"));
-    info["output_shape"] =
-        parseShapeString(stringAttr(metadata, "tf.output_shape"));
-    std::string abi = stringAttr(metadata, "abi");
-    info["abi"] = abi.empty() ? "mlir_ciface" : abi;
-    info["n_constants"] = intAttr(metadata, "Nconstants");
-    info["n_fixed"] = intAttr(metadata, "Nfixed");
-    info["n_dynamic"] = intAttr(metadata, "Ndynamic");
-    info["num_outputs"] = intAttr(metadata, "num_outputs", 1);
-    info["output_ranks"] = intArrayAttr(metadata, "output_ranks");
-    info["input_ranks"] = intArrayAttr(metadata, "input_ranks");
-    info["dynamic_dims"] = intArrayAttr(metadata, "dynamic_dims");
-    info["kernel_arg_order"] = intArrayAttr(metadata, "kernel_arg_order");
-    info["symbolic_signature"] = stringAttr(metadata, "symbolic_signature");
-    info["fallback_function"] = stringAttr(metadata, "fallback_function");
-
-    if (!info["name"].get<std::string>().empty() &&
-        !info["original_nodes"].empty() && !info["inputs"].empty() &&
-        !info["output_tensor"].get<std::string>().empty()) {
-      result = std::move(info);
-    }
+    auto info = fusionMetadataToJson(metadata);
+    if (info.has_value()) fusions.push_back(std::move(*info));
   });
-  return result;
+  return fusions;
 }
 
 }  // namespace
@@ -149,8 +156,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  auto fusion = findANNCFusion(*module);
-  if (!fusion.has_value()) {
+  auto fusions = findANNCFusions(*module);
+  if (fusions.empty()) {
     llvm::errs() << "[annc-fusion-metadata] Error: no ANNCFused metadata in "
                  << inputFilename << "\n";
     return 1;
@@ -162,6 +169,8 @@ int main(int argc, char **argv) {
                  << outputFilename << "\n";
     return 1;
   }
-  out << fusion->dump(2) << "\n";
+  nlohmann::json result;
+  result["fusions"] = std::move(fusions);
+  out << result.dump(2) << "\n";
   return 0;
 }

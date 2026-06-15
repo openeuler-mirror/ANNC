@@ -16,6 +16,7 @@ struct PipelineOptions {
   std::string kernelName;
   std::string sharedLibPath;
   std::string workDir;
+  int64_t batchSize = 2;
   bool keepTemps = false;
   bool verbose = false;
 };
@@ -87,6 +88,7 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->kernelName = takeValue(argc, argv, "--kernel_name", opts->kernelName);
   opts->sharedLibPath = takeValue(argc, argv, "--shared_lib_path");
   opts->workDir = takeValue(argc, argv, "--work_dir", defaultWorkDir());
+  opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "2"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
@@ -133,7 +135,8 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::string fusionPass = "--atir-op-fusion";
 
   bool ok =
-      runCommand({anncTf2Atir, opts.inputGraphDef, "-o", rawAtir.string()},
+      runCommand({anncTf2Atir, opts.inputGraphDef, "--batch_size",
+                  std::to_string(opts.batchSize), "-o", rawAtir.string()},
                  opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), fusionPass, "-o",
                   fusedAtir.string()},
@@ -142,6 +145,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
                   fusionMetadata.string()},
                  opts.verbose) &&
       runCommand({anncAsm, fusedAtir.string(), "--atir-prune-func",
+                  "--atir-fast-codegen=enable-kdnn=true",
                   "--convert-atir-to-affine", "-o", loweredMlir.string()},
                  opts.verbose) &&
       runCommand({annc, loweredMlir.string(), "--shared", "-o",
