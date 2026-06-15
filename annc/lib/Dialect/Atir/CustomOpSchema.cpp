@@ -33,6 +33,8 @@ std::string kindToString(CustomOpSchema::ArgKind kind) {
     return "memref";
   case CustomOpSchema::ArgKind::Scalar:
     return "scalar";
+  case CustomOpSchema::ArgKind::I64Attr:
+    return "i64_attr";
   case CustomOpSchema::ArgKind::Opaque:
     return "opaque";
   case CustomOpSchema::ArgKind::Custom:
@@ -92,6 +94,11 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
     argKinds.push_back(kindToString(arg.kind));
     argRanks.push_back(arg.rank);
     argTypeVars.push_back(arg.typeVar);
+    if (arg.kind == ArgKind::I64Attr) {
+      std::string attrName = "custom.attr." + arg.name;
+      attrs.push_back(builder.getNamedAttr(
+          attrName, builder.getI64IntegerAttr(arg.i64Value)));
+    }
   }
 
   attrs.push_back(builder.getNamedAttr("custom.op_name",

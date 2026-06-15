@@ -7,24 +7,17 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <fstream>
+#include <chrono>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
 using namespace std;
 
 static const char* KERNEL_LIB_PATH = ANNC_KERNEL_LIB_PATH;
-static const char* DEFAULT_C_COMPILER = ANNC_C_COMPILER;
 
 string getKernelLibPath() {
     return KERNEL_LIB_PATH;
-}
-
-string getCCompiler() {
-    const char* env = getenv("ANNC_CLANG");
-    if (env && env[0] != '\0') {
-        return string(env);
-    }
-    return string(DEFAULT_C_COMPILER);
 }
 
 // 
@@ -114,9 +107,20 @@ private:
     fs::path tempDir;
     
     void createTempDir() {
-        tempDir = fs::current_path() / ("annc_temp_" + to_string(time(nullptr)));
-        fs::create_directories(tempDir);
-        workingDir = fs::current_path();
+        auto now = chrono::system_clock::now();
+        auto micros = chrono::duration_cast<chrono::microseconds>(
+            now.time_since_epoch()).count();
+        string baseName = "annc_temp_" + to_string(micros) + "_" +
+                          to_string(static_cast<long long>(getpid()));
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            tempDir = fs::current_path() /
+                      (baseName + "_" + to_string(attempt));
+            if (fs::create_directory(tempDir)) {
+                workingDir = fs::current_path();
+                return;
+            }
+        }
+        throw runtime_error("Failed to create unique temporary directory");
     }
     
     void cleanupTempDir() {
@@ -469,7 +473,7 @@ private:
             return false;
         }
         
-        string command = getCCompiler() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
@@ -479,6 +483,10 @@ private:
         command += " -Wl,-rpath," KDNN_LIB_DIR;
 #endif
         //
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+        command += " -L" KDNN_LIB_DIR " -lkdnn";
+        command += " -Wl,-rpath," KDNN_LIB_DIR;
+#endif
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
         command += " -DN=" + to_string(config.N);
@@ -497,7 +505,7 @@ private:
                                    ? config.mLirSymbolName + ".so"
                                    : config.outputFile;
         
-        string command = getCCompiler() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
@@ -526,7 +534,7 @@ private:
         setenv("ANNC_LIBRARY_NAME", libName.c_str(), 1);
         
         // 
-        string command = getCCompiler() + " -O3 \"" + config.testFile + "\"";
+        string command = "clang -O3 \"" + config.testFile + "\"";
         // 
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);

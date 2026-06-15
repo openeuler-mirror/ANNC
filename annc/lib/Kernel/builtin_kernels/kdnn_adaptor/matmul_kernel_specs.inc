@@ -6,7 +6,7 @@ ANNC_KERNEL(
     {
         ::annc::kernels::kdnn_adaptor::matmul_kdnn_impl(
             ::annc::threadpool::getCurrentThreadPool(),
+            output,
             lhs,
-            rhs,
-            output);
+            rhs);
     })

@@ -175,5 +175,4 @@ void ZerosLikeOp::Interpret() {
     emitOpError("ZerosLike output element type is not supported");
   }
 }
-
 } // namespace atir

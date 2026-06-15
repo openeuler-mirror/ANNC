@@ -26,6 +26,19 @@ typedef struct {
 } AnncMemRef1DF32;
 
 typedef struct {
+    const char* data;
+    int64_t     size;
+} AnncStringRef;
+
+typedef struct {
+    AnncStringRef* allocated;
+    AnncStringRef* aligned;
+    int64_t        offset;
+    int64_t        sizes[1];
+    int64_t        strides[1];
+} AnncMemRef1DString;
+
+typedef struct {
     float*   allocated;
     float*   aligned;
     int64_t  offset;

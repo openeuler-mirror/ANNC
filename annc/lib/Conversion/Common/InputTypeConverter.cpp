@@ -6,13 +6,26 @@
 
 
 using namespace atir;
+
+namespace {
+
+bool isStringTensor(atir::TensorType tensorType) {
+    auto encoding = tensorType.getEncoding();
+    auto stringAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(encoding);
+    return stringAttr && stringAttr.getValue() == "string";
+}
+
+} // namespace
+
 InputTypeConverter::InputTypeConverter()
 {
     addConversion([](Type type) { return type; });
-    addConversion([](TensorType tensorType)
+    addConversion([](atir::TensorType tensorType)
     {
         auto shape = tensorType.getShape();
-        auto elemType = tensorType.getElementType();
+        auto elemType = isStringTensor(tensorType)
+                            ? mlir::IntegerType::get(tensorType.getContext(), 64)
+                            : tensorType.getElementType();
         int64_t offset = 0; // todo:
         auto strides = tensorType.getValueOfStride();
         if (strides.empty())

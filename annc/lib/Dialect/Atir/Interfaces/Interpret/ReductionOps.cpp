@@ -156,4 +156,5 @@ void ProdOp::Interpret() {
   }
   (void)setDenseResult(resultType, outputShape, result);
 }
+
 } // namespace atir

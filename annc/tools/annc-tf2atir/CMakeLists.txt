@@ -15,8 +15,14 @@ add_executable(annc-tf2atir
     ${PROTO_SRCS}
 )
 
+get_target_property(CURRENT_INCLUDE_DIRS annc-tf2atir INCLUDE_DIRECTORIES)
+if(CURRENT_INCLUDE_DIRS)
+    list(REMOVE_ITEM CURRENT_INCLUDE_DIRS "${TENSORFLOW_INCLUDE_DIRS}")
+    set_target_properties(annc-tf2atir PROPERTIES INCLUDE_DIRECTORIES "${CURRENT_INCLUDE_DIRS}")
+endif()
+
 target_include_directories(annc-tf2atir BEFORE PRIVATE
-    "${CMAKE_SOURCE_DIR}/annc/include"
+    "${CMAKE_SOURCE_DIR}/annc/include"                
     "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code"
     "${TENSORFLOW_INCLUDE_DIRS}"
     "${Protobuf_INCLUDE_DIRS}"
@@ -37,6 +43,7 @@ endif()
 add_definitions(-DABSL_MIN_LOG_LEVEL=4)
 
 target_link_libraries(annc-tf2atir PRIVATE
+    ${Protobuf_LIBRARIES}
     ${TENSORFLOW_FRAMEWORK_LIB}
 )
 

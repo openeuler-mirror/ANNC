@@ -9,12 +9,12 @@ namespace tensorflow {
 
 REGISTER_OP("ANNCFused")
     // Input classification (BladeDISC-style)
-    .Input("constants: Nconstants * T")         // Compile-time constants
-    .Input("fixed_shapes: Nfixed * T")          // Fixed shape inputs
-    .Input("dynamic_shapes: Ndynamic * T")      // Dynamic shape inputs
+    .Input("constants: Nconstants * Tconstants")  // Compile-time constants
+    .Input("fixed_shapes: Nfixed * Tfixed")       // Fixed shape inputs
+    .Input("dynamic_shapes: Ndynamic * Tdynamic") // Dynamic shape inputs
 
     // Outputs
-    .Output("outputs: num_outputs * T")
+    .Output("outputs: num_outputs * Toutputs")
 
     // Core attributes
     .Attr("kernel_name: string")                // Base kernel name
@@ -31,18 +31,28 @@ REGISTER_OP("ANNCFused")
     // Legacy metadata kept for GraphDef compatibility. Runtime fallback is
     // intentionally not executed by ANNCFused.
     .Attr("fallback_function: func")
+    .Attr("fusion_pattern: string = ''")
+    .Attr("annc_original_nodes: list(string) = []")
 
     // Input counts
     .Attr("Nconstants: int >= 0")
     .Attr("Nfixed: int >= 0")
     .Attr("Ndynamic: int >= 0")
 
-    // Data type
+    // Data types.  The legacy T attr is retained for old GraphDefs that only
+    // contain float inputs/outputs; new rewrites use the per-list attributes.
     .Attr("T: {float} = DT_FLOAT")
+    .Attr("Tconstants: type = DT_FLOAT")
+    .Attr("Tfixed: type = DT_FLOAT")
+    .Attr("Tdynamic: type = DT_FLOAT")
+    .Attr("Toutputs: type = DT_FLOAT")
 
     // Shared library path produced by ANNCOptimizerPass.
     .Attr("shared_lib_path: string = ''")
     .Attr("abi: string = 'mlir_ciface'")
+    // Set to false only when the generated kernel is known to fully overwrite
+    // every output element.
+    .Attr("zero_initialize_outputs: bool = true")
 
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* c) {

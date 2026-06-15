@@ -5,9 +5,9 @@
 namespace {
 
 void matmul_aarch64_impl(annc::threadpool::AnncThreadPool* thread_pool,
+                         AnncMemRef2DF32* output,
                          AnncMemRef2DF32* lhs,
-                         AnncMemRef2DF32* rhs,
-                         AnncMemRef2DF32* output) {
+                         AnncMemRef2DF32* rhs) {
     float* out = ANNC_MEMREF_DATA(*output);
     const float* A = ANNC_MEMREF_DATA(*lhs);
     const float* B = ANNC_MEMREF_DATA(*rhs);

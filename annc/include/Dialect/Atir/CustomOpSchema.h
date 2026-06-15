@@ -22,6 +22,7 @@ public:
   enum class ArgKind {
     MemRef,
     Scalar,
+    I64Attr,
     Opaque,
     Custom,
   };
@@ -31,6 +32,7 @@ public:
     ArgKind kind = ArgKind::MemRef;
     int64_t rank = -1;
     std::string typeVar;
+    int64_t i64Value = 0;
   };
 
   static CustomOpSchema get(llvm::StringRef name) {
@@ -47,6 +49,15 @@ public:
   CustomOpSchema &MemRefArg(llvm::StringRef name, int64_t rank,
                             llvm::StringRef typeVar) {
     args_.push_back(Arg{name.str(), ArgKind::MemRef, rank, typeVar.str()});
+    return *this;
+  }
+
+  CustomOpSchema &I64AttrArg(llvm::StringRef name, int64_t value) {
+    Arg arg;
+    arg.name = name.str();
+    arg.kind = ArgKind::I64Attr;
+    arg.i64Value = value;
+    args_.push_back(arg);
     return *this;
   }
 

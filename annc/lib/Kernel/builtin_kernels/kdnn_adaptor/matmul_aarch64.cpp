@@ -9,9 +9,9 @@
 namespace annc::kernels::kdnn_adaptor {
 
 void matmul_kdnn_impl(annc::threadpool::AnncThreadPool* thread_pool,
+                      AnncMemRef2DF32* output,
                       AnncMemRef2DF32* lhs,
-                      AnncMemRef2DF32* rhs,
-                      AnncMemRef2DF32* output) {
+                      AnncMemRef2DF32* rhs) {
     try {
         ScopedKDNNThreadPoolActivation scoped_thread_pool(thread_pool);
 
