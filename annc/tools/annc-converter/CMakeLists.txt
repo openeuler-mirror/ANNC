@@ -27,8 +27,6 @@ target_link_libraries(annc-converter PRIVATE
   ${TENSORFLOW_LIBS}
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(annc-converter PUBLIC ${TENSORFLOW_LIBRARY_DIR}/libtensorflow_framework.so.2)
-
 target_include_directories(annc-converter PRIVATE
   ${TENSORFLOW_INCLUDE_DIRS}
 )

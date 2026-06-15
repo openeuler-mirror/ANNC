@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **LLVM/MLIR 21.1.3** + **nlohmann/json**: CMake `FetchContent` 在 configure 时自动从 gitee 镜像下载到 `third_party/llvm/` 和 `third_party/json/`，并作为 ANNC 构建的一部分从源码编译。无需手动克隆。
   > LLVM 首次编译需要 30-60 分钟，约 50GB 磁盘空间。增量构建仅重新编译变更文件。
-- **TensorFlow**: `pip3 install tensorflow` (CMake 会在 configure 时自动检测)
-- **pybind11 + nanobind**: `pip3 install pybind11 nanobind`
+- **TensorFlow**: `pip3 install tensorflow` (CMake 会在 configure 时自动检测)。也可通过 `pip3 install -r requirements.txt` 安装所有 Python 依赖。
+- **pybind11 + nanobind**: `pip3 install pybind11 nanobind`。`build.sh` 会在缺少时自动安装这两者；如不希望自动安装，可传入 `--no-install-deps`。
 - **protobuf-devel**: `sudo yum install -y protobuf-devel` (仅在 openEuler 需要)
 - **clang**: `annc` driver 在链接阶段需要调用 clang，构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量覆盖
 

@@ -1,0 +1,12 @@
+# Python dependencies for ANNC build/runtime.
+#
+# Install manually with:
+#   pip3 install -r requirements.txt
+#
+# Or let build.sh automatically install the lightweight build-time packages
+# (pybind11 and nanobind). TensorFlow is checked but not auto-installed because
+# it is large and version-sensitive.
+
+pybind11==2.11.1
+nanobind==1.9.2
+tensorflow==2.15.0
