@@ -2,6 +2,10 @@ option(ANNC_ENABLE_KDNN_ADAPTOR "Build ANNC builtin kernels backed by KDNN" OFF)
 
 set(ANNC_THIRD_PARTY_KDNN_DIR "${CMAKE_SOURCE_DIR}/third_party/kdnn"
     CACHE PATH "Path to the KDNN third-party source tree")
+set(ANNC_KDNN_GIT_REPOSITORY "https://gitcode.com/boostkit/kdnn.git"
+    CACHE STRING "Git repository used to fetch KDNN when local sources are absent")
+set(ANNC_KDNN_GIT_TAG "ccc8373f15652bbd99215c9812660651ade3d1b1"
+    CACHE STRING "Git revision used when fetching KDNN")
 set(ANNC_BUILD_THIRD_PARTY_KDNN "AUTO"
     CACHE STRING "Build KDNN from third_party/kdnn when ANNC_ENABLE_KDNN_ADAPTOR is ON")
 set_property(CACHE ANNC_BUILD_THIRD_PARTY_KDNN PROPERTY STRINGS AUTO ON OFF)
@@ -14,6 +18,7 @@ endif()
 set(ANNC_KDNN_TARGET_PLATFORM "${_annc_default_kdnn_target_platform}"
     CACHE STRING "TARGET_PLATFORM passed to the KDNN CMake build")
 unset(_annc_default_kdnn_target_platform)
+set(ANNC_KDNN_SOURCE_DIR "${ANNC_THIRD_PARTY_KDNN_DIR}/src/dnn")
 
 if(NOT ANNC_ENABLE_KDNN_ADAPTOR)
     return()
@@ -40,11 +45,30 @@ if(ANNC_BUILD_THIRD_PARTY_KDNN STREQUAL "OFF")
         "were not provided and ANNC_BUILD_THIRD_PARTY_KDNN is OFF")
 endif()
 
-set(ANNC_KDNN_SOURCE_DIR "${ANNC_THIRD_PARTY_KDNN_DIR}/src/dnn")
+FetchContent_Declare(kdnn
+    GIT_REPOSITORY ${ANNC_KDNN_GIT_REPOSITORY}
+    GIT_TAG        ${ANNC_KDNN_GIT_TAG}
+    GIT_SHALLOW    TRUE
+    SOURCE_DIR     ${ANNC_THIRD_PARTY_KDNN_DIR}
+)
+FetchContent_GetProperties(kdnn)
+if(NOT kdnn_POPULATED)
+    if(EXISTS "${ANNC_KDNN_SOURCE_DIR}/CMakeLists.txt")
+        message(STATUS "KDNN source already exists, skipping fetch")
+        set(kdnn_POPULATED ON CACHE INTERNAL "kdnn populated" FORCE)
+        set(kdnn_SOURCE_DIR "${ANNC_THIRD_PARTY_KDNN_DIR}" CACHE INTERNAL "kdnn source dir" FORCE)
+        set(kdnn_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/kdnn-build" CACHE INTERNAL "kdnn binary dir" FORCE)
+    else()
+        message(STATUS
+            "Fetching KDNN from ${ANNC_KDNN_GIT_REPOSITORY} (${ANNC_KDNN_GIT_TAG}) ...")
+        FetchContent_Populate(kdnn)
+    endif()
+endif()
+
 if(NOT EXISTS "${ANNC_KDNN_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
         "ANNC_ENABLE_KDNN_ADAPTOR is ON, but KDNN source was not found at "
-        "${ANNC_KDNN_SOURCE_DIR}. Initialize third_party/kdnn or provide "
+        "${ANNC_KDNN_SOURCE_DIR}. Fetch KDNN failed or provide "
         "KDNN_INCLUDE_DIR and KDNN_LIBRARY.")
 endif()
 

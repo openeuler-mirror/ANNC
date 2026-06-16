@@ -181,20 +181,7 @@ index 4a11c6b..4b96021 100644
 +    } else {
 +        srcPackStrategy.reset(new PrivateBufferPack{threadsBatched, threadsM, threadsN, MatrixKind::SRC});
 +    }
-+    std::unique_ptr<PackStrategy> weiPackStrategy;
 +    if ((nThreadsExec > 1) && (gemmWorkSize > 1)) {
-+#if defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_OMP)
-+        auto &&activeLevel = omp_get_active_level();
-+        NestedOMPHelper helper;
-+        Service::Unused(helper);
-+#pragma omp parallel for num_threads(gemmWorkSize) \
-+            if ((activeLevel < 1) || \
-+            (Threading::GetThreadingControlStatus() == Threading::ThreadingControl::KDNN_MANUAL))
-+        for (IntType i = 0; i < gemmWorkSize; ++i) {
-+            RunSequentialWithPackedB(i, srcExec, weiExec, dstExec, biaExec, srcPackStrategy,
-+                postOpsPtrs, params.alpha, params.beta);
-+        }
-+#elif defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_THREADPOOL)
 +        int64_t cost = 1000000;
 +        KDNN::Threading::Parallel(gemmWorkSize, cost, [&](IntType start, IntType end) {
 +            for (int i = start; i < end; ++i) {
@@ -202,7 +189,6 @@ index 4a11c6b..4b96021 100644
 +                    postOpsPtrs, params.alpha, params.beta);
 +            }
 +        });
-+#endif
 +    } else {
 +        RunSequentialWithPackedB(0, srcExec, weiExec, dstExec, biaExec, srcPackStrategy,
 +            postOpsPtrs, params.alpha, params.beta);
