@@ -159,10 +159,10 @@ public:
         
         try {
             //  0:  MLIR 
-            if (!extractDimensionsFromMLIR()) {
-                log("Failed to extract dimensions from MLIR file");
-                return false;
-            }
+            // if (!extractDimensionsFromMLIR()) {
+            //     log("Failed to extract dimensions from MLIR file");
+            //     return false;
+            // }
 
             //  1: MLIR -> LLVM-dialect MLIR
             if (!step1_MLIRToLLVMDialect()) {

@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <sstream>
+#include <iostream>
 
 #include "Kernel/MemRefTypes.h"
 #include "Kernel/threadpool/ThreadPool.h"

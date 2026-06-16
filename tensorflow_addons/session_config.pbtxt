@@ -1,0 +1,17 @@
+allow_soft_placement: true
+graph_options {
+  optimizer_options {
+    global_jit_level: 1
+  }
+  rewrite_options {
+    meta_optimizer_iterations: TWO
+    min_graph_nodes: -1
+    custom_optimizers {
+      name: "ANNCOptimizer"
+      parameter_map {
+        key: "enabled"
+        value { s: "true" }
+      }
+    }
+  }
+}
