@@ -1,0 +1,682 @@
+diff --git a/src/dnn/CMakeLists.txt b/src/dnn/CMakeLists.txt
+index 27b7da5..118ba82 100644
+--- a/src/dnn/CMakeLists.txt
++++ b/src/dnn/CMakeLists.txt
+@@ -61,2 +61,2 @@ endif ()
+-if(${ENABLE_ASAN} STREQUAL "on")
++if(ENABLE_ASAN STREQUAL "on")
+-if(${ENABLE_GCOV} STREQUAL "on")
++if(ENABLE_GCOV STREQUAL "on")
+@@ -81 +81 @@ if(${ENABLE_GCOV} STREQUAL "on")
+-if (${ENABLE_ASAN} STREQUAL "on")
++if (ENABLE_ASAN STREQUAL "on")
+@@ -106 +106 @@ endif()
+-if (${KDNN_CPU_RUNTIME} STREQUAL "THREADPOOL")
++if (KDNN_CPU_RUNTIME STREQUAL "THREADPOOL")
+@@ -115 +115 @@ configure_file(
+-if (${TARGET_PLATFORM} STREQUAL "KP920F" AND ${ENABLE_HBM} STREQUAL "on")
++if (${TARGET_PLATFORM} STREQUAL "KP920F" AND ENABLE_HBM STREQUAL "on")
+diff --git a/src/dnn/include/operations/kdnn_gemm.hpp b/src/dnn/include/operations/kdnn_gemm.hpp
+index 2d4e8e1..1e2b972 100644
+--- a/src/dnn/include/operations/kdnn_gemm.hpp
++++ b/src/dnn/include/operations/kdnn_gemm.hpp
+@@ -65,0 +68,8 @@ public:
++    void RunWithPackedB(const void *a, const void *packedB, void *c, const void *bias,
++        const PostOpsDataPtrs &postOpsPtrs, float alpha = 1.0f, float beta = 0.0f) const noexcept(false);
++    void RunWithPackedB(const void *a, const void *packedB, void *c, const void *bias,
++        float alpha = 1.0f, float beta = 0.0f) const noexcept(false);
++    void RunWithPackedB(const void *a, const void *packedB, void *c,
++        float alpha = 1.0f, float beta = 0.0f) const noexcept(false);
++    void RunWithPackedB(const void *a, const void *packedB, void *c, const PostOpsDataPtrs &postOpsPtrs,
++        float alpha = 1.0f, float beta = 0.0f) const noexcept(false);
+diff --git a/src/dnn/src/CMakeLists.txt b/src/dnn/src/CMakeLists.txt
+index 0092c27..f8760a7 100644
+--- a/src/dnn/src/CMakeLists.txt
++++ b/src/dnn/src/CMakeLists.txt
+@@ -3 +3 @@
+-if (NOT (${KDNN_CPU_RUNTIME} STREQUAL "THREADPOOL"))
++if (NOT (KDNN_CPU_RUNTIME STREQUAL "THREADPOOL"))
+diff --git a/src/dnn/src/kdnn_gemm.cpp b/src/dnn/src/kdnn_gemm.cpp
+index 32794ce..c71c3ef 100644
+--- a/src/dnn/src/kdnn_gemm.cpp
++++ b/src/dnn/src/kdnn_gemm.cpp
+@@ -89,0 +91,44 @@ public:
++    void RunWithPackedB(const void *a, const void *packedB, void *c, const void *bias,
++                       const PostOpsDataPtrs &postOpsPtrs, float alpha, float beta) const noexcept(false)
++    {
++        if ((a == nullptr) || (packedB == nullptr) || (c == nullptr) ||
++            ((gemmImplInfo.biaInfo.GetTotalTensorSize() != 0) && (bias == nullptr))) {
++            throw Service::LogicError {"Matmul Layer: one of input matrices is nullptr"};
++        }
++        if ((gemmImplInfo.biaInfo.GetTotalTensorSize() == 0) && (bias != nullptr)) {
++            throw Service::LogicError {"Matmul Layer: bias isn't nullptr, but bias TensorInfo has 0 total size"};
++        }
++        auto &&po = gemmImplInfo.attributes.GetPostOps();
++        if (po.Len() > 1) {
++            throw Service::LogicError {"Matmul Layer: only 1 post-ops is supported"};
++        }
++        if (po.Len() > 0) {
++            if ((po.Kind(0) == PrimitiveKind::SUM) && (beta != 0.0f)) {
++                throw Service::LogicError {"Matmul Layer: beta scaler and sum post-ops are conflicting"};
++            }
++            if (po.Kind(0) == PrimitiveKind::SUM) {
++                po.GetParamsSum(0, beta);
++            }
++        }
++#if defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_OMP)
++        int maxNumThreads = Threading::GetMaxNumThreads();
++#elif defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_THREADPOOL)
++        int maxNumThreads = Threading::GetThreadpoolNumThreads();
++#endif
++        {
++            if (impl.expired()) {
++                throw Service::LogicError {"Cached Matmul Impl was manully removed"};
++            } else {
++                std::shared_ptr<ImplBase<GemmInfo>> gemmImpl(impl);
++                if (gemmImpl->GetNThreads() != maxNumThreads) {
++                    impl = FindSolution(gemmImpl->GetTask(), maxNumThreads);
++                    gemmImpl = impl.lock();
++                }
++                auto packedImpl = FindPackedBSolution(gemmImplInfo, maxNumThreads);
++                if (packedImpl == nullptr) {
++                    throw Service::LogicError {"Packed-B Matmul Impl was manully removed"};
++                }
++                packedImpl->RunWithPackedB({a, packedB, c, bias, postOpsPtrs, alpha, beta});
++            }
++        }
++    }
+@@ -162,0 +213,20 @@ void Gemm::Run(const void *a, const void *b, void *c,
++void Gemm::RunWithPackedB(const void *a, const void *packedB, void *c, const void *bias,
++                         const PostOpsDataPtrs &postOpsPtrs, float alpha, float beta) const noexcept(false)
++{
++    pImpl->RunWithPackedB(a, packedB, c, bias, postOpsPtrs, alpha, beta);
++}
++void Gemm::RunWithPackedB(const void *a, const void *packedB, void *c, const void *bias,
++                         float alpha, float beta) const noexcept(false)
++{
++    pImpl->RunWithPackedB(a, packedB, c, bias, {}, alpha, beta);
++}
++void Gemm::RunWithPackedB(const void *a, const void *packedB, void *c,
++                         float alpha, float beta) const noexcept(false)
++{
++    pImpl->RunWithPackedB(a, packedB, c, nullptr, {}, alpha, beta);
++}
++void Gemm::RunWithPackedB(const void *a, const void *packedB, void *c, const PostOpsDataPtrs &postOpsPtrs,
++                         float alpha, float beta) const noexcept(false)
++{
++    pImpl->RunWithPackedB(a, packedB, c, nullptr, postOpsPtrs, alpha, beta);
++}
+diff --git a/src/dnn/src/kdnn_jit.hpp b/src/dnn/src/kdnn_jit.hpp
+index a56a3f1..56a3e0c 100644
+--- a/src/dnn/src/kdnn_jit.hpp
++++ b/src/dnn/src/kdnn_jit.hpp
+@@ -149,0 +151,5 @@ struct ImplBase {
++    virtual void RunWithPackedB(typename Task::RunTimeParams params) noexcept(false)
++    {
++        (void)params;
++        throw Service::LogicError{"RunWithPackedB not implemented for this GEMM variant"};
++    }
+diff --git a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_helpers.hpp b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_helpers.hpp
+index 54f6d74..e02c3b5 100644
+--- a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_helpers.hpp
++++ b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_helpers.hpp
+@@ -22,0 +23,3 @@
++#include <memory>
++template <typename Task>
++struct ImplBase;
+@@ -104,0 +109 @@ inline bool operator==(const GemmInfo &lhs, const GemmInfo &rhs) noexcept
++std::shared_ptr<ImplBase<GemmInfo>> FindPackedBSolution(const GemmInfo &task, IntType nThreads) noexcept(false);
+diff --git a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_impls.cpp b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_impls.cpp
+index 818bd98..6d76902 100644
+--- a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_impls.cpp
++++ b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_impls.cpp
+@@ -32,0 +33 @@
++#include "kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.hpp"
+@@ -96,0 +98,3 @@ static const std::vector<std::shared_ptr<ImplGenerator<GemmInfo>>> g_implKinds =
++static const std::vector<std::shared_ptr<ImplGenerator<GemmInfo>>> g_packedBImplKinds = {
++    std::make_shared<MatMulImplGeneratorNoPack>(),
++};
+@@ -111,0 +117,20 @@ std::weak_ptr<ImplBase<GemmInfo>> FindSolution(const GemmInfo &task, IntType nTh
++std::shared_ptr<ImplBase<GemmInfo>> FindPackedBSolution(const GemmInfo &task, IntType nThreads) noexcept(false)
++{
++    VERBOSE_PRINT;
++    std::shared_ptr<ImplGenerator<GemmInfo>> ret;
++    std::chrono::duration<float, std::milli> bestTime =
++        std::chrono::duration<float, std::milli>{std::numeric_limits<float>::max()};
++    for (auto&& implKind : g_packedBImplKinds) {
++        if (implKind->Supports(task)) {
++            auto currentEstimatedTime = implKind->EstimateTime(task, nThreads);
++            if (currentEstimatedTime < bestTime) {
++                bestTime = currentEstimatedTime;
++                ret = implKind;
++            }
++        }
++    }
++    if (ret == nullptr) {
++        throw Service::LogicError {"Packed-B solution for GEMM wasn't found"};
++    }
++    return ret->GetImpl(task, nThreads);
++}
+diff --git a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.cpp b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.cpp
+index 4a11c6b..4b96021 100644
+--- a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.cpp
++++ b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.cpp
+@@ -115,0 +117,50 @@ void MatMulImplBase::Run(typename GemmInfo::RunTimeParams params) noexcept(false
++void MatMulImplBase::RunWithPackedB(typename GemmInfo::RunTimeParams params) noexcept(false)
++{
++    VERBOSE_PRINT;
++    if (!isInitialized || (perThreadParams.size() == 0)) {
++        throw Service::LogicError{"Internal Error"};
++    }
++    const void *srcExec = srcRWM.Get(params.src);
++    const void *weiExec = params.wei;
++    void *dstExec = dstRWM.Get(params.dst, (params.beta == 0.0f));
++    const void *biaExec = biaRWM.Get(params.bia);
++    PostOpsDataPtrs postOpsPtrs = params.postOpsPtrs;
++    std::unique_ptr<PackStrategy> srcPackStrategy;
++    if (packingPolicy & PackingPolicy::SYNC_DST_DIM_SRC) {
++        srcPackStrategy.reset(new SharedBufferPackSplitDstDim{threadsBatched, threadsM, threadsN, MatrixKind::SRC});
++    } else if (packingPolicy & PackingPolicy::SYNC_ACC_DIM_SRC) {
++        srcPackStrategy.reset(new SharedBufferPackSplitAccDim{threadsBatched, threadsM, threadsN, MatrixKind::SRC});
++    } else {
++        srcPackStrategy.reset(new PrivateBufferPack{threadsBatched, threadsM, threadsN, MatrixKind::SRC});
++    }
++    std::unique_ptr<PackStrategy> weiPackStrategy;
++    if ((nThreadsExec > 1) && (gemmWorkSize > 1)) {
++#if defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_OMP)
++        auto &&activeLevel = omp_get_active_level();
++        NestedOMPHelper helper;
++        Service::Unused(helper);
++#pragma omp parallel for num_threads(gemmWorkSize) \
++            if ((activeLevel < 1) || \
++            (Threading::GetThreadingControlStatus() == Threading::ThreadingControl::KDNN_MANUAL))
++        for (IntType i = 0; i < gemmWorkSize; ++i) {
++            RunSequentialWithPackedB(i, srcExec, weiExec, dstExec, biaExec, srcPackStrategy,
++                postOpsPtrs, params.alpha, params.beta);
++        }
++#elif defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_THREADPOOL)
++        int64_t cost = 1000000;
++        KDNN::Threading::Parallel(gemmWorkSize, cost, [&](IntType start, IntType end) {
++            for (int i = start; i < end; ++i) {
++                RunSequentialWithPackedB(i, srcExec, weiExec, dstExec, biaExec, srcPackStrategy,
++                    postOpsPtrs, params.alpha, params.beta);
++            }
++        });
++#endif
++    } else {
++        RunSequentialWithPackedB(0, srcExec, weiExec, dstExec, biaExec, srcPackStrategy,
++            postOpsPtrs, params.alpha, params.beta);
++    }
++    if (dstExec != params.dst) {
++        ReorderLayer r(taskExec.dstInfo, implTask.dstInfo);
++        r.Run(dstExec, params.dst);
++    }
++}
+@@ -516,0 +588,53 @@ void MatMulImplBase::RunSequential(IntType threadID,
++void MatMulImplBase::RunSequentialWithPackedB(IntType threadID,
++    const void *src, const void *packedWei, void *dst, const void *bia,
++    std::unique_ptr<PackStrategy> &srcPackStrategy,
++    const PostOpsDataPtrs &postOpsPtrs, float alpha, float beta) const noexcept(false)
++{
++    VERBOSE_PRINT;
++    PostOpsDataPtrs shiftedByTIDPOPtrs = ShiftPODPbyThreadID(threadID, postOpsPtrs);
++    IntType tIDbatch;
++    IntType tIDm;
++    IntType tIDn;
++    InitThreadIDs(threadID, tIDbatch, tIDm, tIDn);
++    srcPackStrategy->AllocateBuffers(perThreadParams[threadID].SrcBufferSize,
++        tIDbatch * threadsM + tIDm, tIDn, threadsN);
++    srcPackStrategy->Barrier(tIDbatch * threadsM + tIDm, tIDn, threadsN);
++    auto oldLocalNThreads = Threading::SetNumThreadsLocalInternal(1);
++    for (SizeType i0 = 0; i0 < perThreadParams[threadID].broadcastedDims[IDX_0]; ++i0) {
++        for (SizeType i1 = 0; i1 < perThreadParams[threadID].broadcastedDims[IDX_1]; ++i1) {
++            for (SizeType i2 = 0; i2 < perThreadParams[threadID].broadcastedDims[IDX_2]; ++i2) {
++                const void *srcPtr = static_cast<const void *>(
++                    static_cast<const std::byte *>(src) + perThreadParams[threadID].parallelStrideSrc +
++                    (i0 * broadcastedStridesSrc[IDX_0] + i1 * broadcastedStridesSrc[IDX_1] +
++                    i2 * broadcastedStridesSrc[IDX_2]) * taskExec.srcInfo.GetType().GetSize());
++                const void *weiPtr = static_cast<const void *>(
++                    static_cast<const std::byte *>(packedWei) + perThreadParams[threadID].parallelStrideWei +
++                    (i0 * broadcastedStridesWei[IDX_0] + i1 * broadcastedStridesWei[IDX_1] +
++                    i2 * broadcastedStridesWei[IDX_2]) * taskExec.weiInfo.GetType().GetSize());
++                void *dstPtr = static_cast<void *>(
++                    static_cast<std::byte *>(dst) + perThreadParams[threadID].parallelStrideDst +
++                    (i0 * broadcastedStridesDst[IDX_0] + i1 * broadcastedStridesDst[IDX_1] +
++                    i2 * broadcastedStridesDst[IDX_2]) * taskExec.dstInfo.GetType().GetSize());
++                const void *biaPtr = bia;
++                PostOpsDataPtrs shiftedByBatchPOPtrs = ShiftPODPbyBatch(i0, i1, i2, shiftedByTIDPOPtrs);
++                if (biaPtr) {
++                    biaPtr = static_cast<const void *>(
++                        static_cast<const std::byte *>(biaPtr) + perThreadParams[threadID].parallelStrideBia +
++                        (i0 * broadcastedStridesBia[IDX_0] + i1 * broadcastedStridesBia[IDX_1] +
++                        i2 * broadcastedStridesBia[IDX_2]) * taskExec.biaInfo.GetType().GetSize());
++                }
++                const void *biaExec = perThreadParams[threadID].biaRW2D.Get(biaPtr);
++                std::unique_ptr<PackStrategy> emptyWeiStrategy;
++                if (dstLayout2D == Layout::AB) {
++                    RunSequential2D(threadID, srcPtr, weiPtr, dstPtr, biaExec,
++                        srcPackStrategy, emptyWeiStrategy, alpha, beta, shiftedByBatchPOPtrs);
++                } else {
++                    RunSequential2D(threadID, weiPtr, srcPtr, dstPtr, biaExec,
++                        srcPackStrategy, emptyWeiStrategy, alpha, beta, shiftedByBatchPOPtrs);
++                }
++            }
++        }
++    }
++    Threading::SetNumThreadsLocalInternal(oldLocalNThreads);
++    srcPackStrategy->DeallocateBuffers(tIDbatch * threadsM + tIDm, tIDn, threadsN);
++}
+diff --git a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.hpp b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.hpp
+index 216a6c6..6d0e093 100644
+--- a/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.hpp
++++ b/src/dnn/src/kernels/matmul_jit/kdnn_gemm_jit.hpp
+@@ -138,0 +140 @@ struct MatMulImplBase : ImplBase<GemmInfo> {
++    void RunWithPackedB(typename GemmInfo::RunTimeParams params) noexcept(false);
+@@ -195,0 +204,4 @@ protected:
++    void RunSequentialWithPackedB(IntType threadID,
++        const void *src, const void *packedWei, void *dst, const void *bia,
++        std::unique_ptr<PackStrategy> &srcPackStrategy,
++        const PostOpsDataPtrs &postOpsPtrs, float alpha, float beta) const noexcept(false);
+diff --git a/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.cpp b/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.cpp
+new file mode 100644
+index 0000000..fd22b28
+--- /dev/null
++++ b/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.cpp
+@@ -0,0 +17,306 @@
++#include <memory>
++#include <vector>
++#include <algorithm>
++#include "kdnn.hpp"
++#include "cg_codegen.hpp"
++#include "kdnn_jit.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_jit.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_helpers.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_threading_helpers.hpp"
++#include "kernels/reorder/sve/bf16any32/kdnn_fast_jit_impl_bfp16any32_bfp16any32.hpp"
++#include "kdnn_wrapper_helpers.hpp"
++#include "kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.hpp"
++namespace KDNN {
++namespace Detail {
++MatMulImplGeneratorNoPack::DefaultImplNoPack::DefaultImplNoPack(
++    const GemmInfo &task, IntType nThreads) : MatMulImplBase(task, nThreads)
++{
++    VERBOSE_PRINT;
++    UpdateExecParams();
++    Initialize();
++}
++constexpr std::uint32_t MatMulImplGeneratorNoPack::DefaultImplNoPack::GetKernelMSize() noexcept
++{
++    return CodeGen::KERNEL_M_SIZE;
++}
++std::uint32_t MatMulImplGeneratorNoPack::DefaultImplNoPack::GetKernelNSize() noexcept
++{
++    return CodeGen::KERNEL_N_SIZE * NUM_4;
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::InitializeCodeGens(
++    IntType m, IntType n, IntType k, IntType vlw,
++    SizeType offsetSrc, SizeType offsetWei, SizeType offsetDst, SizeType offsetBia,
++    bool wereSrcWeiSwapped, IntType mFull, IntType nFull, const Attributes &attributes)
++{
++    Service::Unused(offsetWei, wereSrcWeiSwapped, vlw);
++    IntType vl = CodeGen::NEON_VL;
++    IntType mFullThreadBlock = mFull;
++    IntType mResidThreadBlock = m % mFullThreadBlock;
++    IntType nFullThreadBlock = nFull;
++    IntType nResidThreadBlock = n % nFullThreadBlock;
++    IntType mBlockExecFull =  M_BLOCK_SIZE;
++    IntType mBlockExecResid1 = mFullThreadBlock % M_BLOCK_SIZE;
++    IntType mBlockExecResid2 = mResidThreadBlock % M_BLOCK_SIZE;
++    IntType nBlockExecFull = N_BLOCK_SIZE;
++    IntType nBlockExecResid1 = nFullThreadBlock % N_BLOCK_SIZE;
++    IntType nBlockExecResid2 = nResidThreadBlock % N_BLOCK_SIZE;
++    IntType kBlockExecFull = K_BLOCK_SIZE;
++    IntType kBlockExecResid = k % kBlockExecFull;
++    CodeGenWrapper<CodeGen> cgw0;
++    if (mBlockExecFull <= m)  {
++        cgw0.Initialize(mBlockExecFull, nBlockExecFull, kBlockExecFull, static_cast<IntType>(offsetSrc),
++            kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    }
++    CodeGenWrapper<CodeGen> cgw1;
++    cgw1.Initialize(mBlockExecResid1, nBlockExecFull, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw2;
++    cgw2.Initialize(mBlockExecResid2, nBlockExecFull, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw3;
++    cgw3.Initialize(mBlockExecFull, nBlockExecResid1, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw4;
++    cgw4.Initialize(mBlockExecResid1, nBlockExecResid1, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw5;
++    cgw5.Initialize(mBlockExecResid2, nBlockExecResid1, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw6;
++    cgw6.Initialize(mBlockExecFull, nBlockExecResid2, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw7;
++    cgw7.Initialize(mBlockExecResid1, nBlockExecResid2, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw8;
++    cgw8.Initialize(mBlockExecResid2, nBlockExecResid2, kBlockExecFull, static_cast<IntType>(offsetSrc),
++        kBlockExecFull * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw9;
++    cgw9.Initialize(mBlockExecFull, nBlockExecFull, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw10;
++    cgw10.Initialize(mBlockExecResid1, nBlockExecFull, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw11;
++    cgw11.Initialize(mBlockExecResid2, nBlockExecFull, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw12;
++    cgw12.Initialize(mBlockExecFull, nBlockExecResid1, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw13;
++    cgw13.Initialize(mBlockExecResid1, nBlockExecResid1, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw14;
++    cgw14.Initialize(mBlockExecResid2, nBlockExecResid1, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw15;
++    cgw15.Initialize(mBlockExecFull, nBlockExecResid2, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw16;
++    cgw16.Initialize(mBlockExecResid1, nBlockExecResid2, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    CodeGenWrapper<CodeGen> cgw17;
++    cgw17.Initialize(mBlockExecResid2, nBlockExecResid2, kBlockExecResid, static_cast<IntType>(offsetSrc),
++        kBlockExecResid * vl, static_cast<IntType>(offsetDst), static_cast<IntType>(offsetBia), attributes);
++    matmulCodegenKernels = {std::move(cgw0), std::move(cgw1), std::move(cgw2), std::move(cgw3),
++                              std::move(cgw4), std::move(cgw5), std::move(cgw6), std::move(cgw7),
++                              std::move(cgw8), std::move(cgw9), std::move(cgw10), std::move(cgw11),
++                              std::move(cgw12), std::move(cgw13), std::move(cgw14), std::move(cgw15),
++                              std::move(cgw16), std::move(cgw17)};
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::InitializeReorderCodeGens(
++    IntType m, IntType n, IntType k, IntType vlw, IntType mFull, IntType nFull)
++{
++    Service::Unused(m, n, mFull);
++    IntType vl = vlw;
++    IntType nFullThreadBlock = nFull;
++    IntType nResidThreadBlock = n % nFullThreadBlock;
++    IntType nBlockExecResid1 = nFullThreadBlock % vl;
++    IntType nBlockExecResid2 = nResidThreadBlock % vl;
++    IntType kBlockExecFull = K_BLOCK_SIZE;
++    IntType kBlockExecResid = k % kBlockExecFull;
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderFNFKA;
++    reorderFNFKA.Initialize(static_cast<SizeType>(vl), static_cast<SizeType>(kBlockExecFull), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderFNRKA;
++    reorderFNRKA.Initialize(static_cast<SizeType>(vl), static_cast<SizeType>(kBlockExecResid), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN1FKA;
++    reorderRN1FKA.Initialize(static_cast<SizeType>(nBlockExecResid1), static_cast<SizeType>(kBlockExecFull), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN1RKA;
++    reorderRN1RKA.Initialize(static_cast<SizeType>(nBlockExecResid1), static_cast<SizeType>(kBlockExecResid), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN2FKA;
++    reorderRN2FKA.Initialize(static_cast<SizeType>(nBlockExecResid2), static_cast<SizeType>(kBlockExecFull), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN2RKA;
++    reorderRN2RKA.Initialize(static_cast<SizeType>(nBlockExecResid2), static_cast<SizeType>(kBlockExecResid), true);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderFNFKNA;
++    reorderFNFKNA.Initialize(static_cast<SizeType>(vl), static_cast<SizeType>(kBlockExecFull), false);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderFNRKNA;
++    reorderFNRKNA.Initialize(static_cast<SizeType>(vl), static_cast<SizeType>(kBlockExecResid), false);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN1FKNA;
++    reorderRN1FKNA.Initialize(static_cast<SizeType>(nBlockExecResid1), static_cast<SizeType>(kBlockExecFull), false);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN1RKNA;
++    reorderRN1RKNA.Initialize(static_cast<SizeType>(nBlockExecResid1), static_cast<SizeType>(kBlockExecResid), false);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN2FKNA;
++    reorderRN2FKNA.Initialize(static_cast<SizeType>(nBlockExecResid2), static_cast<SizeType>(kBlockExecFull), false);
++    CodeGenWrapper<FastReorderKernelCodeGen<float, float>> reorderRN2RKNA;
++    reorderRN2RKNA.Initialize(static_cast<SizeType>(nBlockExecResid2), static_cast<SizeType>(kBlockExecResid), false);
++    reorderPackingCodegenKernels = {
++        std::move(reorderFNFKA), std::move(reorderFNRKA),
++        std::move(reorderRN1FKA), std::move(reorderRN1RKA),
++        std::move(reorderRN2FKA), std::move(reorderRN2RKA),
++        std::move(reorderFNFKNA), std::move(reorderFNRKNA),
++        std::move(reorderRN1FKNA), std::move(reorderRN1RKNA),
++        std::move(reorderRN2FKNA), std::move(reorderRN2RKNA),
++    };
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::InitializePackingCodeGens(
++    IntType m, IntType n, IntType k, IntType vlw, IntType mFull, IntType nFull)
++{
++    Service::Unused(m, n, k, vlw, nFull, mFull);
++    IntType nFullThreadBlock = nFull;
++    IntType nResidThreadBlock = n % nFullThreadBlock;
++    IntType nBlockExecFull = N_BLOCK_SIZE;
++    IntType nBlockExecResid1 = nFullThreadBlock % nBlockExecFull;
++    IntType nBlockExecResid2 = nResidThreadBlock % nBlockExecFull;
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowBNAlpha;
++    cgwPackBrowBNAlpha.Initialize(nBlockExecFull, true);
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowR1NAlpha;
++    cgwPackBrowR1NAlpha.Initialize(nBlockExecResid1, true);
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowR2NAlpha;
++    cgwPackBrowR2NAlpha.Initialize(nBlockExecResid2, true);
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowBNnoAlpha;
++    cgwPackBrowBNnoAlpha.Initialize(nBlockExecFull, false);
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowR1NnoAlpha;
++    cgwPackBrowR1NnoAlpha.Initialize(nBlockExecResid1, false);
++    CodeGenWrapper<PackBRowDefaultSchemeCodegenF32> cgwPackBrowR2NnoAlpha;
++    cgwPackBrowR2NnoAlpha.Initialize(nBlockExecResid2, false);
++    vectorPackBRowCodegenKernels = {
++        std::move(cgwPackBrowBNAlpha), std::move(cgwPackBrowR1NAlpha), std::move(cgwPackBrowR2NAlpha),
++        std::move(cgwPackBrowBNnoAlpha), std::move(cgwPackBrowR1NnoAlpha), std::move(cgwPackBrowR2NnoAlpha),
++    };
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::InitializeThreadsCountImpl()
++{
++    IntType threadNumber = NUM_80;
++    IntType size = GetRequiredMemSize();
++    if (size < 21216) {
++        threadNumber = NUM_1;
++    } else if (size < 58858) {
++        threadNumber = NUM_8;
++    } else if (size < 115296) {
++        threadNumber = NUM_24;
++    } else if (size < 355776) {
++        threadNumber = NUM_40;
++    }
++    nThreadsExec = std::min(threadNumber, implNThreads);
++}
++IntType MatMulImplGeneratorNoPack::DefaultImplNoPack::GetThreadBufSize(
++    IntType m, IntType n, IntType k, IntType vlw, MatrixKind mKind) const noexcept
++{
++    Service::Unused(m, n, k, vlw, mKind);
++    return static_cast<IntType>(0);
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::ReserveImplSpecificParams() {}
++std::vector<std::pair<Shape, Shape>> MatMulImplGeneratorNoPack::DefaultImplNoPack::SplitWork()
++{
++    return CalculateWorkOnThread<DefaultImplNoPack>(taskExec.dstInfo.GetDims(), nThreadsExec, dstLayout2D == Layout::BA);
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::RunSequential2D(
++    IntType threadID, const void *src, const void *wei, void *dst, const void *bia,
++    std::unique_ptr<PackStrategy> &srcPackStrategy, std::unique_ptr<PackStrategy> &weiPackStrategy,
++    float alpha, float beta, const PostOpsDataPtrs &shiftedByBatchPOPtrs) const noexcept(false)
++{
++    Service::Unused(srcPackStrategy, shiftedByBatchPOPtrs, weiPackStrategy, alpha);
++    VERBOSE_PRINT;
++    IntType tIDbatch;
++    IntType tIDm;
++    IntType tIDn;
++    InitThreadIDs(threadID, tIDbatch, tIDm, tIDn);
++    const WeiType* weiBuffer = static_cast<const WeiType*>(wei);
++    for (IntType mBlock = 0; mBlock < perThreadParams[threadID].m; mBlock += M_BLOCK_SIZE) {
++        auto mBlockExec = std::min(M_BLOCK_SIZE,  perThreadParams[threadID].m - mBlock);
++        IntType mIdx = (mBlockExec == M_BLOCK_SIZE) ? 0 : 1;
++        IntType mIdxKernel = mIdx * (perThreadParams[threadID].isResidByM + 1);
++        for (IntType kBlock = 0; kBlock < perThreadParams[threadID].k; kBlock += K_BLOCK_SIZE) {
++            auto kBlockExec = std::min(K_BLOCK_SIZE, perThreadParams[threadID].k - kBlock);
++            IntType kIdxKernel = (kBlockExec == K_BLOCK_SIZE) ? 0 : 1;
++            bool lastKIter = (perThreadParams[threadID].k - kBlock) <= K_BLOCK_SIZE;
++            for (IntType nBlock = 0; nBlock < perThreadParams[threadID].n; nBlock += N_BLOCK_SIZE) {
++                auto nBlockExec = std::min(N_BLOCK_SIZE, perThreadParams[threadID].n - nBlock);
++                IntType nIdx = (nBlockExec == N_BLOCK_SIZE) ? 0 : 1;
++                IntType nIdxKernel = nIdx * (perThreadParams[threadID].isResidByN + 1);
++                typename CodeGen::DstType *dstExec = static_cast<typename CodeGen::DstType *>(dst) + nBlock +
++                    mBlock * perThreadParams[threadID].dstOffset2D;
++                const typename CodeGen::BiaType *biaExec = static_cast<const typename CodeGen::BiaType *>(bia) +
++                    nBlock * biaNOffset + mBlock * perThreadParams[threadID].biaOffset2D;
++                const typename CodeGen::WeiType *weiExec = weiBuffer;
++                if (perThreadParams[threadID].weiLayout2D == Layout::AB) {
++                    constexpr IntType vl = CodeGen::NEON_VL;
++                    weiExec = weiBuffer + nBlock * perThreadParams[threadID].k + kBlock * vl;
++                } else {
++                    throw Service::LogicError{"RunWithPackedB supports AB-layout RHS only"};
++                }
++                const typename CodeGen::SrcType *srcExec = static_cast<const typename CodeGen::SrcType *>(src) +
++                    kBlock + mBlock * perThreadParams[threadID].srcOffset2D;
++                MatMulDstFlags biaFlagsExec = SetBiaFlagsExec(biaFlags, beta, kBlock, lastKIter);
++                auto kernel = matmulCodegenKernels[kIdxKernel * NUM_9 +
++                    nIdxKernel * NUM_3 + mIdxKernel].template GetCode<void (*)(
++                    const typename CodeGen::SrcType *, const typename CodeGen::WeiType *, typename CodeGen::DstType *,
++                    const typename CodeGen::BiaType *, MatMulDstFlags, float)>();
++                kernel(srcExec, weiExec, dstExec, biaExec,
++                    biaFlagsExec, beta);
++            }
++        }
++    }
++}
++void MatMulImplGeneratorNoPack::DefaultImplNoPack::UpdateExecParams() noexcept
++{
++    VERBOSE_PRINT;
++    Layout desiredSrcLayout = implTask.srcInfo.GetLayout();
++    Layout desiredWeiLayout = implTask.weiInfo.GetLayout();
++    Layout desiredDstLayout = implTask.dstInfo.GetLayout();
++    Layout desiredBiaLayout = implTask.biaInfo.GetLayout();
++    {
++        if (IsLayoutAlikeAB(desiredDstLayout)) {
++            if (!IsLayoutAlikeAB(desiredSrcLayout)) {
++                desiredSrcLayout = GetPlaneLayoutAB(desiredSrcLayout);
++            }
++            if (!IsLayoutAlikeAB(desiredWeiLayout) && !IsLayoutAlikeBA(desiredWeiLayout)) {
++                desiredWeiLayout = GetPlaneLayoutAB(desiredWeiLayout);
++            }
++        } else if (IsLayoutAlikeBA(desiredDstLayout)) {
++            if (!IsLayoutAlikeBA(desiredWeiLayout)) {
++                desiredWeiLayout = GetPlaneLayoutBA(desiredWeiLayout);
++            }
++            if (!IsLayoutAlikeAB(desiredSrcLayout) && !IsLayoutAlikeBA(desiredSrcLayout)) {
++                desiredSrcLayout = GetPlaneLayoutBA(desiredSrcLayout);
++            }
++        } else {
++            if (IsLayoutAlikeAB(desiredSrcLayout)) {
++                desiredDstLayout = GetPlaneLayoutAB(desiredDstLayout);
++                if (!IsLayoutAlikeAB(desiredWeiLayout) && !IsLayoutAlikeBA(desiredWeiLayout)) {
++                    desiredWeiLayout = GetPlaneLayoutAB(desiredWeiLayout);
++                }
++            } else if (IsLayoutAlikeBA(desiredWeiLayout)) {
++                desiredDstLayout = GetPlaneLayoutBA(desiredDstLayout);
++                if (!IsLayoutAlikeAB(desiredSrcLayout) && !IsLayoutAlikeBA(desiredSrcLayout)) {
++                    desiredSrcLayout = GetPlaneLayoutBA(desiredSrcLayout);
++                }
++            } else {
++                desiredDstLayout = GetPlaneLayoutAB(desiredDstLayout);
++                desiredSrcLayout = GetPlaneLayoutAB(desiredSrcLayout);
++                if (!IsLayoutAlikeAB(desiredWeiLayout) && !IsLayoutAlikeBA(desiredWeiLayout)) {
++                    desiredWeiLayout = GetPlaneLayoutAB(desiredWeiLayout);
++                }
++            }
++        }
++    }
++    if (implTask.biaInfo.GetTotalTensorSize() != 0) {
++        desiredBiaLayout = desiredDstLayout;
++    }
++    InitializeTaskExec(desiredSrcLayout, desiredWeiLayout, desiredDstLayout, desiredBiaLayout,
++        CodeGen::GetSrcType(), CodeGen::GetWeiType(), CodeGen::GetDstType(),
++        (implTask.biaInfo.GetTotalTensorSize() != 0) ? CodeGen::GetBiaType() :
++            static_cast<Element::TypeT>(implTask.biaInfo.GetType()));
++}
++}
++}
+diff --git a/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.hpp b/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.hpp
+new file mode 100644
+index 0000000..a5961e3
+--- /dev/null
++++ b/src/dnn/src/kernels/matmul_jit/neon/kdnn_nopack_impl_f32f32f32f32.hpp
+@@ -0,0 +16,85 @@
++#ifndef KDNN_MATMUL_JIT_NEON_NOPACK_IMPL_F32F32F32F32_HPP
++#define KDNN_MATMUL_JIT_NEON_NOPACK_IMPL_F32F32F32F32_HPP
++#include <memory>
++#include <vector>
++#include <array>
++#include <type_traits>
++#include "kdnn.hpp"
++#include "cg_codegen.hpp"
++#include "vector_wrappers.hpp"
++#include "kdnn_jit.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_jit.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_helpers.hpp"
++#include "kernels/matmul_jit/kdnn_gemm_threading_helpers.hpp"
++#include "kernels/matmul_jit/neon/kdnn_default_impl_f32f32f32f32.hpp"
++#include "kernels/reorder/sve/bf16any32/kdnn_fast_jit_impl_bfp16any32_bfp16any32.hpp"
++#include "kdnn_wrapper_helpers.hpp"
++#include "internal_funcs.hpp"
++namespace KDNN {
++namespace Detail {
++struct MatMulImplGeneratorNoPack: MatmulTypeHelper<float, float, float, float>, ImplGenerator<GemmInfo> {
++    using CodeGen = MatMulKernelDefaultCodeGen<ARCH::NEON, float, float, float, float,
++        MatMulImplKinds::F32F32F32F32_NEON>;
++    struct DefaultImplNoPack : MatMulImplBase {
++        DefaultImplNoPack(const GemmInfo &task, IntType nThreads);
++        constexpr static std::uint32_t GetKernelMSize() noexcept;
++        static std::uint32_t GetKernelNSize() noexcept;
++    protected:
++        void InitializeCodeGens(IntType m, IntType n, IntType k, IntType vlw,
++            SizeType offsetSrc, SizeType offsetWei, SizeType offsetDst, SizeType offsetBia,
++            bool wereSrcWeiSwapped, IntType mFull, IntType nFull, const Attributes &attributes) override;
++        void InitializePackingCodeGens(IntType m, IntType n, IntType k,
++            IntType vlw, IntType mFull, IntType nFull) override;
++        void InitializeReorderCodeGens(IntType m, IntType n, IntType k,
++            IntType vlw, IntType mFull, IntType nFull) override;
++        void InitializeThreadsCountImpl() override;
++        IntType GetThreadBufSize(IntType m, IntType n, IntType k, IntType vlw,
++            MatrixKind mKind) const noexcept override;
++        void ReserveImplSpecificParams() override;
++        std::vector<std::pair<Shape, Shape>> SplitWork() override;
++        void RunSequential2D(IntType threadID, const void *src, const void *wei, void *dst, const void *bia,
++            std::unique_ptr<PackStrategy> &srcPackStrategy, std::unique_ptr<PackStrategy> &weiPackStrategy,
++            float alpha, float beta, const PostOpsDataPtrs &shiftedByBatchPOPtrs) const noexcept(false) override;
++        void UpdateExecParams() noexcept override;
++        constexpr static IntType M_BLOCK_SIZE = 1200;
++        constexpr static IntType K_BLOCK_SIZE = 640;
++        constexpr static IntType N_BLOCK_SIZE = 256;
++        std::array<CodeGenWrapper<CodeGen>, NUM_18> matmulCodegenKernels;
++        std::array<CodeGenWrapper<PackBRowDefaultSchemeCodegenF32>, NUM_6> vectorPackBRowCodegenKernels;
++        std::array<CodeGenWrapper<FastReorderKernelCodeGen<float, float>>,
++            NUM_12> reorderPackingCodegenKernels;
++    };
++    bool Supports(const GemmInfo &task) const noexcept override
++    {
++        VERBOSE_PRINT;
++        return task.srcInfo.GetType() == Element::TypeT::F32 &&
++            task.weiInfo.GetType() == Element::TypeT::F32 &&
++            task.dstInfo.GetType() == Element::TypeT::F32 &&
++            IsLayoutAlikeAB(task.srcInfo.GetLayout()) &&
++            IsLayoutAlikeAB(task.weiInfo.GetLayout()) &&
++            IsLayoutAlikeAB(task.dstInfo.GetLayout());
++    }
++    std::chrono::duration<float, std::milli> EstimateTime(const GemmInfo &task,
++                                                          IntType nThreads) const noexcept override
++    {
++        VERBOSE_PRINT;
++        float singleThreadPerformance = NUM_77;
++        if (std::getenv("KDNN_FORCE_NEON")) {
++#ifdef KDNNL_920F
++            singleThreadPerformance = 512;
++#else
++            singleThreadPerformance = 96;
++#endif
++        }
++        return CalculateMatmulTimeWithReorder<float, float, float, float>(
++            singleThreadPerformance, task, nThreads);
++    }
++    std::shared_ptr<ImplBase<GemmInfo>> GetImpl(const GemmInfo &task, IntType nThreads) const override
++    {
++        VERBOSE_PRINT;
++        return std::make_shared<DefaultImplNoPack>(task, nThreads);
++    }
++};
++}
++}
++#endif
