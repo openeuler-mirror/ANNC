@@ -64,12 +64,20 @@ target_include_directories(ANNCBuiltinKernels PRIVATE
 )
 
 if(ANNC_ENABLE_KDNN_ADAPTOR)
-    target_include_directories(ANNCBuiltinKernels PRIVATE
-        "${KDNN_INCLUDE_DIR}"
-    )
-    target_link_libraries(ANNCBuiltinKernels PUBLIC
-        "${KDNN_LIBRARY}"
-    )
+    if(TARGET KDNN::kdnn)
+        target_link_libraries(ANNCBuiltinKernels PUBLIC KDNN::kdnn)
+    elseif(KDNN_INCLUDE_DIR AND KDNN_LIBRARY)
+        target_include_directories(ANNCBuiltinKernels PRIVATE
+            "${KDNN_INCLUDE_DIR}"
+        )
+        target_link_libraries(ANNCBuiltinKernels PUBLIC
+            "${KDNN_LIBRARY}"
+        )
+    else()
+        message(FATAL_ERROR
+            "ANNC_ENABLE_KDNN_ADAPTOR is ON, but neither KDNN::kdnn nor "
+            "KDNN_INCLUDE_DIR/KDNN_LIBRARY is available")
+    endif()
 endif()
 
 target_link_libraries(ANNCBuiltinKernels PUBLIC

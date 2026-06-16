@@ -40,6 +40,7 @@ endif()
 add_subdirectory(${json_SOURCE_DIR} ${json_BINARY_DIR})
 # nlohmann_json is referenced by libraries in the MLIR export set
 install(TARGETS nlohmann_json EXPORT MLIRTargets)
+include(${CMAKE_SOURCE_DIR}/cmake/ThirdPartyKDNN.cmake)
 
 set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 
