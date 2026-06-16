@@ -242,22 +242,18 @@ static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
   Value rhs = entry->getArgument(1);
   Value c = entry->getArgument(2);
 
-  // Keep the public fused kernel symbol stable while delegating the actual
-  // MatMul body to the registered builtin kernel during lowering.
   auto schema = CustomOpSchema::get("MatMul")
-      .TypeVar("T")
-      .MemRefArg("lhs", 2, "T")
-      .MemRefArg("rhs", 2, "T")
-      .MemRefArg("output", 2, "T");
-  SmallVector<NamedAttribute> matmulAttrs;
-  matmulAttrs.push_back(
-      rewriter.getNamedAttr("opType", rewriter.getStringAttr("MatMul")));
-  matmulAttrs.push_back(
-      rewriter.getNamedAttr("withBias", rewriter.getBoolAttr(false)));
-  matmulAttrs.push_back(rewriter.getNamedAttr(
-        "metadata", schema.toMetadata(rewriter.getContext())));
-  rewriter.create<MatMulOp>(
-      func.getLoc(), TypeRange{c.getType()}, ValueRange{c, lhs, rhs}, matmulAttrs);
+                    .TypeVar("T")
+                    .MemRefArg("output", 2, "T")
+                    .MemRefArg("lhs", 2, "T")
+                    .MemRefArg("rhs", 2, "T");
+  auto metadata = schema.toMetadata(rewriter.getContext());
+  auto customCall = rewriter.create<CustomizeOp>(
+      func.getLoc(), TypeRange{c.getType()}, ValueRange{c, lhs, rhs},
+      rewriter.getStringAttr("MatMul"), metadata);
+  if (auto rhsFormat = matmulOp.getRhsFormat()) {
+    customCall->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
+  }
   rewriter.create<func::ReturnOp>(func.getLoc());
 
   return func;
@@ -465,6 +461,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
+    if (!matmulOp.getRhsFormat()) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
 
     std::string matmulName = getTfName(matmulOp);
@@ -570,7 +567,7 @@ public:
 
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
-    // patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
+    patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
 
     if (failed(applyPatternsAndFoldGreedily(mainFunc, std::move(patterns)))) {
       signalPassFailure();

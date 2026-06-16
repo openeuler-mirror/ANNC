@@ -245,6 +245,9 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   annc::kernels::KernelResolveRequest req;
   req.op_type = op.getOpType().str();
   req.type_constraints.assign(typeBindings.begin(), typeBindings.end());
+  if (auto rhsFormat = op->getAttrOfType<StringAttr>("rhs_format")) {
+    req.rhs_format = rhsFormat.getValue().str();
+  }
   auto attr = module->getAttrOfType<BoolAttr>("annc.enable_kdnn");
   bool enableKdnn = attr && attr.getValue();
   auto kernelInfo = annc::kernels::resolveBestKernelInfo(req, enableKdnn);

@@ -21,6 +21,18 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
                            bool enableKdnn) {
     auto& registry = KernelRegistry::instance();
 
+    if (enableKdnn && request.hasPackedRhsFormat()) {
+        if (!request.requiresSpecialization()) {
+            if (registry.hasKernel(request.op_type, "kdnn_packed")) return true;
+        } else {
+            KernelQuery q;
+            q.op_type = request.op_type;
+            q.backend = "kdnn_packed";
+            q.type_constraints = request.type_constraints;
+            if (registry.hasKernel(q)) return true;
+        }
+    }
+
     if (enableKdnn) {
         if (!request.requiresSpecialization()) {
             if (registry.hasKernel(request.op_type, "kdnn")) return true;
@@ -46,9 +58,15 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
     return false;
 }
 
-std::optional<KernelInfo> resolveBestKernelInfo(const KernelResolveRequest& request,
-                                                bool enableKdnn) {
-    // Priority: kdnn (if enabled and exists) → aarch64 (fallback)
+std::optional<KernelInfo> resolveBestKernelInfo(
+    const KernelResolveRequest& request, bool enableKdnn) {
+    if (enableKdnn && request.hasPackedRhsFormat()) {
+        if (auto info = lookupKernelForBackend(request.op_type, "kdnn_packed",
+                                               request.type_constraints)) {
+            return info;
+        }
+    }
+
     if (enableKdnn) {
         if (auto info = lookupKernelForBackend(request.op_type, "kdnn",
                                                request.type_constraints)) {

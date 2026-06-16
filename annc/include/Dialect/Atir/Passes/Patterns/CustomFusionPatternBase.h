@@ -82,6 +82,9 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     annc::kernels::KernelResolveRequest req;
     req.op_type = customOpName;
     req.type_constraints = inferTypeConstraintsFromSchema(metadata, inputValues);
+    if (auto rhsFormat = anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
+      req.rhs_format = rhsFormat.getValue().str();
+    }
     if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
       llvm::dbgs() << "ANNC: No builtin kernel available for '" << customOpName
                    << "', skipping CustomizeOp rewrite\n";
@@ -92,6 +95,9 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
 
     auto customCallOp = rewriter.create<CustomizeOp>(
         anchor.getLoc(), resultTypes, inputValues, callee, metadata);
+    if (auto rhsFormat = anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
+      customCallOp->setAttr("rhs_format", rhsFormat);
+    }
 
     //replace
     for (auto [oldV, newV] : llvm::zip(outputValues, customCallOp.getResults())) {
