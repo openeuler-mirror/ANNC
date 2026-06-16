@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
 
-REQUIRED_PROTOC_VERSION="3.21.9"
-
 USAGE="Usage: $0 [OPTIONS]
 
 Options:
@@ -10,11 +8,8 @@ Options:
   -h, --help          Show this help message
 
 Requirements:
-  - protoc (Protocol Buffers compiler) version ${REQUIRED_PROTOC_VERSION}
-  - The script will automatically download protoc ${REQUIRED_PROTOC_VERSION} if the
-    system protoc version does not match
-  - protoc ${REQUIRED_PROTOC_VERSION} must match the TensorFlow bundled protobuf
-    version to avoid header/library version conflicts at compile time
+  - protoc (Protocol Buffers compiler), any version available on the system
+  - The generated .pb.cc/.pb.h code will match the system protobuf version
 
 Example:
   $0                          # Use current directory
@@ -42,9 +37,12 @@ done
 
 cd "${WORK_DIR}"
 
+FALLBACK_PROTOC_VERSION="3.14.0"
+FALLBACK_PROTOC_DIR=".protoc-${FALLBACK_PROTOC_VERSION}"
+
 resolve_protoc() {
   local protoc_bin="${PROTOC_BIN:-}"
-  if [ -n "${protoc_bin}" ]; then
+  if [ -n "${protoc_bin}" ] && [ -x "${protoc_bin}" ]; then
     echo "${protoc_bin}"
     return 0
   fi
@@ -52,28 +50,52 @@ resolve_protoc() {
   local system_protoc
   system_protoc="$(command -v protoc 2>/dev/null || true)"
   if [ -n "${system_protoc}" ]; then
-    local version
-    version=$("${system_protoc}" --version 2>/dev/null | awk '{print $2}')
-    if [ "${version}" = "${REQUIRED_PROTOC_VERSION}" ]; then
-      echo "${system_protoc}"
-      return 0
-    fi
-    echo "System protoc version is ${version}, but ${REQUIRED_PROTOC_VERSION} is required (must match TensorFlow bundled protobuf)." >&2
+    echo "${system_protoc}"
+    return 0
   fi
 
-  local local_protoc="${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}/bin/protoc"
+  local local_protoc="${PWD}/${FALLBACK_PROTOC_DIR}/bin/protoc"
   if [ -x "${local_protoc}" ]; then
     echo "${local_protoc}"
     return 0
   fi
 
-  echo "Downloading protoc ${REQUIRED_PROTOC_VERSION} for aarch64..." >&2
-  mkdir -p "${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}"
+  echo "protoc not found, downloading fallback protoc ${FALLBACK_PROTOC_VERSION} for aarch64..." >&2
+  mkdir -p "${PWD}/${FALLBACK_PROTOC_DIR}"
   local tmpzip
   tmpzip="$(mktemp /tmp/protoc-XXXXXX.zip)"
-  curl -L -o "${tmpzip}" \
-    "https://github.com/protocolbuffers/protobuf/releases/download/v21.9/protoc-21.9-linux-aarch_64.zip"
-  unzip -o "${tmpzip}" -d "${PWD}/.protoc-${REQUIRED_PROTOC_VERSION}"
+
+  local proto_url="https://github.com/protocolbuffers/protobuf/releases/download/v3.14.0/protoc-3.14.0-linux-aarch_64.zip"
+  local mirrors=(
+    "https://ghproxy.net/"
+    "https://gh-proxy.com/"
+    ""
+  )
+
+  local downloaded=false
+  for prefix in "${mirrors[@]}"; do
+    echo "  Trying ${prefix}${proto_url} ..." >&2
+    if curl -L --connect-timeout 15 --max-time 300 -o "${tmpzip}" "${prefix}${proto_url}" 2>/dev/null; then
+      if unzip -t "${tmpzip}" >/dev/null 2>&1; then
+        downloaded=true
+        break
+      else
+        echo "  Downloaded file is corrupt, trying next mirror..." >&2
+        rm -f "${tmpzip}"
+      fi
+    else
+      echo "  Failed to connect, trying next mirror..." >&2
+      rm -f "${tmpzip}"
+    fi
+  done
+
+  if [ "${downloaded}" = false ]; then
+    rm -f "${tmpzip}"
+    echo "Error: Failed to download protoc ${FALLBACK_PROTOC_VERSION} from all mirrors." >&2
+    exit 1
+  fi
+
+  unzip -o "${tmpzip}" -d "${PWD}/${FALLBACK_PROTOC_DIR}" >&2
   rm -f "${tmpzip}"
 
   if [ -x "${local_protoc}" ]; then
@@ -81,7 +103,7 @@ resolve_protoc() {
     return 0
   fi
 
-  echo "Error: Failed to download protoc ${REQUIRED_PROTOC_VERSION}." >&2
+  echo "Error: Failed to download protoc ${FALLBACK_PROTOC_VERSION}." >&2
   exit 1
 }
 
@@ -95,7 +117,7 @@ echo "Downloading TensorFlow proto files (version ${TF_TAG})..."
 mkdir -p tf_protos_minimal/tensorflow/core/framework tf_protos_minimal/tensorflow/core/protobuf
 
 download_proto() {
-  local rel="$1"  # e.g. tensorflow/core/framework/attr_value.proto
+  local rel="$1"
   local dst="tf_protos_minimal/${rel}"
   mkdir -p "$(dirname "${dst}")"
   curl -L --fail -o "${dst}" "${REPO_BASE}/${rel}"
@@ -127,12 +149,13 @@ download_proto tensorflow/core/protobuf/trackable_object_graph.proto
 echo "Generating C++ code from proto files..."
 cd tf_protos_minimal
 
-# 只针对本仓库实际需要的 proto 做最小生成
 OUT_DIR=gen_code
+rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
 "${PROTOC_BIN}" \
   -I. \
+  -I/usr/include \
   --cpp_out="${OUT_DIR}" \
   tensorflow/core/framework/attr_value.proto \
   tensorflow/core/framework/full_type.proto \

@@ -5,7 +5,6 @@ find_package(Protobuf REQUIRED)
 find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
 
-# 自动收集所有生成的 .pb.cc 文件
 file(GLOB_RECURSE PROTO_SRCS "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code/*.pb.cc")
 
 add_executable(annc-tf2atir
@@ -15,39 +14,38 @@ add_executable(annc-tf2atir
     ${PROTO_SRCS}
 )
 
-get_target_property(CURRENT_INCLUDE_DIRS annc-tf2atir INCLUDE_DIRECTORIES)
-if(CURRENT_INCLUDE_DIRS)
-    list(REMOVE_ITEM CURRENT_INCLUDE_DIRS "${TENSORFLOW_INCLUDE_DIRS}")
-    set_target_properties(annc-tf2atir PROPERTIES INCLUDE_DIRECTORIES "${CURRENT_INCLUDE_DIRS}")
-endif()
-
 target_include_directories(annc-tf2atir BEFORE PRIVATE
-    "${CMAKE_SOURCE_DIR}/annc/include"                
+    "${CMAKE_SOURCE_DIR}/annc/include"
     "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code"
-    "${TENSORFLOW_INCLUDE_DIRS}"
-    "${Protobuf_INCLUDE_DIRS}"
 )
 target_include_directories(annc-tf2atir PRIVATE
     "${MLIR_INCLUDE_DIRS}"
     "${LLVM_INCLUDE_DIRS}"
 )
 
-# 自动检测是否需要链接系统 abseil 库
-# openEuler 24.03 的 protobuf 依赖 abseil，而 22.03 不需要
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(ABSL_LOG QUIET absl_log)
     pkg_check_modules(ABSL_CHECK_OP QUIET absl_log_internal_check_op)
+    pkg_check_modules(ABSL_BASE QUIET absl_base)
 endif()
 
 add_definitions(-DABSL_MIN_LOG_LEVEL=4)
 
-target_link_libraries(annc-tf2atir PRIVATE
-    ${Protobuf_LIBRARIES}
-    ${TENSORFLOW_FRAMEWORK_LIB}
+target_include_directories(annc-tf2atir SYSTEM PRIVATE
+    "${Protobuf_INCLUDE_DIRS}"
 )
 
-# 条件性链接 abseil 库（如果检测到）
+if(ABSL_BASE_FOUND)
+    target_include_directories(annc-tf2atir SYSTEM PRIVATE
+        ${ABSL_BASE_INCLUDE_DIRS}
+    )
+endif()
+
+target_link_libraries(annc-tf2atir PRIVATE
+    ${Protobuf_LIBRARIES}
+)
+
 if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
     message(STATUS "Linking abseil libraries for protobuf dependency")
     target_link_libraries(annc-tf2atir PRIVATE
@@ -58,7 +56,6 @@ else()
     message(STATUS "Abseil libraries not found, skipping (may not be required on this system)")
 endif()
 
-# 链接 ANNC 和 MLIR/LLVM 库
 target_link_libraries(annc-tf2atir PRIVATE
     AtirBuilder AtirDialect AtirPasses
     AtirToAffineConversion

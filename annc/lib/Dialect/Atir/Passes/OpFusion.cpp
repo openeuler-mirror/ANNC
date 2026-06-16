@@ -570,7 +570,7 @@ public:
 
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
-    patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
+    // patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
 
     if (failed(applyPatternsAndFoldGreedily(mainFunc, std::move(patterns)))) {
       signalPassFailure();

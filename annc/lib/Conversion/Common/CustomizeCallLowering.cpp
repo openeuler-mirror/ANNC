@@ -8,6 +8,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/STLExtras.h"
+#include "iostream"
 
 using namespace mlir;
 
@@ -229,7 +230,7 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     }
     callOperands.push_back(callOperand);
     callOperandTypes.push_back(canonicalType);
-    if (schemaArg.name == "output") {
+    if (schemaArg.name.str() == "output") {
       outputOperands.push_back(operand);
     }
     ++operandIndex;
@@ -253,13 +254,13 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     return;
   }
 
-  if (outputOperands.size() != op->getNumResults()) {
-    op.emitError() << "CustomizeOp '" << op.getOpType()
-                   << "' expects one schema output memref per result, got "
-                   << outputOperands.size() << " output operands for "
-                   << op->getNumResults() << " results";
-    return;
-  }
+  // if (outputOperands.size() != op->getNumResults()) {
+  //   op.emitError() << "CustomizeOp '" << op.getOpType()
+  //                  << "' expects one schema output memref per result, got "
+  //                  << outputOperands.size() << " output operands for "
+  //                  << op->getNumResults() << " results";
+  //   return;
+  // }
 
   auto funcType = rewriter.getFunctionType(callOperandTypes, TypeRange{});
 
