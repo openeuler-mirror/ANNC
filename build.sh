@@ -190,7 +190,9 @@ cmake .. \
   -DCMAKE_CXX_FLAGS="-fPIC" \
   -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
   -Dpybind11_DIR="${PYBIND11_DIR}" \
-  -Dnanobind_DIR="${NANOBIND_DIR}"
+  -Dnanobind_DIR="${NANOBIND_DIR}" \
+  -DKDNN_DIR=/annc/kdnn/out \
+  -DANNC_ENABLE_KDNN_ADAPTOR=ON
 
 if [ $? -ne 0 ]; then
     echo "CMake configuration failed, aborting build"
