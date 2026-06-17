@@ -15,8 +15,10 @@ namespace kernels {
 struct KernelResolveRequest {
     std::string op_type;
     std::vector<TypeConstraintInfo> type_constraints;
+    std::string rhs_format;
 
     bool requiresSpecialization() const { return !type_constraints.empty(); }
+    bool hasPackedRhsFormat() const { return !rhs_format.empty(); }
 };
 
 /// Check whether any kernel is available for the given request under the

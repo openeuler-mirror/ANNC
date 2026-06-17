@@ -54,6 +54,17 @@ std::string tfAttrValueToString(const NodeInfo::TfAttrValue &value) {
   }, value);
 }
 
+StringAttr getStringAttrFromNode(const NodeInfo &node, OpBuilder &builder,
+                                 llvm::StringRef key) {
+  if (auto it = node.attrs.find(key.str()); it != node.attrs.end()) {
+    if (auto *value = std::get_if<std::string>(&it->second);
+        value && !value->empty()) {
+      return builder.getStringAttr(*value);
+    }
+  }
+  return StringAttr();
+}
+
 DictionaryAttr makeTfMetadata(OpBuilder& builder, const NodeInfo& node) {
   SmallVector<NamedAttribute> attrs;
   attrs.push_back(builder.getNamedAttr("tf.name", builder.getStringAttr(node.name)));
@@ -1130,7 +1141,8 @@ void MLIRBuilder::createMatMulOp(const NodeInfo& node, ArrayRef<Type> outs, Arra
       k_start ? builder_.getI32IntegerAttr(*k_start) : IntegerAttr(),
       m_size ? builder_.getI32IntegerAttr(*m_size) : IntegerAttr(),
       n_size ? builder_.getI32IntegerAttr(*n_size) : IntegerAttr(),
-      k_size ? builder_.getI32IntegerAttr(*k_size) : IntegerAttr());
+      k_size ? builder_.getI32IntegerAttr(*k_size) : IntegerAttr(),
+      getStringAttrFromNode(node, builder_, "rhs_format"));
     attachTfMetadata(matmul.getOperation(), builder_, node);
     std::string outName = node.outputs[0].name;
     tensorValues_[outName] = matmul.getResult();

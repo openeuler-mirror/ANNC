@@ -171,7 +171,8 @@ def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
     OptionalAttr<I32Attr>:$k_start,
     OptionalAttr<I32Attr>:$m_size,
     OptionalAttr<I32Attr>:$n_size,
-    OptionalAttr<I32Attr>:$k_size
+    OptionalAttr<I32Attr>:$k_size,
+    OptionalAttr<StrAttr>:$rhs_format
   );
   let results = (outs Atir_Tensor:$output);
 }
