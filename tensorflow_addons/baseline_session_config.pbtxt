@@ -1,5 +1,10 @@
+allow_soft_placement: true
 graph_options {
+  optimizer_options {
+    global_jit_level: 1
+  }
   rewrite_options {
-    remapping: OFF
+    meta_optimizer_iterations: TWO
+    min_graph_nodes: -1
   }
 }
