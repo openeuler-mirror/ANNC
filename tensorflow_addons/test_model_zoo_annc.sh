@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH=${SCRIPT_DIR}/../install/bin:$PATH
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -7,18 +8,52 @@ CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/session_config.pbtxt}"
 BASELINE_CONFIG_FILE="${BASELINE_CONFIG_FILE:-${SCRIPT_DIR}/baseline_session_config.pbtxt}"
 
 MODELS=${1:-"wide_and_deep"}
-INTRA_OP=${2:-20}
-INTER_OP=${3:-20}
+INTRA_OP=${2:-24}
+INTER_OP=${3:-24}
 INSTANCE_NUMS=${4:-1}
 ENABLE_ANNC=${5:-1}
 
+# Backward compatibility: START_CPU is the server-side anchor.  Use SERVER_START_CPU
+# when you want to place the client elsewhere explicitly.
 START_CPU=${START_CPU:-0}
+SERVER_START_CPU=${SERVER_START_CPU:-$START_CPU}
 
-export KDNN_FORCE_NEON=1
+BASE_PORT=${BASE_PORT:-8888}
+BASE_REST_PORT=$((BASE_PORT + 100))
+
+SERVER_PIDS=()
+
+# By default the client is placed on a different NUMA node than the server so that
+# client and server do not contend for the same CPU cores.  This rule is applied
+# identically to baseline and ANNc runs to keep the comparison fair.
+CLIENT_NUMA_NODE=${CLIENT_NUMA_NODE:-}
+CLIENT_START_CPU=${CLIENT_START_CPU:-}
+
+#export KDNN_FORCE_NEON=1
 
 # Timeline 开关：ANNC_TIMELINE=1 时把 ANNCFused 各阶段事件写到 trace.json
 # 用 chrome://tracing 或 https://ui.perfetto.dev/ 打开
 ANNC_TIMELINE=${ANNC_TIMELINE:-0}
+
+# Profiler 开关：ENABLE_PROFILER=1 时启用 TF Serving profiler 服务并捕获 timeline
+ENABLE_PROFILER=${ENABLE_PROFILER:-0}
+if [ "$ENABLE_PROFILER" -eq 1 ]; then
+    TF_PROFILER_FLAG="true"
+else
+    TF_PROFILER_FLAG="false"
+fi
+
+# 是否在一次调用中顺序跑 baseline + ANNc 并生成对比日志。
+# 默认开启；设置为 0 时回到旧行为，只跑 ENABLE_ANNC 指定的模式。
+RUN_BOTH=${RUN_BOTH:-1}
+
+# perf_analyzer 延迟阈值（单位：微秒）。推荐模型 batch 较大，200 us 过严，
+# 默认放宽到 200 ms，可通过环境变量覆盖。
+LATENCY_THRESHOLD=${LATENCY_THRESHOLD:-200000}
+
+# perf_analyzer 正式测量前发送的 warm-up 请求数，用于触发 ANNc 图改写 / kernel 编译。
+# 设为 0 可跳过 warm-up。
+WARMUP_REQUESTS=${WARMUP_REQUESTS:-50}
 
 # ============================================================================
 # 控制参数说明
@@ -26,90 +61,121 @@ ANNC_TIMELINE=${ANNC_TIMELINE:-0}
 #
 # ── 命令行位置参数 ──
 #   $1 MODELS          : 模型列表,逗号分隔 (默认: wide_and_deep)
-#   $2 INTRA_OP        : TF intra_op 并行度 (默认: 1)
-#   $3 INTER_OP        : TF inter_op 并行度 (默认: -1=自动)
+#   $2 INTRA_OP        : TF intra_op 并行度 (默认: 24)
+#   $3 INTER_OP        : TF inter_op 并行度 (默认: 24)
 #   $4 INSTANCE_NUMS   : serving/client 实例数 (默认: 1)
-#   $5 ENABLE_ANNC      : 是否启用 ANNC, 0=baseline (默认: 1)
+#   $5 ENABLE_ANNC      : 是否启用 ANNC, 0=baseline, 1=ANNC (默认: 1)
+#                        仅在 RUN_BOTH=0 时生效
 #
 # ── 环境变量 (脚本级控制) ──
-#   START_CPU          : NUMA 起始核 (默认: 0)
-#   COMPARE_BASELINE   : 是否跑基线 (默认: 1, 当前已禁用)
-#   ANNC_PIPELINE_PATH : annc-tf-pipeline 路径
+#   START_CPU          : server 起始核 (默认: 0, 兼容旧用法)
+#   SERVER_START_CPU   : server 起始核 (默认: START_CPU)
+#   CLIENT_NUMA_NODE   : client 使用的 NUMA node (默认: server_node+1)
+#   CLIENT_START_CPU   : client 起始核 (默认: CLIENT_NUMA_NODE 第一个核)
+#   RUN_BOTH           : 是否一次调用跑 baseline + ANNc (默认: 1)
+#   LATENCY_THRESHOLD  : perf_analyzer 延迟阈值 us (默认: 200000)
+#   WARMUP_REQUESTS    : perf_analyzer warm-up 请求数 (默认: 50)
+#   ANNC_PIPELINE_PATH : annc-tf-pipeline 路径 (默认: 自动推导到本仓库 install/bin)
+#   LLVM_PATH          : LLVM 安装目录 (默认: 从 ANNC_PIPELINE_PATH 推导)
+#   TF_PY_SITE_PACKAGES: TensorFlow Python site-packages 目录 (默认: 自动检测)
 #   ANNC_BACKEND       : ANNC 后端 (默认: generic)
 #   ANNC_WORK_BASE     : 工作目录 (默认: /tmp/annc_modelzoo_work)
-#   TFSERVER_PATH      : tensorflow_model_server 路径
-#   MODEL_BASE         : 模型根目录
+#   TFSERVER_PATH      : tensorflow_model_server 路径 (默认: 自动检测)
+#   MODEL_BASE         : 模型根目录 (默认: 自动检测)
 #   ADDONS_DIR         : libannc_optimizer.so 目录
 #   CONFIG_FILE        : session_config.pbtxt 路径
 #
 # ── ANNC 运行环境变量 (注入 serving 子进程) ──
 #   LD_PRELOAD         : libannc_optimizer.so (自动)
 #   ANNC_ENABLE        : 1 (启用 ANNC, 固定)
-#   ANNC_VERBOSE       : 1 (verbose 日志, 固定)
+#   ANNC_VERBOSE       : 0 (默认关闭 verbose 日志，避免污染性能数据)
 #   ANNC_PIPELINE_PATH : annc-tf-pipeline 路径 (同上)
 #   ANNC_WORK_DIR      : 模型级临时工作目录 (自动生成)
 #   ANNC_SAVEDMODEL_PATH : 模型路径 (自动传入)
 #   ANNC_BACKEND       : 后端类型 (同上)
 #
 # ── 模型压测参数 ──
-#   wide_and_deep  : 2:2:2,96
-#   dlrm           : 2:2:2,256
-#   deepfm         : 2:2:2,256
-#   dffm           : 2:2:2,96
-#   dssm           : 2:2:2,530
-#   格式: concurrency:stop:step,batch
+#   wide_and_deep  : 10:24:2,96
+#   dlrm           : 10:24:2,256
+#   deepfm         : 10:24:2,256
+#   dffm           : 10:24:2,96
+#   dssm           : 10:24:2,530
+#   格式: start:stop:step,batch
 #
 # ── 硬编码参数 ──
 #   cpu_per_server = 24    : serving 占用核数
 #   cpu_per_client = 24    : client 占用核数
-#   LD_LIBRARY_PATH        : +tensorflow site-packages
+#   NUMA 拓扑              : 自动从 /sys/devices/system/node 检测
 #
 # ── 使用示例 ──
-#   START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep
-#   START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep,dlrm,deepfm 20 20 1 1
-#   START_CPU=80 bash test_model_zoo_annc.sh wide_and_deep,dlrm,deepfm
+#   bash test_model_zoo_annc.sh wide_and_deep
+#   bash test_model_zoo_annc.sh wide_and_deep,dlrm,deepfm 20 20 1
+#   SERVER_START_CPU=0 CLIENT_START_CPU=48 bash test_model_zoo_annc.sh wide_and_deep
+#   RUN_BOTH=0 ENABLE_ANNC=0 bash test_model_zoo_annc.sh wide_and_deep
 #
 # ============================================================================
 
 
-ANNC_PIPELINE_PATH="${ANNC_PIPELINE_PATH:-/annc/ANNC/ANNC_630/install/bin/annc-tf-pipeline}"
+DEFAULT_ANNC_INSTALL="$(cd "${SCRIPT_DIR}/.." && pwd)/install"
+DEFAULT_TFSERVER="/home/l00562880/annc/serving/output/826723b62a7b3d9761abfbfce744e16b/execroot/tf_serving/bazel-out/aarch64-opt/bin/tensorflow_serving/model_servers/tensorflow_model_server"
+DEFAULT_MODEL_BASE="/home/l00562880/annc/sra_benchmark/modelzoo"
+
+ANNC_PIPELINE_PATH="${ANNC_PIPELINE_PATH:-${DEFAULT_ANNC_INSTALL}/bin/annc-tf-pipeline}"
 ANNC_BACKEND="${ANNC_BACKEND:-generic}"
 ANNC_WORK_BASE="${ANNC_WORK_BASE:-/tmp/annc_modelzoo_work}"
-TFSERVER_PATH="${TFSERVER_PATH:-/usr/local/bin/tensorflow_model_server}"
-MODEL_BASE="${MODEL_BASE:-/annc/sra_benchmark/modelzoo/}"
+TFSERVER_PATH="${TFSERVER_PATH:-${DEFAULT_TFSERVER}}"
+MODEL_BASE="${MODEL_BASE:-${DEFAULT_MODEL_BASE}}"
+
+# Derive LLVM install from the ANNC pipeline location so we don't hard-code /opt/llvm-21.1.3.
+ANNC_INSTALL_BIN="$(dirname "$ANNC_PIPELINE_PATH")"
+ANNC_INSTALL_ROOT="$(dirname "$ANNC_INSTALL_BIN")"
+LLVM_PATH="${LLVM_PATH:-${ANNC_INSTALL_ROOT}}"
+
+# Auto-detect TensorFlow Python site-packages path.
+TF_PY_SITE_PACKAGES="${TF_PY_SITE_PACKAGES:-$(python3 -c 'import tensorflow as tf, os; print(os.path.dirname(tf.__file__))' 2>/dev/null || echo "/usr/local/lib64/python3.11/site-packages/tensorflow")}"
+
+# Detect actual NUMA topology from /sys instead of assuming 4 nodes x 80 cores.
+NUMA_NODE_CPUS=()
+NUMA_NODES=0
+CORES_PER_NODE=0
+
+detect_numa_topology() {
+    local nodes
+    nodes=$(ls -d /sys/devices/system/node/node* 2>/dev/null | sort -V)
+    NUMA_NODES=$(echo "$nodes" | wc -l)
+    for node_dir in $nodes; do
+        local cpulist
+        cpulist=$(cat "${node_dir}/cpulist" 2>/dev/null || echo "")
+        NUMA_NODE_CPUS+=("$cpulist")
+    done
+    if [ "$NUMA_NODES" -gt 0 ]; then
+        local first_range
+        first_range=${NUMA_NODE_CPUS[0]}
+        # Count cores in the first range (e.g., "0-47" -> 48)
+        local start end
+        start=$(echo "$first_range" | cut -d'-' -f1)
+        end=$(echo "$first_range" | cut -d'-' -f2)
+        CORES_PER_NODE=$((end - start + 1))
+    fi
+}
+
+detect_numa_topology
 
 TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 THREAD_TAG="i${INTRA_OP}-o${INTER_OP}-n${INSTANCE_NUMS}"
-if [ "$ENABLE_ANNC" -eq 1 ]; then
-    BACKEND_TAG="${ANNC_BACKEND}"
-    LOG_TAG="${BACKEND_TAG}_annc"
-else
-    LOG_TAG="baseline"
-fi
-LOG_DIR="logs/${LOG_TAG}_modelzoo_${MODELS}_${THREAD_TAG}_${TIMESTAMP}"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/test.log"
+
+# 顶层日志目录：一次调用中 baseline 与 ANNc 的结果放在同一父目录下，便于对比。
+BASE_LOG_DIR="logs/modelzoo_${MODELS}_${THREAD_TAG}_${TIMESTAMP}"
+mkdir -p "$BASE_LOG_DIR"
 
 declare -A model_params
-# model_params["wide_and_deep"]="12:24:1,96"
-# model_params["dlrm"]="20:30:1,256"
-# model_params["deepfm"]="12:24:1,256"
-# model_params["dffm"]="12:24:1,96"
-# model_params["dssm"]="12:24:1,530"
-
-# 1 -1 (这些concurrency可以跑满)
-# model_params["wide_and_deep"]="10:20:2,96"
-# model_params["dlrm"]="18:26:2,256"
-# model_params["deepfm"]="16:26:2,256"
-# model_params["dffm"]="16:26:2,96"
-# model_params["dssm"]="16:26:2,530"
-
 # 1 1
-model_params["wide_and_deep"]="12:24:2,96"
-model_params["dlrm"]="10:24:2,256"
-model_params["deepfm"]="10:24:2,256"
-model_params["dffm"]="10:24:2,96"
-model_params["dssm"]="10:24:2,530"
+model_params["wide_and_deep"]="22:28:1,96"
+model_params["dlrm"]="44:54:1,256"
+model_params["deepfm"]="24:34:1,256"
+model_params["dffm"]="26:36:1,96"+
+model_params["dssm"]="32:37:1,530"
+# model_params["dssm"]=":10:1,530"
 
 
 RED='\033[0;31m'
@@ -121,16 +187,39 @@ MAX_RETRIES=3
 
 calculate_numa_node() {
     local cpu=$1
-    if [ "$cpu" -lt 80 ]; then
+    if [ "$CORES_PER_NODE" -le 0 ]; then
         echo 0
-    elif [ "$cpu" -lt 160 ]; then
-        echo 1
-    elif [ "$cpu" -lt 240 ]; then
-        echo 2
-    else
-        echo 3
+        return
     fi
+    local node=$(( cpu / CORES_PER_NODE ))
+    if [ "$node" -lt 0 ]; then
+        node=0
+    elif [ "$node" -ge "$NUMA_NODES" ]; then
+        node=$((NUMA_NODES - 1))
+    fi
+    echo "$node"
 }
+
+# 获取指定 NUMA node 的第一个 CPU；若不可用则回退到 SERVER_START_CPU
+get_numa_node_start_cpu() {
+    local node=$1
+    if [ "$node" -lt 0 ] || [ "$node" -ge "$NUMA_NODES" ] || [ -z "${NUMA_NODE_CPUS[$node]:-}" ]; then
+        echo "$SERVER_START_CPU"
+        return
+    fi
+    local cpulist="${NUMA_NODE_CPUS[$node]}"
+    echo "$cpulist" | awk -F'[-,]' '{print $1}'
+}
+
+# Auto-place client on a different NUMA node than the server by default so that
+# baseline and ANNc runs share the same client/server NUMA topology.
+if [ "$NUMA_NODES" -gt 1 ] && [ -z "${CLIENT_START_CPU:-}" ] && [ -z "${CLIENT_NUMA_NODE:-}" ]; then
+    server_numa=$(calculate_numa_node "$SERVER_START_CPU")
+    CLIENT_NUMA_NODE=$(( (server_numa + 1) % NUMA_NODES ))
+fi
+if [ -z "${CLIENT_START_CPU:-}" ]; then
+    CLIENT_START_CPU=$(get_numa_node_start_cpu "${CLIENT_NUMA_NODE:-0}")
+fi
 
 check_prerequisites() {
     echo "=========================================="
@@ -148,6 +237,11 @@ check_prerequisites() {
 
     if [ ! -f "${CONFIG_FILE}" ]; then
         echo -e "${RED}ERROR${NC}: session_config.pbtxt not found at ${CONFIG_FILE}"
+        ok=0
+    fi
+
+    if [ ! -f "${BASELINE_CONFIG_FILE}" ]; then
+        echo -e "${RED}ERROR${NC}: baseline_session_config.pbtxt not found at ${BASELINE_CONFIG_FILE}"
         ok=0
     fi
 
@@ -174,14 +268,32 @@ check_prerequisites() {
     echo -e "${GREEN}Prerequisites OK${NC}"
     echo "  ADDONS_DIR:      ${ADDONS_DIR}"
     echo "  CONFIG_FILE:     ${CONFIG_FILE}"
+    echo "  BASELINE_CONFIG: ${BASELINE_CONFIG_FILE}"
     echo "  PIPELINE_PATH:   ${ANNC_PIPELINE_PATH}"
+    echo "  LLVM_PATH:       ${LLVM_PATH}"
     echo "  TFSERVER_PATH:   ${TFSERVER_PATH}"
     echo "  MODEL_BASE:      ${MODEL_BASE}"
-    echo "  START_CPU:       ${START_CPU}"
+    echo "  TF_PY_PKGS:      ${TF_PY_SITE_PACKAGES}"
+    echo "  NUMA_NODES:      ${NUMA_NODES}"
+    echo "  CORES_PER_NODE:  ${CORES_PER_NODE}"
+    echo "  SERVER_START_CPU:${SERVER_START_CPU}"
+    echo "  CLIENT_NUMA_NODE:${CLIENT_NUMA_NODE:-<auto>}"
+    echo "  CLIENT_START_CPU:${CLIENT_START_CPU}"
     echo "  INTRA_OP:        ${INTRA_OP}"
     echo "  INTER_OP:        ${INTER_OP}"
     echo "  INSTANCE_NUMS:   ${INSTANCE_NUMS}"
-    echo "  LOG_DIR:         ${LOG_DIR}"
+    echo "  RUN_BOTH:        ${RUN_BOTH}"
+    echo "  LATENCY_THRESH:  ${LATENCY_THRESHOLD} us"
+    echo "  WARMUP_REQUESTS: ${WARMUP_REQUESTS}"
+    echo "  BASE_LOG_DIR:    ${BASE_LOG_DIR}"
+
+    local server_numa client_numa
+    server_numa=$(calculate_numa_node "$SERVER_START_CPU")
+    client_numa=$(calculate_numa_node "$CLIENT_START_CPU")
+    if [ "$server_numa" -eq "$client_numa" ]; then
+        echo -e "${YELLOW}WARN${NC}: client and server are on the same NUMA node ${server_numa}."
+        echo "  Consider setting CLIENT_START_CPU or CLIENT_NUMA_NODE to avoid CPU contention."
+    fi
     echo ""
 }
 
@@ -210,25 +322,49 @@ get_model_dir() {
     esac
 }
 
+SERVER_PIDS=()
+
+kill_port_occupiers() {
+    for ((i = 0; i < INSTANCE_NUMS; i++)); do
+        local port=$((BASE_PORT + i))
+        local rest_port=$((BASE_REST_PORT + i))
+        for p in $port $rest_port; do
+            local pid
+            pid=$(lsof -ti :$p 2>/dev/null || true)
+            if [ -n "$pid" ]; then
+                echo "  Port $p occupied by PID(s) $pid, killing ..."
+                kill $pid 2>/dev/null || true
+                sleep 1
+                pid=$(lsof -ti :$p 2>/dev/null || true)
+                if [ -n "$pid" ]; then
+                    kill -9 $pid 2>/dev/null || true
+                fi
+            fi
+        done
+    done
+}
+
 start_serving_baseline() {
     local times=$1
     local model=$2
     local tf_model_dir=$3
-    local cpu_per_server=20
+    local cpu_per_server=24
+    local instances_per_node=$(( CORES_PER_NODE / cpu_per_server ))
+    [ "$instances_per_node" -lt 1 ] && instances_per_node=1
 
     for ((i = 0; i < times; i++)); do
-        local segment=$(( i % 4 ))
-        local cpu_start=$(( segment * cpu_per_server + (i / 4) * 80 + START_CPU ))
+        local segment=$(( i % instances_per_node ))
+        local cpu_start=$(( segment * cpu_per_server + (i / instances_per_node) * CORES_PER_NODE + SERVER_START_CPU ))
         local cpu_end=$(( cpu_start + cpu_per_server - 1 ))
         local numa_node=$(calculate_numa_node "$cpu_start")
-        local port=$(( 8888 + i ))
-        local rest_port=$(( 8988 + i ))
+        local port=$(( BASE_PORT + i ))
+        local rest_port=$(( BASE_REST_PORT + i ))
         local server_log="$LOG_DIR/baseline_serving${i}_${model}.log"
 
-        local subcmd="numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${BASELINE_CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=true"
-
-        nohup bash -c "$subcmd" > "$server_log" 2>&1 &
-        echo "  baseline server${i}: port=${port} rest=${rest_port} cpus=${cpu_start}-${cpu_end} numa=${numa_node}"
+        echo "[FINAL CMD baseline server${i}] numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${BASELINE_CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG}"
+        nohup numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${BASELINE_CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG} > "$server_log" 2>&1 &
+        SERVER_PIDS+=($!)
+        echo "  baseline server${i}: pid=$! port=${port} rest=${rest_port} cpus=${cpu_start}-${cpu_end} numa=${numa_node}"
     done
 }
 
@@ -236,15 +372,17 @@ start_serving_annc() {
     local times=$1
     local model=$2
     local tf_model_dir=$3
-    local cpu_per_server=20
+    local cpu_per_server=24
+    local instances_per_node=$(( CORES_PER_NODE / cpu_per_server ))
+    [ "$instances_per_node" -lt 1 ] && instances_per_node=1
 
     for ((i = 0; i < times; i++)); do
-        local segment=$(( i % 4 ))
-        local cpu_start=$(( segment * cpu_per_server + (i / 4) * 80 + START_CPU ))
+        local segment=$(( i % instances_per_node ))
+        local cpu_start=$(( segment * cpu_per_server + (i / instances_per_node) * CORES_PER_NODE + SERVER_START_CPU ))
         local cpu_end=$(( cpu_start + cpu_per_server - 1 ))
         local numa_node=$(calculate_numa_node "$cpu_start")
-        local port=$(( 8888 + i ))
-        local rest_port=$(( 8988 + i ))
+        local port=$(( BASE_PORT + i ))
+        local rest_port=$(( BASE_REST_PORT + i ))
         local server_log="$LOG_DIR/annc_serving${i}_${model}.log"
         local annc_work="${ANNC_WORK_BASE}/${model}_${i}"
         mkdir -p "$annc_work"
@@ -256,16 +394,16 @@ start_serving_annc() {
             echo "  Timeline: $trace_file"
         fi
 
-        local subcmd="numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=/opt/llvm-21.1.3/install/bin:\${PATH} LD_LIBRARY_PATH=/opt/llvm-21.1.3/install/lib:/usr/local/lib64/python3.11/site-packages/tensorflow:\${LD_LIBRARY_PATH} LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=1 ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ANNC_FUSED_PROFILE=${ANNC_FUSED_PROFILE:-0} ANNC_FUSED_PROFILE_INTERVAL=${ANNC_FUSED_PROFILE_INTERVAL:-1000} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=true"
-
-        nohup bash -c "$subcmd" > "$server_log" 2>&1 &
-        echo "  ANNC server${i}: port=${port} rest=${rest_port} cpus=${cpu_start}-${cpu_end} numa=${numa_node}"
+        echo "[FINAL CMD ANNC server${i}] numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:\$PATH LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:\$LD_LIBRARY_PATH LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG}"
+        nohup numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:${PATH} LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:${LD_LIBRARY_PATH} LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG} > "$server_log" 2>&1 &
+        SERVER_PIDS+=($!)
+        echo "  ANNC server${i}: pid=$! port=${port} rest=${rest_port} cpus=${cpu_start}-${cpu_end} numa=${numa_node}"
     done
 }
 
 wait_for_serving() {
     local times=$1
-    local base_rest_port=${2:-8988}
+    local base_rest_port=${2:-$BASE_REST_PORT}
     local max_wait=${3:-60}
 
     echo "  Waiting for ${times} serving instance(s) to be ready ..."
@@ -289,28 +427,70 @@ wait_for_serving() {
     return 0
 }
 
+warmup_client() {
+    local times=$1
+    local model=$2
+    local batch=$3
+    local tag=$4
+    local cpu_per_client=24
+    local instances_per_node=$(( CORES_PER_NODE / cpu_per_client ))
+    [ "$instances_per_node" -lt 1 ] && instances_per_node=1
+
+    # client 与 server 使用对称的绑定策略，避免 baseline 与 ANNc 运行环境不同。
+    local client_start_cpu=$CLIENT_START_CPU
+    local pids=()
+
+    echo "  Warm-up (${WARMUP_REQUESTS} requests per instance, tag=${tag}) ..." | tee -a "$LOG_FILE"
+    for ((i = 0; i < times; i++)); do
+        local segment=$(( i % instances_per_node ))
+        local cpu_start=$(( segment * cpu_per_client + (i / instances_per_node) * CORES_PER_NODE + client_start_cpu ))
+        local cpu_end=$(( cpu_start + cpu_per_client - 1 ))
+        local numa_node=$(calculate_numa_node "$cpu_start")
+        local port=$(( BASE_PORT + i ))
+
+        local warmup_log="$LOG_DIR/warmup${i}-${model}-${batch}-${tag}.log"
+        local subcmd="perf_analyzer --request-count ${WARMUP_REQUESTS} --concurrency-range 1 -p 2000 --latency-threshold ${LATENCY_THRESHOLD} -m coarse --service-kind tfserving -i grpc --request-distribution poisson -b ${batch} -u localhost:${port} --input-data=random -v"
+
+        docker run --rm --cpuset-cpus="${cpu_start}-${cpu_end}" --cpuset-mems="${numa_node}" --net host nvcr.io/nvidia/tritonserver:24.05-py3-sdk sh -c "$subcmd" > "$warmup_log" 2>&1 &
+        pids+=($!)
+    done
+
+    local exit_code=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" && true || exit_code=1
+    done
+    if [ $exit_code -ne 0 ]; then
+        echo -e "  ${YELLOW}WARN${NC}: warm-up failed (non-fatal), continuing with real measurement ..." | tee -a "$LOG_FILE"
+    fi
+}
+
 start_client() {
     local times=$1
     local model=$2
     local batch=$3
     local concurrency=$4
     local tag=$5
-    local cpu_per_client=20
+    local cpu_per_client=24
+    local instances_per_node=$(( CORES_PER_NODE / cpu_per_client ))
+    [ "$instances_per_node" -lt 1 ] && instances_per_node=1
+
+    # client 与 server 使用对称的绑定策略，避免 baseline 与 ANNc 运行环境不同。
+    local client_start_cpu=$CLIENT_START_CPU
 
     client_pids=()
     for ((i = 0; i < times; i++)); do
-        local segment=$(( i % 4 ))
-        local cpu_start=$(( segment * cpu_per_client + (i / 4) * 80 + START_CPU ))
+        local segment=$(( i % instances_per_node ))
+        local cpu_start=$(( segment * cpu_per_client + (i / instances_per_node) * CORES_PER_NODE + client_start_cpu ))
         local cpu_end=$(( cpu_start + cpu_per_client - 1 ))
         local numa_node=$(calculate_numa_node "$cpu_start")
-        local port=$(( 8888 + i ))
+        local port=$(( BASE_PORT + i ))
 
         local client_log="$LOG_DIR/client${i}-${model}-${batch}-${tag}.log"
-        local subcmd="perf_analyzer --concurrency-range ${concurrency} -p 8000 --latency-threshold 200 -f perf.csv -m coarse --service-kind tfserving -i grpc --request-distribution poisson -b ${batch} -u localhost:${port} --percentile 99 --input-data=random -v"
+        local subcmd="perf_analyzer --concurrency-range ${concurrency} -p 8000 --latency-threshold ${LATENCY_THRESHOLD} -f perf.csv -m coarse --service-kind tfserving -i grpc --request-distribution poisson -b ${batch} -u localhost:${port} --percentile 99 --input-data=random -v"
 
         docker run --rm --cpuset-cpus="${cpu_start}-${cpu_end}" --cpuset-mems="${numa_node}" --net host nvcr.io/nvidia/tritonserver:24.05-py3-sdk sh -c "$subcmd" > "$client_log" 2>&1 &
         client_pids+=($!)
-        echo "client${i} log redirect to $client_log" | tee -a "$LOG_FILE"
+        echo "client${i} (tag=${tag}) cpus=${cpu_start}-${cpu_end} numa=${numa_node} log=$client_log" | tee -a "$LOG_FILE"
     done
 }
 
@@ -372,8 +552,44 @@ extract_result() {
 }
 
 stop_serving() {
-    pkill -f "tensorflow_model_server" 2>/dev/null || true
-    sleep 2
+    if [ ${#SERVER_PIDS[@]} -gt 0 ]; then
+        echo "  Stopping ${#SERVER_PIDS[@]} tracked server(s): ${SERVER_PIDS[*]}"
+        for pid in "${SERVER_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+                echo "    Killed PID $pid"
+            else
+                echo "    PID $pid already exited"
+            fi
+        done
+        sleep 2
+        for pid in "${SERVER_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+                echo "    Force-killed PID $pid"
+            fi
+        done
+        SERVER_PIDS=()
+    fi
+
+    echo "  Sweeping port occupants ..."
+    local found=0
+    for ((i = 0; i < INSTANCE_NUMS; i++)); do
+        for p in $((BASE_PORT + i)) $((BASE_REST_PORT + i)); do
+            local pids
+            pids=$(lsof -ti :$p 2>/dev/null || true)
+            if [ -n "$pids" ]; then
+                for pid in $pids; do
+                    kill -9 "$pid" 2>/dev/null || true
+                    echo "    Killed port $p occupant PID $pid"
+                    found=1
+                done
+            fi
+        done
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "    No port occupants found."
+    fi
     echo "  All serving processes stopped."
 }
 
@@ -406,26 +622,29 @@ run_model_test() {
     echo "concurrency: $concurrency" | tee -a "$LOG_FILE"
     echo "batch: $batchs" | tee -a "$LOG_FILE"
     echo "instance nums: $INSTANCE_NUMS" | tee -a "$LOG_FILE"
-    echo "start cpu: $START_CPU" | tee -a "$LOG_FILE"
+    echo "server start cpu: $SERVER_START_CPU" | tee -a "$LOG_FILE"
+    echo "client start cpu: $CLIENT_START_CPU" | tee -a "$LOG_FILE"
 
     if [ "$ENABLE_ANNC" -eq 1 ]; then
         local tag="annc"
-        echo "start serving (ANNC)..." | tee -a "$LOG_FILE"
-        start_serving_annc "$INSTANCE_NUMS" "$model" "$tf_model_dir" | tee -a "$LOG_FILE"
+        echo "start serving (ANNC) ..." | tee -a "$LOG_FILE"
+        kill_port_occupiers
+        start_serving_annc "$INSTANCE_NUMS" "$model" "$tf_model_dir" > >(tee -a "$LOG_FILE")
     else
         local tag="baseline"
-        echo "start serving (Baseline)..." | tee -a "$LOG_FILE"
-        start_serving_baseline "$INSTANCE_NUMS" "$model" "$tf_model_dir" | tee -a "$LOG_FILE"
+        echo "start serving (Baseline) ..." | tee -a "$LOG_FILE"
+        kill_port_occupiers
+        start_serving_baseline "$INSTANCE_NUMS" "$model" "$tf_model_dir" > >(tee -a "$LOG_FILE")
     fi
 
     if [ "$ENABLE_ANNC" -eq 1 ]; then
-        if ! wait_for_serving "$INSTANCE_NUMS" 8988 90; then
+        if ! wait_for_serving "$INSTANCE_NUMS" $BASE_REST_PORT 90; then
             echo -e "${RED}ANNC serving failed to start${NC}"
             stop_serving
             return 1
         fi
     else
-        if ! wait_for_serving "$INSTANCE_NUMS" 8988 60; then
+        if ! wait_for_serving "$INSTANCE_NUMS" $BASE_REST_PORT 60; then
             echo -e "${RED}Baseline serving failed to start${NC}"
             stop_serving
             return 1
@@ -436,13 +655,18 @@ run_model_test() {
     for batch in "${batch_list[@]}"; do
         client_pids=()
         RETRIES=0
+
+        if [ "${WARMUP_REQUESTS:-0}" -gt 0 ]; then
+            warmup_client "$INSTANCE_NUMS" "$model" "$batch" "$tag"
+        fi
+
         while [ $RETRIES -lt $MAX_RETRIES ]; do
             start_client "$INSTANCE_NUMS" "$model" "$batch" "$concurrency" "$tag"
             echo "Wait all clients..." | tee -a "$LOG_FILE"
 
-            # Capture profiler timeline while clients are running (baseline only, first attempt)
+            # Capture profiler timeline while clients are running (first attempt only)
             local profiler_pid=""
-            if [ $RETRIES -eq 39 ] && command -v python3 &>/dev/null; then
+            if [ "$ENABLE_PROFILER" -eq 1 ] && [ $RETRIES -eq 0 ] && command -v python3 &>/dev/null; then
                 echo "  Capturing TF Serving profiler timeline (continuous)..." | tee -a "$LOG_FILE"
                 local profiler_log="$LOG_DIR/profiler_${model}_${batch}_${tag}.log"
                 # Pass client PIDs so profiler loop knows when to stop
@@ -450,7 +674,7 @@ run_model_test() {
                 printf '%s\n' "${client_pids[@]}" > "$pid_file"
                 (
                     cd "${SCRIPT_DIR}"
-                    LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/tensorflow \
+                    LD_LIBRARY_PATH=${TF_PY_SITE_PACKAGES} \
                     python3 -c "
 import tensorflow as tf, os, json, time
 from collections import defaultdict
@@ -639,34 +863,55 @@ check_annc_graph() {
     local model=$1
 
     echo "  --- ANNC Graph Verification ---"
-    local annc_count=0
+    local rewrite_ok=0
+    local rewrite_failed=0
+    local annfused_count=0
+    local fusion_count=0
+    local kernel_log_count=0
+    local kernel_file_count=0
     for log in "$LOG_DIR"/annc_serving*_${model}.log; do
         if [ -f "$log" ]; then
-            local count
-            count=$(grep -c "ANNCFused\|graph rewrite completed\|annc_fused" "$log" 2>/dev/null || echo 0)
-            annc_count=$((annc_count + count))
+            local ok_count fail_count af_count f_count k_count
+            ok_count=$(grep -c "graph rewrite completed successfully" "$log" 2>/dev/null || true)
+            fail_count=$(grep -c "graph rewrite failed" "$log" 2>/dev/null || true)
+            af_count=$(grep -c "ANNCFused" "$log" 2>/dev/null || true)
+            # With ANNC_VERBOSE=1 some backends print fused kernel names like
+            # fused_dnn_embedding_hash_bucket_*; count those as valid fusions too.
+            f_count=$(grep -cE "fused_[a-zA-Z0-9_]+_[0-9A-Fa-f]{8}|fused_dnn_embedding_hash_bucket" "$log" 2>/dev/null || true)
+            k_count=$(grep -c "annc_generated_kernel" "$log" 2>/dev/null || true)
+            ok_count=${ok_count:-0}
+            fail_count=${fail_count:-0}
+            af_count=${af_count:-0}
+            f_count=${f_count:-0}
+            k_count=${k_count:-0}
+            rewrite_ok=$((rewrite_ok + ok_count))
+            rewrite_failed=$((rewrite_failed + fail_count))
+            annfused_count=$((annfused_count + af_count))
+            fusion_count=$((fusion_count + f_count))
+            kernel_log_count=$((kernel_log_count + k_count))
         fi
     done
 
-    if [ "$annc_count" -gt 0 ]; then
-        echo -e "  ${GREEN}PASS${NC}: ANNC graph rewrite detected (${annc_count} matches)"
+    # Also check the work directory for generated kernel .so files, because
+    # non-verbose mode does not print the kernel path in the serving log.
+    local work_dir="${ANNC_WORK_BASE}/${model}_0"
+    if [ -d "$work_dir" ]; then
+        kernel_file_count=$(find "$work_dir" -name "annc_generated_kernel.so" -type f 2>/dev/null | wc -l)
+    fi
+    kernel_file_count=${kernel_file_count:-0}
+
+    if [ "$rewrite_ok" -gt 0 ] && { [ "$annfused_count" -gt 0 ] || [ "$fusion_count" -gt 0 ] || [ "$kernel_file_count" -gt 0 ]; }; then
+        echo -e "  ${GREEN}PASS${NC}: ANNC graph rewrite succeeded (${rewrite_ok}), fused kernels detected (ANNCFused=${annfused_count}, other_fusions=${fusion_count}, kernel_files=${kernel_file_count})"
+    elif [ "$rewrite_ok" -gt 0 ]; then
+        echo -e "  ${YELLOW}PASS${NC}: ANNC graph rewrite succeeded (${rewrite_ok}), but no fused-kernel name was detected in logs/workdir"
     else
-        echo -e "  ${RED}FAIL${NC}: No ANNC graph rewrite detected in serving logs"
+        echo -e "  ${RED}FAIL${NC}: ANNC graph rewrite did not succeed (success=${rewrite_ok}, failed=${rewrite_failed}, ANNCFused=${annfused_count}, other_fusions=${fusion_count})"
     fi
 
-    local kernel_count=0
-    for log in "$LOG_DIR"/annc_serving*_${model}.log; do
-        if [ -f "$log" ]; then
-            local count
-            count=$(grep -c 'annc_generated_kernel\|fused op library' "$log" 2>/dev/null || echo 0)
-            kernel_count=$((kernel_count + count))
-        fi
-    done
-
-    if [ "$kernel_count" -gt 0 ]; then
-        echo -e "  ${GREEN}PASS${NC}: ANNC kernel .so detected (${kernel_count} matches)"
+    if [ "$kernel_log_count" -gt 0 ] || [ "$kernel_file_count" -gt 0 ]; then
+        echo -e "  ${GREEN}PASS${NC}: ANNC generated kernel .so detected (log_matches=${kernel_log_count}, files=${kernel_file_count})"
     else
-        echo -e "  ${YELLOW}WARN${NC}: No ANNC kernel .so reference found"
+        echo -e "  ${YELLOW}WARN${NC}: No ANNC generated kernel .so reference found"
     fi
 }
 
@@ -674,12 +919,43 @@ check_prerequisites
 
 IFS=',' read -ra models_array <<< "$MODELS"
 
-for model in "${models_array[@]}"; do
-    run_model_test "$model"
+# 运行模式列表：默认一次调用内顺序跑 baseline + ANNc，也可通过 RUN_BOTH=0 回到单模式。
+if [ "$RUN_BOTH" -eq 1 ]; then
+    MODE_LIST=("baseline" "annc")
+else
+    if [ "$ENABLE_ANNC" -eq 1 ]; then
+        MODE_LIST=("annc")
+    else
+        MODE_LIST=("baseline")
+    fi
+fi
+
+for mode in "${MODE_LIST[@]}"; do
+    if [ "$mode" = "annc" ]; then
+        ENABLE_ANNC=1
+        LOG_TAG="${ANNC_BACKEND}_annc"
+    else
+        ENABLE_ANNC=0
+        LOG_TAG="baseline"
+    fi
+
+    LOG_DIR="${BASE_LOG_DIR}/${LOG_TAG}"
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/test.log"
+
+    echo ""
+    echo "=========================================="
+    echo "Running mode: ${LOG_TAG}"
+    echo "LOG_DIR: ${LOG_DIR}"
+    echo "=========================================="
+
+    for model in "${models_array[@]}"; do
+        run_model_test "$model"
+    done
 done
 
 echo ""
 echo "=========================================="
 echo "All tests completed."
-echo "Logs: ${LOG_DIR}/"
+echo "Logs: ${BASE_LOG_DIR}/"
 echo "=========================================="
