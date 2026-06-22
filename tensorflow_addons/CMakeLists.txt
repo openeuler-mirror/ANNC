@@ -133,10 +133,8 @@ add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 
 if(ANNC_FOR_TF_SERVING)
     target_link_libraries(annc_optimizer PRIVATE dl pthread)
-    target_link_libraries(annc_fused_op PRIVATE dl pthread /usr/lib64/libopenblasp.so)
     target_include_directories(annc_fused_op PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/annc
-        /usr/include/openblas
     )
     set_target_properties(annc_optimizer annc_fused_op PROPERTIES
         LINK_FLAGS "-Wl,--allow-shlib-undefined"
