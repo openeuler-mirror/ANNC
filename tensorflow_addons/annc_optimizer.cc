@@ -95,7 +95,7 @@ int GetEnvInt(const char* name, int default_val = 0) {
 Status ANNCOptimizer::Init(
     const tensorflow::RewriterConfig_CustomGraphOptimizer* config) {
   enabled_ = true;
-  keep_temp_files_ = true;
+  keep_temp_files_ = false;
   annc_verbose_ = false;
   timeout_seconds_ = kDefaultTimeoutSeconds;
   temp_dir_ = kDefaultTempDir;
@@ -127,6 +127,11 @@ Status ANNCOptimizer::Init(
 
   if (GetEnvFlag(kEnvKeepTemps)) {
     keep_temp_files_ = true;
+  } else {
+    const char* env_keep = getenv(kEnvKeepTemps);
+    if (env_keep && (env_keep[0] == '0' || env_keep[0] == 'f' || env_keep[0] == 'F')) {
+      keep_temp_files_ = false;
+    }
   }
 
   const std::string env_backend = GetEnvStr(kEnvBackend);
@@ -247,16 +252,27 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
 
   std::string input_graphdef_file = GenerateTempFilename("annc_input_graph_");
   std::string output_graphdef_file = GenerateTempFilename(kOutputPrefix);
-  TF_RETURN_IF_ERROR(WriteGraphDefToFile(input_graph, &input_graphdef_file));
+
+  auto cleanup_temps = [&]() {
+    if (!keep_temp_files_) {
+      CleanupTempFiles({input_graphdef_file, output_graphdef_file});
+    }
+  };
+
+  Status write_status = WriteGraphDefToFile(input_graph, &input_graphdef_file);
+  if (!write_status.ok()) {
+    LOG(WARNING) << "Failed to write input GraphDef: " << write_status.message();
+    cleanup_temps();
+    *output = grappler_item.graph;
+    return OkStatus();
+  }
 
   Status status = InvokePipeline(input_graphdef_file, output_graphdef_file);
   if (!status.ok()) {
     LOG(WARNING) << "annc-tf-pipeline graph rewrite failed: " << status.message()
                  << ", returning original graph";
     *output = grappler_item.graph;
-    if (!keep_temp_files_) {
-      CleanupTempFiles({input_graphdef_file, output_graphdef_file});
-    }
+    cleanup_temps();
     return OkStatus();
   }
 
@@ -276,14 +292,7 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
               << "node count: " << output->node_size();
   }
 
-  if (!keep_temp_files_) {
-    CleanupTempFiles({input_graphdef_file, output_graphdef_file});
-  } else {
-    LOG(INFO) << "Keeping ANNCOptimizer temp files: "
-              << "\n  Input GraphDef: " << input_graphdef_file
-              << "\n  Output GraphDef: " << output_graphdef_file;
-  }
-
+  cleanup_temps();
   return OkStatus();
 }
 
@@ -378,7 +387,7 @@ Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
       argv.push_back(const_cast<char*>("--work_dir"));
       argv.push_back(const_cast<char*>(annc_work_dir_.c_str()));
     }
-    if (keep_temp_files_) {
+    if (keep_temp_files_ || !annc_work_dir_.empty()) {
       argv.push_back(const_cast<char*>("--keep_temps"));
     }
     if (annc_verbose_) {
