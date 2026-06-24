@@ -65,4 +65,8 @@ target_link_libraries(annc-tf2atir PRIVATE
     ${MLIR_LIBS}
     ${llvm_libs}
 )
+set_target_properties(annc-tf2atir PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../lib"
+    BUILD_RPATH "${Protobuf_LIB_DIRS}"
+)
 install(TARGETS annc-tf2atir DESTINATION bin)

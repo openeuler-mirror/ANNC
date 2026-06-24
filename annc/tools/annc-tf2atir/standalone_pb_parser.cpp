@@ -3,10 +3,30 @@
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
+#include <sstream>
+
+#include <google/protobuf/text_format.h>
 
 using namespace tensorflow;
 using annc::NodeInfo;
 using annc::OutputInfo;
+
+namespace {
+
+static std::string readFileContent(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) return {};
+    std::ostringstream oss;
+    oss << file.rdbuf();
+    return oss.str();
+}
+
+static bool hasSuffix(const std::string& filename, const std::string& suffix) {
+    if (filename.size() < suffix.size()) return false;
+    return filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+} // namespace
 
 // 构造函数
 StandalonePbParser::StandalonePbParser(const std::string& model_path, int64_t default_batch_size)
@@ -19,17 +39,45 @@ bool StandalonePbParser::loadModel() {
 
     namespace fs = std::filesystem;
     if (fs::is_regular_file(model_path_)) {
-        std::ifstream graph_file(model_path_, std::ios::binary);
-        if (!graph_file) {
-            std::cerr << "Error: Cannot open GraphDef at " << model_path_ << std::endl;
-            return false;
+        std::string filename = fs::path(model_path_).filename().string();
+        bool is_text = hasSuffix(filename, ".pbtxt");
+
+        auto tryParseSavedModel = [&]() -> bool {
+            if (is_text) {
+                std::string content = readFileContent(model_path_);
+                return !content.empty() &&
+                    google::protobuf::TextFormat::ParseFromString(content, saved_model_.get()) &&
+                    saved_model_->meta_graphs_size() > 0;
+            }
+            std::ifstream pb_file(model_path_, std::ios::binary);
+            return pb_file.is_open() && saved_model_->ParseFromIstream(&pb_file) &&
+                saved_model_->meta_graphs_size() > 0;
+        };
+
+        auto tryParseGraphDef = [&]() -> bool {
+            if (is_text) {
+                std::string content = readFileContent(model_path_);
+                return !content.empty() &&
+                    google::protobuf::TextFormat::ParseFromString(content, graph_def_.get()) &&
+                    graph_def_->node_size() > 0;
+            }
+            std::ifstream graph_file(model_path_, std::ios::binary);
+            return graph_file.is_open() && graph_def_->ParseFromIstream(&graph_file) &&
+                graph_def_->node_size() > 0;
+        };
+
+        if (tryParseSavedModel()) {
+            std::cout << "Successfully parsed SavedModel: " << model_path_ << std::endl;
+            gdef_ = &(saved_model_->meta_graphs(0).graph_def());
+            return true;
         }
-        if (!graph_def_->ParseFromIstream(&graph_file)) {
-            std::cerr << "Error: Failed to parse GraphDef at " << model_path_ << std::endl;
-            return false;
+        if (tryParseGraphDef()) {
+            std::cout << "Successfully parsed GraphDef: " << model_path_ << std::endl;
+            gdef_ = graph_def_.get();
+            return true;
         }
-        gdef_ = graph_def_.get();
-        return true;
+        std::cerr << "Error: Failed to parse file as SavedModel or GraphDef: " << model_path_ << std::endl;
+        return false;
     }
 
     std::string pb_path = model_path_ + "/saved_model.pb";
