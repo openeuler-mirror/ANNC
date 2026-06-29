@@ -84,7 +84,9 @@ namespace atir {
                 std::cout << "start KPGemm" << std::endl;
                 mlir::PassManager pm(m.getContext(),PassManager::getAnyOpAnchorName(),mlir::OpPassManager::Nesting::Implicit);
                 pm.addPass(createAtirTilingPass());
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
                 pm.addPass(createAtirCanonicalizePass());
+#endif
                 pm.addPass(createAtirFastCodegenPass());
                 if (pm.run(m.getOperation()).failed())
                 {

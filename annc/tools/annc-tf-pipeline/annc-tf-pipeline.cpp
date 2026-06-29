@@ -134,6 +134,14 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   std::string fusionPass = "--atir-op-fusion";
 
+  std::vector<std::string> asmArgs = {
+      anncAsm, fusedAtir.string(), "--atir-prune-func",
+      "--atir-fast-codegen",
+      "--convert-atir-to-affine", "-o", loweredMlir.string()};
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+  asmArgs[3] = "--atir-fast-codegen=enable-kdnn=true";
+#endif
+
   bool ok =
       runCommand({anncTf2Atir, opts.inputGraphDef, "--batch_size",
                   std::to_string(opts.batchSize), "-o", rawAtir.string()},
@@ -144,10 +152,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
       runCommand({anncFusionMetadata, fusedAtir.string(), "-o",
                   fusionMetadata.string()},
                  opts.verbose) &&
-      runCommand({anncAsm, fusedAtir.string(), "--atir-prune-func",
-                  "--atir-fast-codegen=enable-kdnn=true",
-                  "--convert-atir-to-affine", "-o", loweredMlir.string()},
-                 opts.verbose) &&
+      runCommand(asmArgs, opts.verbose) &&
       runCommand({annc, loweredMlir.string(), "--shared", "-o",
                   generatedSo.string()},
                  opts.verbose) &&

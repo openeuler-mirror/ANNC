@@ -1,9 +1,28 @@
 #!/bin/bash
-export PATH=${SCRIPT_DIR}/../install/bin:$PATH
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ADDONS_DIR="${ADDONS_DIR:-${SCRIPT_DIR}/build}"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_ANNC_INSTALL="${PROJECT_ROOT}/install"
+DEFAULT_ANNC_BUILD="${PROJECT_ROOT}/build"
+
+if [ -x "${DEFAULT_ANNC_INSTALL}/bin/annc-tf-pipeline" ]; then
+    DEFAULT_ANNC_BIN="${DEFAULT_ANNC_INSTALL}/bin"
+else
+    DEFAULT_ANNC_BIN="${DEFAULT_ANNC_BUILD}/bin"
+fi
+
+if [ -f "${SCRIPT_DIR}/build/libannc_optimizer.so" ]; then
+    DEFAULT_ADDONS_DIR="${SCRIPT_DIR}/build"
+elif [ -f "${DEFAULT_ANNC_INSTALL}/lib/libannc_optimizer.so" ]; then
+    DEFAULT_ADDONS_DIR="${DEFAULT_ANNC_INSTALL}/lib"
+else
+    DEFAULT_ADDONS_DIR="${DEFAULT_ANNC_BUILD}/lib"
+fi
+
+export PATH="${DEFAULT_ANNC_BIN}:$PATH"
+
+ADDONS_DIR="${ADDONS_DIR:-${DEFAULT_ADDONS_DIR}}"
 CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/session_config.pbtxt}"
 BASELINE_CONFIG_FILE="${BASELINE_CONFIG_FILE:-${SCRIPT_DIR}/baseline_session_config.pbtxt}"
 
@@ -31,8 +50,7 @@ CLIENT_START_CPU=${CLIENT_START_CPU:-}
 
 #export KDNN_FORCE_NEON=1
 
-# Timeline 开关：ANNC_TIMELINE=1 时把 ANNCFused 各阶段事件写到 trace.json
-# 用 chrome://tracing 或 https://ui.perfetto.dev/ 打开
+# 远程 ANNC 仓库当前未实现 ANNC_TRACE_FILE timeline 注入，默认不启用。
 ANNC_TIMELINE=${ANNC_TIMELINE:-0}
 
 # Profiler 开关：ENABLE_PROFILER=1 时启用 TF Serving profiler 服务并捕获 timeline
@@ -115,16 +133,15 @@ WARMUP_REQUESTS=${WARMUP_REQUESTS:-50}
 #
 # ============================================================================
 
-
-DEFAULT_ANNC_INSTALL="$(cd "${SCRIPT_DIR}/.." && pwd)/install"
 DEFAULT_TFSERVER="/home/l00562880/annc/serving/output/826723b62a7b3d9761abfbfce744e16b/execroot/tf_serving/bazel-out/aarch64-opt/bin/tensorflow_serving/model_servers/tensorflow_model_server"
 DEFAULT_MODEL_BASE="/home/l00562880/annc/sra_benchmark/modelzoo"
 
-ANNC_PIPELINE_PATH="${ANNC_PIPELINE_PATH:-${DEFAULT_ANNC_INSTALL}/bin/annc-tf-pipeline}"
+ANNC_PIPELINE_PATH="${ANNC_PIPELINE_PATH:-${DEFAULT_ANNC_BIN}/annc-tf-pipeline}"
 ANNC_BACKEND="${ANNC_BACKEND:-generic}"
 ANNC_WORK_BASE="${ANNC_WORK_BASE:-/tmp/annc_modelzoo_work}"
 TFSERVER_PATH="${TFSERVER_PATH:-${DEFAULT_TFSERVER}}"
 MODEL_BASE="${MODEL_BASE:-${DEFAULT_MODEL_BASE}}"
+ANNC_FUSED_OP_PATH="${ANNC_FUSED_OP_PATH:-${ADDONS_DIR}/libannc_fused_op.so}"
 
 # Derive LLVM install from the ANNC pipeline location so we don't hard-code /opt/llvm-21.1.3.
 ANNC_INSTALL_BIN="$(dirname "$ANNC_PIPELINE_PATH")"
@@ -173,7 +190,7 @@ declare -A model_params
 model_params["wide_and_deep"]="22:28:1,96"
 model_params["dlrm"]="44:54:1,256"
 model_params["deepfm"]="24:34:1,256"
-model_params["dffm"]="26:36:1,96"+
+model_params["dffm"]="26:36:1,96"
 model_params["dssm"]="32:37:1,530"
 # model_params["dssm"]=":10:1,530"
 
@@ -231,7 +248,12 @@ check_prerequisites() {
 
     if [ ! -f "${ADDONS_DIR}/libannc_optimizer.so" ]; then
         echo -e "${RED}ERROR${NC}: libannc_optimizer.so not found at ${ADDONS_DIR}/"
-        echo "  Run: cd ${SCRIPT_DIR} && bash build.sh"
+        echo "  Expected ANNC build artifact under ${PROJECT_ROOT}/install/lib or ${PROJECT_ROOT}/build/lib"
+        ok=0
+    fi
+
+    if [ ! -f "${ANNC_FUSED_OP_PATH}" ]; then
+        echo -e "${RED}ERROR${NC}: libannc_fused_op.so not found at ${ANNC_FUSED_OP_PATH}"
         ok=0
     fi
 
@@ -267,6 +289,7 @@ check_prerequisites() {
 
     echo -e "${GREEN}Prerequisites OK${NC}"
     echo "  ADDONS_DIR:      ${ADDONS_DIR}"
+    echo "  FUSED_OP_PATH:   ${ANNC_FUSED_OP_PATH}"
     echo "  CONFIG_FILE:     ${CONFIG_FILE}"
     echo "  BASELINE_CONFIG: ${BASELINE_CONFIG_FILE}"
     echo "  PIPELINE_PATH:   ${ANNC_PIPELINE_PATH}"
@@ -389,13 +412,11 @@ start_serving_annc() {
 
         local trace_env=""
         if [ "$ANNC_TIMELINE" -eq 1 ]; then
-            local trace_file="$LOG_DIR/trace_annc_${model}_${i}.json"
-            trace_env="ANNC_TRACE_FILE=${trace_file}"
-            echo "  Timeline: $trace_file"
+            echo -e "  ${YELLOW}WARN${NC}: ANNC_TIMELINE is not supported by this ANNC checkout; ignoring."
         fi
 
-        echo "[FINAL CMD ANNC server${i}] numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:\$PATH LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:\$LD_LIBRARY_PATH LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG}"
-        nohup numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:${PATH} LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:${LD_LIBRARY_PATH} LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG} > "$server_log" 2>&1 &
+        echo "[FINAL CMD ANNC server${i}] numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:\$PATH LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:\$LD_LIBRARY_PATH LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ANNC_FUSED_OP_PATH=${ANNC_FUSED_OP_PATH} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG}"
+        nohup numactl -C ${cpu_start}-${cpu_end} -m ${numa_node} env ${trace_env} PATH=${LLVM_PATH}/bin:${PATH} LD_LIBRARY_PATH=${LLVM_PATH}/lib:${TF_PY_SITE_PACKAGES}:${LD_LIBRARY_PATH:-} LD_PRELOAD=${ADDONS_DIR}/libannc_optimizer.so ANNC_ENABLE=1 ANNC_VERBOSE=${ANNC_VERBOSE:-1} ANNC_PIPELINE_PATH=${ANNC_PIPELINE_PATH} ANNC_WORK_DIR=${annc_work} ANNC_SAVEDMODEL_PATH=${tf_model_dir} ANNC_BACKEND=${ANNC_BACKEND} ANNC_FUSED_OP_PATH=${ANNC_FUSED_OP_PATH} ${TFSERVER_PATH} --port=${port} --rest_api_port=${rest_port} --model_name=coarse --model_base_path=${tf_model_dir} --tensorflow_session_config_file=${CONFIG_FILE} --tensorflow_intra_op_parallelism=${INTRA_OP} --tensorflow_inter_op_parallelism=${INTER_OP} --enable_profiler=${TF_PROFILER_FLAG} > "$server_log" 2>&1 &
         SERVER_PIDS+=($!)
         echo "  ANNC server${i}: pid=$! port=${port} rest=${rest_port} cpus=${cpu_start}-${cpu_end} numa=${numa_node}"
     done

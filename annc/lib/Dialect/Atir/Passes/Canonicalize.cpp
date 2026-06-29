@@ -142,6 +142,9 @@ class AtirCanonicalizePass : public AtirCanonicalizeBase<AtirCanonicalizePass> {
   AtirCanonicalizePass() = default;
 
   void runOnOperation() override {
+#ifndef ANNC_ENABLE_CONSTANT_FOLDING
+    return;
+#else
     auto m = getOperation();
     auto ctx = m.getContext();
 
@@ -151,6 +154,7 @@ class AtirCanonicalizePass : public AtirCanonicalizeBase<AtirCanonicalizePass> {
     RewritePatternSet patterns(ctx);
     patterns.add<MatMulRewrite>(ctx);
     (void)applyPatternsGreedily(m, std::move(patterns), config);
+#endif
   }
 };
 

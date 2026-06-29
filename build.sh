@@ -5,10 +5,15 @@ BUILD_TYPE="Release"
 INSTALL_PREFIX="${PWD}/install"
 ENABLE_LIBCXX="OFF"
 ENABLE_ASSERTIONS="ON"
+ENABLE_CONSTANT_FOLDING="OFF"
+ENABLE_KDNN_ADAPTOR="ON"
+KDNN_SOURCE="LOCAL"
+KDNN_DIR="${PWD}/third_party/KDNN"
 C_COMPILER="${CC:-gcc}"
 CXX_COMPILER="${CXX:-g++}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_DEPS="YES"
+REGEN_TF_PROTOS="NO"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -29,12 +34,44 @@ while [[ $# -gt 0 ]]; do
       ENABLE_ASSERTIONS="OFF"
       shift
       ;;
+    --enable-constant-folding)
+      ENABLE_CONSTANT_FOLDING="ON"
+      shift
+      ;;
+    --enable-kdnn-adaptor)
+      ENABLE_KDNN_ADAPTOR="ON"
+      shift
+      ;;
+    --disable-kdnn-adaptor)
+      ENABLE_KDNN_ADAPTOR="OFF"
+      shift
+      ;;
+    --kdnn-source)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --kdnn-source requires LOCAL or REMOTE" >&2
+        exit 1
+      fi
+      KDNN_SOURCE="$2"
+      shift 2
+      ;;
+    --kdnn-dir|--annc-kdnn-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: $1 requires a path" >&2
+        exit 1
+      fi
+      KDNN_DIR="$2"
+      shift 2
+      ;;
     --clean)
       CLEAN_BUILD="YES"
       shift
       ;;
     --no-install-deps)
       INSTALL_DEPS="NO"
+      shift
+      ;;
+    --regen-tf-protos)
+      REGEN_TF_PROTOS="YES"
       shift
       ;;
     -h|--help)
@@ -44,8 +81,14 @@ while [[ $# -gt 0 ]]; do
       echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
       echo "  --enable-libcxx               Enable libc++"
       echo "  --disable-assertions          Disable assertions"
+      echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support (default: OFF)"
+      echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: ON)"
+      echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
+      echo "  --kdnn-source [LOCAL|REMOTE]  KDNN source (default: LOCAL)"
+      echo "  --kdnn-dir <path>             Local KDNN root (default: ./third_party/KDNN)"
       echo "  --clean                       Clean build directory before build"
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
+      echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -55,6 +98,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" ]]; then
+  echo "ERROR: --kdnn-source must be LOCAL or REMOTE, got '${KDNN_SOURCE}'" >&2
+  exit 1
+fi
 
 # -----------------------------------------------------------------------------
 # Python dependency helpers
@@ -160,6 +208,42 @@ NANOBIND_DIR=$(get_nanobind_dir) || {
 }
 
 # -----------------------------------------------------------------------------
+# TensorFlow proto generation
+# -----------------------------------------------------------------------------
+
+ensure_tf_protos() {
+  local gen_dir="${PWD}/tf_protos_minimal/gen_code"
+  local required_headers=(
+    "${gen_dir}/tensorflow/core/framework/graph.pb.h"
+    "${gen_dir}/tensorflow/core/framework/node_def.pb.h"
+    "${gen_dir}/tensorflow/core/framework/tensor.pb.h"
+    "${gen_dir}/tensorflow/core/protobuf/saved_model.pb.h"
+  )
+
+  local missing="NO"
+  if [ "${REGEN_TF_PROTOS}" == "YES" ]; then
+    missing="YES"
+  else
+    for header in "${required_headers[@]}"; do
+      if [ ! -f "${header}" ]; then
+        missing="YES"
+        break
+      fi
+    done
+  fi
+
+  if [ "${missing}" == "NO" ]; then
+    echo "TensorFlow protobuf sources already generated (${gen_dir})"
+    return 0
+  fi
+
+  echo "Generating minimal TensorFlow protobuf sources..."
+  bash "${PWD}/tf_protos_minimal.sh" -d "${PWD}"
+}
+
+ensure_tf_protos
+
+# -----------------------------------------------------------------------------
 # Create build directory (preserve LLVM build if exists)
 # -----------------------------------------------------------------------------
 
@@ -181,20 +265,27 @@ echo "  Install Prefix: ${INSTALL_PREFIX}"
 echo "  C Compiler: ${C_COMPILER}"
 echo "  C++ Compiler: ${CXX_COMPILER}"
 echo "  Python: ${PYTHON}"
+echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
+echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+echo "  KDNN Source: ${KDNN_SOURCE}"
+echo "  KDNN Dir: ${KDNN_DIR}"
 
 cmake .. \
   -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
   -DLLVM_ENABLE_LIBCXX="${ENABLE_LIBCXX}" \
   -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
+  -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
+  -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
+  -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
+  -DANNC_KDNN_DIR="${KDNN_DIR}" \
+  -DKDNN_DIR="${KDNN_DIR}" \
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
   -DCMAKE_C_COMPILER="$(command -v ${C_COMPILER})" \
   -DCMAKE_CXX_COMPILER="$(command -v ${CXX_COMPILER})" \
   -DCMAKE_CXX_FLAGS="-fPIC" \
   -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
   -Dpybind11_DIR="${PYBIND11_DIR}" \
-  -Dnanobind_DIR="${NANOBIND_DIR}" \
-  -DKDNN_DIR=/annc/kdnn/out \
-  -DANNC_ENABLE_KDNN_ADAPTOR=ON
+  -Dnanobind_DIR="${NANOBIND_DIR}"
 
 if [ $? -ne 0 ]; then
     echo "CMake configuration failed, aborting build"

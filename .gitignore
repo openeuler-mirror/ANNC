@@ -21,4 +21,7 @@ tf_protos_minimal/
 third_party/llvm/
 third_party/json/
 third_party/kdnn/
+third_party/KDNN/
+tensorflow_addons/logs
+tensorflow_addons/build
 .cache/
