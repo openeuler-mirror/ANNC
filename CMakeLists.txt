@@ -173,6 +173,10 @@ include_directories(${json_SOURCE_DIR}/include)
 
 add_subdirectory(annc)
 add_subdirectory(python)
+# TensorFlow addons are part of the top-level build.  Build and install the
+# TF Serving/LD_PRELOAD variant from this CMake project.
+set(ANNC_FOR_TF_SERVING ON CACHE BOOL
+    "Build TensorFlow addons for TF Serving (LD_PRELOAD mode)" FORCE)
 add_subdirectory(tensorflow_addons)
 
 include(CTest)

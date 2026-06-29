@@ -12,9 +12,7 @@ else
     DEFAULT_ANNC_BIN="${DEFAULT_ANNC_BUILD}/bin"
 fi
 
-if [ -f "${SCRIPT_DIR}/build/libannc_optimizer.so" ]; then
-    DEFAULT_ADDONS_DIR="${SCRIPT_DIR}/build"
-elif [ -f "${DEFAULT_ANNC_INSTALL}/lib/libannc_optimizer.so" ]; then
+if [ -f "${DEFAULT_ANNC_INSTALL}/lib/libannc_optimizer.so" ]; then
     DEFAULT_ADDONS_DIR="${DEFAULT_ANNC_INSTALL}/lib"
 else
     DEFAULT_ADDONS_DIR="${DEFAULT_ANNC_BUILD}/lib"
@@ -248,7 +246,7 @@ check_prerequisites() {
 
     if [ ! -f "${ADDONS_DIR}/libannc_optimizer.so" ]; then
         echo -e "${RED}ERROR${NC}: libannc_optimizer.so not found at ${ADDONS_DIR}/"
-        echo "  Expected ANNC build artifact under ${PROJECT_ROOT}/install/lib or ${PROJECT_ROOT}/build/lib"
+        echo "  Expected top-level ANNC build artifact under ${PROJECT_ROOT}/install/lib or ${PROJECT_ROOT}/build/lib"
         ok=0
     fi
 

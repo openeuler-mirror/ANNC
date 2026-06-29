@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(ANNC_FOR_TF_SERVING "Build for TF Serving (LD_PRELOAD mode, no TF linkage)" OFF)
+option(ANNC_FOR_TF_SERVING "Build for TF Serving (LD_PRELOAD mode, no TF linkage)" ON)
 option(ANNC_WITH_THREADPOOL "Include ThreadPool in annc_fused_op" OFF)
 
 # ── TF Serving mode (LD_PRELOAD, no TF linkage, ABI=0) ───────────────────────
@@ -36,6 +36,15 @@ if(ANNC_FOR_TF_SERVING)
     )
 
     add_compile_options(-D_GLIBCXX_USE_CXX11_ABI=0)
+
+    # LLVM's HandleLLVMOptions may add -Wl,-z,defs globally, which rejects
+    # unresolved symbols when linking shared libraries.  In TF Serving mode the
+    # addon intentionally leaves TensorFlow/TSL/Abseil symbols unresolved so
+    # they are resolved from tensorflow_model_server at load time.
+    string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS
+        "${CMAKE_SHARED_LINKER_FLAGS}")
+    string(REPLACE "-z defs" "" CMAKE_SHARED_LINKER_FLAGS
+        "${CMAKE_SHARED_LINKER_FLAGS}")
 
 # ── pip TensorFlow mode ─────────────────────────────────────────────────────
 else()
@@ -137,7 +146,7 @@ if(ANNC_FOR_TF_SERVING)
         ${CMAKE_CURRENT_SOURCE_DIR}/annc
     )
     set_target_properties(annc_optimizer annc_fused_op PROPERTIES
-        LINK_FLAGS "-Wl,--allow-shlib-undefined"
+        LINK_FLAGS "-Wl,--allow-shlib-undefined -Wl,-z,undefs"
     )
 else()
     target_link_directories(annc_optimizer PRIVATE ${TF_LIB_DIR})
