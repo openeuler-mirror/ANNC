@@ -136,9 +136,11 @@ done
 
 # TensorFlow is large and version-sensitive; only verify presence, do not auto-install.
 if ! python_module_available "tensorflow"; then
-  echo "ERROR: TensorFlow is not installed for ${PYTHON}." >&2
-  echo "       ANNC requires TensorFlow at configure time. Install it with:" >&2
+  echo "ERROR: TensorFlow cannot be imported by ${PYTHON}." >&2
+  echo "       ANNC requires TensorFlow at configure time. Install compatible deps with:" >&2
   echo "         ${PYTHON} -m pip install -r requirements.txt" >&2
+  echo "       If the error mentions NumPy 2.x, downgrade with:" >&2
+  echo "         ${PYTHON} -m pip install 'numpy<2'" >&2
   DEP_ERRORS=$((DEP_ERRORS + 1))
 fi
 
