@@ -481,11 +481,7 @@ private:
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;
-#endif
-        //
-#ifdef ANNC_ENABLE_KDNN_ADAPTOR
-        command += " -L" KDNN_LIB_DIR " -lkdnn";
-        command += " -Wl,-rpath," KDNN_LIB_DIR;
+        command += " " ANNC_KDNN_OPENMP_LINK_FLAGS;
 #endif
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
@@ -512,6 +508,7 @@ private:
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;
+        command += " " ANNC_KDNN_OPENMP_LINK_FLAGS;
 #endif
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         

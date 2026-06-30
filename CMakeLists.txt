@@ -4,6 +4,7 @@ project(annc LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
+option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 
 # set(ABSL_PROPAGATE_CXX_STD ON)
@@ -172,6 +173,10 @@ include_directories(${json_SOURCE_DIR}/include)
 
 add_subdirectory(annc)
 add_subdirectory(python)
+# TensorFlow addons are part of the top-level build.  Build and install the
+# TF Serving/LD_PRELOAD variant from this CMake project.
+set(ANNC_FOR_TF_SERVING ON CACHE BOOL
+    "Build TensorFlow addons for TF Serving (LD_PRELOAD mode)" FORCE)
 add_subdirectory(tensorflow_addons)
 
 include(CTest)

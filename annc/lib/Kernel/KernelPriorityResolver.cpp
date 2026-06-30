@@ -22,6 +22,7 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
     auto& registry = KernelRegistry::instance();
 
     if (enableKdnn && request.hasPackedRhsFormat()) {
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (!request.requiresSpecialization()) {
             if (registry.hasKernel(request.op_type, "kdnn_packed")) return true;
         } else {
@@ -31,6 +32,7 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
             q.type_constraints = request.type_constraints;
             if (registry.hasKernel(q)) return true;
         }
+#endif
     }
 
     if (enableKdnn) {
@@ -61,10 +63,12 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
 std::optional<KernelInfo> resolveBestKernelInfo(
     const KernelResolveRequest& request, bool enableKdnn) {
     if (enableKdnn && request.hasPackedRhsFormat()) {
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (auto info = lookupKernelForBackend(request.op_type, "kdnn_packed",
                                                request.type_constraints)) {
             return info;
         }
+#endif
     }
 
     if (enableKdnn) {
