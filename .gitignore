@@ -1,7 +1,6 @@
 .vscode
 .venv
 
-AGENTS.md
 
 .idea
 
@@ -22,3 +21,5 @@ third_party/llvm/
 third_party/json/
 third_party/kdnn/
 .cache/
+.claude/
+docs/superpowers/
