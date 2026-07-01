@@ -178,9 +178,6 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | `tests/` | 测试 |
 | `third_party/json/` | nlohmann/json（CMake FetchContent 自动下载，header-only） |
 | `third_party/llvm/` | LLVM/MLIR 21.1.3（CMake FetchContent 自动下载，从源码编译） |
-<<<<<<< HEAD
-## 使用示例
-=======
 | `third_party/tensorflow/` | TF C++ 依赖（CMakeLists.txt，configure 时自动检测 pip TF） |
 
 ## 组件使用方法
@@ -188,7 +185,6 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 ### 端到端 GraphDef 重写
 
 `annc-tf-pipeline` 会自动编排 `annc-tf2atir`、`annc-opt`、`annc-fusion-metadata`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。
->>>>>>> annc_oe/dev_2
 
 ```shell
 annc-tf-pipeline \

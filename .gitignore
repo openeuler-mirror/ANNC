@@ -1,7 +1,6 @@
 .vscode
 .venv
 
-AGENTS.md
 
 .idea
 
@@ -25,3 +24,5 @@ third_party/KDNN/
 tensorflow_addons/logs
 tensorflow_addons/build
 .cache/
+.claude/
+docs/superpowers/
