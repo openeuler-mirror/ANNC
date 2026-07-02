@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <map>
@@ -499,44 +500,54 @@ std::vector<int> BuildDefaultKernelArgOrder(int num_inputs, int num_outputs) {
   return order;
 }
 
+Status CheckKernelStatus(std::int32_t status_code) {
+  if (status_code == 0) {
+    return OkStatus();
+  }
+  return errors::Internal("ANNC kernel returned failure status ", status_code);
+}
+
 Status CallMlirCiface(void* func, const std::vector<void*>& args) {
   switch (args.size()) {
     case 0:
-      reinterpret_cast<void (*)()>(func)();
-      return OkStatus();
+      return CheckKernelStatus(reinterpret_cast<std::int32_t (*)()>(func)());
     case 1:
-      reinterpret_cast<void (*)(void*)>(func)(args[0]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(void*)>(func)(args[0]));
     case 2:
-      reinterpret_cast<void (*)(void*, void*)>(func)(args[0], args[1]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(void*, void*)>(func)(args[0],
+                                                                 args[1]));
     case 3:
-      reinterpret_cast<void (*)(void*, void*, void*)>(func)(
-          args[0], args[1], args[2]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(void*, void*, void*)>(func)(
+              args[0], args[1], args[2]));
     case 4:
-      reinterpret_cast<void (*)(void*, void*, void*, void*)>(func)(
-          args[0], args[1], args[2], args[3]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*)>(func)(
+              args[0], args[1], args[2], args[3]));
     case 5:
-      reinterpret_cast<void (*)(void*, void*, void*, void*, void*)>(func)(
-          args[0], args[1], args[2], args[3], args[4]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(
+              void*, void*, void*, void*, void*)>(func)(
+              args[0], args[1], args[2], args[3], args[4]));
     case 6:
-      reinterpret_cast<void (*)(void*, void*, void*, void*, void*, void*)>(
-          func)(args[0], args[1], args[2], args[3], args[4], args[5]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(
+              void*, void*, void*, void*, void*, void*)>(func)(
+              args[0], args[1], args[2], args[3], args[4], args[5]));
     case 7:
-      reinterpret_cast<void (*)(
-          void*, void*, void*, void*, void*, void*, void*)>(func)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(
+              void*, void*, void*, void*, void*, void*, void*)>(func)(
+              args[0], args[1], args[2], args[3], args[4], args[5],
+              args[6]));
     case 8:
-      reinterpret_cast<void (*)(
-          void*, void*, void*, void*, void*, void*, void*, void*)>(func)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7]);
-      return OkStatus();
+      return CheckKernelStatus(
+          reinterpret_cast<std::int32_t (*)(
+              void*, void*, void*, void*, void*, void*, void*, void*)>(func)(
+              args[0], args[1], args[2], args[3], args[4], args[5],
+              args[6], args[7]));
     default:
       return errors::Unimplemented(
           "mlir_ciface supports up to 8 memref arguments, got ", args.size());

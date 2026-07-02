@@ -59,9 +59,12 @@ std::array<float, 4> runMatMulKernel(const std::string& backend) {
         throw std::runtime_error("MatMul kernel was not registered for backend: " + backend);
     }
 
-    auto kernel = loadKernelApi<void (*)(AnncMemRef2DF32*, AnncMemRef2DF32*, AnncMemRef2DF32*)>(
-        symbolOpt->c_str());
-    kernel(&output, &lhs, &rhs);
+    auto kernel = loadKernelApi<std::int32_t (*)(
+        AnncMemRef2DF32*, AnncMemRef2DF32*, AnncMemRef2DF32*)>(
+            symbolOpt->c_str());
+    if (kernel(&output, &lhs, &rhs) != 0) {
+        throw std::runtime_error("MatMul kernel returned failure status");
+    }
 
     return {outputData[0], outputData[1], outputData[2], outputData[3]};
 }

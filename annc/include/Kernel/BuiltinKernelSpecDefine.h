@@ -3,6 +3,7 @@
 
 #include "Kernel/KernelRegistry.h"
 #include "Kernel/KernelAPIMacros.h"
+#include "Kernel/KernelStatus.h"
 #include "Kernel/threadpool/ThreadPool.h"
 
 #ifndef ANNC_BUILTIN_KERNEL_SPECS_FILE
@@ -12,7 +13,10 @@
 using ::annc::kernels::Name;
 
 #define ANNC_KERNEL_SPEC(spec_token, builder_expr, args_decl, body) \
-    DEFINE_KERNEL(void, ANNC_AUTO_KERNEL_SYMBOL(spec_token), ANNC_UNPAREN args_decl) body
+    DEFINE_KERNEL(std::int32_t, ANNC_AUTO_KERNEL_SYMBOL(spec_token), ANNC_UNPAREN args_decl) { \
+        body \
+        return ::annc::kernels::statusCode(::annc::kernels::KernelStatus::Success); \
+    }
 #include ANNC_BUILTIN_KERNEL_SPECS_FILE
 #undef ANNC_KERNEL_SPEC
 #undef ANNC_BUILTIN_KERNEL_SPECS_FILE

@@ -4,9 +4,10 @@ ANNC_KERNEL(
      AnncMemRef2DF32* lhs,
      AnncMemRef2DF32* rhs),
     {
-        ::annc::kernels::kdnn_adaptor::matmul_kdnn_impl(
+        const auto status = ::annc::kernels::kdnn_adaptor::matmul_kdnn_impl(
             ::annc::threadpool::getCurrentThreadPool(),
             output,
             lhs,
             rhs);
+        return ::annc::kernels::statusCode(status);
     })

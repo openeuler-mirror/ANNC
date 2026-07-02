@@ -71,9 +71,10 @@ TEST_F(AutoKernelRegistryTest, AutoWrapperDefaultRegistrationAndForwarding) {
     AnncMemRef1DF32 input{inputData, inputData, 0, {4}, {1}};
     AnncMemRef1DF32 output{outputData, outputData, 0, {4}, {1}};
 
-    auto defaultKernel = loadKernelApi<void (*)(AnncMemRef1DF32*, AnncMemRef1DF32*)>(
-        symbolOpt->c_str());
-    defaultKernel(&output, &input);
+    auto defaultKernel =
+        loadKernelApi<std::int32_t (*)(AnncMemRef1DF32*, AnncMemRef1DF32*)>(
+            symbolOpt->c_str());
+    EXPECT_EQ(defaultKernel(&output, &input), 0);
 
     EXPECT_FLOAT_EQ(outputData[0], 3.0f);
     EXPECT_FLOAT_EQ(outputData[1], 6.0f);
@@ -98,10 +99,10 @@ TEST_F(AutoKernelRegistryTest, AutoWrapperSpecializationRegistrationAndForwardin
     g_auto_spec_f32_calls = 0;
     g_auto_spec_i32_calls = 0;
 
-    auto f32Kernel = loadKernelApi<void (*)()>(f32SymbolOpt->c_str());
-    auto i32Kernel = loadKernelApi<void (*)()>(i32SymbolOpt->c_str());
-    f32Kernel();
-    i32Kernel();
+    auto f32Kernel = loadKernelApi<std::int32_t (*)()>(f32SymbolOpt->c_str());
+    auto i32Kernel = loadKernelApi<std::int32_t (*)()>(i32SymbolOpt->c_str());
+    EXPECT_EQ(f32Kernel(), 0);
+    EXPECT_EQ(i32Kernel(), 0);
 
     EXPECT_EQ(g_auto_spec_f32_calls, 1);
     EXPECT_EQ(g_auto_spec_i32_calls, 1);

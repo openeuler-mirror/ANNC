@@ -1,11 +1,11 @@
-#include <cstdlib>
 #include <exception>
-#include <iostream>
 
+#include "Kernel/KernelStatus.h"
 #include "Kernel/threadpool/ThreadPool.h"
 #include "kdnn.hpp"
 #include "kdnn_adaptor/KDNNTensorInfoAdaptor.h"
 #include "kdnn_adaptor/KDNNThreadPoolAdaptor.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace annc::kernels::kdnn_adaptor {
 namespace {
@@ -19,11 +19,12 @@ KDNN::TensorInfo makeBiasTensorInfo(const AnncMemRef1DF32& bias) {
 
 } // namespace
 
-void matmul_add_relu_kdnn_impl(annc::threadpool::AnncThreadPool* thread_pool,
-                               AnncMemRef2DF32* output,
-                               AnncMemRef2DF32* lhs,
-                               AnncMemRef2DF32* rhs,
-                               AnncMemRef1DF32* bias) {
+KernelStatus matmul_add_relu_kdnn_impl(
+    annc::threadpool::AnncThreadPool* thread_pool,
+    AnncMemRef2DF32* output,
+    AnncMemRef2DF32* lhs,
+    AnncMemRef2DF32* rhs,
+    AnncMemRef1DF32* bias) {
     try {
         ScopedKDNNThreadPoolActivation scoped_thread_pool(thread_pool);
 
@@ -44,9 +45,13 @@ void matmul_add_relu_kdnn_impl(annc::threadpool::AnncThreadPool* thread_pool,
                         bias_info, attr);
         gemm.Run(lhs_ref.data, rhs_ref.data, output_ref.data, bias_data,
                  post_op_ptrs);
+        return KernelStatus::Success;
     } catch (const std::exception& ex) {
-        std::cerr << "[ANNC KDNN] MatMulAddRelu failed: " << ex.what() << '\n';
-        std::abort();
+        llvm::errs() << "[ANNC KDNN] MatMulAddRelu failed: " << ex.what() << '\n';
+        return KernelStatus::RuntimeError;
+    } catch (...) {
+        llvm::errs() << "[ANNC KDNN] MatMulAddRelu failed: unknown exception\n";
+        return KernelStatus::UnknownError;
     }
 }
 

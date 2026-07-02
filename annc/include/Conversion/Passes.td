@@ -11,7 +11,8 @@ def ConvertAtirToAffine : Pass<"convert-atir-to-affine", "ModuleOp"> {
     "AtirDialect",
     "mlir::affine::AffineDialect",
     "mlir::arith::ArithDialect",
-    "mlir::memref::MemRefDialect"
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 

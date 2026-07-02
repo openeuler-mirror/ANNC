@@ -5,10 +5,12 @@ ANNC_KERNEL(
      AnncMemRef2DF32* rhs,
      AnncMemRef1DF32* bias),
     {
-        ::annc::kernels::kdnn_adaptor::matmul_add_kdnn_impl(
-            ::annc::threadpool::getCurrentThreadPool(),
-            output,
-            lhs,
-            rhs,
-            bias);
+        const auto status =
+            ::annc::kernels::kdnn_adaptor::matmul_add_kdnn_impl(
+                ::annc::threadpool::getCurrentThreadPool(),
+                output,
+                lhs,
+                rhs,
+                bias);
+        return ::annc::kernels::statusCode(status);
     })

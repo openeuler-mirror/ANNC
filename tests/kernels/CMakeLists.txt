@@ -113,6 +113,8 @@ target_link_libraries(builtin_shared_spec_test
     PRIVATE
     ANNCKernel
     ANNCThreadPool
+    LLVMSupport
+    LLVMDemangle
 )
 if(ANNC_ENABLE_KDNN_ADAPTOR)
     target_compile_definitions(builtin_shared_spec_test PRIVATE ANNC_TEST_ENABLE_KDNN=1)
