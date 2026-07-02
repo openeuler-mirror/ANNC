@@ -86,6 +86,8 @@ endif()
 
 target_link_libraries(ANNCBuiltinKernels PUBLIC
     ANNCKernel
+    LLVMSupport
+    LLVMDemangle
 )
 
 target_sources(ANNCKernel PRIVATE "${GENERATED_REGISTRY_SOURCE}")

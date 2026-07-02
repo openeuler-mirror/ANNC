@@ -478,6 +478,8 @@ private:
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+        command += " -L" + getKernelLibPath() +
+                   " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;
@@ -505,6 +507,8 @@ private:
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+        command += " -L" + getKernelLibPath() +
+                   " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;

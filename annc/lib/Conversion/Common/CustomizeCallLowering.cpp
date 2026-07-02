@@ -265,7 +265,9 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   //   return;
   // }
 
-  auto funcType = rewriter.getFunctionType(callOperandTypes, TypeRange{});
+  auto statusType = rewriter.getI32Type();
+  auto funcType = rewriter.getFunctionType(callOperandTypes,
+                                           TypeRange{statusType});
 
   PatternRewriter::InsertionGuard guard(rewriter);
 
@@ -285,8 +287,23 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
 
   rewriter.setInsertionPoint(op);
 
-  rewriter.create<func::CallOp>(
-      op.getLoc(), kernelInfo->symbol_name, TypeRange{}, callOperands);
+  auto callOp = rewriter.create<func::CallOp>(
+      op.getLoc(), kernelInfo->symbol_name, TypeRange{statusType},
+      callOperands);
+  Value status = callOp.getResult(0);
+
+  if (auto parentFunc = op->getParentOfType<func::FuncOp>();
+      parentFunc && parentFunc->hasAttr("annc.kernel") &&
+      parentFunc.getNumResults() == 0) {
+    parentFunc.setFunctionType(rewriter.getFunctionType(
+        parentFunc.getFunctionType().getInputs(), TypeRange{statusType}));
+    if (auto returnOp =
+            dyn_cast<func::ReturnOp>(op->getBlock()->getTerminator())) {
+      if (returnOp.getNumOperands() == 0) {
+        returnOp->setOperands(status);
+      }
+    }
+  }
 
   SmallVector<Value> replacements;
   for (auto [result, output] : llvm::zip(op->getResults(), outputOperands)) {

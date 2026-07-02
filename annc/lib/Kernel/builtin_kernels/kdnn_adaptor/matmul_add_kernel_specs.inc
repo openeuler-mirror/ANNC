@@ -1,14 +1,16 @@
 ANNC_KERNEL(
-    Name("MatMul").Backend("kdnn_packed").TypeConstraint<float>("T"),
+    Name("MatMulAdd").Backend("kdnn").TypeConstraint<float>("T"),
     (AnncMemRef2DF32* output,
      AnncMemRef2DF32* lhs,
-     AnncMemRef2DF32* rhs),
+     AnncMemRef2DF32* rhs,
+     AnncMemRef1DF32* bias),
     {
         const auto status =
-            ::annc::kernels::kdnn_adaptor::matmul_kdnn_packed_impl(
+            ::annc::kernels::kdnn_adaptor::matmul_add_kdnn_impl(
                 ::annc::threadpool::getCurrentThreadPool(),
                 output,
                 lhs,
-                rhs);
+                rhs,
+                bias);
         return ::annc::kernels::statusCode(status);
     })
