@@ -5,6 +5,16 @@ graph_options {
   }
   rewrite_options {
     meta_optimizer_iterations: TWO
+    optimizers: "pruning"
+    optimizers: "ANNCOptimizer"
+    optimizers: "common_subgraph_elimination"
+    optimizers: "constfold"
+    optimizers: "shape"
+    optimizers: "arithmetic"
+    optimizers: "layout"
+    optimizers: "remap"
+    optimizers: "loop"
+    optimizers: "dependency"
     min_graph_nodes: -1
     custom_optimizers {
       name: "ANNCOptimizer"

@@ -13,47 +13,12 @@
 #include <random>
 #include <vector>
 
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/protobuf/saved_model.pb.h"
 #include "absl/strings/str_cat.h"
 
 namespace tensorflow {
 namespace grappler {
 
 namespace {
-
-bool ReadSavedModelGraphDef(const std::string& path, GraphDef* graph_def) {
-  std::string pb_path;
-  if (path.size() > 3 && path.substr(path.size() - 3) == ".pb") {
-    pb_path = path;
-  } else {
-    pb_path = path + "/saved_model.pb";
-  }
-
-  std::string data;
-  Status s = ReadFileToString(Env::Default(), pb_path, &data);
-  if (!s.ok()) {
-    LOG(WARNING) << "ANNC: cannot read SavedModel: " << pb_path
-                 << ": " << s.message();
-    return false;
-  }
-
-  SavedModel saved_model;
-  if (!saved_model.ParseFromString(data)) {
-    LOG(WARNING) << "ANNC: cannot parse SavedModel: " << pb_path;
-    return false;
-  }
-
-  if (saved_model.meta_graphs_size() == 0) {
-    LOG(WARNING) << "ANNC: SavedModel has no MetaGraphDefs: " << pb_path;
-    return false;
-  }
-
-  *graph_def = saved_model.meta_graphs(0).graph_def();
-  LOG(INFO) << "ANNC: extracted GraphDef from SavedModel: " << pb_path
-            << " (" << graph_def->node_size() << " nodes)";
-  return true;
-}
 
 constexpr char kEnvEnable[] = "ANNC_ENABLE";
 constexpr char kEnvPipelinePath[] = "ANNC_PIPELINE_PATH";
@@ -63,7 +28,6 @@ constexpr char kEnvVerbose[] = "ANNC_VERBOSE";
 constexpr char kEnvTimeout[] = "ANNC_TIMEOUT";
 constexpr char kEnvKeepTemps[] = "ANNC_KEEP_TEMPS";
 constexpr char kEnvFusedOpPath[] = "ANNC_FUSED_OP_PATH";
-constexpr char kEnvSavedModelPath[] = "ANNC_SAVEDMODEL_PATH";
 
 constexpr int kDefaultTimeoutSeconds = 300;
 constexpr char kDefaultTempDir[] = "/tmp";
@@ -139,11 +103,6 @@ Status ANNCOptimizer::Init(
     backend_ = env_backend;
   }
 
-  const std::string env_sm = GetEnvStr(kEnvSavedModelPath);
-  if (!env_sm.empty()) {
-    savedmodel_path_ = env_sm;
-  }
-
   if (config != nullptr) {
     for (const auto& param : config->parameter_map()) {
       const std::string& name = param.first;
@@ -165,8 +124,6 @@ Status ANNCOptimizer::Init(
         enabled_ = (value == "true" || value == "1");
       } else if (name == "batch_size") {
         batch_size_ = std::stoll(value);
-      } else if (name == "savedmodel_path") {
-        savedmodel_path_ = value;
       } else if (name == "backend") {
         backend_ = value;
       }
@@ -184,7 +141,6 @@ Status ANNCOptimizer::Init(
             << ", keep_temp_files=" << keep_temp_files_
             << ", annc_verbose=" << annc_verbose_
             << ", batch_size=" << batch_size_
-            << ", savedmodel_path=" << savedmodel_path_
             << ", backend=" << (backend_.empty() ? "generic" : backend_);
 
   return OkStatus();
@@ -236,17 +192,7 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
 
   LOG(INFO) << "Running ANNCOptimizer on graph: " << grappler_item.id;
 
-  GraphDef input_graph;
-
-  if (!savedmodel_path_.empty()) {
-    LOG(INFO) << "Reading SavedModel from: " << savedmodel_path_;
-    if (!ReadSavedModelGraphDef(savedmodel_path_, &input_graph)) {
-      LOG(WARNING) << "Failed to read SavedModel, falling back to Grappler graph";
-      input_graph = grappler_item.graph;
-    }
-  } else {
-    input_graph = grappler_item.graph;
-  }
+  GraphDef input_graph = grappler_item.graph;
 
   LOG(INFO) << "Input graph has " << input_graph.node_size() << " nodes";
 
@@ -470,3 +416,4 @@ void ANNCOptimizer::CleanupTempFiles(const std::vector<std::string>& filepaths) 
 
 }  // namespace grappler
 }  // namespace tensorflow
+

@@ -42,7 +42,6 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   std::string pipeline_path_;
   std::string annc_work_dir_;
   std::string temp_dir_;
-  std::string savedmodel_path_;
   std::string backend_;
   int timeout_seconds_;
   bool enabled_;
