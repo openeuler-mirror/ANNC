@@ -17,7 +17,7 @@ set(ANNC_THIRD_PARTY_KDNN_DIR "${CMAKE_SOURCE_DIR}/third_party/kdnn"
     CACHE PATH "Path used when fetching KDNN from git")
 set(ANNC_KDNN_GIT_REPOSITORY "https://gitcode.com/boostkit/kdnn.git"
     CACHE STRING "Git repository used to fetch KDNN")
-set(ANNC_KDNN_GIT_TAG "ccc8373f15652bbd99215c9812660651ade3d1b1"
+set(ANNC_KDNN_GIT_TAG "v3.1.0"
     CACHE STRING "Git revision used when fetching KDNN")
 
 if(TARGET_PLATFORM)
@@ -168,6 +168,10 @@ ExternalProject_Add(annc_third_party_kdnn
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DCMAKE_INSTALL_PREFIX=${ANNC_KDNN_INSTALL_DIR}
         -DTARGET_PLATFORM=${ANNC_KDNN_TARGET_PLATFORM}
+        -DENABLE_ASAN=off
+        -DENABLE_GCOV=off
+        -DENABLE_HBM=off
+        -DKDNN_CPU_RUNTIME=OMP
     BUILD_BYPRODUCTS "${KDNN_LIBRARY}"
     INSTALL_COMMAND ${CMAKE_COMMAND} --build . --target install
 )

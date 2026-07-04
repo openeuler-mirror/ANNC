@@ -14,6 +14,7 @@ ANNC 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统与 AA
 - **pybind11 + nanobind**：`pip3 install pybind11 nanobind`。`build.sh` 会在缺少时自动安装这两者；如不希望自动安装，可传入 `--no-install-deps`。
 - **protobuf-devel**：`sudo yum install -y protobuf-devel`（仅在 openEuler 上需要）
 - **clang**：`annc` driver 在链接阶段需要调用 clang，构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量覆盖其路径。
+- **ninja-build**：`build.sh` 默认使用 Ninja 生成器，需提前安装，例如 `sudo yum install -y ninja-build`。
 
 ## 3. 构建命令
 
@@ -23,11 +24,11 @@ ANNC 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统与 AA
 
 # 手动构建
 mkdir build && cd build
-cmake .. \
+cmake -G Ninja .. \
   -DCMAKE_INSTALL_PREFIX=/opt/ANNC \
   -DCMAKE_BUILD_TYPE=Debug
-make -j$(nproc)
-make install
+ninja -j$(nproc)
+ninja install
 ```
 
 ## 4. 运行测试
@@ -183,7 +184,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 ## 9. 常见陷阱
 
-- **LLVM 首次编译**：耗时 30-60 分钟，约需 50GB 磁盘空间。若空间不足，可清理 `build/` 后使用 `ninja -j4` 或 `make -j4` 降低并行度。
+- **LLVM 首次编译**：耗时 30-60 分钟，约需 50GB 磁盘空间。若空间不足，可清理 `build/` 后使用 `ninja -j4` 降低并行度。
 - **TensorFlow 版本**：CMake 在 configure 时会自动检测当前 Python 环境下的 TF。若切换 Python 环境或 TF 版本，需重新运行 CMake。
 - **`annc` driver 链接失败**：构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量指定 clang 路径。
 - **Python 绑定导入失败**：确认已安装 `pybind11` 和 `nanobind`，且构建时使用了正确的 Python 解释器（`PYTHON_EXECUTABLE`）。

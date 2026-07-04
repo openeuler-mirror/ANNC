@@ -7,8 +7,8 @@ ENABLE_LIBCXX="OFF"
 ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="ON"
-KDNN_SOURCE="LOCAL"
-KDNN_DIR="${PWD}/third_party/KDNN"
+KDNN_SOURCE="REMOTE"
+KDNN_DIR="${PWD}/third_party/kdnn"
 C_COMPILER="${CC:-gcc}"
 CXX_COMPILER="${CXX:-g++}"
 PYTHON="${PYTHON:-python3}"
@@ -101,6 +101,16 @@ done
 
 if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" ]]; then
   echo "ERROR: --kdnn-source must be LOCAL or REMOTE, got '${KDNN_SOURCE}'" >&2
+  exit 1
+fi
+
+# Check for ninja early so we fail with a clear message before CMake runs.
+if ! command -v ninja >/dev/null 2>&1; then
+  echo "ERROR: ninja is required but not found in PATH." >&2
+  echo "       Install it with one of the following commands:" >&2
+  echo "         sudo yum install ninja-build" >&2
+  echo "         sudo dnf install ninja-build" >&2
+  echo "         sudo apt-get install ninja-build" >&2
   exit 1
 fi
 
@@ -271,6 +281,7 @@ echo "  KDNN Source: ${KDNN_SOURCE}"
 echo "  KDNN Dir: ${KDNN_DIR}"
 
 cmake .. \
+  -G Ninja \
   -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
   -DLLVM_ENABLE_LIBCXX="${ENABLE_LIBCXX}" \
   -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
@@ -294,11 +305,11 @@ fi
 
 # Build and install
 echo "Starting build with $(nproc) parallel jobs..."
-make -j$(nproc)
+ninja -j$(nproc)
 if [ $? -ne 0 ]; then
     echo "Build failed, aborting installation"
     exit 1
 fi
 
-make install
+ninja install
 echo "Build and installation completed successfully"
