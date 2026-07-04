@@ -8,6 +8,6 @@
 # it is large and version-sensitive.
 
 pybind11==2.11.1
-nanobind==1.9.2
+nanobind>=2.4,<3
 numpy<2
 tensorflow==2.15.0
