@@ -31,6 +31,8 @@ ninja -j$(nproc)
 ninja install
 ```
 
+> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source LOCAL`（本地 `third_party/KDNN`）。如需自动从 release zip 下载并集成 KDNN，可传入 `./build.sh --kdnn-source RELEASE --kdnn-lib-variant sve-threadpool`。详见 `README.md` 的 CMake / 构建选项参考章节。
+
 ## 4. 运行测试
 
 ```bash

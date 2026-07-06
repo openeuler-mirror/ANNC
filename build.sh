@@ -7,13 +7,19 @@ ENABLE_LIBCXX="OFF"
 ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="ON"
-KDNN_SOURCE="REMOTE"
-KDNN_DIR="${PWD}/third_party/kdnn"
+KDNN_SOURCE="LOCAL"
+KDNN_DIR="${PWD}/third_party/KDNN"
+KDNN_LIB_VARIANT="sve-threadpool"
 C_COMPILER="${CC:-gcc}"
 CXX_COMPILER="${CXX:-g++}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_DEPS="YES"
 REGEN_TF_PROTOS="NO"
+
+# Internal flags used to detect whether the user explicitly passed certain
+# options on the command line.  These are not user-tunable defaults.
+_user_kdnn_dir_set=""
+_user_kdnn_lib_variant_set=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -48,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --kdnn-source)
       if [[ $# -lt 2 ]]; then
-        echo "ERROR: --kdnn-source requires LOCAL or REMOTE" >&2
+        echo "ERROR: --kdnn-source requires LOCAL, REMOTE, or RELEASE" >&2
         exit 1
       fi
       KDNN_SOURCE="$2"
@@ -60,6 +66,16 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       KDNN_DIR="$2"
+      _user_kdnn_dir_set="1"
+      shift 2
+      ;;
+    --kdnn-lib-variant|--annc-kdnn-lib-variant)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: $1 requires a variant" >&2
+        exit 1
+      fi
+      KDNN_LIB_VARIANT="$2"
+      _user_kdnn_lib_variant_set="1"
       shift 2
       ;;
     --clean)
@@ -84,8 +100,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support (default: OFF)"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: ON)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
-      echo "  --kdnn-source [LOCAL|REMOTE]  KDNN source (default: REMOTE)"
-      echo "  --kdnn-dir <path>             Local KDNN root (default: ./third_party/kdnn)"
+      echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: LOCAL)"
+      echo "  --kdnn-dir <path>             Local KDNN root, only valid with --kdnn-source LOCAL (default: ./third_party/KDNN)"
+      echo "  --kdnn-lib-variant <variant>  KDNN library variant for RELEASE mode (default: ${KDNN_LIB_VARIANT})"
       echo "  --clean                       Clean build directory before build"
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
@@ -99,8 +116,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" ]]; then
-  echo "ERROR: --kdnn-source must be LOCAL or REMOTE, got '${KDNN_SOURCE}'" >&2
+if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" && "${KDNN_SOURCE}" != "RELEASE" ]]; then
+  echo "ERROR: --kdnn-source must be LOCAL, REMOTE, or RELEASE, got '${KDNN_SOURCE}'" >&2
+  exit 1
+fi
+
+if [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
+  for cmd in unzip rpm2cpio cpio; do
+    if ! command -v "${cmd}" &>/dev/null; then
+      echo "ERROR: RELEASE mode requires '${cmd}' but it is not installed." >&2
+      echo "       On openEuler, install it with: sudo yum install -y unzip rpm cpio" >&2
+      exit 1
+    fi
+  done
+fi
+
+if [[ "${KDNN_SOURCE}" == "RELEASE" && -n "${_user_kdnn_dir_set}" ]]; then
+  echo "ERROR: --kdnn-dir is only valid with --kdnn-source LOCAL." >&2
+  exit 1
+fi
+
+if [[ "${KDNN_SOURCE}" != "RELEASE" && -n "${_user_kdnn_lib_variant_set}" ]]; then
+  echo "ERROR: --kdnn-lib-variant is only valid with --kdnn-source RELEASE." >&2
+  exit 1
+fi
+
+if [[ -n "${_user_kdnn_lib_variant_set}" && \
+      "${KDNN_LIB_VARIANT}" != "sve-threadpool" && \
+      "${KDNN_LIB_VARIANT}" != "sve-omp" && \
+      "${KDNN_LIB_VARIANT}" != "sve2-threadpool" && \
+      "${KDNN_LIB_VARIANT}" != "sve2-omp" ]]; then
+  echo "ERROR: --kdnn-lib-variant must be one of: sve-threadpool, sve-omp, sve2-threadpool, sve2-omp, got '${KDNN_LIB_VARIANT}'" >&2
   exit 1
 fi
 
@@ -278,7 +324,11 @@ echo "  Python: ${PYTHON}"
 echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
 echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
 echo "  KDNN Source: ${KDNN_SOURCE}"
-echo "  KDNN Dir: ${KDNN_DIR}"
+if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
+  echo "  KDNN Dir: ${KDNN_DIR}"
+elif [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
+  echo "  KDNN Lib Variant: ${KDNN_LIB_VARIANT}"
+fi
 
 cmake .. \
   -G Ninja \
@@ -289,6 +339,7 @@ cmake .. \
   -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
   -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
   -DANNC_KDNN_DIR="${KDNN_DIR}" \
+  -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \
   -DKDNN_DIR="${KDNN_DIR}" \
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
   -DCMAKE_C_COMPILER="$(command -v ${C_COMPILER})" \
