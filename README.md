@@ -354,7 +354,7 @@ annc model_lowered.mlir -t tests/annc/driver_dynamic.c -o test_app -v --shared
 | `-v` / `--verbose` | 打印详细命令 |
 | `--shared` / `-shared` | 生成 `.so`，否则生成可执行文件 |
 
-运行时可通过 `ANNC_CLANG` 覆盖 clang 路径：
+`annc` 链接阶段默认调用系统 `clang`，可通过环境变量 `ANNC_CLANG` 覆盖，详见[环境变量参考](#环境变量参考)。
 
 ```shell
 ANNC_CLANG=/path/to/clang annc model_lowered.mlir --shared -o kernel.so
@@ -439,7 +439,7 @@ MatMul fusion metadata 保持 `ANNCFused` 的运行时输入约定：fixed shape
 
 `ANNCFused` 通过 `zero_initialize_outputs` 控制输出 Tensor 是否在调用 kernel 前清零。该 attr 默认 `true`，保持旧 GraphDef 和非全量写输出 kernel 的保守行为；运行时对 `fusion_pattern=dnn_embedding_hash_bucket` 自动关闭清零，因为生成的 embedding kernel 会完整覆盖 `[batch, embedding_dim]` 输出，跳过清零可消除 `avg_output_init` 带来的主要包装层开销。该优化不要求 GraphDef 写入新 attr，避免不同 Serving OpDef 版本下 unknown attr 被忽略。
 
-`ANNCFused` 运行时性能打点默认关闭，排查融合 Op 延迟时可通过环境变量开启：
+`ANNCFused` 运行时性能打点默认关闭，排查融合 Op 延迟时可通过 `ANNC_FUSED_PROFILE` 与 `ANNC_FUSED_PROFILE_INTERVAL` 开启，详见[环境变量参考](#环境变量参考)。
 
 ```bash
 ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ...
@@ -484,6 +484,58 @@ cd /annc/ANNC_E2E/ANNC_zch/tensorflow_serving_addons
 ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
 ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 ```
+
+## 环境变量参考
+
+ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面向用户/运维的变量。CMake / 构建脚本内部变量（如 `ANNC_PATCH_FILE`）和已废弃变量未包含在内。
+
+### `annc` driver
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANNC_CLANG` | clang 可执行文件路径 | `clang` | 链接阶段使用的 clang 路径 |
+| `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | **内部使用**，动态测试编译时由 driver 自动设置，测试 driver 据此加载共享库 |
+
+### `ANNCOptimizer`（Grappler 插件）
+
+这些变量也可通过 `RewriterConfig.CustomGraphOptimizer.parameter_map` 配置，参数名见说明。
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANNC_ENABLE` | `1`/`0`/`true`/`false`/`yes`/`no` | `false` | 是否启用 ANNC 图改写 |
+| `ANNC_PIPELINE_PATH` | 路径 | `/usr/local/bin/annc-tf-pipeline` | `annc-tf-pipeline` 可执行文件路径（参数名：`pipeline_path` / `annc_pipeline_path`） |
+| `ANNC_WORK_DIR` | 目录路径 | 临时目录 | 编译产物工作目录（参数名：`work_dir` / `annc_work_dir`） |
+| `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`） |
+| `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
+| `ANNC_TIMEOUT` | 正整数（秒） | `300` | pipeline 调用超时时间（参数名：`timeout_seconds`） |
+| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留临时文件（参数名：`keep_temp_files`） |
+| `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
+
+### `ANNCFusedOp` 运行时
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANNC_FUSED_PROFILE` | 非空且非 `0` | 关闭 | 开启融合 Op 性能打点 |
+| `ANNC_FUSED_PROFILE_INTERVAL` | 正整数 | `100000` | 每隔多少次调用输出一次汇总统计 |
+| `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅对 `openblas` MatMul 路径做特殊判断 |
+
+### 构建与测试
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `TENSORFLOW_LIBRARY_DIR` | TensorFlow 库目录 | 自动检测 | CMake 配置时显式指定 TF 库路径 |
+| `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
+| `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
+| `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
+| `ANNCOPT` / `ANNASM` / `FILECHECK` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
+
+### 模型压测脚本 `test_model_zoo_annc.sh`
+
+脚本控制变量：`START_CPU` / `SERVER_START_CPU` / `CLIENT_START_CPU` / `CLIENT_NUMA_NODE` / `RUN_BOTH` / `LATENCY_THRESHOLD` / `WARMUP_REQUESTS` / `BASE_PORT` / `ENABLE_PROFILER`。
+
+ANNC / Serving 路径与参数：`ANNC_PIPELINE_PATH` / `LLVM_PATH` / `TF_PY_SITE_PACKAGES` / `ANNC_BACKEND` / `ANNC_WORK_BASE` / `TFSERVER_PATH` / `MODEL_BASE` / `ADDONS_DIR` / `CONFIG_FILE` / `BASELINE_CONFIG_FILE` / `ANNC_FUSED_OP_PATH`。
+
+其中 `ANNC_ENABLE`、`ANNC_VERBOSE`、`ANNC_WORK_DIR`、`ANNC_SAVEDMODEL_PATH`、`ANNC_BACKEND`、`ANNC_FUSED_OP_PATH` 等会注入 serving 子进程，由 `ANNCOptimizer` 与 `ANNCFusedOp` 读取。更详细的说明和默认值见脚本头部注释。
 
 ### Python 绑定
 

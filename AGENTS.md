@@ -13,7 +13,7 @@ ANNC 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统与 AA
 - **TensorFlow**：`pip3 install tensorflow`（CMake 会在 configure 时自动检测）。也可通过 `pip3 install -r requirements.txt` 安装所有 Python 依赖。
 - **pybind11 + nanobind**：`pip3 install pybind11 nanobind`。`build.sh` 会在缺少时自动安装这两者；如不希望自动安装，可传入 `--no-install-deps`。
 - **protobuf-devel**：`sudo yum install -y protobuf-devel`（仅在 openEuler 上需要）
-- **clang**：`annc` driver 在链接阶段需要调用 clang，构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量覆盖其路径。
+- **clang**：`annc` driver 在链接阶段需要调用 clang，构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量覆盖其路径（详见 `README.md` 环境变量参考章节）。
 - **ninja-build**：`build.sh` 默认使用 Ninja 生成器，需提前安装，例如 `sudo yum install -y ninja-build`。
 
 ## 3. 构建命令
@@ -154,7 +154,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 - Python `annc.builder` / `annc.ops` / `annc.types` 等公开 API；
 - CLI 工具参数（`annc-opt`、`annc-asm`、`annc`、`annc-tf-pipeline` 等）；
 - GraphDef / SavedModel 反向转换格式；
-- 配置项、环境变量（如 `ANNC_CLANG`、`ANNC_BACKEND`）。
+- 配置项、环境变量（如 `ANNC_CLANG`、`ANNC_BACKEND`），详见 `README.md` 环境变量参考章节。
 
 ### 模块大小与拆分
 
@@ -186,7 +186,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 - **LLVM 首次编译**：耗时 30-60 分钟，约需 50GB 磁盘空间。若空间不足，可清理 `build/` 后使用 `ninja -j4` 降低并行度。
 - **TensorFlow 版本**：CMake 在 configure 时会自动检测当前 Python 环境下的 TF。若切换 Python 环境或 TF 版本，需重新运行 CMake。
-- **`annc` driver 链接失败**：构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量指定 clang 路径。
+- **`annc` driver 链接失败**：构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量指定 clang 路径（详见 `README.md` 环境变量参考章节）。
 - **Python 绑定导入失败**：确认已安装 `pybind11` 和 `nanobind`，且构建时使用了正确的 Python 解释器（`PYTHON_EXECUTABLE`）。
 
 ## 10. 文档同步规则

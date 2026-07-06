@@ -20,6 +20,14 @@ string getKernelLibPath() {
     return KERNEL_LIB_PATH;
 }
 
+static string getClangPath() {
+    const char* env_clang = getenv("ANNC_CLANG");
+    if (env_clang && env_clang[0] != '\0') {
+        return string(env_clang);
+    }
+    return "clang";
+}
+
 // 
 class CommandExecutor {
 public:
@@ -473,7 +481,7 @@ private:
             return false;
         }
         
-        string command = "clang -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = getClangPath() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
@@ -503,7 +511,7 @@ private:
                                    ? config.mLirSymbolName + ".so"
                                    : config.outputFile;
         
-        string command = "clang -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
+        string command = getClangPath() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
@@ -535,7 +543,7 @@ private:
         setenv("ANNC_LIBRARY_NAME", libName.c_str(), 1);
         
         // 
-        string command = "clang -O3 \"" + config.testFile + "\"";
+        string command = getClangPath() + " -O3 \"" + config.testFile + "\"";
         // 
         command += " -DM=" + to_string(config.M);
         command += " -DK=" + to_string(config.K);
