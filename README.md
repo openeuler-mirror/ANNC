@@ -30,7 +30,7 @@ pip install pybind11 nanobind
 pip install tensorflow==2.15.0
 
 # 系统工具
-yum install cmake clang
+yum install cmake clang ninja-build
 ```
 
 > **注意**：部分命令可能需要 `sudo` 权限执行
@@ -531,8 +531,8 @@ module.operation.print(large_elements_limit=16)
 
 ## 常见问题
 
-1. **编译失败**：请确认已安装所有依赖（pybind11、nanobind、tensorflow、cmake）
-2. **编译内存不足**：减少并行编译任务数，使用 `ninja -j4` 或 `make -j4` 等方式限制
+1. **编译失败**：请确认已安装所有依赖（pybind11、nanobind、tensorflow、cmake、ninja-build）
+2. **编译内存不足**：减少并行编译任务数，使用 `ninja -j4` 等方式限制
 3. **LLVM 下载缓慢**：Gitee 镜像偶尔不稳定，可重试或手动下载 LLVM 源码到 `third_party/llvm/`
 
 ## 相关项目
