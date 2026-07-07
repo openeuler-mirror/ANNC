@@ -7,6 +7,7 @@ ENABLE_LIBCXX="OFF"
 ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="ON"
+ENABLE_COVERAGE="OFF"
 KDNN_SOURCE="LOCAL"
 KDNN_DIR="${PWD}/third_party/KDNN"
 KDNN_LIB_VARIANT="sve-threadpool"
@@ -90,6 +91,10 @@ while [[ $# -gt 0 ]]; do
       REGEN_TF_PROTOS="YES"
       shift
       ;;
+    --coverage)
+      ENABLE_COVERAGE="ON"
+      shift
+      ;;
     -h|--help)
       echo "Usage: $0 [options]"
       echo "Options:"
@@ -106,6 +111,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --clean                       Clean build directory before build"
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
+      echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -148,6 +154,14 @@ if [[ -n "${_user_kdnn_lib_variant_set}" && \
       "${KDNN_LIB_VARIANT}" != "sve2-omp" ]]; then
   echo "ERROR: --kdnn-lib-variant must be one of: sve-threadpool, sve-omp, sve2-threadpool, sve2-omp, got '${KDNN_LIB_VARIANT}'" >&2
   exit 1
+fi
+
+# Coverage note: keep the existing build type (forcing Debug would recompile
+# LLVM). Line coverage is accurate in Release; branch coverage is approximate.
+# The gcovr dependency is handled below alongside the other Python deps.
+if [ "${ENABLE_COVERAGE}" == "ON" ] && [ "${BUILD_TYPE}" == "Release" ]; then
+  echo "NOTE: --coverage with Release build: line coverage accurate, branch coverage approximate."
+  echo "      For precise branch coverage use a clean Debug build: rm -rf build && ./build.sh --coverage --build-type Debug"
 fi
 
 # Check for ninja early so we fail with a clear message before CMake runs.
@@ -238,6 +252,41 @@ for dep in pybind11 nanobind; do
   fi
 done
 
+# gcovr is the coverage report tool, only needed with --coverage.
+if [ "${ENABLE_COVERAGE}" == "ON" ]; then
+  if ! python_module_available gcovr; then
+    if [ "${INSTALL_DEPS}" == "YES" ]; then
+      echo "Missing Python package 'gcovr'. Attempting to install it automatically..."
+      if ! pip_install gcovr; then
+        echo "ERROR: Failed to install 'gcovr' via pip." >&2
+        echo "       Please install it manually, e.g.: ${PYTHON} -m pip install gcovr" >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      elif ! python_module_available gcovr; then
+        echo "ERROR: 'gcovr' was installed but cannot be imported by ${PYTHON}." >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      fi
+    else
+      echo "ERROR: --coverage requires 'gcovr' which is not installed." >&2
+      echo "       Install it with: ${PYTHON} -m pip install gcovr" >&2
+      echo "       Or rerun without --no-install-deps to auto-install." >&2
+      DEP_ERRORS=$((DEP_ERRORS + 1))
+    fi
+  fi
+  # pip --user installs the gcovr CLI to the user bin dir which may not be on
+  # PATH. CMake's find_program needs the CLI, so expose it for the cmake call.
+  if ! command -v gcovr >/dev/null 2>&1; then
+    USER_BIN="$("${PYTHON}" -c "import site; print(site.USER_BASE)")/bin"
+    if [ -x "${USER_BIN}/gcovr" ]; then
+      export PATH="${USER_BIN}:${PATH}"
+    fi
+  fi
+  if ! command -v gcovr >/dev/null 2>&1; then
+    echo "ERROR: gcovr is importable but its CLI could not be found on PATH." >&2
+    echo "       Add the pip user bin to PATH or install gcovr system-wide." >&2
+    DEP_ERRORS=$((DEP_ERRORS + 1))
+  fi
+fi
+
 # TensorFlow is large and version-sensitive; only verify presence, do not auto-install.
 if ! python_module_available "tensorflow"; then
   echo "ERROR: TensorFlow cannot be imported by ${PYTHON}." >&2
@@ -323,6 +372,7 @@ echo "  C++ Compiler: ${CXX_COMPILER}"
 echo "  Python: ${PYTHON}"
 echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
 echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+echo "  Coverage: ${ENABLE_COVERAGE}"
 echo "  KDNN Source: ${KDNN_SOURCE}"
 if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
   echo "  KDNN Dir: ${KDNN_DIR}"
@@ -337,6 +387,7 @@ cmake .. \
   -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
   -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
   -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
+  -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
   -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
   -DANNC_KDNN_DIR="${KDNN_DIR}" \
   -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \

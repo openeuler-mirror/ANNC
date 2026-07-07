@@ -5,6 +5,7 @@ project(annc LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
+option(ANNC_ENABLE_COVERAGE "Enable source-based code coverage (clang only)" OFF)
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 
 # set(ABSL_PROPAGATE_CXX_STD ON)
@@ -170,6 +171,20 @@ include_directories(${CMAKE_SOURCE_DIR}/annc/include)
 include_directories(${CMAKE_BINARY_DIR}/annc/include)
 
 include_directories(${json_SOURCE_DIR}/include)
+
+# Code coverage via gcov (--coverage, portable across gcc/clang). Set AFTER the
+# LLVM/MLIR sub-build so LLVM is neither recompiled nor relinked with --coverage;
+# the options apply only to directories processed afterwards (annc/, python/,
+# tests/, ...). Both compile and link flags are required: compile flags
+# instrument objects (referencing __gcov_* symbols), link flags pull in the gcov
+# runtime that resolves them — so any ANNC executable linking an instrumented
+# object (e.g. libANNCKernel) must also get the link flag, which the global
+# scope guarantees. Toggling coverage recompiles ANNC sources only, not LLVM.
+if(ANNC_ENABLE_COVERAGE)
+  add_compile_options(--coverage)
+  add_link_options(--coverage)
+  message(STATUS "ANNC code coverage enabled (--coverage / gcov).")
+endif()
 
 add_subdirectory(annc)
 add_subdirectory(python)
