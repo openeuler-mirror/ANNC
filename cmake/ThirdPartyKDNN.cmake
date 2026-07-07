@@ -1,8 +1,8 @@
 option(ANNC_ENABLE_KDNN_ADAPTOR "Build ANNC builtin kernels backed by KDNN" OFF)
 
 set(ANNC_KDNN_SOURCE "LOCAL"
-    CACHE STRING "KDNN source: LOCAL uses ANNC_KDNN_DIR; REMOTE fetches from ANNC_KDNN_GIT_REPOSITORY")
-set_property(CACHE ANNC_KDNN_SOURCE PROPERTY STRINGS LOCAL REMOTE)
+    CACHE STRING "KDNN source: LOCAL uses ANNC_KDNN_DIR; REMOTE fetches from ANNC_KDNN_GIT_REPOSITORY; RELEASE downloads a release zip")
+set_property(CACHE ANNC_KDNN_SOURCE PROPERTY STRINGS LOCAL REMOTE RELEASE)
 
 set(ANNC_KDNN_DIR "${CMAKE_SOURCE_DIR}/third_party/KDNN"
     CACHE PATH "Path to a local KDNN tree or installation root")
@@ -19,6 +19,22 @@ set(ANNC_KDNN_GIT_REPOSITORY "https://gitcode.com/boostkit/kdnn.git"
     CACHE STRING "Git repository used to fetch KDNN")
 set(ANNC_KDNN_GIT_TAG "v3.1.0"
     CACHE STRING "Git revision used when fetching KDNN")
+
+set(ANNC_KDNN_RELEASE_URL
+    "https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip"
+    CACHE STRING "URL of the KDNN release zip package")
+
+set(ANNC_KDNN_RELEASE_SHA256
+    "61a4b0b55a80ca742b43dde638b7fdd63c7ef36f26f3615e4f1ad008750217a8"
+    CACHE STRING "Expected SHA256 of the KDNN release zip package (empty to skip)")
+
+set(ANNC_KDNN_LIB_VARIANT "sve-threadpool"
+    CACHE STRING "KDNN library variant to use from the release package")
+set_property(CACHE ANNC_KDNN_LIB_VARIANT PROPERTY STRINGS
+    sve-threadpool sve-omp sve2-threadpool sve2-omp)
+
+set(ANNC_KDNN_RELEASE_DIR "${CMAKE_SOURCE_DIR}/third_party/kdnn-release"
+    CACHE PATH "Directory where the release KDNN package is extracted")
 
 if(TARGET_PLATFORM)
     set(_annc_default_kdnn_target_platform "${TARGET_PLATFORM}")
@@ -98,6 +114,107 @@ function(annc_import_kdnn kdnn_root)
     )
 endfunction()
 
+if(ANNC_KDNN_SOURCE STREQUAL "RELEASE")
+    if(ANNC_ENABLE_CONSTANT_FOLDING)
+        message(FATAL_ERROR
+            "ANNC_ENABLE_CONSTANT_FOLDING is not supported with "
+            "ANNC_KDNN_SOURCE=RELEASE in this version.")
+    endif()
+
+    if(NOT ANNC_KDNN_LIB_VARIANT MATCHES "^(sve-threadpool|sve-omp|sve2-threadpool|sve2-omp)$")
+        message(FATAL_ERROR
+            "Invalid ANNC_KDNN_LIB_VARIANT='${ANNC_KDNN_LIB_VARIANT}'. "
+            "Expected one of: sve-threadpool, sve-omp, sve2-threadpool, sve2-omp.")
+    endif()
+
+    set(_kdnn_release_root "${ANNC_KDNN_RELEASE_DIR}")
+    set(_kdnn_zip_file "${_kdnn_release_root}/BoostKit-boostcore-kdnn_3.1.0.zip")
+    set(_kdnn_rpm_file "${_kdnn_release_root}/boostcore-kdnn-3.1.0-1.aarch64.rpm")
+    set(_kdnn_extract_root "${_kdnn_release_root}/extract")
+    set(_kdnn_stamp_file "${_kdnn_release_root}/.annc_kdnn_release_stamp")
+    set(_kdnn_stamp_content "${ANNC_KDNN_RELEASE_URL}\n${ANNC_KDNN_LIB_VARIANT}")
+
+    set(_kdnn_release_cache_valid FALSE)
+    if(EXISTS "${_kdnn_release_root}/include/kdnn.hpp"
+       AND EXISTS "${_kdnn_release_root}/src/libkdnn.a"
+       AND EXISTS "${_kdnn_stamp_file}")
+        file(READ "${_kdnn_stamp_file}" _kdnn_existing_stamp)
+        if(_kdnn_existing_stamp STREQUAL "${_kdnn_stamp_content}\n")
+            set(_kdnn_release_cache_valid TRUE)
+        else()
+            message(STATUS "KDNN release configuration changed, clearing staged KDNN tree")
+            file(REMOVE_RECURSE "${_kdnn_release_root}/include")
+            file(REMOVE_RECURSE "${_kdnn_release_root}/src")
+            file(REMOVE "${_kdnn_stamp_file}")
+        endif()
+    endif()
+
+    if(NOT _kdnn_release_cache_valid)
+        if(NOT EXISTS "${_kdnn_rpm_file}" AND NOT EXISTS "${_kdnn_zip_file}")
+            message(STATUS "Downloading KDNN release from ${ANNC_KDNN_RELEASE_URL} ...")
+            set(_kdnn_download_hash_args "")
+            if(NOT "${ANNC_KDNN_RELEASE_SHA256}" STREQUAL "")
+                list(APPEND _kdnn_download_hash_args EXPECTED_HASH SHA256=${ANNC_KDNN_RELEASE_SHA256})
+            endif()
+            file(DOWNLOAD "${ANNC_KDNN_RELEASE_URL}" "${_kdnn_zip_file}"
+                 SHOW_PROGRESS TIMEOUT 300 ${_kdnn_download_hash_args} STATUS _download_status)
+            list(GET _download_status 0 _download_rc)
+            if(NOT _download_rc EQUAL 0)
+                list(GET _download_status 1 _download_err)
+                message(FATAL_ERROR "Failed to download KDNN release: ${_download_err}")
+            endif()
+        endif()
+
+        if(NOT EXISTS "${_kdnn_rpm_file}")
+            find_program(_unzip_cmd unzip REQUIRED)
+            execute_process(
+                COMMAND ${_unzip_cmd} -o "${_kdnn_zip_file}" -d "${_kdnn_release_root}"
+                RESULT_VARIABLE _unzip_rc)
+            if(NOT _unzip_rc EQUAL 0)
+                message(FATAL_ERROR "Failed to unzip KDNN release package")
+            endif()
+        endif()
+
+        find_program(_rpm2cpio_cmd rpm2cpio REQUIRED)
+        find_program(_cpio_cmd cpio REQUIRED)
+        file(MAKE_DIRECTORY "${_kdnn_extract_root}")
+        execute_process(
+            COMMAND ${_rpm2cpio_cmd} "${_kdnn_rpm_file}"
+            COMMAND ${_cpio_cmd} -idm
+            WORKING_DIRECTORY "${_kdnn_extract_root}"
+            RESULT_VARIABLE _extract_rc)
+        if(NOT _extract_rc EQUAL 0)
+            message(FATAL_ERROR "Failed to extract KDNN rpm package")
+        endif()
+
+        set(_kdnn_variant_dir "lib/sve/threadpool")
+        if(ANNC_KDNN_LIB_VARIANT STREQUAL "sve-omp")
+            set(_kdnn_variant_dir "lib/sve/omp")
+        elseif(ANNC_KDNN_LIB_VARIANT STREQUAL "sve2-threadpool")
+            set(_kdnn_variant_dir "lib/sve2/threadpool")
+        elseif(ANNC_KDNN_LIB_VARIANT STREQUAL "sve2-omp")
+            set(_kdnn_variant_dir "lib/sve2/omp")
+        endif()
+
+        set(_kdnn_lib_src
+            "${_kdnn_extract_root}/usr/local/kdnn/${_kdnn_variant_dir}/libkdnn.a")
+        if(NOT EXISTS "${_kdnn_lib_src}")
+            message(FATAL_ERROR "KDNN library variant not found: ${_kdnn_lib_src}")
+        endif()
+
+        file(MAKE_DIRECTORY "${_kdnn_release_root}/include")
+        file(MAKE_DIRECTORY "${_kdnn_release_root}/src")
+        file(COPY "${_kdnn_extract_root}/usr/local/kdnn/include/"
+             DESTINATION "${_kdnn_release_root}/include")
+        file(COPY "${_kdnn_lib_src}" DESTINATION "${_kdnn_release_root}/src")
+        file(WRITE "${_kdnn_stamp_file}" "${_kdnn_stamp_content}\n")
+    endif()
+
+    annc_import_kdnn("${_kdnn_release_root}")
+    message(STATUS "Using release KDNN from ${_kdnn_release_root}")
+    return()
+endif()
+
 if(ANNC_KDNN_SOURCE STREQUAL "LOCAL")
     annc_import_kdnn("${ANNC_KDNN_DIR}")
     message(STATUS "Using local KDNN from ${ANNC_KDNN_DIR}")
@@ -107,7 +224,7 @@ endif()
 if(NOT ANNC_KDNN_SOURCE STREQUAL "REMOTE")
     message(FATAL_ERROR
         "Invalid ANNC_KDNN_SOURCE='${ANNC_KDNN_SOURCE}'. "
-        "Expected LOCAL or REMOTE.")
+        "Expected LOCAL, REMOTE, or RELEASE.")
 endif()
 
 include(ExternalProject)
