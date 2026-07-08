@@ -42,6 +42,27 @@ python3 -m pytest tests/test_asm.py -v  # 单个测试文件
 
 顶层脚本：`test_matmul.py`（matmul 功能测试）、`tf_protos_minimal.sh`（TF protobuf 最小化生成）
 
+### C++ 单元测试（ctest）
+
+`tests/kernels/` 下的 GTest 用例通过 CTest 注册，是工程当前唯一接入 CTest 的测试套件：
+
+```bash
+cd build && ctest --output-on-failure   # 跑全部 GTest 用例
+cd build && ctest -R KernelRegistry     # 按名过滤
+```
+
+### 测试覆盖率（coverage 快速入口）
+
+对 ctest 套件出 gcov 覆盖率报告，一条命令：
+
+```bash
+./build.sh --coverage                    # configure（复用 build/，仅重编 ANNC；自动装 gcovr）
+cd build && ninja coverage               # 跑 ctest + 生成报告
+# HTML 报告：build/coverage/index.html
+```
+
+说明：插桩通过 `add_compile_options/add_link_options(--coverage)` 对 ANNC 作用域全局生效（定义在 LLVM 子构建之后，不波及 LLVM）。编译+链接 flag 都要加：编译期插桩引入 `__gcov_*` 符号，链接期拉 gcov 运行时解析——所有链接插桩库的可执行文件都需链接 flag，全局作用域保证这一点。切换 `--coverage` 仅重编 ANNC 源码。`gcovr` 缺失时 build.sh 会自动安装（同 pybind11/nanobind 机制）。Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖率用 `rm -rf build && ./build.sh --coverage --build-type Debug`（会重编 LLVM）。报告用绝对路径 `--filter` 限定到 Kernel 子系统（全局插桩会覆盖所有 ANNC 代码，但 ctest 只跑 Kernel，不过滤会被 0% 代码淹没）。
+
 ## 5. 代码风格
 
 - **C++ / TableGen / MLIR TD**：使用项目根目录 `.clang-format`（Google-based，列宽 80，2 空格缩进）。提交前运行：
