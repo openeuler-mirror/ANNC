@@ -58,6 +58,19 @@
 //      "./build.sh: Permission denied"，请检查 clang 是否已安装、build.sh
 //      是否具有可执行权限。
 //    - 可参考 jenkins/README.md 中的落地说明
+//
+// 7. KDNN RELEASE 模式（nightly 默认）
+//    - Build 阶段使用 --kdnn-source RELEASE。CMake configure 时从公开地址
+//      https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/
+//      BoostKit-boostcore-kdnn_3.1.0.zip 下载预编译包（无需鉴权），解 rpm
+//      后 staging 成 include/ + src/libkdnn.a，等价于 LOCAL 布局。
+//    - agent 必须预装：unzip、rpm2cpio、cpio
+//        sudo dnf install -y unzip rpm cpio
+//    - 变体默认 sve-threadpool，如需切换用 --kdnn-lib-variant 指定。
+//    - 下载产物缓存在 third_party/kdnn-release/，URL/变体不变则增量复用。
+//    - 若 Build 阶段报 "RELEASE mode requires 'rpm2cpio' but it is not
+//      installed" 或 "Failed to download KDNN release"，请按上述命令安装
+//      工具，或检查 agent 到 gitcode 的网络连通性。
 // ============================================================================
 
 pipeline {
@@ -169,12 +182,17 @@ PY
             steps {
                 script {
                     def cleanFlag = params.CLEAN_BUILD ? '--clean' : ''
+                    // 使用 RELEASE 模式拉取 KDNN：CMake 在 configure 阶段从
+                    // gitcode release 下载预编译 zip，解 rpm 后 staging 成
+                    // include/ + src/libkdnn.a，等价于 LOCAL 布局。
+                    // agent 需预装 unzip / rpm2cpio / cpio 并能访问 gitcode。
                     sh """
                         set -e
                         ./build.sh \
                           --build-type Release \
                           --install-prefix "${env.INSTALL_PREFIX}" \
                           --no-install-deps \
+                          --kdnn-source RELEASE \
                           ${cleanFlag}
                     """
                 }
