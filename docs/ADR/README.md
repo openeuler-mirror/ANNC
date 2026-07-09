@@ -31,7 +31,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | 编号 | 标题 | 状态 | 详情位置 |
 | --- | --- | --- | --- |
 | ADR-001 | 采用统一 IR（ATIR）而非框架专属优化 | accepted | [decisions.md#adr-001](decisions.md#adr-001) |
-| ADR-002 | 编译器三层解耦（前端/优化/运行时） | accepted | [decisions.md#adr-002](decisions.md#adr-002) |
+| ADR-002 | 编译器三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端） | accepted | [decisions.md#adr-002](decisions.md#adr-002) |
 | ADR-003 | 两层选择算子接入策略 | accepted | [decisions.md#adr-003](decisions.md#adr-003) |
 | ADR-004 | fork/exec 进程隔离 | accepted | [decisions.md#adr-004](decisions.md#adr-004) |
 | ADR-005 | 运行时无 fallback 决策 | accepted | [decisions.md#adr-005](decisions.md#adr-005) |
