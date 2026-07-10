@@ -108,7 +108,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: LOCAL)"
       echo "  --kdnn-dir <path>             Local KDNN root, only valid with --kdnn-source LOCAL (default: ./third_party/KDNN)"
       echo "  --kdnn-lib-variant <variant>  KDNN library variant for RELEASE mode (default: ${KDNN_LIB_VARIANT})"
-      echo "  --clean                       Clean build directory before build"
+      echo "  --clean                       Clean build directory before build (forces full reconfigure)"
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
@@ -364,45 +364,108 @@ fi
 # Run CMake
 # -----------------------------------------------------------------------------
 
-echo "Running CMake with the following configuration:"
-echo "  Build Type: ${BUILD_TYPE}"
-echo "  Install Prefix: ${INSTALL_PREFIX}"
-echo "  C Compiler: ${C_COMPILER}"
-echo "  C++ Compiler: ${CXX_COMPILER}"
-echo "  Python: ${PYTHON}"
-echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
-echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
-echo "  Coverage: ${ENABLE_COVERAGE}"
-echo "  KDNN Source: ${KDNN_SOURCE}"
-if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
-  echo "  KDNN Dir: ${KDNN_DIR}"
-elif [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
-  echo "  KDNN Lib Variant: ${KDNN_LIB_VARIANT}"
+# Read a value from CMakeCache.txt (format: KEY:TYPE=VALUE).
+get_cache_value() {
+  grep "^$1:" CMakeCache.txt 2>/dev/null | tail -n1 | cut -d= -f2-
+}
+
+# Check that key build options still match an existing cache.  CMake does not
+# automatically reconfigure when -D arguments change; silently reusing the old
+# cache would ignore user-requested changes (e.g. --kdnn-source RELEASE on a
+# tree previously configured with LOCAL).  If a mismatch is found, force an
+# explicit --clean reconfigure.
+check_cache_consistency() {
+  [ -f "CMakeCache.txt" ] || return 0
+
+  local key old_val new_val
+  local -a mismatches=()
+  local -a cache_checks=(
+    "CMAKE_BUILD_TYPE:${BUILD_TYPE}"
+    "CMAKE_INSTALL_PREFIX:${INSTALL_PREFIX}"
+    "CMAKE_C_COMPILER:$(command -v ${C_COMPILER})"
+    "CMAKE_CXX_COMPILER:$(command -v ${CXX_COMPILER})"
+    "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
+    "LLVM_ENABLE_LIBCXX:${ENABLE_LIBCXX}"
+    "LLVM_ENABLE_ASSERTIONS:${ENABLE_ASSERTIONS}"
+    "ANNC_ENABLE_CONSTANT_FOLDING:${ENABLE_CONSTANT_FOLDING}"
+    "ANNC_ENABLE_KDNN_ADAPTOR:${ENABLE_KDNN_ADAPTOR}"
+    "ANNC_ENABLE_COVERAGE:${ENABLE_COVERAGE}"
+    "ANNC_KDNN_SOURCE:${KDNN_SOURCE}"
+    "ANNC_KDNN_DIR:${KDNN_DIR}"
+    "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
+  )
+
+  for entry in "${cache_checks[@]}"; do
+    key="${entry%%:*}"
+    new_val="${entry#*:}"
+    old_val=$(get_cache_value "${key}")
+    if [ -n "${old_val}" ] && [ "${old_val}" != "${new_val}" ]; then
+      mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+    fi
+  done
+
+  if [ ${#mismatches[@]} -ne 0 ]; then
+    echo "ERROR: Build option(s) changed but an existing CMakeCache.txt was found." >&2
+    printf '%s\n' "${mismatches[@]}" >&2
+    echo "       Use --clean to reconfigure with the new options." >&2
+    exit 1
+  fi
+}
+
+# 增量构建: 若 build/CMakeCache.txt 已存在且参数一致, 跳过 cmake 重新配置,
+# 直接复用既有 cache。避免对已存在 cache 重复传 -D 触发的 cache 变量时序问题
+# (如 CMAKE_BUILD_TYPE / pybind11_DIR 在 LLVM add_subdirectory 作用域不可见)。
+# 若参数不一致, 必须先使用 --clean 重新配置。
+SKIP_CMAKE="NO"
+if [ -f "CMakeCache.txt" ]; then
+  check_cache_consistency
+  SKIP_CMAKE="YES"
 fi
 
-cmake .. \
-  -G Ninja \
-  -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
-  -DLLVM_ENABLE_LIBCXX="${ENABLE_LIBCXX}" \
-  -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
-  -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
-  -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
-  -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
-  -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
-  -DANNC_KDNN_DIR="${KDNN_DIR}" \
-  -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \
-  -DKDNN_DIR="${KDNN_DIR}" \
-  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
-  -DCMAKE_C_COMPILER="$(command -v ${C_COMPILER})" \
-  -DCMAKE_CXX_COMPILER="$(command -v ${CXX_COMPILER})" \
-  -DCMAKE_CXX_FLAGS="-fPIC" \
-  -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
-  -Dpybind11_DIR="${PYBIND11_DIR}" \
-  -Dnanobind_DIR="${NANOBIND_DIR}"
+if [ "${SKIP_CMAKE}" == "YES" ]; then
+  echo "Skipping CMake configuration (reusing existing CMakeCache.txt)"
+  echo "Use --clean to force a full reconfigure."
+else
+  echo "Running CMake with the following configuration:"
+  echo "  Build Type: ${BUILD_TYPE}"
+  echo "  Install Prefix: ${INSTALL_PREFIX}"
+  echo "  C Compiler: ${C_COMPILER}"
+  echo "  C++ Compiler: ${CXX_COMPILER}"
+  echo "  Python: ${PYTHON}"
+  echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
+  echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+  echo "  Coverage: ${ENABLE_COVERAGE}"
+  echo "  KDNN Source: ${KDNN_SOURCE}"
+  if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
+    echo "  KDNN Dir: ${KDNN_DIR}"
+  elif [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
+    echo "  KDNN Lib Variant: ${KDNN_LIB_VARIANT}"
+  fi
 
-if [ $? -ne 0 ]; then
-    echo "CMake configuration failed, aborting build"
-    exit 1
+  cmake .. \
+    -G Ninja \
+    -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
+    -DLLVM_ENABLE_LIBCXX="${ENABLE_LIBCXX}" \
+    -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
+    -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
+    -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
+    -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
+    -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
+    -DANNC_KDNN_DIR="${KDNN_DIR}" \
+    -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \
+    -DKDNN_DIR="${KDNN_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_C_COMPILER="$(command -v ${C_COMPILER})" \
+    -DCMAKE_CXX_COMPILER="$(command -v ${CXX_COMPILER})" \
+    -DCMAKE_CXX_FLAGS="-fPIC" \
+    -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
+    -Dpybind11_DIR="${PYBIND11_DIR}" \
+    -Dnanobind_DIR="${NANOBIND_DIR}"
+
+  if [ $? -ne 0 ]; then
+      echo "CMake configuration failed, aborting build"
+      exit 1
+  fi
 fi
 
 # Build and install
