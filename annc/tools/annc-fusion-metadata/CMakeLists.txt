@@ -7,6 +7,7 @@ set(LIBS
   MLIRFuncDialect
   AtirDialect
   MLIRDialect
+  ANNCFusionMetadata
 )
 
 add_llvm_executable(annc-fusion-metadata
@@ -17,7 +18,6 @@ add_llvm_executable(annc-fusion-metadata
 
 target_link_libraries(annc-fusion-metadata PRIVATE
   ${LIBS}
-  nlohmann_json::nlohmann_json
 )
 
 llvm_update_compile_flags(annc-fusion-metadata)
