@@ -43,7 +43,7 @@ ninja -j$(nproc)
 ninja install
 ```
 
-> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source LOCAL`（本地 `third_party/KDNN`）。如需自动从 release zip 下载并集成 KDNN，可传入 `./build.sh --kdnn-source RELEASE --kdnn-lib-variant sve-threadpool`。详见 `README.md` 的 CMake / 构建选项参考章节。
+> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source LOCAL`（本地 `third_party/KDNN`）。`--kdnn-source` 可选 `LOCAL` / `REMOTE` / `RELEASE` 三值：`REMOTE` 从 git 仓库 FetchContent（启用 constant folding 时经 `ApplyPatchIfNeeded.cmake` 自动应用 `patches/kdnn_rhs_packed` 补丁）；`RELEASE` 自动从 release zip 下载并集成，可搭配 `--kdnn-lib-variant sve-threadpool` 等变体。详见 `README.md` 的 CMake / 构建选项参考章节。
 
 ## 5. 运行测试
 
@@ -97,7 +97,6 @@ ANNC 是基于 MLIR 的 AI 编译工具链，将 TensorFlow GraphDef 编译为 A
 
 ```
 TF SavedModel/GraphDef
-  ├─→ tf-adaptor → JSON 描述
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
 ATIR MLIR
@@ -116,7 +115,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 - 位置：`annc/lib/Dialect/Atir/`（实现）、`annc/include/Dialect/Atir/`（TableGen TD 定义）
 - 核心 Op：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
-- Passes：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Initialize`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
+- Passes：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
 - Interfaces：`ShapeInfer`（形状推导）、`Interpret`（解释执行，实现在 `Interfaces/Interpret/` 中）
 - OpVerify：kernel 正确性验证（通过 `kpGenLibPath` / `llmGenLibPath` 指定验证库路径）
 
@@ -131,7 +130,6 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 | 工具 | 功能 |
 |------|------|
-| `tf-adaptor` | TF SavedModel → JSON 图描述 |
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接，无需 JSON；含 `standalone_pb_parser`） |
 | `annc-opt` | ATIR 优化（算子融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON） |
@@ -139,7 +137,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | `annc` | Driver：MLIR → .so / 可执行文件 |
 | `annc-verify` | Kernel 正确性验证 |
 | `annc-converter` | ATIR → TF SavedModel（反向）+ GraphDef 重写 |
-| `annc-tf-pipeline` | 端到端编排（`--tf-graphdef-rewrite`） |
+| `annc-tf-pipeline` | 端到端编排 |
 
 ### TensorFlow 集成
 
@@ -149,14 +147,14 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 ### Python 绑定
 
-- `python/` 使用 nanobind 将 ATIR 方言暴露给 Python（C++ 源：`AtirModule.cpp`、`Attributes.cpp`、`Types.cpp`）
+- `python/` 使用 pybind11 将 ATIR 方言暴露给 Python（C++ 源：`AtirModule.cpp`、`Attributes.cpp`、`Types.cpp`；nanobind 为 MLIR 自带 Python 绑定的传递依赖）
 - `python/annc/` 提供：`builder`、`ops`、`types`、`helper`、`enums`、`dialects/atir`
 
 ### 目录速览
 
 | 目录 | 内容 |
 |------|------|
-| `annc/tools/` | CLI 工具（10 个） |
+| `annc/tools/` | CLI 工具（8 个） |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg + 公共工具（`Common/`） |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
