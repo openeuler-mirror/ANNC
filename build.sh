@@ -412,6 +412,56 @@ check_cache_consistency() {
   fi
 }
 
+# 检测 CMake file(GLOB) 收集的源文件是否增删。CMake 的 file(GLOB) 默认不会在
+# 增量构建时自动 reconfig, 新增/删除源文件会"静默漏编"。这里在复用 cache 前
+# 扫描所有使用 file(GLOB *.cpp) 的 CMakeLists 所在目录, 与上次 configure 结束时
+# 保存的快照比对, 不一致则删除 CMakeCache.txt 触发重新配置。
+# 注: Kernel 子模块已用 CONFIGURE_DEPENDS, 此处不重复监控。
+check_source_glob_changes() {
+  local src_root="${SOURCE_ROOT:-..}"
+  local snapshot="./.glob_sources.snapshot"
+  local tmp dir sub entry
+  tmp=$(mktemp)
+
+  # 监控列表: 每项为 "CMakeLists 所在目录(相对项目根)|glob 子目录(相对该目录, 空表示当前目录)"
+  # 与各 CMakeLists 的 file(GLOB *.cpp) 模式对应; 不含已用 CONFIGURE_DEPENDS 的 Kernel。
+  local -a glob_dirs=(
+    "annc/lib/Dialect/Atir|"
+    "annc/lib/Dialect/Atir/OpVerify|"
+    "annc/lib/Dialect/Atir/Passes|"
+    "annc/lib/Dialect/Atir/Passes/Patterns|"
+    "annc/lib/Dialect/Atir/Passes/Patterns|CustomPatterns"
+    "annc/lib/Dialect/Atir/Interfaces|Interpret"
+    "annc/lib/Builder|"
+    "annc/lib/Conversion/Common|"
+    "annc/lib/Conversion/AtirToAffine|"
+    "annc/lib/Conversion/AtirToLinalg|"
+    "annc/lib/Target/aarch64|"
+    "annc/lib/Adaptor/tensorflow|"
+  )
+
+  for entry in "${glob_dirs[@]}"; do
+    dir="${src_root}/${entry%%|*}"
+    sub="${entry##*|}"
+    if [ -n "${sub}" ]; then
+      dir="${dir}/${sub}"
+    fi
+    if [ -d "${dir}" ]; then
+      find "${dir}" -maxdepth 1 -name "*.cpp" -printf "%P\n" 2>/dev/null | sort >> "${tmp}"
+    fi
+    echo "---" >> "${tmp}"
+  done
+
+  # 仅在复用既有 cache 时才需要触发 reconfig; 首次构建无 cache 时直接建立快照。
+  if [ -f "CMakeCache.txt" ] && [ -f "${snapshot}" ]; then
+    if ! diff -q "${snapshot}" "${tmp}" >/dev/null 2>&1; then
+      echo "Detected source file add/remove in file(GLOB) directories; forcing CMake reconfigure."
+      rm -f CMakeCache.txt
+    fi
+  fi
+  mv -f "${tmp}" "${snapshot}"
+}
+
 # 增量构建: 若 build/CMakeCache.txt 已存在且参数一致, 跳过 cmake 重新配置,
 # 直接复用既有 cache。避免对已存在 cache 重复传 -D 触发的 cache 变量时序问题
 # (如 CMAKE_BUILD_TYPE / pybind11_DIR 在 LLVM add_subdirectory 作用域不可见)。
@@ -419,7 +469,10 @@ check_cache_consistency() {
 SKIP_CMAKE="NO"
 if [ -f "CMakeCache.txt" ]; then
   check_cache_consistency
-  SKIP_CMAKE="YES"
+  check_source_glob_changes
+  [ -f "CMakeCache.txt" ] && SKIP_CMAKE="YES"
+else
+  check_source_glob_changes
 fi
 
 if [ "${SKIP_CMAKE}" == "YES" ]; then
