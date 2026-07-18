@@ -121,16 +121,20 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     }
 
     // Step 2b: real boundary inputs — operands whose defining op is neither
-    // in fusedOps nor a BufferOp.  BufferOp results that are not output
-    // buffers belong to intermediate fused ops and are skipped here (they
-    // will be erased together with their host ops in step 3).  Output
-    // buffers collected in step 2a are already in inputSet and skipped by
-    // the SetVector's deduplication.
+    // in fusedOps nor a BufferOp nor a ConstantOp.  BufferOp results that
+    // are not output buffers belong to intermediate fused ops and are
+    // skipped here (they will be erased together with their host ops in
+    // step 3).  Output buffers collected in step 2a are already in inputSet
+    // and skipped by the SetVector's deduplication.  Constants are
+    // compile-time literals — patterns surface the relevant ones as metadata
+    // attrs via getCustomOpSchema, so they are not passed as runtime
+    // operands.
     for (Operation *op : fusedOps) {
       for (const auto &operand : op->getOperands()) {
         Operation *defOp = operand.getDefiningOp();
         if (fusedSet.contains(defOp)) continue;
         if (defOp && isa<BufferOp>(defOp)) continue;
+        if (defOp && isa<ConstantOp>(defOp)) continue;
         inputSet.insert(operand);
       }
     }
@@ -163,6 +167,25 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
 
     auto callee = StringAttr::get(rewriter.getContext(), customOpName);
 
+    // Create the CustomizeOp after all its inputs are defined to preserve
+    // dominance.  Inputs may include ops defined after the anchor (e.g.
+    // constants feeding ops later in the block); placing the custom op at
+    // the anchor would violate SSA dominance.  Insert after the latest
+    // defining op among inputValues.
+    Operation *latestDef = nullptr;
+    for (Value v : inputValues) {
+      if (auto *defOp = v.getDefiningOp()) {
+        if (!latestDef || latestDef->isBeforeInBlock(defOp)) {
+          latestDef = defOp;
+        }
+      }
+    }
+    if (latestDef) {
+      rewriter.setInsertionPointAfter(latestDef);
+    } else {
+      rewriter.setInsertionPoint(anchor);
+    }
+
     auto customCallOp = rewriter.create<CustomizeOp>(
         anchor.getLoc(), resultTypes, inputValues, callee, metadata);
     if (auto rhsFormat = anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
@@ -177,16 +200,21 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     // Step 3: erase fusedOps plus intermediate BufferOps, in reverse block
     // order to respect def-use.  Kept BufferOps (tied to output ops) are
     // excluded since their results remain live as CustomizeOp operands.
-    SmallVector<Operation *> allEraseOps(fusedOps.begin(), fusedOps.end());
+    // Use SetVector to deduplicate — a BufferOp may already be in fusedOps
+    // (collected by the pattern) and also be re-added here as an intermediate
+    // buffer of a non-output fused op; erasing twice would be UB.
+    llvm::SetVector<Operation *> allEraseSet(fusedOps.begin(), fusedOps.end());
     for (Operation *op : fusedOps) {
       if (outputOps.contains(op)) continue;
       if (op->getNumOperands() == 0) continue;
       Operation *defOp = op->getOperand(0).getDefiningOp();
       if (defOp && isa<BufferOp>(defOp) &&
           !llvm::is_contained(keptBufferOps, defOp)) {
-        allEraseOps.push_back(defOp);
+        allEraseSet.insert(defOp);
       }
     }
+    SmallVector<Operation *, 64> allEraseOps(allEraseSet.begin(),
+                                             allEraseSet.end());
     llvm::sort(allEraseOps, [](Operation *a, Operation *b) {
       return a->isBeforeInBlock(b);
     });

@@ -26,7 +26,6 @@ namespace atir {
             // over aarch64 defaults during kernel resolution.
             if (enableKdnn) {
                 m->setAttr("annc.enable_kdnn", BoolAttr::get(ctx, true));
-                llvm::dbgs() << "ANNC: KDNN optimization enabled\n";
             }
 
             GreedyRewriteConfig config;
@@ -40,7 +39,6 @@ namespace atir {
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass() {
-        llvm::dbgs() << "this is createPimpFastCodegenPass\n";
         return std::make_unique<AtirFastCodegenPass>();
     }
 }  // namespace atir

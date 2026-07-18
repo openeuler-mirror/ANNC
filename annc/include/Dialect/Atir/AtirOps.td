@@ -1322,7 +1322,7 @@ def Atir_BroadcastOp : Atir_Op<"broadcast",
   }];
 }
 
-def Atir_ReshapeOp : Atir_Op<"Reshape", !listconcat([Pure], Interfaces)> {
+def Atir_ReshapeOp : Atir_Op<"Reshape", Interfaces> {
   let summary = "Reshape a tensor to a new shape without changing its underlying data.";
   let description = [{
     Produce a tensor with the same data as the input but reshaped to the specified shape.
