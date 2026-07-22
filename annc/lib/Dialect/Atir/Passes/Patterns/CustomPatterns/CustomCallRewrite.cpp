@@ -7,6 +7,7 @@ using namespace atir;
 struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   MatmulToCustomCallRewrite(MLIRContext* context, PatternBenefit benefit = 8)
       : CustomFusionPatternBase<MatMulOp>(context, benefit){}
+
   mlir::LogicalResult matchFusion(
       MatMulOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
@@ -43,6 +44,10 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
     return "MatMul";
   }
 
+  // Schema args follow the base class's collected input order:
+  //   MatMul-only:   [C, lhs, rhs]
+  //   MatMulAdd*:    [C, lhs, rhs, bias]
+  // (bias comes from AddOp's second operand, collected after MatMul's)
   CustomOpSchema getCustomOpSchema(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
