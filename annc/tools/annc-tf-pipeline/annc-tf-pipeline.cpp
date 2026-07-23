@@ -18,6 +18,7 @@ struct PipelineOptions {
   std::string workDir;
   int64_t batchSize = 2;
   bool keepTemps = false;
+  bool dumpFusionMetadata = false;
   bool verbose = false;
 };
 
@@ -91,6 +92,7 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "2"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
+  opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
 
   if (opts->inputGraphDef.empty() || opts->outputGraphDef.empty()) {
@@ -117,7 +119,8 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   std::string anncTf2Atir = executableSibling(argv[0], "annc-tf2atir");
   std::string anncOpt = executableSibling(argv[0], "annc-opt");
-  std::string anncFusionMetadata = executableSibling(argv[0], "annc-fusion-metadata");
+  std::string anncFusionMetadata =
+      executableSibling(argv[0], "annc-fusion-metadata");
   std::string anncAsm = executableSibling(argv[0], "annc-asm");
   std::string annc = executableSibling(argv[0], "annc");
   std::string anncConverter = executableSibling(argv[0], "annc-converter");
@@ -126,7 +129,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
       anncConverter, fusedAtir.string(), "--tf-graphdef-rewrite",
       "--input_graphdef", opts.inputGraphDef, "--output_graphdef",
       opts.outputGraphDef, "--shared_lib_path", runtimeSharedLibPath,
-      "--metadata_json", fusionMetadata.string()};
+  };
   if (!opts.kernelName.empty()) {
     converterArgs.push_back("--kernel_name");
     converterArgs.push_back(opts.kernelName);
@@ -148,10 +151,13 @@ static bool runGraphDefRewrite(int argc, char **argv) {
                  opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), fusionPass, "-o",
                   fusedAtir.string()},
-                 opts.verbose) &&
-      runCommand({anncFusionMetadata, fusedAtir.string(), "-o",
-                  fusionMetadata.string()},
-                 opts.verbose) &&
+                 opts.verbose);
+  if (ok && opts.dumpFusionMetadata) {
+    ok = runCommand({anncFusionMetadata, fusedAtir.string(), "-o",
+                     fusionMetadata.string()},
+                    opts.verbose);
+  }
+  ok = ok &&
       runCommand(asmArgs, opts.verbose) &&
       runCommand({annc, loweredMlir.string(), "--shared", "-o",
                   generatedSo.string()},
@@ -165,11 +171,23 @@ static bool runGraphDefRewrite(int argc, char **argv) {
               << generatedSo << "\n";
     std::cerr << "[annc-tf-pipeline] runtime shared_lib_path written to GraphDef: "
               << runtimeSharedLibPath << "\n";
+    if (opts.dumpFusionMetadata) {
+      std::cerr << "[annc-tf-pipeline] fusion metadata dumped to: "
+                << fusionMetadata << "\n";
+    }
   }
 
   if (!opts.keepTemps) {
     std::error_code ec;
-    fs::remove_all(work, ec);
+    if (opts.dumpFusionMetadata) {
+      for (const fs::path &temp :
+           {rawAtir, fusedAtir, loweredMlir, generatedSo}) {
+        fs::remove(temp, ec);
+        ec.clear();
+      }
+    } else {
+      fs::remove_all(work, ec);
+    }
   }
   return true;
 }

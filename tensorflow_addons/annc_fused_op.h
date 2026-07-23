@@ -42,35 +42,51 @@ class ANNCFusedOp : public OpKernel {
                                  bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample);
 
-  // Input classification counts
+  // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;
   int num_fixed_;
   int num_dynamic_;
 
-  // Core attributes
+  // Core runtime attributes copied from or derived from fusion metadata.
   std::string kernel_name_;
   int num_outputs_;
+  // One entry per output; used to build ranked output memref descriptors.
   std::vector<int> output_ranks_;
+  // Output-axis indices whose sizes come from the first dynamic input.
   std::vector<int> dynamic_dims_;
+  // One entry per input in constants/fixed/dynamic TensorFlow input order.
   std::vector<int> input_ranks_;
+  // Comma-separated dimensions per output; "?" denotes a dynamic dimension.
   std::vector<std::string> output_shapes_;
+  // Permutation over [input memrefs..., output memrefs...] for the kernel call.
   std::vector<int> kernel_arg_order_;
+  // Compatibility placeholder; currently read but not interpreted by runtime.
   std::string symbolic_signature_str_;
+  // Semantic label used for runtime policy such as output initialization.
   std::string fusion_pattern_;
+  // Legacy homogeneous output dtype retained by the TensorFlow Op contract.
   DataType dtype_;
+  // Generated library containing _mlir_ciface_<kernel_name_>.
   std::string shared_lib_path_;
+  // Calling convention; currently only "mlir_ciface" is accepted.
   std::string abi_;
+  // Whether runtime clears output tensors before calling the generated kernel.
   bool zero_initialize_outputs_;
 
   // Runtime state
+  // Shared-library path associated with the currently resolved kernel symbol.
   std::string current_so_path_;
+  // dlopen handle owned by the process-wide library cache.
   void* handle_;
+  // Resolved _mlir_ciface_<kernel_name_> entry point.
   void* mlir_ciface_func_;
+  // Optional hooks that expose TensorFlow's thread pool to generated kernels.
   void (*annc_set_current_threadpool_)(annc::threadpool::AnncThreadPool*);
   annc::threadpool::AnncThreadPool* (*annc_get_current_threadpool_)();
+  // True after the current shared library and kernel symbol are resolved.
   bool loaded_;
 
-  // Static library handle cache (memory cache for loaded libs)
+  // Process-wide cache prevents repeated dlopen calls for the same library.
   static mutex lib_cache_mu_;
   static std::unordered_map<std::string, void*> lib_cache_;
 };

@@ -17,12 +17,9 @@ std::vector<T> jsonValue(const nlohmann::json &json, const char *key,
 
 nlohmann::json fusionInfoToJson(const FusionInfo &info) {
   nlohmann::json json;
-  json["schema_version"] = info.schemaVersion;
   json["name"] = info.name;
   json["pattern"] = info.pattern;
   json["kernel_name"] = info.kernelName;
-  json["output_tensor"] = info.outputTensor;
-  json["original_nodes"] = info.originalNodes;
   json["args"] = nlohmann::json::array();
   for (const auto &arg : info.args) {
     json["args"].push_back({
@@ -44,18 +41,7 @@ nlohmann::json fusionInfoToJson(const FusionInfo &info) {
     });
   }
   json["pattern_attrs"] = info.patternAttrs;
-
-  // Legacy fields consumed by the current GraphDef rewrite path.
-  json["inputs"] = info.inputs;
-  json["input_shapes"] = info.inputShapes;
-  json["output_shape"] = info.outputShape;
   json["abi"] = info.abi.empty() ? "mlir_ciface" : info.abi;
-  json["n_constants"] = info.nConstants;
-  json["n_fixed"] = info.nFixed;
-  json["n_dynamic"] = info.nDynamic;
-  json["num_outputs"] = info.numOutputs;
-  json["output_ranks"] = info.outputRanks;
-  json["input_ranks"] = info.inputRanks;
   json["dynamic_dims"] = info.dynamicDims;
   json["kernel_arg_order"] = info.kernelArgOrder;
   json["symbolic_signature"] = info.symbolicSignature;
@@ -65,7 +51,6 @@ nlohmann::json fusionInfoToJson(const FusionInfo &info) {
 
 nlohmann::json fusionInfosToJson(const std::vector<FusionInfo> &infos) {
   nlohmann::json result;
-  result["schema_version"] = 1;
   result["fusions"] = nlohmann::json::array();
   for (const auto &info : infos) {
     result["fusions"].push_back(fusionInfoToJson(info));
@@ -81,12 +66,9 @@ llvm::Expected<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
 
   FusionInfo info;
   try {
-    info.schemaVersion = json.value("schema_version", 1);
     info.name = json.value("name", "");
     info.pattern = json.value("pattern", "");
     info.kernelName = json.value("kernel_name", "");
-    info.outputTensor = json.value("output_tensor", "");
-    info.originalNodes = jsonValue<std::string>(json, "original_nodes");
     info.patternAttrs =
         json.value("pattern_attrs", std::map<std::string, std::string>{});
 
@@ -114,23 +96,12 @@ llvm::Expected<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
       }
     }
 
-    info.inputs = jsonValue<std::string>(json, "inputs");
-    info.inputShapes =
-        json.value("input_shapes", std::vector<std::vector<int64_t>>{});
-    info.outputShape = jsonValue<int64_t>(json, "output_shape");
     info.abi = json.value("abi", "mlir_ciface");
     if (info.abi.empty()) info.abi = "mlir_ciface";
-    info.nConstants = json.value("n_constants", int64_t{0});
-    info.nFixed = json.value("n_fixed", int64_t{0});
-    info.nDynamic = json.value("n_dynamic", int64_t{0});
-    info.numOutputs = json.value("num_outputs", int64_t{1});
-    info.outputRanks = jsonValue<int64_t>(json, "output_ranks");
-    info.inputRanks = jsonValue<int64_t>(json, "input_ranks");
     info.dynamicDims = jsonValue<int64_t>(json, "dynamic_dims");
     info.kernelArgOrder = jsonValue<int64_t>(json, "kernel_arg_order");
     info.symbolicSignature = json.value("symbolic_signature", "");
     info.fallbackFunction = json.value("fallback_function", "");
-    normalizeFusionInfo(info);
   } catch (const std::exception &e) {
     return llvm::createStringError(std::errc::invalid_argument,
                                    "failed to parse fusion metadata JSON: %s",

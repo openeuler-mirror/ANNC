@@ -1,6 +1,4 @@
 #include "Dialect/Atir/AtirOps.h"
-#include "Dialect/Atir/CustomOpSchema.h"
-#include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
 
 #include "Helper.h"
@@ -8,6 +6,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/SHA256.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -116,16 +115,62 @@ static std::string uniquifyFusionName(ModuleOp module, StringRef baseName) {
   return unique;
 }
 
-static ArrayAttr makeStringArray(MLIRContext *ctx, ArrayRef<std::string> values) {
-  SmallVector<Attribute> attrs;
-  for (const auto &value : values) attrs.push_back(StringAttr::get(ctx, value));
-  return ArrayAttr::get(ctx, attrs);
-}
-
 static ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
   SmallVector<Attribute> attrs;
   Builder b(ctx);
   for (int64_t value : values) attrs.push_back(b.getI64IntegerAttr(value));
+  return ArrayAttr::get(ctx, attrs);
+}
+
+static int64_t getRank(Type type);
+static SmallVector<int64_t> getShape(Type type);
+
+static std::string getDTypeString(Type type) {
+  if (auto tensorType = dyn_cast<atir::TensorType>(type)) {
+    if (auto encoding = dyn_cast_or_null<StringAttr>(tensorType.getEncoding())) {
+      if (!encoding.getValue().empty()) return encoding.str();
+    }
+    return tensorType.getValueOfElementType();
+  }
+  if (auto floatType = dyn_cast<FloatType>(type)) {
+    if (floatType.isF16()) return "f16";
+    if (floatType.isF32()) return "f32";
+    if (floatType.isF64()) return "f64";
+  }
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    return (Twine("i") + Twine(intType.getWidth())).str();
+  }
+  return "";
+}
+
+static DictionaryAttr makeFusionArgAttr(MLIRContext *ctx, StringRef role,
+                                        StringRef tfName, Type type) {
+  Builder builder(ctx);
+  SmallVector<NamedAttribute> attrs;
+  attrs.push_back(builder.getNamedAttr("role", builder.getStringAttr(role)));
+  attrs.push_back(
+      builder.getNamedAttr("tf_name", builder.getStringAttr(tfName)));
+  attrs.push_back(
+      builder.getNamedAttr("shape", makeI64Array(ctx, getShape(type))));
+  attrs.push_back(
+      builder.getNamedAttr("rank", builder.getI64IntegerAttr(getRank(type))));
+  attrs.push_back(builder.getNamedAttr(
+      "dtype", builder.getStringAttr(getDTypeString(type))));
+  return DictionaryAttr::get(ctx, attrs);
+}
+
+struct FusionArgSpec {
+  std::string role;
+  std::string tfName;
+  Type type;
+};
+
+static ArrayAttr makeFusionArgArray(MLIRContext *ctx,
+                                    ArrayRef<FusionArgSpec> specs) {
+  SmallVector<Attribute> attrs;
+  for (const auto &spec : specs) {
+    attrs.push_back(makeFusionArgAttr(ctx, spec.role, spec.tfName, spec.type));
+  }
   return ArrayAttr::get(ctx, attrs);
 }
 
@@ -161,23 +206,50 @@ static bool hasCompatibleBiasDim(Type outputType, Type biasType) {
   return outputCols == biasLen;
 }
 
-static std::string shapeToString(Type type) {
-  auto tensorType = dyn_cast<atir::TensorType>(type);
-  if (!tensorType) return "";
-
-  std::string out;
-  llvm::raw_string_ostream os(out);
-  llvm::interleaveComma(tensorType.getShape(), os,
-                        [&](int64_t dim) { os << dim; });
-  return os.str();
-}
-
 static bool startsWith(StringRef value, StringRef prefix) {
   return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
 }
 
 static bool hasTfNamePrefix(Operation *op, StringRef prefix) {
   return startsWith(getTfName(op), prefix);
+}
+
+static bool definesAny(Operation *op, ArrayRef<Value> values) {
+  for (Value result : op->getResults()) {
+    for (Value value : values) {
+      if (result == value) return true;
+    }
+  }
+  return false;
+}
+
+static void collectDefiningOpsPostOrder(
+    Operation *op, ArrayRef<Value> boundaryValues,
+    SmallPtrSetImpl<Operation *> &visited,
+    SmallVectorImpl<Operation *> &ops) {
+  if (!op || visited.contains(op) || isa<VariableOp>(op)) return;
+  if (definesAny(op, boundaryValues)) return;
+  visited.insert(op);
+
+  for (Value operand : op->getOperands()) {
+    if (llvm::is_contained(boundaryValues, operand)) continue;
+    collectDefiningOpsPostOrder(operand.getDefiningOp(), boundaryValues,
+                                visited, ops);
+  }
+  ops.push_back(op);
+}
+
+static bool isClosedKernelOpSet(ArrayRef<Operation *> ops,
+                                ArrayRef<Value> boundaryValues) {
+  SmallPtrSet<Operation *, 32> opSet(ops.begin(), ops.end());
+  for (Operation *op : ops) {
+    for (Value operand : op->getOperands()) {
+      if (llvm::is_contained(boundaryValues, operand)) continue;
+      Operation *def = operand.getDefiningOp();
+      if (!def || !opSet.contains(def)) return false;
+    }
+  }
+  return true;
 }
 
 template <typename OpT>
@@ -256,7 +328,8 @@ static OpT findNamedOp(func::FuncOp func, StringRef name) {
 static func::FuncOp createDnnEmbeddingHashBucketKernelFunc(
     ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
     Type dynamicInputType, Type weightType, Type outputType,
-    int64_t numBuckets) {
+    int64_t numBuckets, ArrayRef<Operation *> kernelOps, Value dynamicInput,
+    Value embeddingWeight, Value outputBuffer) {
   if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
     return existing;
   }
@@ -271,26 +344,21 @@ static func::FuncOp createDnnEmbeddingHashBucketKernelFunc(
   func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
   func->setAttr("fusion.pattern",
                 rewriter.getStringAttr("dnn_embedding_hash_bucket"));
+  func->setAttr("fusion.num_buckets",
+                rewriter.getI64IntegerAttr(numBuckets));
   func->setAttr("annc.kernel", rewriter.getUnitAttr());
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
-  Value dynamicInput = entry->getArgument(0);
-  Value weight = entry->getArgument(1);
-  Value output = entry->getArgument(2);
 
-  auto schema = CustomOpSchema::get("KPFusedDnnEmbeddingWithHashBucket")
-                    .TypeVar("T")
-                    .MemRefArg("output", getRank(outputType), "T")
-                    .MemRefArg("input", getRank(dynamicInputType), "")
-                    .MemRefArg("embedding_weight", getRank(weightType), "T")
-                    .I64AttrArg("num_buckets", numBuckets);
-  auto metadata = schema.toMetadata(rewriter.getContext());
-  auto customCall = rewriter.create<CustomizeOp>(
-      func.getLoc(), TypeRange{outputType},
-      ValueRange{output, dynamicInput, weight},
-      rewriter.getStringAttr("KPFusedDnnEmbeddingWithHashBucket"), metadata);
-  (void)customCall;
+  IRMapping mapper;
+  mapper.map(dynamicInput, entry->getArgument(0));
+  mapper.map(embeddingWeight, entry->getArgument(1));
+  mapper.map(outputBuffer, entry->getArgument(2));
+
+  for (Operation *op : kernelOps) {
+    rewriter.clone(*op, mapper);
+  }
   rewriter.create<func::ReturnOp>(func.getLoc());
 
   return func;
@@ -321,17 +389,19 @@ static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
   Value rhs = entry->getArgument(1);
   Value c = entry->getArgument(2);
 
-  auto schema = CustomOpSchema::get("MatMul")
-                    .TypeVar("T")
-                    .MemRefArg("output", 2, "T")
-                    .MemRefArg("lhs", 2, "T")
-                    .MemRefArg("rhs", 2, "T");
-  auto metadata = schema.toMetadata(rewriter.getContext());
-  auto customCall = rewriter.create<CustomizeOp>(
-      func.getLoc(), TypeRange{c.getType()}, ValueRange{c, lhs, rhs},
-      rewriter.getStringAttr("MatMul"), metadata);
+  auto matmul = rewriter.create<MatMulOp>(
+      func.getLoc(), c.getType(), c, lhs, rhs, Value{},
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getF32FloatAttr(-1.0f),
+      IntegerAttr(), IntegerAttr(), IntegerAttr(),
+      IntegerAttr(), IntegerAttr(), IntegerAttr(),
+      matmulOp->getAttrOfType<StringAttr>("rhs_format"));
   if (auto rhsFormat = matmulOp.getRhsFormat()) {
-    customCall->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
+    matmul->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
   }
   rewriter.create<func::ReturnOp>(func.getLoc());
 
@@ -366,18 +436,39 @@ static func::FuncOp createMatMulPostOpKernelFunc(
   Value out = entry->getArgument(2);
   Value biasArg = entry->getArgument(3);
 
-  auto schema = CustomOpSchema::get(customOpName)
-                    .TypeVar("T")
-                    .MemRefArg("output", 2, "T")
-                    .MemRefArg("lhs", 2, "T")
-                    .MemRefArg("rhs", 2, "T")
-                    .MemRefArg("bias", 1, "T");
-  auto metadata = schema.toMetadata(rewriter.getContext());
-  auto customCall = rewriter.create<CustomizeOp>(
-      func.getLoc(), TypeRange{out.getType()}, ValueRange{out, lhs, rhs, biasArg},
-      rewriter.getStringAttr(customOpName), metadata);
+  auto matmulBuffer =
+      rewriter.create<BufferOp>(func.getLoc(), out.getType()).getResult();
+  auto matmul = rewriter.create<MatMulOp>(
+      func.getLoc(), out.getType(), matmulBuffer, lhs, rhs, Value{},
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(false),
+      rewriter.getF32FloatAttr(-1.0f),
+      IntegerAttr(), IntegerAttr(), IntegerAttr(),
+      IntegerAttr(), IntegerAttr(), IntegerAttr(),
+      matmulOp->getAttrOfType<StringAttr>("rhs_format"));
   if (auto rhsFormat = matmulOp.getRhsFormat()) {
-    customCall->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
+    matmul->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
+  }
+
+  Value postOpInput = matmul.getResult();
+  if (pattern == "matmul_add_relu") {
+    auto addBuffer =
+        rewriter.create<BufferOp>(func.getLoc(), out.getType()).getResult();
+    auto add = rewriter.create<AddOp>(
+        func.getLoc(), out.getType(), addBuffer,
+        ValueRange{postOpInput, biasArg}, rewriter.getBoolAttr(false),
+        rewriter.getF32FloatAttr(-1.0f), FloatAttr());
+    postOpInput = add.getResult();
+    rewriter.create<ReluOp>(func.getLoc(), out.getType(), out,
+                            postOpInput, rewriter.getF32FloatAttr(-1.0f));
+  } else {
+    rewriter.create<AddOp>(
+        func.getLoc(), out.getType(), out,
+        ValueRange{postOpInput, biasArg}, rewriter.getBoolAttr(false),
+        rewriter.getF32FloatAttr(-1.0f), FloatAttr());
   }
   rewriter.create<func::ReturnOp>(func.getLoc());
 
@@ -392,6 +483,7 @@ struct DnnEmbeddingHashBucketMatch {
   SparseSegmentMeanOp sparseSegmentMean;
   StringToHashBucketFastOp hashBucket;
   SmallVector<Operation *> candidateOps;
+  SmallVector<Operation *> kernelOps;
   std::string prefix;
 };
 
@@ -447,8 +539,18 @@ static LogicalResult matchDnnEmbeddingHashBucket(
   match.sparseSegmentMean = sparseSegmentMean;
   match.hashBucket = hashBucket;
 
+  SmallVector<Value, 3> boundaryValues = {match.dynamicInput,
+                                          match.embeddingWeight,
+                                          match.outputBuffer};
+  SmallPtrSet<Operation *, 32> visitedKernelOps;
+  collectDefiningOpsPostOrder(match.finalReshape.getOperation(),
+                              boundaryValues, visitedKernelOps,
+                              match.kernelOps);
+  if (!isClosedKernelOpSet(match.kernelOps, boundaryValues)) return failure();
+
   func.walk([&](Operation *op) {
-    if (hasTfNamePrefix(op, match.prefix) && !isa<ConstantOp, VariableOp>(op)) {
+    if (!hasTfNamePrefix(op, match.prefix)) return;
+    if (!isa<ConstantOp, VariableOp>(op)) {
       match.candidateOps.push_back(op);
     }
   });
@@ -503,13 +605,8 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
     auto kernelFunc = createDnnEmbeddingHashBucketKernelFunc(
         module, rewriter, kernelName, match.dynamicInput.getType(),
         match.embeddingWeight.getType(), match.outputBuffer.getType(),
-        match.hashBucket.getNumBuckets());
-
-    SmallVector<std::string> fusedNodeNames;
-    for (Operation *op : match.candidateOps) {
-      std::string name = getTfName(op);
-      if (!name.empty()) fusedNodeNames.push_back(name);
-    }
+        match.hashBucket.getNumBuckets(), match.kernelOps, match.dynamicInput,
+        match.embeddingWeight, match.outputBuffer);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr(
@@ -518,45 +615,20 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
         "kernel_name", rewriter.getStringAttr(kernelName)));
     metadata.push_back(rewriter.getNamedAttr(
         "tf.name", rewriter.getStringAttr(clusterName)));
+    SmallVector<FusionArgSpec> argSpecs;
+    argSpecs.push_back({"fixed", getValueName(match.embeddingWeight),
+                        match.embeddingWeight.getType()});
+    argSpecs.push_back({"dynamic", getValueName(match.dynamicInput),
+                        match.dynamicInput.getType()});
     metadata.push_back(rewriter.getNamedAttr(
-        "tf.nodes", makeStringArray(rewriter.getContext(), fusedNodeNames)));
+        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
+    SmallVector<FusionArgSpec> outputSpecs;
+    outputSpecs.push_back({"output", getTfName(match.finalReshape),
+                           match.outputBuffer.getType()});
     metadata.push_back(rewriter.getNamedAttr(
-        "tf.inputs", makeStringArray(rewriter.getContext(),
-                                     {getValueName(match.embeddingWeight),
-                                      getValueName(match.dynamicInput)})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.input_shapes",
-        makeStringArray(rewriter.getContext(),
-                        {shapeToString(match.embeddingWeight.getType()),
-                         shapeToString(match.dynamicInput.getType())})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.output_shape",
-        rewriter.getStringAttr(shapeToString(match.outputBuffer.getType()))));
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
     metadata.push_back(rewriter.getNamedAttr(
         "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.output", rewriter.getStringAttr(getTfName(match.finalReshape))));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Nconstants", rewriter.getI64IntegerAttr(0)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Nfixed", rewriter.getI64IntegerAttr(1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Ndynamic", rewriter.getI64IntegerAttr(1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "num_outputs", rewriter.getI64IntegerAttr(1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "output_ranks",
-        makeI64Array(rewriter.getContext(),
-                     {getRank(match.outputBuffer.getType())})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "input_ranks",
-        makeI64Array(rewriter.getContext(),
-                     {getRank(match.embeddingWeight.getType()),
-                      getRank(match.dynamicInput.getType())})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "output_shapes",
-        makeStringArray(rewriter.getContext(),
-                        {shapeToString(match.outputBuffer.getType())})));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {1, 0, 2})));
     metadata.push_back(rewriter.getNamedAttr(
@@ -635,10 +707,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                                        output, bias, pattern, customOpName)
         : createKernelFunc(module, rewriter, kernelName, matmulOp);
 
-    SmallVector<std::string> fusedNodes = {matmulName};
-    if (hasBiasPostOp) fusedNodes.push_back(getTfName(addOp));
-    if (hasReluPostOp) fusedNodes.push_back(getTfName(reluOp));
-
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr(
         "fusion.pattern", rewriter.getStringAttr(pattern)));
@@ -646,8 +714,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         "kernel_name", rewriter.getStringAttr(kernelName)));
     metadata.push_back(rewriter.getNamedAttr(
         "tf.name", rewriter.getStringAttr(clusterName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.nodes", makeStringArray(rewriter.getContext(), fusedNodes)));
 
     bool lhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
@@ -662,61 +728,30 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     SmallVector<int64_t> kernelArgOrder =
         lhsIsDynamic ? SmallVector<int64_t>{1, 0, 2}
                      : SmallVector<int64_t>{0, 1, 2};
+    SmallVector<FusionArgSpec> argSpecs;
     if (hasBiasPostOp) {
-      metadata.push_back(rewriter.getNamedAttr(
-          "tf.inputs", makeStringArray(rewriter.getContext(),
-                                       {getValueName(matmulOp.getRhs()),
-                                        getValueName(bias),
-                                        getValueName(matmulOp.getLhs())})));
-      metadata.push_back(rewriter.getNamedAttr(
-          "tf.input_shapes",
-          makeStringArray(rewriter.getContext(),
-                          {shapeToString(matmulOp.getRhs().getType()),
-                           shapeToString(bias.getType()),
-                           shapeToString(matmulOp.getLhs().getType())})));
-      kernelArgOrder = {2, 0, 3, 1};
+      argSpecs.push_back({"fixed", getValueName(matmulOp.getRhs()),
+                          matmulOp.getRhs().getType()});
+      argSpecs.push_back({"fixed", getValueName(bias), bias.getType()});
+      argSpecs.push_back({"dynamic", getValueName(matmulOp.getLhs()),
+                          matmulOp.getLhs().getType()});
     } else {
-      metadata.push_back(rewriter.getNamedAttr(
-          "tf.inputs", makeStringArray(rewriter.getContext(),
-                                       {getValueName(fixedInput),
-                                        getValueName(dynamicInput)})));
-      metadata.push_back(rewriter.getNamedAttr(
-          "tf.input_shapes",
-          makeStringArray(rewriter.getContext(),
-                          {shapeToString(fixedInput.getType()),
-                           shapeToString(dynamicInput.getType())})));
+      argSpecs.push_back({"fixed", getValueName(fixedInput),
+                          fixedInput.getType()});
+      argSpecs.push_back({"dynamic", getValueName(dynamicInput),
+                          dynamicInput.getType()});
     }
     metadata.push_back(rewriter.getNamedAttr(
-        "tf.output_shape",
-        rewriter.getStringAttr(shapeToString(outputType))));
+        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
+    SmallVector<FusionArgSpec> outputSpecs;
+    outputSpecs.push_back({"output", outputName, outputType});
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
+    if (hasBiasPostOp) {
+      kernelArgOrder = {2, 0, 3, 1};
+    }
     metadata.push_back(rewriter.getNamedAttr(
         "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.output", rewriter.getStringAttr(outputName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Nconstants", rewriter.getI64IntegerAttr(0)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Nfixed", rewriter.getI64IntegerAttr(hasBiasPostOp ? 2 : 1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "Ndynamic", rewriter.getI64IntegerAttr(1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "num_outputs", rewriter.getI64IntegerAttr(1)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "output_ranks", makeI64Array(rewriter.getContext(),
-                                      {getRank(outputType)})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "input_ranks",
-        hasBiasPostOp
-            ? makeI64Array(rewriter.getContext(),
-                           {getRank(matmulOp.getRhs().getType()),
-                            getRank(bias.getType()),
-                            getRank(matmulOp.getLhs().getType())})
-            : makeI64Array(rewriter.getContext(),
-                           {getRank(fixedInput.getType()),
-                            getRank(dynamicInput.getType())})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "output_shapes", makeStringArray(rewriter.getContext(),
-                                          {shapeToString(outputType)})));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), kernelArgOrder)));
     metadata.push_back(rewriter.getNamedAttr(
