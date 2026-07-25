@@ -109,7 +109,6 @@ python3 -m pytest tests/test_asm.py -v  # 单个测试文件
 
 ```
 TF SavedModel/GraphDef
-  ├─→ tf-adaptor → JSON 图描述
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
 ATIR MLIR
@@ -130,7 +129,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 - **源码位置**：`annc/lib/Dialect/Atir/`（实现），`annc/include/Dialect/Atir/`（TableGen TD 定义）
 - **核心 Op**：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
-- **优化 Pass**：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Initialize`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
+- **优化 Pass**：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
 - **接口**：`ShapeInfer`（形状推导）、`Interpret`（解释执行）
 - **验证**：OpVerify（kernel 正确性验证，通过 `kpGenLibPath` / `llmGenLibPath` 指定验证库）
 
@@ -146,7 +145,6 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 | 工具 | 功能 |
 |------|------|
-| `tf-adaptor` | TF SavedModel → JSON 图描述 |
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
 | `annc-opt` | ATIR 优化（算子融合、块融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |
@@ -154,7 +152,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | `annc` | 编译驱动：MLIR → .so / 可执行文件 |
 | `annc-verify` | Kernel 正确性验证 |
 | `annc-converter` | ATIR → TF SavedModel（反向转换）+ GraphDef 重写 |
-| `annc-tf-pipeline` | 端到端编排（`--tf-graphdef-rewrite`） |
+| `annc-tf-pipeline` | 端到端编排 |
 
 ### TensorFlow 集成
 
@@ -164,14 +162,14 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 ### Python 绑定
 
-- `python/` 使用 nanobind 将 ATIR 方言暴露给 Python
+- `python/` 使用 pybind11 将 ATIR 方言暴露给 Python（nanobind 为 MLIR 自带 Python 绑定的传递依赖）
 - `python/annc/` 提供：`builder`、`ops`、`types`、`helper`、`enums`、`dialects/atir`
 
 ### 目录结构
 
 | 目录 | 内容 |
 |------|------|
-| `annc/tools/` | CLI 工具（10 个） |
+| `annc/tools/` | CLI 工具（8 个） |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
@@ -252,21 +250,6 @@ annc-converter fused.mlir \
   --metadata_json fusion_metadata.json
 ```
 
-### `tf-adaptor`
-
-`tf-adaptor` 将 TensorFlow SavedModel 解析为 JSON 图描述。
-
-```shell
-tf-adaptor <saved_model_dir> <output.json>
-```
-
-参数：
-
-| 参数 | 说明 |
-|------|------|
-| `<saved_model_dir>` | TensorFlow SavedModel 目录 |
-| `<output.json>` | 输出 JSON 文件 |
-
 ### `annc-tf2atir`
 
 `annc-tf2atir` 将 TensorFlow GraphDef 直接转换为 ATIR MLIR，不经过 JSON 中间格式。
@@ -290,7 +273,7 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 |------|------|
 | `--atir-op-fusion` | 算子融合 |
 | `--atir-block-fusion` | 块融合 |
-| `--atir-eltwise-fusion` | Elementwise 融合 |
+| `--atir-Eltwise` | Elementwise 融合（当前为占位 stub） |
 | `--atir-select-lowering-strategy` | 选择 lowering 策略 |
 
 ### `annc-fusion-metadata`
@@ -563,7 +546,7 @@ ANNC / Serving 路径与参数：`ANNC_PIPELINE_PATH` / `LLVM_PATH` / `TF_PY_SIT
 
 ### Python 绑定
 
-`python/annc` 使用 nanobind 暴露 ATIR 构建接口。
+`python/annc` 使用 pybind11 暴露 ATIR 构建接口（nanobind 为 MLIR 自带 Python 绑定的传递依赖）。
 
 | 模块 | 说明 |
 |------|------|
