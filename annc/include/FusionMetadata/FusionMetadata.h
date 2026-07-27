@@ -32,9 +32,10 @@ struct FusionArg {
   // rank does not match shape.size().
   int64_t rank = -1;
 
-  // Canonical ATIR dtype spelling, for example "f32", "i64", or "string".
-  // Encoded TensorFlow types such as string take their dtype from the ATIR
-  // tensor encoding rather than from the underlying complex storage type.
+  // Canonical ATIR dtype spelling, for example "f32", "i64", "si64",
+  // "ui64", "index", or "string". Encoded TensorFlow types such as string
+  // take their dtype from the ATIR tensor encoding rather than from the
+  // underlying complex storage type.
   std::string dtype;
 };
 

@@ -125,22 +125,35 @@ static ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
 static int64_t getRank(Type type);
 static SmallVector<int64_t> getShape(Type type);
 
+static std::string getElementDTypeString(Type type) {
+  if (auto floatType = dyn_cast<FloatType>(type)) {
+    if (floatType.isF16()) return "f16";
+    if (floatType.isF32()) return "f32";
+    if (floatType.isF64()) return "f64";
+    if (floatType.isF80()) return "f80";
+    if (floatType.isF128()) return "f128";
+  }
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    StringRef prefix = "i";
+    if (intType.isSigned()) {
+      prefix = "si";
+    } else if (intType.isUnsigned()) {
+      prefix = "ui";
+    }
+    return (Twine(prefix) + Twine(intType.getWidth())).str();
+  }
+  if (type.isIndex()) return "index";
+  return "";
+}
+
 static std::string getDTypeString(Type type) {
   if (auto tensorType = dyn_cast<atir::TensorType>(type)) {
     if (auto encoding = dyn_cast_or_null<StringAttr>(tensorType.getEncoding())) {
       if (!encoding.getValue().empty()) return encoding.str();
     }
-    return tensorType.getValueOfElementType();
+    return getElementDTypeString(tensorType.getElementType());
   }
-  if (auto floatType = dyn_cast<FloatType>(type)) {
-    if (floatType.isF16()) return "f16";
-    if (floatType.isF32()) return "f32";
-    if (floatType.isF64()) return "f64";
-  }
-  if (auto intType = dyn_cast<IntegerType>(type)) {
-    return (Twine("i") + Twine(intType.getWidth())).str();
-  }
-  return "";
+  return getElementDTypeString(type);
 }
 
 static DictionaryAttr makeFusionArgAttr(MLIRContext *ctx, StringRef role,
@@ -325,6 +338,20 @@ static OpT findNamedOp(func::FuncOp func, StringRef name) {
   return found;
 }
 
+static MatMulOp createMatMulBodyOp(PatternRewriter &rewriter, Location loc,
+                                   Type resultType, Value output, Value lhs,
+                                   Value rhs, MatMulOp source) {
+  return rewriter.create<MatMulOp>(
+      loc, resultType, output, lhs, rhs, Value{}, rewriter.getBoolAttr(false),
+      rewriter.getBoolAttr(source.getRightTranspose()),
+      rewriter.getBoolAttr(source.getLeftTranspose()),
+      rewriter.getBoolAttr(source.getOutputTranspose()),
+      rewriter.getBoolAttr(false), source.getReluLimitAttr(),
+      source.getMStartAttr(), source.getNStartAttr(), source.getKStartAttr(),
+      source.getMSizeAttr(), source.getNSizeAttr(), source.getKSizeAttr(),
+      source->getAttrOfType<StringAttr>("rhs_format"));
+}
+
 static func::FuncOp createDnnEmbeddingHashBucketKernelFunc(
     ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
     Type dynamicInputType, Type weightType, Type outputType,
@@ -389,20 +416,10 @@ static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
   Value rhs = entry->getArgument(1);
   Value c = entry->getArgument(2);
 
-  auto matmul = rewriter.create<MatMulOp>(
-      func.getLoc(), c.getType(), c, lhs, rhs, Value{},
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getF32FloatAttr(-1.0f),
-      IntegerAttr(), IntegerAttr(), IntegerAttr(),
-      IntegerAttr(), IntegerAttr(), IntegerAttr(),
-      matmulOp->getAttrOfType<StringAttr>("rhs_format"));
-  if (auto rhsFormat = matmulOp.getRhsFormat()) {
-    matmul->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
-  }
+  auto matmul =
+      createMatMulBodyOp(rewriter, func.getLoc(), c.getType(), c, lhs, rhs,
+                         matmulOp);
+  (void)matmul;
   rewriter.create<func::ReturnOp>(func.getLoc());
 
   return func;
@@ -438,20 +455,8 @@ static func::FuncOp createMatMulPostOpKernelFunc(
 
   auto matmulBuffer =
       rewriter.create<BufferOp>(func.getLoc(), out.getType()).getResult();
-  auto matmul = rewriter.create<MatMulOp>(
-      func.getLoc(), out.getType(), matmulBuffer, lhs, rhs, Value{},
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getBoolAttr(false),
-      rewriter.getF32FloatAttr(-1.0f),
-      IntegerAttr(), IntegerAttr(), IntegerAttr(),
-      IntegerAttr(), IntegerAttr(), IntegerAttr(),
-      matmulOp->getAttrOfType<StringAttr>("rhs_format"));
-  if (auto rhsFormat = matmulOp.getRhsFormat()) {
-    matmul->setAttr("rhs_format", rewriter.getStringAttr(*rhsFormat));
-  }
+  auto matmul = createMatMulBodyOp(rewriter, func.getLoc(), out.getType(),
+                                   matmulBuffer, lhs, rhs, matmulOp);
 
   Value postOpInput = matmul.getResult();
   if (pattern == "matmul_add_relu") {
