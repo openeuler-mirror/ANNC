@@ -196,7 +196,7 @@ private:
       return dataAttr.getSplatValue<APInt>().getSExtValue();
     }
     if (dataAttr.getNumElements() != 1) return failure();
-    return dataAttr.getValues<APInt>().begin()->getSExtValue();
+    return (*dataAttr.getValues<APInt>().begin()).getSExtValue();
   }
 
   // Returns the integer values of a 1-D ConstantOp tensor.  Fails for
@@ -304,6 +304,9 @@ private:
       } else if (auto pack = dyn_cast<PackOp>(op)) {
         // Pack (stack) for the Tile multipliers: among its variadic inputs,
         // the one defined by a ConstantOp must equal 1 (stack/0 = dense<1>).
+        // The subgraph also contains the SparseReshape new-shape pack
+        // (Cast/x), whose inputs are both dynamic (Prod, Gather); it has no
+        // constant to verify and is recognized by feeding a SparseReshapeOp.
         bool found = false;
         for (Value input : pack.getInputs()) {
           if (auto *defOp = input.getDefiningOp()) {
@@ -314,7 +317,13 @@ private:
             }
           }
         }
-        if (!found) return failure();
+        if (!found) {
+          bool feedsSparseReshape =
+              llvm::any_of(pack->getUsers(), [](Operation *user) {
+                return isa<SparseReshapeOp>(user);
+              });
+          if (!feedsSparseReshape) return failure();
+        }
       }
       // Other op types (ExpandDims, Shape, Where, GatherNd,
       // StringToHashBucketFast, SparseReshape, Unique, Cast, Tile,
