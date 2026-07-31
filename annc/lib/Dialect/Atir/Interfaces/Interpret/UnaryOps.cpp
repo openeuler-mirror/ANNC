@@ -40,6 +40,8 @@ void ReluOp::Interpret() {
   (void)setDenseResult(resultType, outputShape, result);
 }
 
+void SoftmaxOp::Interpret() {}
+
 void LogisticOp::Interpret() {
   this->inferShape();
 

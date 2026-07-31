@@ -65,29 +65,54 @@ void TransposeOp::Interpret() {
   }
   auto inShape = inputType.getShape();
   int64_t rank = static_cast<int64_t>(inShape.size());
-  auto permAttr = getPermutationAttr();
-  if (!permAttr) {
-    emitOpError("Transpose missing permutation attribute");
-    return;
+  // Prefer the concrete cacheData shape (static) over the declared type shape,
+  // which may still carry dynamic batch dims.
+  if (auto rankedCache =
+          dyn_cast<RankedTensorType>(inputAttr.getType())) {
+    if (rankedCache.hasStaticShape())
+      inShape = rankedCache.getShape();
   }
+  // Read the permutation: prefer the runtime perm operand's cacheData (TF
+  // computes it via a ConcatV2/Pack chain for Tensordot, so the static
+  // attribute may be a wrong build-time fallback). Fall back to the static
+  // permutation attribute if the operand has no runtime value.
   llvm::SmallVector<int64_t> perm;
-  for (Attribute a : permAttr) {
-    auto ia = dyn_cast<IntegerAttr>(a);
-    if (!ia) {
-      emitOpError("Transpose permutation must be integer attributes");
+  atir::TensorType permType = dyn_cast<atir::TensorType>(getPerm().getType());
+  if (permType) {
+    if (auto permAttr = permType.getCacheData()) {
+      auto permValsOr = getIntValues(permAttr);
+      if (succeeded(permValsOr))
+        perm.assign(permValsOr->begin(), permValsOr->end());
+    }
+  }
+  if (perm.empty()) {
+    auto permAttr = getPermutationAttr();
+    if (!permAttr) {
+      emitOpError("Transpose missing permutation (no runtime perm operand "
+                  "value and no static attribute)");
       return;
     }
-    int64_t p = ia.getInt();
-    if (p < 0)
-      p += rank;
-    perm.push_back(p);
+    for (Attribute a : permAttr) {
+      auto ia = dyn_cast<IntegerAttr>(a);
+      if (!ia) {
+        emitOpError("Transpose permutation must be integer attributes");
+        return;
+      }
+      perm.push_back(ia.getInt());
+    }
   }
+  for (int64_t &p : perm)
+    if (p < 0) p += rank;
   if (static_cast<int64_t>(perm.size()) != rank) {
     emitOpError("Transpose permutation length mismatch");
     return;
   }
   auto resultType = getResult().getType();
-  auto outputShape = resultType.getShape();
+  // Compute the output shape from the (concrete) input shape + permutation,
+  // rather than the declared result type which may carry a dynamic batch dim.
+  SmallVector<int64_t> outputShape(rank, 0);
+  for (int64_t d = 0; d < rank; ++d)
+    outputShape[d] = inShape[perm[d]];
   int64_t outputSize = getElementCount(outputShape);
   if (outputSize < 0) {
     emitOpError("Transpose output shape must be static for interpretation");
@@ -111,6 +136,18 @@ void ExpandDimsOp::Interpret() {
   DenseElementsAttr inputAttr;
   if (failed(getTensorTypeAndData(getOperation(), getInput(),
                                   "ExpandDims input", inputType, inputAttr))) {
+    return;
+  }
+  // String tensor: ExpandDims only inserts a dimension (num elements
+  // unchanged); copy the string values through to the inferred result shape.
+  if (isStringTensor(inputType)) {
+    auto stringsOr = getStringValues(inputAttr);
+    if (failed(stringsOr)) {
+      emitOpError("ExpandDims string input has no string cacheData");
+      return;
+    }
+    auto resultType = getResult().getType();
+    (void)setStringResult(resultType, resultType.getShape(), *stringsOr);
     return;
   }
   auto inputValsOr = getFloatValues(inputAttr);

@@ -7,6 +7,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "llvm/Support/Debug.h"
@@ -41,7 +42,41 @@ FailureOr<std::vector<float>> getFloatValues(DenseElementsAttr attr);
 
 FailureOr<SmallVector<int64_t>> getIntValues(DenseElementsAttr attr);
 
+/// True if the tensor carries string elements (encoding == "string").  The
+/// elementType is a `complex<f32>` placeholder in that case; this checks the
+/// encoding attribute (the real marker), mirroring the lowering in
+/// InputTypeConverter / AtirTypeConverter.
+bool isStringTensor(atir::TensorType tensorType);
+
+/// Read a DenseStringElementsAttr as a vector of strings. Returns failure if
+/// the attr is not a string elements attr (so non-string-aware ops that call
+/// this on a numeric attr fail cleanly).
+FailureOr<std::vector<std::string>> getStringValues(DenseElementsAttr attr);
+
+/// Write string values as a DenseStringElementsAttr cacheData on resultType.
+/// resultType's elementType must be non-int/float (e.g. the complex<f32>
+/// string placeholder) so MLIR allows string elements.
+LogicalResult setStringResult(atir::TensorType resultType,
+                              ArrayRef<int64_t> outputShape,
+                              ArrayRef<std::string> values);
+
+/// Concretize a result's (dynamic) type shape to a static `shape` computed at
+/// runtime (e.g. a sparse op's NNZ, which the inferred type leaves as `?`).
+/// Creates a static atir::TensorType carrying the result's other params +
+/// existing cacheData, binds it to the result via setType, and returns the
+/// static type (pass it to the subsequent setDense*Result/setStringResult so
+/// cacheData lands on the static type). Returns null if the result isn't an
+/// atir::TensorType.
+atir::TensorType concretizeResultType(mlir::Value result,
+                                      ArrayRef<int64_t> shape);
+
 SmallVector<int64_t> getIntArrayAttrValues(ArrayAttr attr);
+
+/// Resolve dynamic dimensions in a shape using the actual element count.
+/// If exactly one dimension is kDynamic, infer it from numElements / product
+/// of the static dimensions.
+SmallVector<int64_t> resolveDynamicShape(ArrayRef<int64_t> outputShape,
+                                         int64_t numElements);
 
 Attribute getZeroElementAttr(Type elementType, MLIRContext *context);
 

@@ -98,6 +98,7 @@ void registerNodeHandlers(llvm::StringMap<NodeHandler>& m) {
   add({"Less"}, &MLIRBuilder::createLessNode);
   add({"Greater"}, &MLIRBuilder::createGreaterNode);
   add({"GreaterEqual", "GreaterEqualV2"}, &MLIRBuilder::createGreaterEqualNode);
+  add({"LessEqual"}, &MLIRBuilder::createLessEqualNode);
   add({"Maximum"}, &MLIRBuilder::createMaximumNode);
   add({"Minimum"}, &MLIRBuilder::createMinimumNode);
   add({"Concat"}, &MLIRBuilder::createConcatNode);
@@ -189,6 +190,12 @@ void MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
   auto entryBlock = mainFunc_.addEntryBlock();
   builder_.setInsertionPointToStart(entryBlock);
 
+  // Populate name -> NodeInfo lookup for handlers that need to resolve
+  // constant inputs (e.g. Transpose's perm) by name.
+  nodesByName_.clear();
+  for (const auto& node : nodes)
+    nodesByName_[node.name] = &node;
+
   // 分离输入节点、输出节点和计算节点
   std::vector<NodeInfo> inputNodes;
   std::vector<NodeInfo> outputNodes;
@@ -278,6 +285,33 @@ static std::vector<uint8_t> base64Decode(const std::string& encoded) {
     return result;
 }
 
+bool MLIRBuilder::decodeIntConstValues(const std::string& name,
+                                       std::vector<int64_t>& out) const {
+  auto nit = nodesByName_.find(name);
+  if (nit == nodesByName_.end() || !nit->second)
+    return false;
+  const NodeInfo* cnode = nit->second;
+  if (cnode->outputs.empty() || cnode->raw_data.empty())
+    return false;
+  const std::string& dtype = cnode->outputs[0].dtype;
+  std::vector<uint8_t> decoded = base64Decode(cnode->raw_data);
+  if (dtype == "int32") {
+    size_t n = decoded.size() / sizeof(int32_t);
+    const int32_t* d = reinterpret_cast<const int32_t*>(decoded.data());
+    for (size_t i = 0; i < n; ++i)
+      out.push_back(static_cast<int64_t>(d[i]));
+    return true;
+  }
+  if (dtype == "int64") {
+    size_t n = decoded.size() / sizeof(int64_t);
+    const int64_t* d = reinterpret_cast<const int64_t*>(decoded.data());
+    for (size_t i = 0; i < n; ++i)
+      out.push_back(d[i]);
+    return true;
+  }
+  return false;
+}
+
 mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
   const std::string& name = node.name;
   if (node.outputs.empty()) {
@@ -285,7 +319,7 @@ mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
   }
   const std::string& dtype = node.outputs[0].dtype;
   const std::vector<int64_t>& shape = node.outputs[0].shape;
-  
+
   // 解码base64数据（与 TensorProto tensor_content 字节布局一致，小端）
   std::vector<uint8_t> decoded;
   if (!node.raw_data.empty()) {
@@ -853,6 +887,10 @@ void MLIRBuilder::createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> ou
   SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
                                               builder_.getStringAttr("GE")));
 }
+void MLIRBuilder::createLessEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
+  SINGLE_OUT(builder_.create<atir::CompareOp>(loc, outs[0], ins[0], ins[1],
+                                              builder_.getStringAttr("LE")));
+}
 void MLIRBuilder::createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   auto loc = getLoc(builder_.getContext(), node.name);
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
@@ -1162,10 +1200,31 @@ void MLIRBuilder::createDotNode(const NodeInfo& node, ArrayRef<Type> outs, Array
 }
 void MLIRBuilder::createReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   auto loc = getLoc(builder_.getContext(), node.name);
-  std::vector<int64_t> shape = node.outputs.empty() ? std::vector<int64_t>{} : node.outputs[0].shape;
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
-  auto op = builder_.create<atir::ReshapeOp>(loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getI64ArrayAttr(shape));
+  // targetShape 现在是 SSA Value（1-D i32/i64 tensor）；优先用 ins[1]（TF 中 Reshape
+  // 的 shape 输入，通常是上游 Const，已自带 cacheData）。仅当上游未提供时，
+  // 才从输出 shape 静态推断并构造私有 constant。
+  Value targetShapeValue = nullptr;
+  if (ins.size() >= 2 && ins[1]) {
+    targetShapeValue = ins[1];
+  } else {
+    std::vector<int64_t> shape = node.outputs.empty() ? std::vector<int64_t>{} : node.outputs[0].shape;
+    auto i64Type = builder_.getI64Type();
+    SmallVector<int64_t, 4> shapeVec(shape.begin(), shape.end());
+    auto shapeRanked = RankedTensorType::get({(int64_t)shapeVec.size()}, i64Type);
+    auto shapeElems = DenseElementsAttr::get(shapeRanked, ArrayRef<int64_t>(shapeVec));
+    atir::TensorType shapeTensorTy = atir::TensorType::get(
+        {(int64_t)shapeVec.size()}, i64Type,
+        builder_.getStringAttr(node.name + "/targetShape"),
+        /*encoding=*/{}, /*stride=*/{}, /*layout=*/{}, /*memType=*/{},
+        /*address=*/{}, /*device=*/{}, /*onchip=*/{}, shapeElems);
+    targetShapeValue = builder_.create<atir::ConstantOp>(
+        loc, shapeTensorTy, builder_.getStringAttr(node.name + "/targetShape"),
+        builder_.getStringAttr("private"));
+  }
+  auto op = builder_.create<atir::ReshapeOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], targetShapeValue);
   tensorValues_[node.outputs[0].name] = op.getResult();
 }
 void MLIRBuilder::createTransposeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
@@ -1178,6 +1237,15 @@ void MLIRBuilder::createTransposeNode(const NodeInfo& node, ArrayRef<Type> outs,
   if (auto it = node.attrs.find("perm"); it != node.attrs.end()) {
     if (auto *vec = std::get_if<std::vector<int64_t>>(&it->second))
       perm.assign(vec->begin(), vec->end());
+  }
+  // TF stores the permutation as the 2nd input tensor (a Const), not as a
+  // "perm" attribute. Decode it from that constant input so the emitted
+  // permutation matches the source graph (the previous reverse-order fallback
+  // produced wrong perms, e.g. [2,1,0] instead of [0,2,1]).
+  if (perm.empty() && node.inputs.size() >= 2) {
+    std::vector<int64_t> decodedPerm;
+    if (decodeIntConstValues(node.inputs[1], decodedPerm))
+      perm.assign(decodedPerm.begin(), decodedPerm.end());
   }
   if (perm.empty() && !node.outputs.empty()) {
     int64_t r = static_cast<int64_t>(node.outputs[0].shape.size());
@@ -1193,52 +1261,77 @@ void MLIRBuilder::createTransposeNode(const NodeInfo& node, ArrayRef<Type> outs,
     permAttrs.push_back(builder_.getI64IntegerAttr(p));
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+  // Pass the perm tensor (TF's 2nd input) as an operand so the Interpret can
+  // read the runtime-computed permutation (e.g. from a Tensordot ConcatV2
+  // chain). The static permutation attr is only a build-time fallback.
+  Value permValue = (ins.size() >= 2) ? ins[1] : ins[0];
   SINGLE_OUT(builder_.create<atir::TransposeOp>(
-      loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getArrayAttr(permAttrs)));
+      loc, outs[0], outputBuffer.getResult(), ins[0], permValue,
+      builder_.getArrayAttr(permAttrs)));
 }
 void MLIRBuilder::createExpandDimsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   auto loc = getLoc(builder_.getContext(), node.name);
   auto inputTensorType = dyn_cast_or_null<atir::TensorType>(ins[0].getType());
   auto outputTensorType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputTensorType);
-  int32_t axis = 0;
-  bool hasAxis = false;
-  if (auto it = node.attrs.find("axis"); it != node.attrs.end()) {
-    if (auto v = std::get_if<int64_t>(&it->second)) {
-      axis = static_cast<int32_t>(*v);
-      hasAxis = true;
-    } else if (auto v = std::get_if<double>(&it->second)) {
-      axis = static_cast<int32_t>(*v);
-      hasAxis = true;
+
+  // axis 现在是 SSA Value（0-D i32 tensor）；优先用 ins[1]（TF 中 ExpandDims 的
+  // dim 输入，通常是上游 Const，已自带 cacheData）。仅当上游未提供时，
+  // 才从 node.attrs["axis"] 或 input/output shape 推断并构造私有 constant。
+  Value axisValue = nullptr;
+  if (ins.size() >= 2 && ins[1]) {
+    axisValue = ins[1];
+  } else {
+    int32_t axis = 0;
+    bool hasAxis = false;
+    if (auto it = node.attrs.find("axis"); it != node.attrs.end()) {
+      if (auto v = std::get_if<int64_t>(&it->second)) {
+        axis = static_cast<int32_t>(*v);
+        hasAxis = true;
+      } else if (auto v = std::get_if<double>(&it->second)) {
+        axis = static_cast<int32_t>(*v);
+        hasAxis = true;
+      }
     }
-  }
-  if (!hasAxis && inputTensorType && outputTensorType) {
-    auto inputShape = inputTensorType.getShape();
-    auto outputShape = outputTensorType.getShape();
-    int64_t rank = static_cast<int64_t>(inputShape.size());
-    if (rank + 1 == static_cast<int64_t>(outputShape.size())) {
-      for (int64_t candidate = 0; candidate <= rank; ++candidate) {
-        if (outputShape[candidate] != 1)
-          continue;
-        bool ok = true;
-        for (int64_t outIdx = 0; outIdx < rank + 1; ++outIdx) {
-          if (outIdx == candidate)
+    if (!hasAxis && inputTensorType && outputTensorType) {
+      auto inputShape = inputTensorType.getShape();
+      auto outputShape = outputTensorType.getShape();
+      int64_t rank = static_cast<int64_t>(inputShape.size());
+      if (rank + 1 == static_cast<int64_t>(outputShape.size())) {
+        for (int64_t candidate = 0; candidate <= rank; ++candidate) {
+          if (outputShape[candidate] != 1)
             continue;
-          int64_t origIdx = outIdx < candidate ? outIdx : outIdx - 1;
-          if (outputShape[outIdx] != inputShape[origIdx]) {
-            ok = false;
+          bool ok = true;
+          for (int64_t outIdx = 0; outIdx < rank + 1; ++outIdx) {
+            if (outIdx == candidate)
+              continue;
+            int64_t origIdx = outIdx < candidate ? outIdx : outIdx - 1;
+            if (outputShape[outIdx] != inputShape[origIdx]) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) {
+            axis = static_cast<int32_t>(candidate);
             break;
           }
         }
-        if (ok) {
-          axis = static_cast<int32_t>(candidate);
-          break;
-        }
       }
     }
+    auto i32Type = builder_.getI32Type();
+    auto axisRankedType = RankedTensorType::get({}, i32Type);
+    auto axisElems = DenseElementsAttr::get(axisRankedType,
+                                            static_cast<int32_t>(axis));
+    atir::TensorType axisTensorTy = atir::TensorType::get(
+        {}, i32Type, builder_.getStringAttr(node.name + "/axis"),
+        /*encoding=*/{}, /*stride=*/{}, /*layout=*/{}, /*memType=*/{},
+        /*address=*/{}, /*device=*/{}, /*onchip=*/{}, axisElems);
+    axisValue = builder_.create<atir::ConstantOp>(
+        loc, axisTensorTy, builder_.getStringAttr(node.name + "/axis"),
+        builder_.getStringAttr("private"));
   }
   auto op = builder_.create<atir::ExpandDimsOp>(
-      loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getI32IntegerAttr(axis));
+      loc, outs[0], outputBuffer.getResult(), ins[0], axisValue);
   tensorValues_[node.outputs[0].name] = op.getResult();
 }
 void MLIRBuilder::createTileNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
@@ -1415,7 +1508,13 @@ void MLIRBuilder::createCastNode(const NodeInfo& node, ArrayRef<Type> outs, Arra
 void MLIRBuilder::createStringToHashBucketFastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   if (ins.size() < 1 || outs.empty()) { createUnsupportedNode(node, outs, ins); return; }
   auto loc = getLoc(builder_.getContext(), node.name);
-  int64_t numBuckets = node.has_numBuckets ? node.numBuckets : 100;
+  int64_t numBuckets = node.has_numBuckets
+                          ? node.numBuckets
+                          : (node.attrs.count("num_buckets") &&
+                                     std::holds_alternative<int64_t>(
+                                         node.attrs.at("num_buckets"))
+                                 ? std::get<int64_t>(node.attrs.at("num_buckets"))
+                                 : 100);
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
   SINGLE_OUT(builder_.create<atir::StringToHashBucketFastOp>(
@@ -1507,10 +1606,24 @@ void MLIRBuilder::createSparseFillEmptyRowsNode(const NodeInfo& node, ArrayRef<T
 }
 void MLIRBuilder::createSqueezeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
   auto loc = getLoc(builder_.getContext(), node.name);
-  std::vector<int64_t> shape = node.outputs.empty() ? std::vector<int64_t>{} : node.outputs[0].shape;
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
-  auto op = builder_.create<atir::ReshapeOp>(loc, outs[0], outputBuffer.getResult(), ins[0], builder_.getI64ArrayAttr(shape));
+  // Squeeze 复用 Reshape 的 emit；从输出 shape 构造私有 targetShape tensor。
+  std::vector<int64_t> shape = node.outputs.empty() ? std::vector<int64_t>{} : node.outputs[0].shape;
+  auto i64Type = builder_.getI64Type();
+  SmallVector<int64_t, 4> shapeVec(shape.begin(), shape.end());
+  auto shapeRanked = RankedTensorType::get({(int64_t)shapeVec.size()}, i64Type);
+  auto shapeElems = DenseElementsAttr::get(shapeRanked, ArrayRef<int64_t>(shapeVec));
+  atir::TensorType shapeTensorTy = atir::TensorType::get(
+      {(int64_t)shapeVec.size()}, i64Type,
+      builder_.getStringAttr(node.name + "/targetShape"),
+      /*encoding=*/{}, /*stride=*/{}, /*layout=*/{}, /*memType=*/{},
+      /*address=*/{}, /*device=*/{}, /*onchip=*/{}, shapeElems);
+  auto targetShapeValue = builder_.create<atir::ConstantOp>(
+      loc, shapeTensorTy, builder_.getStringAttr(node.name + "/targetShape"),
+      builder_.getStringAttr("private"));
+  auto op = builder_.create<atir::ReshapeOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], targetShapeValue);
   tensorValues_[node.outputs[0].name] = op.getResult();
 }
 void MLIRBuilder::createSquareNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {

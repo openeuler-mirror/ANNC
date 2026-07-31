@@ -5,179 +5,6 @@ using namespace atir::interpret;
 
 namespace atir {
 
-void NotEqualOp::Interpret() {
-  this->inferShape();
-  atir::TensorType lhsType;
-  atir::TensorType rhsType;
-  DenseElementsAttr lhsAttr;
-  DenseElementsAttr rhsAttr;
-  if (failed(getTensorTypeAndData(getOperation(), getInput1(), "NotEqual lhs",
-                                  lhsType, lhsAttr)) ||
-      failed(getTensorTypeAndData(getOperation(), getInput2(), "NotEqual rhs",
-                                  rhsType, rhsAttr))) {
-    return;
-  }
-
-  auto lhsValsOr = getFloatValues(lhsAttr);
-  auto rhsValsOr = getFloatValues(rhsAttr);
-  if (failed(lhsValsOr) || failed(rhsValsOr)) {
-    emitOpError("NotEqual only supports numeric input cacheData");
-    return;
-  }
-
-  auto resultType = getResult().getType();
-  auto outputShape = resultType.getShape();
-  int64_t outputSize = getElementCount(outputShape);
-  if (outputSize < 0) {
-    emitOpError("NotEqual output shape must be static for interpretation");
-    return;
-  }
-
-  std::vector<int64_t> result(outputSize, 0);
-  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
-    auto outputIndex = getMultiIndex(outputShape, outIdx);
-    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
-    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
-    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
-    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
-    result[outIdx] = lhsValue != rhsValue ? 1 : 0;
-  }
-
-  if (failed(setBooleanLikeResult(resultType, outputShape, result))) {
-    emitOpError("NotEqual output element type is not supported");
-  }
-}
-
-void LessOp::Interpret() {
-  this->inferShape();
-  atir::TensorType lhsType;
-  atir::TensorType rhsType;
-  DenseElementsAttr lhsAttr;
-  DenseElementsAttr rhsAttr;
-  if (failed(getTensorTypeAndData(getOperation(), getLhs(), "Less lhs", lhsType,
-                                  lhsAttr)) ||
-      failed(getTensorTypeAndData(getOperation(), getRhs(), "Less rhs", rhsType,
-                                  rhsAttr))) {
-    return;
-  }
-
-  auto lhsValsOr = getFloatValues(lhsAttr);
-  auto rhsValsOr = getFloatValues(rhsAttr);
-  if (failed(lhsValsOr) || failed(rhsValsOr)) {
-    emitOpError("Less only supports numeric input cacheData");
-    return;
-  }
-
-  auto resultType = getResult().getType();
-  auto outputShape = resultType.getShape();
-  int64_t outputSize = getElementCount(outputShape);
-  if (outputSize < 0) {
-    emitOpError("Less output shape must be static for interpretation");
-    return;
-  }
-
-  std::vector<int64_t> result(outputSize, 0);
-  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
-    auto outputIndex = getMultiIndex(outputShape, outIdx);
-    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
-    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
-    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
-    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
-    result[outIdx] = lhsValue < rhsValue ? 1 : 0;
-  }
-
-  if (failed(setBooleanLikeResult(resultType, outputShape, result))) {
-    emitOpError("Less output element type is not supported");
-  }
-}
-
-void GreaterEqualOp::Interpret() {
-  this->inferShape();
-  atir::TensorType lhsType;
-  atir::TensorType rhsType;
-  DenseElementsAttr lhsAttr;
-  DenseElementsAttr rhsAttr;
-  if (failed(getTensorTypeAndData(getOperation(), getLhs(),
-                                  "GreaterEqual lhs", lhsType, lhsAttr)) ||
-      failed(getTensorTypeAndData(getOperation(), getRhs(),
-                                  "GreaterEqual rhs", rhsType, rhsAttr))) {
-    return;
-  }
-
-  auto lhsValsOr = getFloatValues(lhsAttr);
-  auto rhsValsOr = getFloatValues(rhsAttr);
-  if (failed(lhsValsOr) || failed(rhsValsOr)) {
-    emitOpError("GreaterEqual only supports numeric input cacheData");
-    return;
-  }
-
-  auto resultType = getResult().getType();
-  auto outputShape = resultType.getShape();
-  int64_t outputSize = getElementCount(outputShape);
-  if (outputSize < 0) {
-    emitOpError(
-        "GreaterEqual output shape must be static for interpretation");
-    return;
-  }
-
-  std::vector<int64_t> result(outputSize, 0);
-  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
-    auto outputIndex = getMultiIndex(outputShape, outIdx);
-    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
-    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
-    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
-    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
-    result[outIdx] = lhsValue >= rhsValue ? 1 : 0;
-  }
-
-  if (failed(setBooleanLikeResult(resultType, outputShape, result))) {
-    emitOpError("GreaterEqual output element type is not supported");
-  }
-}
-
-void GreaterOp::Interpret() {
-  this->inferShape();
-  atir::TensorType lhsType;
-  atir::TensorType rhsType;
-  DenseElementsAttr lhsAttr;
-  DenseElementsAttr rhsAttr;
-  if (failed(getTensorTypeAndData(getOperation(), getLhs(), "Greater lhs",
-                                  lhsType, lhsAttr)) ||
-      failed(getTensorTypeAndData(getOperation(), getRhs(), "Greater rhs",
-                                  rhsType, rhsAttr))) {
-    return;
-  }
-
-  auto lhsValsOr = getFloatValues(lhsAttr);
-  auto rhsValsOr = getFloatValues(rhsAttr);
-  if (failed(lhsValsOr) || failed(rhsValsOr)) {
-    emitOpError("Greater only supports numeric input cacheData");
-    return;
-  }
-
-  auto resultType = getResult().getType();
-  auto outputShape = resultType.getShape();
-  int64_t outputSize = getElementCount(outputShape);
-  if (outputSize < 0) {
-    emitOpError("Greater output shape must be static for interpretation");
-    return;
-  }
-
-  std::vector<int64_t> result(outputSize, 0);
-  for (int64_t outIdx = 0; outIdx < outputSize; ++outIdx) {
-    auto outputIndex = getMultiIndex(outputShape, outIdx);
-    auto lhsIndex = getBroadcastIndex(outputShape, lhsType.getShape(), outputIndex);
-    auto rhsIndex = getBroadcastIndex(outputShape, rhsType.getShape(), outputIndex);
-    float lhsValue = (*lhsValsOr)[getFlatIndex(lhsType.getShape(), lhsIndex)];
-    float rhsValue = (*rhsValsOr)[getFlatIndex(rhsType.getShape(), rhsIndex)];
-    result[outIdx] = lhsValue > rhsValue ? 1 : 0;
-  }
-
-  if (failed(setBooleanLikeResult(resultType, outputShape, result))) {
-    emitOpError("Greater output element type is not supported");
-  }
-}
-
 void CompareOp::Interpret() {
   this->inferShape();
   atir::TensorType lhsType;
@@ -188,6 +15,43 @@ void CompareOp::Interpret() {
                                   lhsType, lhsAttr)) ||
       failed(getTensorTypeAndData(getOperation(), getRhs(), "Compare rhs",
                                   rhsType, rhsAttr))) {
+    return;
+  }
+
+  // String compare (dnn_embedding_hash_bucket): lhs is a string tensor, rhs is
+  // the ignore-value constant. NE => "string is non-empty (not the ignore
+  // value)"; produce a NUMERIC mask because downstream Where reads the
+  // condition via getFloatValues. Mirrors the hand-written
+  // kp_fused_embedding_hash_bucket's `if (!item.data || item.size<=0) continue`
+  // empty-skip.
+  if (isStringTensor(lhsType)) {
+    auto lhsStringsOr = getStringValues(lhsAttr);
+    if (failed(lhsStringsOr)) {
+      emitOpError("Compare string lhs has no string cacheData");
+      return;
+    }
+    StringRef dir = getComparisonDirection();
+    std::vector<int64_t> mask;
+    mask.reserve(lhsStringsOr->size());
+    for (const std::string &s : *lhsStringsOr) {
+      bool isEmpty = s.empty();
+      bool pred;
+      if (dir == "NE") pred = !isEmpty;
+      else if (dir == "EQ") pred = isEmpty;
+      else {
+        emitOpError("string Compare only supports NE/EQ");
+        return;
+      }
+      mask.push_back(pred ? 1 : 0);
+    }
+    auto resultType = getResult().getType();
+    auto resolvedShape = interpret::resolveDynamicShape(
+        resultType.getShape(), (int64_t)mask.size());
+    // Emit the mask in the declared result element type (bool/i32 for
+    // comparison ops, or float for legacy float-mask consumers).
+    if (failed(setBooleanLikeResult(resultType, resolvedShape, mask))) {
+      emitOpError("string Compare output element type is not supported");
+    }
     return;
   }
 

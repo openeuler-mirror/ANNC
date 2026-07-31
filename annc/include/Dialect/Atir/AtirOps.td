@@ -337,25 +337,28 @@ def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["For
       [{  attr-dict ($results^ `:` type($results))? }];
 }
 
-def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", !listconcat([Pure], Interfaces)> {
+def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", Interfaces> {
   let summary = "Inserts a dimension of 1 into a tensor's shape";
   let description = [{
-    Given a tensor input, this operation inserts a dimension of size 1 at the dimension index 
-    specified by axis. The axis is zero-based; if a negative value is specified, the index is 
+    Given a tensor input, this operation inserts a dimension of size 1 at the dimension index
+    specified by axis. The axis is zero-based; if a negative value is specified, the index is
     counted from the end of the shape.
+
+    `axis` is a 0-D i32 tensor operand (carrying its scalar value via cacheData).
   }];
   let arguments = (ins
     Atir_Tensor:$output,
     Atir_Tensor:$input,
-    I32Attr:$axis
+    Atir_Tensor:$axis
   );
   let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+    $output `,` $input `,` $axis attr-dict
+    `:` type($output) `,` type($input) `,` type($axis) `->` type($result)
   }];
 }
 
-def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure], Interfaces)> {
+def Atir_IdentityOp : Atir_Op<"Identity", Interfaces> {
   let summary = "Identity operation";
   let description = [{
     Returns the input tensor as-is. This op is often used for 
@@ -369,7 +372,7 @@ def Atir_IdentityOp : Atir_Op<"Identity", !listconcat([Pure], Interfaces)> {
   let hasFolder = 0;
 }
 
-def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
+def Atir_ShapeOp : Atir_Op<"Shape", Interfaces> {
   let summary = "Returns the input shape information.";
   let description = [{
     Given a tensor input, this operation generates a one-dimensional tensor 
@@ -386,26 +389,8 @@ def Atir_ShapeOp : Atir_Op<"Shape", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_NotEqualOp : Atir_Op<"NotEqual", !listconcat([NoMemoryEffect,
-    Elementwise, SameOperandsAndResultShape], Interfaces)> {
-  let summary = "Returns (input1 != input2) element-wise";
-  let description = [{
-    Returns the truth value of (input1 != input2) element-wise.
-    Supports broadcasting between input1 and input2.
-  }];
-  let arguments = (ins
-    Atir_Tensor:$input1,
-    Atir_Tensor:$input2
-  );
-  let results = (outs
-    Atir_Tensor:$output
-  );
-  let assemblyFormat = [{
-    $input1 `,` $input2 attr-dict `:` functional-type(operands, results)
-  }];
-}
 
-def Atir_CastOp: Atir_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)>{
+def Atir_CastOp: Atir_Op<"Cast", !listconcat([SameOperandsAndResultShape], Interfaces)>{
   let summary = "Cast input to a new type";
   let description = [{
     Casts a tensor from one data type to another.
@@ -423,7 +408,7 @@ def Atir_CastOp: Atir_Op<"Cast", !listconcat([Pure, SameOperandsAndResultShape],
   }];
 }
 
-def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
+def Atir_WhereOp : Atir_Op<"Where", Interfaces> {
   let summary = "Returns elements from x or y depending on condition.";
   let description = [{
     Selects elements from `x` or `y` depending on `condition`.
@@ -442,7 +427,7 @@ def Atir_WhereOp : Atir_Op<"Where", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_StridedSliceOp : Atir_Op<"StridedSlice", !listconcat([Pure], Interfaces)> {
+def Atir_StridedSliceOp : Atir_Op<"StridedSlice", Interfaces> {
   let summary = "StridedSlice operation";
   let description = [{
     TensorFlow-compatible StridedSlice: 1-D tensor operands `begin`, `end`, and
@@ -471,7 +456,7 @@ def Atir_StridedSliceOp : Atir_Op<"StridedSlice", !listconcat([Pure], Interfaces
   }];
 }
 
-def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfaces)> {
+def Atir_PackOp : Atir_Op<"Pack", !listconcat([SameOperandsShape], Interfaces)> {
   let summary = "Pack tensors along a new axis";
   let description = [{
     Packs the `N` tensors in `values` along the `axis` dimension.
@@ -490,7 +475,7 @@ def Atir_PackOp : Atir_Op<"Pack", !listconcat([Pure, SameOperandsShape], Interfa
   }];
 }
 
-def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure], Interfaces)> {
+def Atir_GatherNdOp : Atir_Op<"GatherNd", Interfaces> {
   let summary = "Gather slices from params using nd indices";
   let description = [{
     Gathers slices from `params` into a Tensor with shape specified by 
@@ -512,7 +497,7 @@ def Atir_GatherNdOp : Atir_Op<"GatherNd", !listconcat([Pure], Interfaces)> {
 }
 
 def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
-    !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
   let summary = "Map strings to hash bucket indices.";
   let description = [{
     Maps each string in `input` to an integer hash modulo `numBuckets`.
@@ -531,7 +516,7 @@ def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
   }];
 }
 
-def Atir_SparseReshapeOp : Atir_Op<"SparseReshape", !listconcat([Pure], Interfaces)> {
+def Atir_SparseReshapeOp : Atir_Op<"SparseReshape", Interfaces> {
   let summary = "Reshape a SparseTensor to a new dense shape.";
   let description = [{
     This operation reshapes a sparse tensor represented by indices and values 
@@ -639,26 +624,9 @@ def Atir_SumOp : Atir_Op<"Sum", Interfaces> {
   }];
 }
 
-def Atir_GreaterEqualOp : Atir_Op<"GreaterEqual", Interfaces> {
-  let summary = "Element-wise greater-than-or-equal comparison";
-  let description = [{
-    Computes element-wise greater-than-or-equal comparison of `lhs` and `rhs`.
-    Returns a boolean tensor indicating where `lhs >= rhs`.
-  }];
-  let arguments = (ins
-    Atir_Tensor:$lhs,
-    Atir_Tensor:$rhs
-  );
-  let results = (outs
-    Atir_Tensor:$result
-  );
-  let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
-  }];
-}
 
-def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows", 
-    !listconcat([Pure], Interfaces)> {
+def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows",
+    Interfaces> {
   let summary = "Fills empty rows in a sparse tensor with a default value.";
   let description = [{
     This operation fills missing rows in a sparse tensor representation 
@@ -688,7 +656,7 @@ def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows",
   }];
 }
 
-def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect, Pure]> {
+def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect]> {
   let summary = "Returns a handle to a variable resource";
   let description = [{
     Creates a handle to a variable resource. The handle can be used with 
@@ -705,7 +673,7 @@ def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect, Pure]> {
   // );
 }
 
-def Atir_UniqueOp : Atir_Op<"Unique", !listconcat([Pure], Interfaces)> {
+def Atir_UniqueOp : Atir_Op<"Unique", Interfaces> {
   let summary = "Finds unique elements in a 1-D tensor and returns them with indices.";
   let description = [{
     This operation returns a tensor `y` containing all of the unique elements of `x`
@@ -725,7 +693,7 @@ def Atir_UniqueOp : Atir_Op<"Unique", !listconcat([Pure], Interfaces)> {
   }]; 
 }
 
-def Atir_ResourceGatherOp : Atir_Op<"ResourceGather", !listconcat([Pure], Interfaces)> {
+def Atir_ResourceGatherOp : Atir_Op<"ResourceGather", Interfaces> {
   let summary = "Gather elements from resource handle by indices";
   let description = [{
     Gathers data from a resource according to given indices.
@@ -744,7 +712,7 @@ def Atir_ResourceGatherOp : Atir_Op<"ResourceGather", !listconcat([Pure], Interf
   }];
 }
 
-def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", !listconcat([Pure], Interfaces)> {
+def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", Interfaces> {
   let summary = "Computes sums of sparse segments of a tensor.";
   let description = [{
     Computes the sum of rows in `data` selected by `indices`, grouped by `segment_ids`.
@@ -774,7 +742,7 @@ def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", !listconcat([Pure], In
   }];      
 }
 
-def Atir_SparseSegmentMinOp : Atir_Op<"SparseSegmentMin", !listconcat([Pure], Interfaces)> {
+def Atir_SparseSegmentMinOp : Atir_Op<"SparseSegmentMin", Interfaces> {
   let summary = "Computes minima of sparse segments of a tensor.";
   let description = [{
     Computes the element-wise minimum of rows in `data` selected by `indices`, grouped by `segment_ids`.
@@ -820,7 +788,7 @@ def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
   }];
 }
 
-def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([SameOperandsAndResultShape], Interfaces)> {
   let summary = "Returns a tensor of zeros with the same shape and type as input";
   let description = [{
     The ZerosLike operation returns a new tensor where all elements are zero,
@@ -878,7 +846,7 @@ def Atir_ConcatV2Op : Atir_Op<"ConcatV2", Interfaces> {
   }];
 }
 
-def Atir_SizeOp : Atir_Op<"Size", !listconcat([Pure], Interfaces)> {
+def Atir_SizeOp : Atir_Op<"Size", Interfaces> {
   let summary = "Return the size of tensor.";
   let description = [{
     Computes the total number of elements in the input tensor.
@@ -892,8 +860,7 @@ def Atir_SizeOp : Atir_Op<"Size", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_FloorModOp : Atir_Op<"FloorMod", !listconcat([Pure,
-    ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
+def Atir_FloorModOp : Atir_Op<"FloorMod", !listconcat([ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise remainder of division";
   let description = [{
     Returns element-wise remainder of division: `floor(x / y) * y + mod = x`.
@@ -912,8 +879,7 @@ def Atir_FloorModOp : Atir_Op<"FloorMod", !listconcat([Pure,
   }];
 }
 
-def Atir_FloorDivOp : Atir_Op<"FloorDiv", !listconcat([Pure, SameOperandsAndResultShape,
-    ResultsBroadcastableShape], Interfaces)>{
+def Atir_FloorDivOp : Atir_Op<"FloorDiv", !listconcat([SameOperandsAndResultShape, ResultsBroadcastableShape], Interfaces)>{
   let summary = "Element-wise floor division: floor(x / y). Matches Python // semantics.";
   let description = [{
     Returns element-wise floor division: `x / y`.
@@ -931,7 +897,7 @@ def Atir_FloorDivOp : Atir_Op<"FloorDiv", !listconcat([Pure, SameOperandsAndResu
   }];
 }
 
-def Atir_RangeOp : Atir_Op<"Range", !listconcat([Pure], Interfaces)> {
+def Atir_RangeOp : Atir_Op<"Range", Interfaces> {
   let summary = "Creates a sequence of numbers";
   let description = [{
     Creates a sequence of numbers from `start` to `limit` with step `delta`.
@@ -951,7 +917,7 @@ def Atir_RangeOp : Atir_Op<"Range", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", !listconcat([Pure], Interfaces)> {
+def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", Interfaces> {
   let summary = "Partitions data into numPartitions tensors using indices from partitions";
   let description = [{
     Partitions data into numPartitions tensors according to the indices in partitions.
@@ -970,7 +936,7 @@ def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", !listconcat([Pure], In
 }
 
 def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch",
-    !listconcat([Pure, SameVariadicOperandSize], Interfaces)> {
+    !listconcat([SameVariadicOperandSize], Interfaces)> {
   let summary = "Interleave values from multiple tensors into a single tensor using parallel indices";
   let description = [{
     Interleaves values from multiple tensors into a single tensor using indices arrays.
@@ -990,7 +956,7 @@ def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch",
   }];
 }
 
-def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", !listconcat([Pure], Interfaces)> {
+def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", Interfaces> {
   let summary = "Computes the mean along sparse segments of a tensor";
   let description = [{
     Computes the mean along sparse segments of a tensor.
@@ -1020,8 +986,7 @@ def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", !listconcat([Pure], 
   }];
 }
 
-def Atir_SubOp : Atir_Op<"Sub", !listconcat([Pure, Commutative,
-    ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
+def Atir_SubOp : Atir_Op<"Sub", !listconcat([Commutative, ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise subtraction: x - y.";
   let description = [{
     Computes per-element subtraction of two tensors with standard broadcasting semantics.
@@ -1039,7 +1004,7 @@ def Atir_SubOp : Atir_Op<"Sub", !listconcat([Pure, Commutative,
   }];
 }
 
-def Atir_MulOp : Atir_Op<"Mul", !listconcat([Pure], Interfaces)> {
+def Atir_MulOp : Atir_Op<"Mul", Interfaces> {
   let summary = "Element-wise multiplication with broadcasting";
   let description = [{
     Computes output = lhs * rhs element-wise.
@@ -1057,24 +1022,8 @@ def Atir_MulOp : Atir_Op<"Mul", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_LessOp : Atir_Op<"Less", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
-  let summary = "Element-wise less-than comparison operation (lhs < rhs).";
-  let description = [{
-    Performs element-wise less-than comparison of two tensors with broadcast support.
-  }];
-  let arguments = (ins
-    Atir_Tensor:$lhs,
-    Atir_Tensor:$rhs
-  );
-  let results = (outs
-    Atir_Tensor:$result
-  );
-  let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
-  }];
-}
 
-def Atir_FillOp : Atir_Op<"Fill", !listconcat([Pure], Interfaces)> {
+def Atir_FillOp : Atir_Op<"Fill", Interfaces> {
   let summary = "Create tensor of shape filled with scalar value";
   let description = [{
     Generates a tensor with a specified shape (from shape input) where all elements 
@@ -1094,24 +1043,8 @@ def Atir_FillOp : Atir_Op<"Fill", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_GreaterOp : Atir_Op<"Greater", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
-  let summary = "Element-wise greater-than comparison operation (lhs > rhs) ";
-  let description = [{
-    Performs element-wise greater-than comparison of two tensors with broadcast support.
-  }];
-  let arguments = (ins
-    Atir_Tensor:$lhs,
-    Atir_Tensor:$rhs
-  );
-  let results = (outs
-    Atir_Tensor:$result
-  );
-  let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
-  }];
-}
 
-def Atir_RealDivOp : Atir_Op<"RealDiv", !listconcat([Pure], Interfaces)> {
+def Atir_RealDivOp : Atir_Op<"RealDiv", Interfaces> {
   let summary = "For the real number type, element-wise returns x / y.";
   let description = [{
     If `x` and `y` are real numbers, this will return the result of floating-point division.
@@ -1129,7 +1062,7 @@ def Atir_RealDivOp : Atir_Op<"RealDiv", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", !listconcat([Pure], Interfaces)> {
+def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", Interfaces> {
   let summary = "Converts sparse representations into dense tensors.";
   let description = [{
     Converts sparse representation (sparseIndice + sparseValues) to a dense tensor with specified shape.
@@ -1153,7 +1086,7 @@ def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", !listconcat([Pure], Interfac
   }];
 }
 
-def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", !listconcat([Pure], Interfaces)> {
+def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", Interfaces> {
   let summary = "Performs batch multiplication on slices of two tensors.";
   let description = [{
     Performs batch matrix multiplication on high-dimensional tensors. For each batch, 
@@ -1177,7 +1110,7 @@ def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", !listconcat([Pure], Interfaces)>
   }];
 }
 
-def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([Pure, SameOperandsAndResultShape, Elementwise], Interfaces)> {
+def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
   let summary = "Computes reciprocal of square root element-wise.";
   let description = [{
     Performs element-wise reciprocal square root on tensor `x`, producing tensor `y`.
@@ -1195,7 +1128,7 @@ def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([Pure, SameOperandsAndResultShap
   }];
 }
 
-def Atir_TopKOp : Atir_Op<"TopK", !listconcat([Pure], Interfaces)> {
+def Atir_TopKOp : Atir_Op<"TopK", Interfaces> {
   let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
   let description = [{
     Find the values and indices of the `k` largest elements along the last dimension.
@@ -1215,7 +1148,7 @@ def Atir_TopKOp : Atir_Op<"TopK", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMin", !listconcat([Pure], Interfaces)> {
+def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMin", Interfaces> {
   let summary = "Computes the minimum value in each segment of the tensor.";
   let description = [{
     Aggregates elements of the input tensor into segments specified by segmentIds (unsorted),
@@ -1235,8 +1168,7 @@ def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMin", !listconcat([Pure]
   }];
 }
 
-def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([Pure,
-    ResultsBroadcastableShape], Interfaces)> {
+def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([ResultsBroadcastableShape], Interfaces)> {
   let summary = "Returns the minimum value of x and y element-wise.";
   let arguments = (ins
     Atir_Tensor:$output,
@@ -1251,7 +1183,7 @@ def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([Pure,
   }];
 }
 
-def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
+def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", !listconcat([ResultsBroadcastableShape], Interfaces)> {
   let summary = "Scatter update tensor values";
   let description = [{
     Updates values of the input tensor at specified indices with values from the updates tensor,
@@ -1271,7 +1203,7 @@ def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", !listconcat([Pur
   }];
 }
 
-def Atir_PadOp : Atir_Op<"Pad", !listconcat([Pure], Interfaces)> {
+def Atir_PadOp : Atir_Op<"Pad", Interfaces> {
   let summary = "Pad a tensor with specified value";
   let description = [{
     Pads a tensor according to the paddings tensor.
@@ -1309,7 +1241,7 @@ def Atir_MergeOp : Atir_Op<"Merge", Interfaces> {
 }
 
 def Atir_BroadcastOp : Atir_Op<"broadcast",
-    !listconcat([Pure], Interfaces)> {
+    Interfaces> {
   let summary = "Broadcast a tensor to a new shape by adding leading dimensions";
   let arguments = (ins
     Atir_Tensor:$output,
@@ -1326,20 +1258,23 @@ def Atir_ReshapeOp : Atir_Op<"Reshape", Interfaces> {
   let summary = "Reshape a tensor to a new shape without changing its underlying data.";
   let description = [{
     Produce a tensor with the same data as the input but reshaped to the specified shape.
-    The total number of elements must remain unchanged. 
+    The total number of elements must remain unchanged.
+
+    `targetShape` is a 1-D i32/i64 tensor operand (carrying the target shape values via cacheData).
   }];
   let arguments = (ins
     Atir_Tensor:$output,
     Atir_Tensor:$input,
-    I64ArrayAttr:$targetShape
+    Atir_Tensor:$targetShape
   );
   let results = (outs Atir_Tensor:$result);
   let assemblyFormat = [{
-    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+    $output `,` $input `,` $targetShape attr-dict
+    `:` type($output) `,` type($input) `,` type($targetShape) `->` type($result)
   }];
 }
 
-def Atir_ParameterOp : Atir_Op<"Parameter", !listconcat([Pure], Interfaces)> {
+def Atir_ParameterOp : Atir_Op<"Parameter", Interfaces> {
   let summary = "Placeholder for input arguments of the computation graph";
   let description = [{
     This operation serves as a placeholder for external inputs into the computation graph.
@@ -1354,7 +1289,7 @@ def Atir_ParameterOp : Atir_Op<"Parameter", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_CompareOp : Atir_Op<"Compare", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
+def Atir_CompareOp : Atir_Op<"Compare", !listconcat([ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise comparison operation.";
   let description = [{
     This operation compares two input tensors element-wise.
@@ -1374,7 +1309,7 @@ def Atir_CompareOp : Atir_Op<"Compare", !listconcat([Pure, ResultsBroadcastableS
   }];
 }
 
-def Atir_DivideOp : Atir_Op<"Divide", !listconcat([Pure], Interfaces)> {
+def Atir_DivideOp : Atir_Op<"Divide", Interfaces> {
   let summary = "Element-wise division with broadcasting support";
   let description = [{
     Computes element-wise division of two tensors.
@@ -1389,7 +1324,7 @@ def Atir_DivideOp : Atir_Op<"Divide", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_AndOp : Atir_Op<"And", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
+def Atir_AndOp : Atir_Op<"And", !listconcat([ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise bitwise AND operation.";
   let description = [{
     This operation computes the bitwise AND of two input tensors
@@ -1407,7 +1342,7 @@ def Atir_AndOp : Atir_Op<"And", !listconcat([Pure, ResultsBroadcastableShape], I
   }];
 }
 
-def Atir_LogisticOp : Atir_Op<"Logistic", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+def Atir_LogisticOp : Atir_Op<"Logistic", !listconcat([SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise logistic (sigmoid) function.";
   let description = [{
     This operation computes the logistic (sigmoid) function on
@@ -1425,7 +1360,7 @@ def Atir_LogisticOp : Atir_Op<"Logistic", !listconcat([Pure, SameOperandsAndResu
   }];
 }
 
-def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([Pure, ResultsBroadcastableShape], Interfaces)> {
+def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([ResultsBroadcastableShape], Interfaces)> {
   let summary = "Element-wise maximum operation.";
   let description = [{
     This operation returns the element-wise maximum of two
@@ -1445,7 +1380,7 @@ def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([Pure, ResultsBroadcastableS
   }];
 }
 
-def Atir_ScatterOp : Atir_Op<"Scatter", !listconcat([Pure], Interfaces)> {
+def Atir_ScatterOp : Atir_Op<"Scatter", Interfaces> {
   let summary = "Scatter operation with configurable update semantics.";
   let description = [{
     This operation updates elements of the `operand` tensor at
@@ -1473,7 +1408,7 @@ def Atir_ScatterOp : Atir_Op<"Scatter", !listconcat([Pure], Interfaces)> {
   );
 }
 
-def Atir_AbsOp : Atir_Op<"Abs", !listconcat([Pure, SameOperandsAndResultShape], Interfaces)> {
+def Atir_AbsOp : Atir_Op<"Abs", !listconcat([SameOperandsAndResultShape], Interfaces)> {
   let summary = "Element-wise absolute value operation.";
   let description = [{
     This operation computes the absolute value of each element in the input tensor. 
@@ -1490,7 +1425,7 @@ def Atir_AbsOp : Atir_Op<"Abs", !listconcat([Pure, SameOperandsAndResultShape], 
   }];
 }
 
-def Atir_DotOp : Atir_Op<"Dot", !listconcat([Pure], Interfaces)> {
+def Atir_DotOp : Atir_Op<"Dot", Interfaces> {
   let summary = "General dot product operation.";
   let description = [{
     This operation computes the dot product of two tensors `lhs` and `rhs`.
@@ -1508,26 +1443,30 @@ def Atir_DotOp : Atir_Op<"Dot", !listconcat([Pure], Interfaces)> {
   }];
 }
 
-def Atir_TransposeOp : Atir_Op<"Transpose", !listconcat([Pure], Interfaces)> {
+def Atir_TransposeOp : Atir_Op<"Transpose", Interfaces> {
   let summary = "Transpose a tensor by permuting its dimensions.";
   let description = [{
-    This operation returns a tensor with dimensions permuted
-    according to the `permutation` attribute.
+    This operation returns a tensor with dimensions permuted according to the
+    permutation. The permutation is taken from the `perm` tensor operand at
+    runtime (TF computes it via a ConcatV2/Pack chain for Tensordot); the
+    `permutation` attribute is a build-time fallback used only when the perm
+    operand has no runtime value.
   }];
   let arguments = (ins
     Atir_Tensor:$output,
     Atir_Tensor:$input,
+    Atir_Tensor:$perm,
     I64ArrayAttr:$permutation
   );
   let results = (outs
     Atir_Tensor:$result
   );
   let assemblyFormat = [{
-    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+    $output `,` $input `,` $perm attr-dict `:` type($output) `,` type($input) `,` type($perm) `->` type($result)
   }];
 }
 
-def Atir_ReduceMeanOp : Atir_Op<"ReduceMean"> {
+def Atir_ReduceMeanOp : Atir_Op<"ReduceMean", Interfaces> {
   let summary = "Compute the mean of tensor elements over specified axes";
   let description = [{
     Computes the mean of elements across dimensions of a tensor.
@@ -1548,7 +1487,7 @@ def Atir_ReduceMeanOp : Atir_Op<"ReduceMean"> {
   }];
 }
 
-def Atir_SoftmaxOp : Atir_Op<"Softmax", [Pure]> {
+def Atir_SoftmaxOp : Atir_Op<"Softmax", Interfaces> {
   let summary = "Softmax operation";
   let description = [{
     Computes softmax activations. For each element `x_i` in the input tensor,
@@ -1566,7 +1505,7 @@ def Atir_SoftmaxOp : Atir_Op<"Softmax", [Pure]> {
   }];
 }
 
-def Atir_SplitOp : Atir_Op<"Split"> {
+def Atir_SplitOp : Atir_Op<"Split", Interfaces> {
   let summary = "Split a tensor into multiple sub-tensors";
   let description = [{
     Splits a tensor into `num_split` tensors along one dimension.
@@ -1585,7 +1524,7 @@ def Atir_SplitOp : Atir_Op<"Split"> {
   }];
 }
 
-def Atir_PowOp : Atir_Op<"Pow", [Pure]> {
+def Atir_PowOp : Atir_Op<"Pow", Interfaces> {
   let summary = "Element-wise power operation";
   let description = [{
     Computes `lhs ^ rhs` element-wise.

@@ -32,7 +32,8 @@ int main(int argc, char **argv) {
     }
 
     // Extract --batch_size before MlirOptMain consumes argv
-    int64_t batch_size = 2;
+    // -1 means "not specified": keep dynamic shapes as-is
+    int64_t batch_size = -1;
     std::vector<char*> filtered_argv;
     filtered_argv.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {

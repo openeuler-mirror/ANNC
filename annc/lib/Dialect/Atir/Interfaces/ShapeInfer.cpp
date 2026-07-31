@@ -165,11 +165,13 @@ std::vector<int64_t> inferReductionAxesFromShapes(ArrayRef<int64_t> inputShape,
 }  // namespace
 
 // 形状广播函数
-llvm::SmallVector<int64_t> computeBroadcastShape(mlir::Operation *op) {
+llvm::SmallVector<int64_t> computeBroadcastShape(mlir::Operation *op,
+                                                  unsigned skipFirst = 0) {
   llvm::SmallVector<int64_t> outShape;
   bool initialized = false;
 
-  for (Value operand : op->getOperands()) {
+  for (unsigned i = skipFirst; i < op->getNumOperands(); ++i) {
+    Value operand = op->getOperand(i);
     if (isNoneOperand(operand)) {
       continue;
     }
@@ -216,9 +218,13 @@ llvm::SmallVector<int64_t> computeBroadcastShape(mlir::Operation *op) {
 }
 
 void inferEltwiseOpShape(mlir::Operation *op) {
+  // Destination-style ops (Sub, Mul, etc.) have operand[0] as the output
+  // buffer — skip it; broadcast is computed from data inputs only.
+  unsigned skip = (op->getNumOperands() > 1) ? 1 : 0;
+
   bool hasMaterializedOperand = false;
-  for (Value operand : op->getOperands()) {
-    if (!isNoneOperand(operand)) {
+  for (unsigned i = skip; i < op->getNumOperands(); ++i) {
+    if (!isNoneOperand(op->getOperand(i))) {
       hasMaterializedOperand = true;
       break;
     }
@@ -228,7 +234,7 @@ void inferEltwiseOpShape(mlir::Operation *op) {
     return;
   }
 
-  auto outShape = computeBroadcastShape(op); // 获取广播后的输出形状
+  auto outShape = computeBroadcastShape(op, skip);
   if (outShape.empty()) {
     return;
   }
@@ -509,10 +515,6 @@ void RealDivOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void FloorModOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void FloorDivOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void DivideOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-void NotEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-void LessOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-void GreaterEqualOp::inferShape() { inferEltwiseOpShape(getOperation()); }
-void GreaterOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void CompareOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void AndOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
@@ -521,6 +523,8 @@ void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
 void LogisticOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void AbsOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void SoftmaxOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void PowOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void ZerosLikeOp::inferShape() {inferEltwiseOpShape(getOperation());}
 
 void ConcatOp::inferShape() {
@@ -916,6 +920,51 @@ void SumOp::inferShape() {
   (void)setSingleResultShape(getOperation(), outputShape);
 }
 
+void ReduceMeanOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!inputType || !indicesType || !resultType) {
+    return;
+  }
+  auto inputShape = inputType.getShape();
+  llvm::SmallVector<int64_t> axes;
+  auto indicesAttr = indicesType.getCacheData();
+  if (indicesAttr && !indicesAttr.empty()) {
+    for (const APInt &value : indicesAttr.getValues<APInt>()) {
+      int64_t axis = value.getSExtValue();
+      if (axis < 0)
+        axis += static_cast<int64_t>(inputShape.size());
+      axes.push_back(axis);
+    }
+  }
+  if (axes.empty()) {
+    auto inferredAxes =
+        inferReductionAxesFromShapes(inputShape, resultType.getShape());
+    axes.append(inferredAxes.begin(), inferredAxes.end());
+  }
+  llvm::SmallVector<int64_t> outputShape;
+  bool keepDims = getKeepDims() ||
+                  resultType.getShape().size() == inputShape.size();
+  if (keepDims) {
+    outputShape.assign(inputShape.begin(), inputShape.end());
+    for (int64_t axis : axes) {
+      if (axis >= 0 && axis < static_cast<int64_t>(outputShape.size()))
+        outputShape[axis] = 1;
+    }
+  } else {
+    if (axes.empty()) {
+      for (int64_t axis = 0; axis < static_cast<int64_t>(inputShape.size()); ++axis)
+        axes.push_back(axis);
+    }
+    for (size_t axis = 0; axis < inputShape.size(); ++axis) {
+      if (!llvm::is_contained(axes, static_cast<int64_t>(axis)))
+        outputShape.push_back(inputShape[axis]);
+    }
+  }
+  (void)setSingleResultShape(getOperation(), outputShape);
+}
+
 void ProdOp::inferShape() {
   auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
   auto indicesType = dyn_cast<atir::TensorType>(getIndices().getType());
@@ -1091,7 +1140,33 @@ void SliceOp::inferShape() {
     return;
   }
 
-  SmallVector<int64_t> outputShape(inputShape.begin(), inputShape.end());
+  // Output shape = the `size` values (how many elements to slice per dim),
+  // read from the size operand's cacheData (a constant interpreted before
+  // Slice). Previously this copied the input shape, which is wrong for any
+  // actual (partial) slice: it made the output type claim `inputShape`'s
+  // element count instead of `size`'s. size[i] < 0 (TF "-1 => to end")
+  // resolves to inputShape[i] - begin[i].
+  SmallVector<int64_t> outputShape;
+  if (auto sizeCache = sizeType.getCacheData()) {
+    SmallVector<int64_t> beginVals;
+    if (auto beginCache = beginTypepe.getCacheData())
+      for (const APInt &b : beginCache.getValues<APInt>())
+        beginVals.push_back(b.getSExtValue());
+    size_t i = 0;
+    for (const APInt &sv : sizeCache.getValues<APInt>()) {
+      int64_t s = sv.getSExtValue();
+      if (s >= 0)
+        outputShape.push_back(s);
+      else if (i < beginVals.size())
+        outputShape.push_back(inputShape[i] - beginVals[i]);
+      else
+        outputShape.push_back(inputShape[i]);
+      ++i;
+    }
+  }
+  if (static_cast<int64_t>(outputShape.size()) !=
+      static_cast<int64_t>(inputShape.size()))
+    outputShape.assign(inputShape.begin(), inputShape.end());
   (void)setSingleResultShape(getOperation(), outputShape);
 }
 
@@ -1242,18 +1317,34 @@ void DotOp::inferShape() {
   (void)setSingleResultShape(getOperation(), outShape);
 }
 void ReshapeOp::inferShape() {
-  auto targetAttr = getTargetShapeAttr();
-  if (!targetAttr) {
+  // targetShape is now a tensor operand; read its values from cacheData.
+  auto targetShapeType = dyn_cast<atir::TensorType>(getTargetShape().getType());
+  if (!targetShapeType || !targetShapeType.getCacheData()) {
     return;
   }
   llvm::SmallVector<int64_t> outShape;
-  for (Attribute a : targetAttr) {
-    if (auto intAttr = dyn_cast<IntegerAttr>(a)) {
-      outShape.push_back(intAttr.getInt());
-      continue;
+  for (const APInt &v : targetShapeType.getCacheData().getValues<APInt>()) {
+    outShape.push_back(v.getSExtValue());
+  }
+  // Resolve -1 (TF "infer" sentinel): that dim = inputNumElements / product(other dims).
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (inputType) {
+    int64_t inputNumElements = 1;
+    for (int64_t d : inputType.getShape())
+      if (d > 0) inputNumElements *= d;
+    int64_t knownProduct = 1;
+    int64_t unknownIdx = -1;
+    for (size_t i = 0; i < outShape.size(); ++i) {
+      if (outShape[i] == -1) {
+        if (unknownIdx != -1) { emitError("Reshape targetShape can have at most one -1"); return; }
+        unknownIdx = i;
+      } else {
+        knownProduct *= outShape[i];
+      }
     }
-    emitError("Reshape targetShape must be integer array");
-    return;
+    if (unknownIdx >= 0 && knownProduct > 0) {
+      outShape[unknownIdx] = inputNumElements / knownProduct;
+    }
   }
   (void)setSingleResultShape(getOperation(), outShape);
 }
@@ -1265,20 +1356,30 @@ void TransposeOp::inferShape() {
   }
   auto inShape = inputType.getShape();
   int64_t rank = static_cast<int64_t>(inShape.size());
-  auto permAttr = getPermutationAttr();
-  if (!permAttr) {
-    emitError("Transpose missing permutation");
-    return;
-  }
+  // Prefer the runtime perm operand's cacheData (TF computes it via a
+  // ConcatV2/Pack chain for Tensordot); fall back to the static attribute.
   llvm::SmallVector<int64_t> perm;
-  perm.reserve(permAttr.size());
-  for (Attribute a : permAttr) {
-    auto ia = dyn_cast<IntegerAttr>(a);
-    if (!ia) {
-      emitError("Transpose permutation must be integer attributes");
+  if (auto permType = dyn_cast<atir::TensorType>(getPerm().getType())) {
+    if (auto permCache = permType.getCacheData()) {
+      for (const APInt &v : permCache.getValues<APInt>())
+        perm.push_back(v.getSExtValue());
+    }
+  }
+  if (perm.empty()) {
+    auto permAttr = getPermutationAttr();
+    if (!permAttr) {
+      emitError("Transpose missing permutation");
       return;
     }
-    perm.push_back(ia.getInt());
+    perm.reserve(permAttr.size());
+    for (Attribute a : permAttr) {
+      auto ia = dyn_cast<IntegerAttr>(a);
+      if (!ia) {
+        emitError("Transpose permutation must be integer attributes");
+        return;
+      }
+      perm.push_back(ia.getInt());
+    }
   }
   if (static_cast<int64_t>(perm.size()) != rank) {
     emitError("Transpose permutation length must match input rank");
@@ -1314,8 +1415,13 @@ void ExpandDimsOp::inferShape() {
     return;
   }
   llvm::ArrayRef<int64_t> inputShape = inputTensorType.getShape();
-  int32_t axisAttr = getAxis();
-  int64_t axis = axisAttr;
+  // axis is now a tensor operand (not an I32Attr); read its value from cacheData.
+  auto axisType = dyn_cast<atir::TensorType>(getAxis().getType());
+  if (!axisType || !axisType.getCacheData()) {
+    emitError("ExpandDims axis operand must have cacheData");
+    return;
+  }
+  int64_t axis = axisType.getCacheData().getValues<APInt>()[0].getSExtValue();
   int64_t rank = inputShape.size();
   if (axis < 0) axis = rank + axis + 1;
   if (axis < 0 || axis > rank) {
@@ -1856,6 +1962,37 @@ void RsqrtOp::inferShape() {
     return;
   }
   (void)setSingleResultShape(getOperation(), inputType.getShape());
+}
+
+void SplitOp::inferShape() {
+  auto valueType = dyn_cast<atir::TensorType>(getValue().getType());
+  auto dimType = dyn_cast<atir::TensorType>(getSplitDim().getType());
+  if (!valueType || !dimType) {
+    emitError("Split operands must be atir::TensorType");
+    return;
+  }
+  auto inputShape = valueType.getShape();
+  int64_t rank = static_cast<int64_t>(inputShape.size());
+  // Resolve the split axis from split_dim's cacheData (a scalar constant
+  // interpreted before Split).
+  int64_t axis = -1;
+  if (auto dimCache = dimType.getCacheData()) {
+    if (dimCache.getNumElements() == 1 &&
+        isa<IntegerType, IndexType>(dimCache.getElementType()))
+      axis = (*dimCache.getValues<APInt>().begin()).getSExtValue();
+  }
+  if (axis < 0 && rank > 0) axis += rank;
+  int64_t numSplit = getNumSplit();
+  for (unsigned r = 0; r < getNumResults(); ++r) {
+    SmallVector<int64_t> outShape(inputShape.begin(), inputShape.end());
+    if (axis >= 0 && axis < rank) {
+      outShape[axis] = (inputShape[axis] >= 0 && numSplit > 0)
+                           ? inputShape[axis] / numSplit
+                           : ShapedType::kDynamic;
+    }
+    auto resType = atir::TensorType::get(outShape, valueType.getElementType());
+    getResult(r).setType(resType);
+  }
 }
 
 }  // namespace atir
