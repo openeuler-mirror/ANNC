@@ -120,6 +120,82 @@ void GatherNdOp::Interpret() {
                                   indicesType, indicesAttr))) {
     return;
   }
+  // String values: gather strings by indices. The result feeds
+  // StringToHashBucketFast, which reads the cacheData via getStringValues
+  // (checks the attr, not the f32 placeholder type), so store a
+  // DenseStringElementsAttr (complex<f32> shaped type) on the result.
+  if (isStringTensor(valuesType)) {
+    auto strValsOr = getStringValues(valuesAttr);
+    auto idxOr = getIntValues(indicesAttr);
+    if (failed(strValsOr) || failed(idxOr)) {
+      emitOpError("GatherNd string values/indices cacheData missing");
+      return;
+    }
+    auto valuesShape = valuesType.getShape();
+    auto indicesShape = indicesType.getShape();
+    if (indicesShape.empty()) {
+      emitOpError("GatherNd indices must have at least one dimension");
+      return;
+    }
+    int64_t indicesRank = static_cast<int64_t>(indicesShape.size());
+    int64_t valuesRank = static_cast<int64_t>(valuesShape.size());
+    int64_t lastIndexDim = indicesShape[indicesRank - 1];
+    if (lastIndexDim > valuesRank) {
+      emitOpError("GatherNd lastIndexDim must not exceed values rank");
+      return;
+    }
+    SmallVector<int64_t> outputShape;
+    for (int64_t i = 0; i < indicesRank - 1; ++i) outputShape.push_back(indicesShape[i]);
+    for (int64_t i = lastIndexDim; i < valuesRank; ++i) outputShape.push_back(valuesShape[i]);
+    int64_t outputSize = getElementCount(outputShape);
+    if (outputSize < 0) {
+      emitOpError("GatherNd output shape must be static for interpretation");
+      return;
+    }
+    const auto &strVals = *strValsOr;
+    const auto &indicesVals = *idxOr;
+    std::vector<std::string> result;
+    result.reserve(outputSize);
+    for (int64_t outFlat = 0; outFlat < outputSize; ++outFlat) {
+      auto outputIndex = getMultiIndex(outputShape, outFlat);
+      SmallVector<int64_t> indicesIndex;
+      for (int64_t i = 0; i < indicesRank - 1; ++i) indicesIndex.push_back(outputIndex[i]);
+      indicesIndex.push_back(0);
+      SmallVector<int64_t> valuesIndex;
+      for (int64_t i = 0; i < lastIndexDim; ++i) {
+        indicesIndex[indicesRank - 1] = i;
+        int64_t flatIndicesIdx = getFlatIndex(indicesShape, indicesIndex);
+        if (flatIndicesIdx >= static_cast<int64_t>(indicesVals.size())) {
+          emitOpError("GatherNd indices out of bounds");
+          return;
+        }
+        int64_t indexValue = indicesVals[flatIndicesIdx];
+        if (indexValue < 0) indexValue += valuesShape[i];
+        if (indexValue < 0 || indexValue >= valuesShape[i]) {
+          emitOpError("GatherNd index out of range");
+          return;
+        }
+        valuesIndex.push_back(indexValue);
+      }
+      for (size_t i = indicesRank - 1; i < outputIndex.size(); ++i)
+        valuesIndex.push_back(outputIndex[i]);
+      int64_t valuesFlatIdx = getFlatIndex(valuesShape, valuesIndex);
+      if (valuesFlatIdx >= static_cast<int64_t>(strVals.size())) {
+        emitOpError("GatherNd computed index out of bounds");
+        return;
+      }
+      result.push_back(strVals[valuesFlatIdx]);
+    }
+    auto resultType = getResult().getType();
+    auto stringElemType = mlir::ComplexType::get(mlir::Float32Type::get(getContext()));
+    auto stringTensorType = mlir::RankedTensorType::get(outputShape, stringElemType);
+    std::vector<llvm::StringRef> refs;
+    refs.reserve(result.size());
+    for (const auto &s : result) refs.push_back(llvm::StringRef(s.data(), s.size()));
+    resultType.setCacheData(mlir::DenseElementsAttr::get(
+        stringTensorType, llvm::ArrayRef<llvm::StringRef>(refs)));
+    return;
+  }
   auto valuesValsOr = getFloatValues(valuesAttr);
   auto indicesValsOr = getIntValues(indicesAttr);
   if (failed(valuesValsOr) || failed(indicesValsOr)) {
@@ -381,11 +457,22 @@ void StridedSliceOp::Interpret() {
   for (int64_t outFlat = 0; outFlat < outputSize; ++outFlat) {
     auto outputIndex = getMultiIndex(outputShape, outFlat);
     SmallVector<int64_t> inputIndex(rank, 0);
+    int64_t shrinkMask = getShrinkAxisMask();
+    int64_t nonShrunkIdx = 0;
     for (size_t axis = 0; axis < rank; ++axis) {
-      inputIndex[axis] = beginVals[axis] + outputIndex[axis] * strideVals[axis];
+      if (shrinkMask & (1 << axis)) {
+        // Shrunk axis: fixed at begin, not from outputIndex.
+        inputIndex[axis] = beginVals[axis];
+      } else {
+        inputIndex[axis] =
+            beginVals[axis] + outputIndex[nonShrunkIdx] * strideVals[axis];
+        ++nonShrunkIdx;
+      }
     }
     result[outFlat] = inputVals[getFlatIndex(inputShape, inputIndex)];
   }
   (void)setDenseResult(resultType, outputShape, result);
 }
+
+void SplitOp::Interpret() {}
 } // namespace atir

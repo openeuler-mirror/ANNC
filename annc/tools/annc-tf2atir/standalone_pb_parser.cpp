@@ -431,7 +431,8 @@ void StandalonePbParser::processNode(
                        getTypeAttr("output_type", tf_dtype) ||
                        getTypeListAttr("Tout", j, tf_dtype) ||
                        getTypeAttr("Tout", tf_dtype) ||
-                       getTypeAttr("T", tf_dtype)) {
+                       getTypeAttr("T", tf_dtype) ||
+                       getTypeAttr("Tparams", tf_dtype)) {
             }
             std::string dtype = getDataTypeStr(tf_dtype);
             OutputInfo output;
@@ -457,6 +458,21 @@ void StandalonePbParser::processNode(
         info.outputs[3].dtype = "int64";
     }
     if (node->op() == "Where" && info.outputs.size() >= 1) {
+        info.outputs[0].dtype = "int64";
+    }
+    // Comparison ops always produce a boolean mask, regardless of operand type.
+    // Without this, the generic dtype inference picks up the operand type attr
+    // (e.g. "T"), which is wrong for string operands (would yield "string").
+    if ((node->op() == "NotEqual" || node->op() == "Equal" ||
+         node->op() == "Less" || node->op() == "LessEqual" ||
+         node->op() == "Greater" || node->op() == "GreaterEqual" ||
+         node->op() == "GreaterEqualV2") &&
+        !info.outputs.empty()) {
+        info.outputs[0].dtype = "bool";
+    }
+    // StringToHashBucketFast outputs int64 bucket indices; it has no T/Tout
+    // attr, so generic inference would wrongly fall back to float32.
+    if (node->op() == "StringToHashBucketFast" && !info.outputs.empty()) {
         info.outputs[0].dtype = "int64";
     }
     if ((node->op() == "TopK" || node->op() == "TopKV2") && info.outputs.size() >= 2) {
@@ -581,6 +597,9 @@ void StandalonePbParser::filterConvertibleNodes() {
 }
 
 void StandalonePbParser::inferMvpMatMulAddReluShapes() {
+    // 未指定 --batch_size 时保留动态 shape，不做替换
+    const bool replaceBatch = default_batch_size_ > 0;
+
     std::unordered_map<std::string, annc::NodeInfo*> by_name;
     for (auto& node : nodes_) {
         by_name[node.name] = &node;
@@ -592,7 +611,8 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
             continue;
         }
 
-        if (!node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
+        if (replaceBatch && !node.outputs[0].shape.empty() &&
+            node.outputs[0].shape[0] == -1) {
             node.outputs[0].shape[0] = default_batch_size_;
         }
         const std::vector<int64_t>& out_shape = node.outputs[0].shape;
@@ -607,7 +627,8 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
         if (k == -1) {
             continue;
         }
-        if (!lhs->outputs[0].shape.empty() && lhs->outputs[0].shape[0] == -1) {
+        if (replaceBatch && !lhs->outputs[0].shape.empty() &&
+            lhs->outputs[0].shape[0] == -1) {
             lhs->outputs[0].shape[0] = default_batch_size_;
         }
         rhs->outputs[0].shape = {k, out_shape[1]};
@@ -618,7 +639,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
                 maybe_add.outputs.empty()) {
                 continue;
             }
-            if (!maybe_add.outputs[0].shape.empty() &&
+            if (replaceBatch && !maybe_add.outputs[0].shape.empty() &&
                 maybe_add.outputs[0].shape[0] == -1) {
                 maybe_add.outputs[0].shape[0] = default_batch_size_;
             }
@@ -640,8 +661,9 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
     }
 
     for (auto& node : nodes_) {
-        if ((node.op_type == "Relu" || node.isOutputNode) && !node.outputs.empty() &&
-            !node.outputs[0].shape.empty() && node.outputs[0].shape[0] == -1) {
+        if (replaceBatch && (node.op_type == "Relu" || node.isOutputNode) &&
+            !node.outputs.empty() && !node.outputs[0].shape.empty() &&
+            node.outputs[0].shape[0] == -1) {
             node.outputs[0].shape[0] = default_batch_size_;
         }
     }

@@ -196,7 +196,7 @@ private:
       return dataAttr.getSplatValue<APInt>().getSExtValue();
     }
     if (dataAttr.getNumElements() != 1) return failure();
-    return dataAttr.getValues<APInt>().begin()->getSExtValue();
+    return (*dataAttr.getValues<APInt>().begin()).getSExtValue();
   }
 
   // Returns the integer values of a 1-D ConstantOp tensor.  Fails for

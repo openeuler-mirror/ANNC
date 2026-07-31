@@ -133,6 +133,70 @@ FailureOr<SmallVector<int64_t>> getIntValues(DenseElementsAttr attr) {
   return failure();
 }
 
+bool isStringTensor(atir::TensorType tensorType) {
+  auto enc = dyn_cast_or_null<StringAttr>(tensorType.getEncoding());
+  return enc && enc.getValue() == "string";
+}
+
+FailureOr<std::vector<std::string>> getStringValues(DenseElementsAttr attr) {
+  if (!isa<DenseStringElementsAttr>(attr))
+    return failure();
+  std::vector<std::string> values;
+  values.reserve(attr.getNumElements());
+  for (StringRef s : attr.getValues<StringRef>())
+    values.emplace_back(s.str());
+  return values;
+}
+
+// Resolve dynamic dimensions in outputShape using the actual element count.
+// If exactly one dimension is dynamic, infer it from numElements / product
+// of the other (static) dimensions. Returns the resolved static shape.
+SmallVector<int64_t> resolveDynamicShape(ArrayRef<int64_t> outputShape,
+                                         int64_t numElements) {
+  SmallVector<int64_t> resolved(outputShape.begin(), outputShape.end());
+  int dynIdx = -1;
+  int64_t product = 1;
+  for (int i = 0; i < (int)resolved.size(); ++i) {
+    if (resolved[i] == ShapedType::kDynamic) {
+      dynIdx = i;
+    } else {
+      product *= resolved[i];
+    }
+  }
+  if (dynIdx >= 0 && product > 0) {
+    resolved[dynIdx] = numElements / product;
+  }
+  return resolved;
+}
+
+LogicalResult setStringResult(atir::TensorType resultType,
+                              ArrayRef<int64_t> outputShape,
+                              ArrayRef<std::string> values) {
+  auto resolved = resolveDynamicShape(outputShape, (int64_t)values.size());
+  auto standardTensorType =
+      RankedTensorType::get(resolved, resultType.getElementType());
+  std::vector<StringRef> refs;
+  refs.reserve(values.size());
+  for (const std::string &s : values)
+    refs.push_back(StringRef(s.data(), s.size()));
+  resultType.setCacheData(
+      DenseElementsAttr::get(standardTensorType, ArrayRef<StringRef>(refs)));
+  return success();
+}
+
+atir::TensorType concretizeResultType(mlir::Value result,
+                                      ArrayRef<int64_t> shape) {
+  auto ty = dyn_cast<atir::TensorType>(result.getType());
+  if (!ty)
+    return atir::TensorType();
+  auto staticType = atir::TensorType::get(
+      shape, ty.getElementType(), ty.getName(), ty.getEncoding(),
+      ty.getStride(), ty.getLayout(), ty.getMemType(), ty.getAddress(),
+      ty.getDeviceParallel(), ty.getOnchipParallel(), ty.getCacheData());
+  result.setType(staticType);
+  return staticType;
+}
+
 SmallVector<int64_t> getIntArrayAttrValues(ArrayAttr attr) {
   SmallVector<int64_t> values;
   if (!attr) {
@@ -166,8 +230,9 @@ Attribute getZeroElementAttr(Type elementType, MLIRContext *context) {
 LogicalResult setDenseResult(atir::TensorType resultType,
                              ArrayRef<int64_t> outputShape,
                              ArrayRef<float> values) {
+  auto resolved = resolveDynamicShape(outputShape, (int64_t)values.size());
   auto standardTensorType =
-      RankedTensorType::get(outputShape, resultType.getElementType());
+      RankedTensorType::get(resolved, resultType.getElementType());
   auto elementType = resultType.getElementType();
 
   if (elementType.isF32()) {
@@ -224,8 +289,9 @@ LogicalResult setDenseResult(atir::TensorType resultType,
 LogicalResult setDenseIntResult(atir::TensorType resultType,
                                 ArrayRef<int64_t> outputShape,
                                 ArrayRef<int64_t> values) {
+  auto resolved = resolveDynamicShape(outputShape, (int64_t)values.size());
   auto standardTensorType =
-      RankedTensorType::get(outputShape, resultType.getElementType());
+      RankedTensorType::get(resolved, resultType.getElementType());
   auto elementType = resultType.getElementType();
   if (elementType.isInteger(1)) {
     std::vector<int64_t> casted;

@@ -164,6 +164,8 @@ void MulOp::Interpret() {
   (void)setDenseResult(resultType, outputShape, result);
 }
 
+void PowOp::Interpret() {}
+
 void RealDivOp::Interpret() {
   this->inferShape();
 

@@ -63,6 +63,7 @@ class MLIRBuilder {
   void createLessNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createGreaterNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  void createLessEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
   void createConcatNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
@@ -138,6 +139,14 @@ class MLIRBuilder {
   void addNode(const NodeInfo& node);
 
   std::unordered_map<std::string, Value> tensorValues_;
+  // Name -> NodeInfo lookup, populated during buildFromNodes so handlers can
+  // resolve constant inputs (e.g. Transpose's perm) by name.
+  std::unordered_map<std::string, const NodeInfo*> nodesByName_;
+  // Decode an integer Const node's raw_data into int64 values (handles
+  // int32/int64 dtypes). Returns false if the node is missing or not an
+  // integer constant.
+  bool decodeIntConstValues(const std::string& name,
+                            std::vector<int64_t>& out) const;
   atir::TensorType getTensorType(const std::string& name,
                                  const std::string& dtype,
                                  const std::vector<int64_t>& shape);

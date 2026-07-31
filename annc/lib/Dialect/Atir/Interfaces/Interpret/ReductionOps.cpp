@@ -77,6 +77,8 @@ void SumOp::Interpret() {
   (void)setDenseResult(resultType, outputShape, result);
 }
 
+void ReduceMeanOp::Interpret() {}
+
 void ProdOp::Interpret() {
   this->inferShape();
   atir::TensorType inputType;
