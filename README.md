@@ -26,16 +26,17 @@ ANNC-Next 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统�
 # Python 依赖（也可使用：pip install -r requirements.txt）
 pip install pybind11 nanobind
 
-# TensorFlow 2.15（CMake 会在 configure 时自动检测）
-pip install tensorflow==2.15.0
+# TensorFlow 2.20（CMake 会在 configure 时自动检测）
+pip install tensorflow==2.20.0
 
-# 系统工具
-yum install cmake clang ninja-build
+# 系统工具、Protobuf 和 GoogleTest C++ 开发库
+yum install cmake clang ninja-build protobuf-devel gtest-devel
 ```
 
 > **注意**：部分命令可能需要 `sudo` 权限执行
 >
 > `build.sh` 会自动检测并安装 `pybind11` 和 `nanobind`；如不需要自动安装，可传入 `--no-install-deps`。TensorFlow 需要预先手动安装。
+> `build.sh` 会在系统 `protoc` 版本变化后自动重新生成最小 TensorFlow protobuf 源码；也可用 `--regen-tf-protos` 强制重新生成。
 
 ### LLVM & MLIR + nlohmann/json
 
