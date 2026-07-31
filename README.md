@@ -132,7 +132,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 - **核心 Op**：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
 - **优化 Pass**：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
 - **接口**：`ShapeInfer`（形状推导）、`Interpret`（解释执行）
-- **验证**：OpVerify（kernel 正确性验证，通过 `kpGenLibPath` / `llmGenLibPath` 指定验证库）
+- **验证**：OpVerify（通过 `kpGenLibPath` 指定 kernel，执行正确性验证）
 
 ### Lowering 路径
 
@@ -359,19 +359,6 @@ ANNC_CLANG=/path/to/clang annc model_lowered.mlir --shared -o kernel.so
 ```shell
 annc-verify output.bin \
   --atir-op-verify="kpGenLibPath=path/to/generated_kernel.so"
-```
-
-验证 LLM CodeGen 生成的 kernel：
-
-```shell
-annc-verify output.bin \
-  --atir-op-verify="llmGenLibPath=path/to/llm_generated_kernel.so"
-```
-
-生成 LLM 专用 TensorFlow Op Kernel：
-
-```shell
-annc-asm output.bin --atir-LLM-CodeGen
 ```
 
 ### `annc-converter`
