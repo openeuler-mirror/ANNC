@@ -176,3 +176,7 @@ mkdir -p "${OUT_DIR}"
   tensorflow/core/protobuf/saved_object_graph.proto \
   tensorflow/core/protobuf/struct.proto \
   tensorflow/core/protobuf/trackable_object_graph.proto
+
+# build.sh uses this stamp to regenerate sources after protoc changes, rather
+# than treating any existing generated header as compatible with libprotobuf.
+"${PROTOC_BIN}" --version > "${OUT_DIR}/.protoc-version"

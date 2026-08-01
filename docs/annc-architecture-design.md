@@ -213,7 +213,7 @@ flowchart TB
 | **前端适配覆盖度**         | 当前仅 TF 前端完整，ONNX 在规划中，PyTorch 未纳入    | 优先覆盖客户量最大的框架，通过 NodeInfo 抽象降低边际适配成本 |
 | **TF Serving 启动时延** | 首次加载模型需执行编译 pipeline                 | 离线预编译、图优化缓存（未来）、合理设置 timeout        |
 | **磁盘空间**            | 构建 LLVM/MLIR 需约 50GB                 | 构建机独立环境、增量构建                        |
-| **构建环境**            | 依赖 openEuler、鲲鹏 920X、TensorFlow 2.15 | 明确依赖清单，提供 build.sh 一键构建             |
+| **构建环境**            | 依赖 openEuler、鲲鹏 920X、TensorFlow 2.20 | 明确依赖清单，提供 build.sh 一键构建             |
 | **运维监控**            | 需要观察编译失败、超时、回退事件                     | 统一日志、关键事件埋点                         |
 | **模型兼容性**           | 部分 TF 算子/动态 shape 可能不支持              | 失败自动回退，持续扩展算子覆盖                     |
 
@@ -758,7 +758,7 @@ flowchart TB
 
 ### 7.5 兼容性
 
-- **TF 版本兼容**：当前基于 TensorFlow 2.15，Grappler 接口稳定。
+- **TF 版本兼容**：当前基于 TensorFlow 2.20，Grappler 接口稳定。
 - **GraphDef 兼容**：重写后的 GraphDef 保留原始节点属性，失败时可回退。
 - **旧产物兼容**：`ANNCFusedOp` 支持 legacy `kernel_arg_order` 重排。
 
@@ -824,9 +824,9 @@ flowchart TB
 
 - 目标硬件为 AArch64 服务器（当前优先支持鲲鹏 920X），未来可扩展至其他 CPU 架构。
 - 目标操作系统为 openEuler 24.03 LTS SP4 或兼容版本。
-- 用户已安装 TensorFlow 2.15.0、pybind11、nanobind。
+- 用户已安装 TensorFlow 2.20.0、pybind11、nanobind。
 - 构建环境具备约 50GB 磁盘空间和足够的编译内存。
-- 构建依赖还包括 protobuf-devel、clang、ninja-build；LLVM 21.1.3、nlohmann/json v3.11.3（由 CMake 自动拉取/定位）。
+- 构建依赖还包括 protobuf-devel、gtest-devel、clang、ninja-build；LLVM 21.1.3、nlohmann/json v3.11.3（由 CMake 自动拉取/定位）。
 
 ### 9.2 约束
 
@@ -941,4 +941,3 @@ flowchart TB
 | v3.1 | 2026-07-09 | ANNC 团队 | 总体方案调整为三层架构：ANNC 框架对接层、ANNC 工具链前端、ANNC 工具链后端 |
 | v3.2 | 2026-07-09 | ANNC 团队 | 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节 |
 | v3.3 | 2026-07-17 | ANNC 团队 | 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等 |
-

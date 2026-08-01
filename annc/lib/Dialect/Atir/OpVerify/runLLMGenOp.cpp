@@ -6,11 +6,12 @@
 
 // TensorFlow C API (for loading library)
 #include <tensorflow/c/c_api.h>
-// TensorFlow C++ API (for building graph)
-#include <tensorflow/cc/client/client_session.h>
+// TensorFlow C++ API (for building and executing graphs)
 #include <tensorflow/cc/ops/standard_ops.h>
+#include <absl/status/status.h>
 #include <tensorflow/core/framework/op.h>
 #include <tensorflow/core/lib/core/status.h>
+#include <tensorflow/core/public/session.h>
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -359,7 +360,7 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
                           std::to_string(placeholders[i].index()));
     }
     
-    tensorflow::Status s;
+    absl::Status s;
     tensorflow::Node* node = root.graph()->AddNode(node_def, &s);
     if (!s.ok()) {
         llvm::errs() << "Error creating custom op: " << s.ToString() << "\n";
@@ -368,14 +369,16 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
     auto custom_op = tensorflow::Output(node, 0);
         
     // Step 5: Prepare input tensors
-    tensorflow::ClientSession::FeedType feeds;
+    std::vector<std::pair<std::string, tensorflow::Tensor>> feeds;
     for (size_t i = 0; i < inputData.shapes.size(); ++i) {
         auto tfTensorResult = createTFFromMLIR(inputData.values[i], inputData.shapes[i]);
         if (!tfTensorResult) {
             llvm::errs() << "Error: " << toString(tfTensorResult.takeError()) << "\n";
             return false;
         }
-        feeds.insert({placeholders[i], tensorflow::Input::Initializer(*tfTensorResult)});
+        feeds.emplace_back(placeholders[i].node()->name() + ":" +
+                               std::to_string(placeholders[i].index()),
+                           *tfTensorResult);
     }
         
     // Step 6: Create session
@@ -387,7 +390,30 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
         ->mutable_rewrite_options()
         ->set_disable_meta_optimizer(true);
     
-    tensorflow::ClientSession session(root, session_opts);
+    tensorflow::GraphDef graph_def;
+    absl::Status graph_status = root.ToGraphDef(&graph_def);
+    if (!graph_status.ok()) {
+        llvm::errs() << "Error exporting TensorFlow graph: "
+                     << graph_status.ToString() << "\n";
+        return false;
+    }
+
+    std::unique_ptr<tensorflow::Session> session(
+        tensorflow::NewSession(session_opts));
+    if (!session) {
+        llvm::errs() << "Error creating TensorFlow session\n";
+        return false;
+    }
+
+    absl::Status create_status = session->Create(graph_def);
+    if (!create_status.ok()) {
+        llvm::errs() << "Error creating TensorFlow graph: "
+                     << create_status.ToString() << "\n";
+        return false;
+    }
+
+    const std::vector<std::string> fetches = {
+        custom_op.node()->name() + ":" + std::to_string(custom_op.index())};
     
     // Step 7: Performance profiling with adaptive warmup
     // Configuration: max warmup iterations, min warmup runs for stability check, stability threshold
@@ -406,7 +432,7 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
         outputs_tf.clear();
         auto startTime = std::chrono::high_resolution_clock::now();
         
-        tensorflow::Status run_status = session.Run(feeds, {custom_op}, &outputs_tf);
+        absl::Status run_status = session->Run(feeds, fetches, {}, &outputs_tf);
         
         auto endTime = std::chrono::high_resolution_clock::now();
         double timeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -477,7 +503,7 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
         outputs_tf.clear();
         auto startTime = std::chrono::high_resolution_clock::now();
         
-        tensorflow::Status run_status = session.Run(feeds, {custom_op}, &outputs_tf);
+        absl::Status run_status = session->Run(feeds, fetches, {}, &outputs_tf);
         
         auto endTime = std::chrono::high_resolution_clock::now();
         double timeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -499,7 +525,7 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
     
     // Step 8: Final run for result extraction
     outputs_tf.clear();
-    tensorflow::Status run_status = session.Run(feeds, {custom_op}, &outputs_tf);
+    absl::Status run_status = session->Run(feeds, fetches, {}, &outputs_tf);
     if (!run_status.ok()) {
         llvm::errs() << "Error during final inference: " << run_status.ToString() << "\n";
         return false;
@@ -514,8 +540,15 @@ bool runLLMGenOp(const std::string &libPath, IoTensorDef *inputs,
     auto& result_tensor = outputs_tf[0];
     auto ctx = inputs->getInputs().begin()->second.getContext();
     storeOutputToMLIR(outputs, result_tensor, ctx);
-    
-    // Cleanup handled by RAII (TFLibraryHandle destructor)
+
+    absl::Status close_status = session->Close();
+    if (!close_status.ok()) {
+        llvm::errs() << "Error closing TensorFlow session: "
+                     << close_status.ToString() << "\n";
+        return false;
+    }
+
+    // Custom op cleanup is handled by TFLibraryHandle.
     return true;
 }
 
