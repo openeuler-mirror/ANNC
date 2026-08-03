@@ -23,6 +23,3 @@ add_mlir_library(AtirOpVerify
     AtirShapeInferIntfc
     AtirInterpretIntfc
 )
-
-target_include_directories(AtirOpVerify PUBLIC ${TENSORFLOW_INCLUDE_DIRS})
-target_link_libraries(AtirOpVerify PUBLIC ${TENSORFLOW_FRAMEWORK_LIB})
