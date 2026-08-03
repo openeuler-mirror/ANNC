@@ -19,10 +19,12 @@ using namespace atir;
 //   arg0 ─► ExpandDims ─►┬─► GatherNd ─► StringToHashBucketFast (anchor)
 //                       │                    │
 //                       │                    ├─► ... ─► Gather ─►┐
-//                       │                    │                    ├─► SparseFillEmptyRows
-//                       └─► Where ◄─ Compare │                    │       ─► Unique ─► Gather ◄─ arg1
-//                                           │                    │                      │
-//                                           └─► SparseReshape ──►┘                      ─► SparseSegmentMean
+//                       │                    │                    ├─►
+//                       SparseFillEmptyRows └─► Where ◄─ Compare │ │       ─►
+//                       Unique ─► Gather ◄─ arg1
+//                                           │                    │ │ └─►
+//                                           SparseReshape ──►┘ ─►
+//                                           SparseSegmentMean
 //                                                                                         │
 //                                                                                         ─► ... ─► Reshape(arg2)  (sink)
 //
@@ -48,17 +50,16 @@ struct DnnEmbeddingHashBucketRewrite
       return failure();
     }
 
-    Value inputArg = func.getArgument(0);    // dynamic string input
-    Value weightArg = func.getArgument(1);   // embedding weights
-    Value outputArg = func.getArgument(2);   // output buffer
+    Value inputArg = func.getArgument(0);   // dynamic string input
+    Value weightArg = func.getArgument(1);  // embedding weights
+    Value outputArg = func.getArgument(2);  // output buffer
 
     // Reverse chain: anchor ← GatherNd ← ExpandDims ← inputArg.
     auto gatherNd = anchor.getOperand(1).getDefiningOp<GatherNdOp>();
     if (!gatherNd) {
       return failure();
     }
-    auto expandDims =
-        gatherNd->getOperand(1).getDefiningOp<ExpandDimsOp>();
+    auto expandDims = gatherNd->getOperand(1).getDefiningOp<ExpandDimsOp>();
     if (!expandDims) {
       return failure();
     }
@@ -89,11 +90,10 @@ struct DnnEmbeddingHashBucketRewrite
     }
     bool hasSparseSegmentMean = false;
     bool hasUnique = false;
-    walkDown(anchor.getOperation(), sink.getOperation(),
-             [&](Operation *op) {
-               if (isa<SparseSegmentMeanOp>(op)) hasSparseSegmentMean = true;
-               if (isa<UniqueOp>(op)) hasUnique = true;
-             });
+    walkDown(anchor.getOperation(), sink.getOperation(), [&](Operation *op) {
+      if (isa<SparseSegmentMeanOp>(op)) hasSparseSegmentMean = true;
+      if (isa<UniqueOp>(op)) hasUnique = true;
+    });
     if (!hasSparseSegmentMean || !hasUnique) {
       return failure();
     }
@@ -130,7 +130,7 @@ struct DnnEmbeddingHashBucketRewrite
     // transformations.  If any constant deviates from the expected value,
     // the rewrite would be semantically incorrect, so we bail out and let
     // the subgraph fall back to normal lowering.
-    if (failed(verifyConstants(fusedOps))) {
+    if (failed(verifyConstants(fusedOps, sink))) {
       return failure();
     }
 
@@ -170,7 +170,7 @@ struct DnnEmbeddingHashBucketRewrite
         .I64AttrArg("num_buckets", numBuckets);
   }
 
-private:
+ private:
   // === Constant verification helpers ======================================
   //
   // The kernel `KPFusedDnnEmbeddingWithHashBucket` assumes specific constant
@@ -243,7 +243,53 @@ private:
   // Verifies that every constant feeding a fused op matches the value the
   // kernel implicitly assumes.  Dispatches by op type.  Returns failure on
   // any mismatch or unexpected structure.
-  static LogicalResult verifyConstants(ArrayRef<Operation *> fusedOps) {
+  // The final Reshape rebuilds the output shape from a runtime leading
+  // dimension and fixed embedding dimensions. Unlike a Tile multiplier Pack,
+  // its constants must match the static dimensions of the output type.
+  static bool isOutputShapePack(PackOp pack, ReshapeOp sink) {
+    return pack->hasOneUse() &&
+           sink.getTargetShape().getDefiningOp() == pack.getOperation();
+  }
+
+  static LogicalResult verifyOutputShapePack(PackOp pack, ReshapeOp sink) {
+    auto outputType = dyn_cast<atir::TensorType>(sink.getResult().getType());
+    if (!outputType) return failure();
+
+    ValueRange inputs = pack.getInputs();
+    ArrayRef<int64_t> outputShape = outputType.getShape();
+    if (inputs.size() != outputShape.size()) return failure();
+
+    for (auto [input, dimension] : llvm::zip(inputs, outputShape)) {
+      if (input.getDefiningOp<ConstantOp>()) {
+        if (ShapedType::isDynamic(dimension) ||
+            !checkConstantInt(input, dimension)) {
+          return failure();
+        }
+      } else if (!ShapedType::isDynamic(dimension)) {
+        return failure();
+      }
+    }
+    return success();
+  }
+
+  // The trailing dimensions of the intermediate reshape are reconstructed
+  // from Shape()[1:] and concatenated with the leading input dimension.
+  static bool isTrailingShapeSlice(SliceOp slice) {
+    if (!slice->hasOneUse()) return false;
+    auto concat = dyn_cast<ConcatV2Op>(*slice->getUsers().begin());
+    return concat && checkConstantInt(concat.getAxis(), 0);
+  }
+
+  // The leading dimension of the final output shape is Shape()[0]. It is
+  // accepted only when it directly constructs the selected sink's shape.
+  static bool feedsOutputShapePack(StridedSliceOp slice, ReshapeOp sink) {
+    if (!slice->hasOneUse()) return false;
+    auto pack = dyn_cast<PackOp>(*slice->getUsers().begin());
+    return pack && isOutputShapePack(pack, sink);
+  }
+
+  static LogicalResult verifyConstants(ArrayRef<Operation *> fusedOps,
+                                       ReshapeOp sink) {
     for (Operation *op : fusedOps) {
       if (auto cmp = dyn_cast<CompareOp>(op)) {
         StringRef dir = cmp.getComparisonDirection();
@@ -259,8 +305,19 @@ private:
         // if present they would have failed the structural match.
       } else if (auto slice = dyn_cast<SliceOp>(op)) {
         // Slice on the Shape result: begin=[0], size=[1] (take dim 0).
-        if (!checkConstantInts(slice.getBegin(), {0})) return failure();
-        if (!checkConstantInts(slice.getSize(), {1})) return failure();
+        if (checkConstantInts(slice.getBegin(), {0}) &&
+            checkConstantInts(slice.getSize(), {1})) {
+          continue;
+        }
+
+        // Intermediate shape reconstruction: begin=[1], size=[-1] keeps
+        // the fixed trailing dimensions before a ConcatV2(axis=0).
+        if (checkConstantInts(slice.getBegin(), {1}) &&
+            checkConstantInts(slice.getSize(), {-1}) &&
+            isTrailingShapeSlice(slice)) {
+          continue;
+        }
+        return failure();
       } else if (auto prod = dyn_cast<ProdOp>(op)) {
         // Prod reduction axes: [0].
         if (!checkConstantInts(prod.getIndices(), {0})) return failure();
@@ -293,15 +350,25 @@ private:
           if (!checkConstantInts(ss.getEnd(), {0, 1})) return failure();
           if (!checkConstantInts(ss.getStrides(), {1, 1})) return failure();
         } else if (rank == 1) {
-          // strided_slice on Shape_1:
-          //   begin=[1], end=[2], strides=[1]
-          if (!checkConstantInts(ss.getBegin(), {1})) return failure();
-          if (!checkConstantInts(ss.getEnd(), {2})) return failure();
-          if (!checkConstantInts(ss.getStrides(), {1})) return failure();
+          // The Tile multiplier reads Shape()[1]. The final output reshape
+          // reads Shape()[0], but only through its selected shape Pack.
+          bool isTileDimension = checkConstantInts(ss.getBegin(), {1}) &&
+                                 checkConstantInts(ss.getEnd(), {2}) &&
+                                 checkConstantInts(ss.getStrides(), {1});
+          bool isOutputDimension = checkConstantInts(ss.getBegin(), {0}) &&
+                                   checkConstantInts(ss.getEnd(), {1}) &&
+                                   checkConstantInts(ss.getStrides(), {1}) &&
+                                   feedsOutputShapePack(ss, sink);
+          if (!isTileDimension && !isOutputDimension) return failure();
         } else {
           return failure();  // unexpected strided_slice begin rank
         }
       } else if (auto pack = dyn_cast<PackOp>(op)) {
+        if (isOutputShapePack(pack, sink)) {
+          if (failed(verifyOutputShapePack(pack, sink))) return failure();
+          continue;
+        }
+
         // Pack (stack) for the Tile multipliers: among its variadic inputs,
         // the one defined by a ConstantOp must equal 1 (stack/0 = dense<1>).
         // The subgraph also contains the SparseReshape new-shape pack
@@ -318,10 +385,9 @@ private:
           }
         }
         if (!found) {
-          bool feedsSparseReshape =
-              llvm::any_of(pack->getUsers(), [](Operation *user) {
-                return isa<SparseReshapeOp>(user);
-              });
+          bool feedsSparseReshape = llvm::any_of(
+              pack->getUsers(),
+              [](Operation *user) { return isa<SparseReshapeOp>(user); });
           if (!feedsSparseReshape) return failure();
         }
       }
@@ -340,10 +406,10 @@ private:
   // subgraph (otherwise they'd linger in the func as dead ops).  The base
   // class excludes them from CustomizeOp operands — patterns surface the
   // relevant constant values as metadata attrs via getCustomOpSchema.
-  static void collectDefiningOpsPostOrder(
-      Operation *op, ArrayRef<Value> boundaryValues,
-      SmallPtrSetImpl<Operation *> &visited,
-      SmallVectorImpl<Operation *> &ops) {
+  static void collectDefiningOpsPostOrder(Operation *op,
+                                          ArrayRef<Value> boundaryValues,
+                                          SmallPtrSetImpl<Operation *> &visited,
+                                          SmallVectorImpl<Operation *> &ops) {
     if (!op || visited.count(op)) return;
     if (isa<VariableOp>(op)) return;
     if (definesBoundary(op, boundaryValues)) return;
