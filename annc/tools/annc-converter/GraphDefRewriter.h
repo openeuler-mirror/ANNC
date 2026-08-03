@@ -13,7 +13,6 @@ struct GraphDefRewriteOptions {
   std::string outputGraphPath;
   std::string kernelNameOverride;
   std::string sharedLibPath;
-  bool textFormat = false;
   bool verbose = false;
 };
 

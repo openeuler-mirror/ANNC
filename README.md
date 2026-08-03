@@ -119,7 +119,7 @@ ATIR MLIR
   │     └─→ lowered MLIR (affine/linalg)
   ├─→ annc → .so / 可执行文件（driver: mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证
-  └─→ annc-converter → TF SavedModel/GraphDef（反向转换 + GraphDef 重写）
+  └─→ annc-converter → TF GraphDef（ANNCFused 图重写）
 
 annc-tf-pipeline → 端到端编排上述所有步骤
 ```
@@ -152,7 +152,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | `annc-asm` | ATIR → lowered MLIR（affine/linalg） |
 | `annc` | 编译驱动：MLIR → .so / 可执行文件 |
 | `annc-verify` | Kernel 正确性验证 |
-| `annc-converter` | ATIR → TF SavedModel（反向转换）+ GraphDef 重写 |
+| `annc-converter` | 基于融合元数据重写 TF GraphDef |
 | `annc-tf-pipeline` | 端到端编排 |
 
 ### TensorFlow 集成
@@ -174,7 +174,6 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
-| `annc/lib/Adaptor/tensorflow/` | TF 模型解析适配器 |
 | `annc/lib/Builder/` | MLIR Op 构建器 |
 | `annc/lib/Kernel/` | 内置 kernel（`builtin_kernels/matmul_aarch64`）+ 线程池（`threadpool/`） |
 | `annc/lib/CAPI/` | C API（Dialect + Passes） |
@@ -191,7 +190,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 ### 端到端 GraphDef 重写
 
-`annc-tf-pipeline` 会自动编排 `annc-tf2atir`、`annc-opt`、`annc-fusion-metadata`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。
+`annc-tf-pipeline` 会自动编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。默认由 converter 从融合后的 ATIR 提取 metadata；传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
 
 ```shell
 annc-tf-pipeline \
@@ -243,9 +242,7 @@ annc lowered.mlir \
   -o kernel.so
 
 # 6. 使用 ANNCFused 重写 GraphDef
-annc-converter fused.mlir \
-  --tf-graphdef-rewrite \
-  --input_graphdef input.pb \
+annc-converter --input_graphdef input.pb \
   --output_graphdef rewritten.pb \
   --shared_lib_path "$(pwd)/kernel.so" \
   --metadata_json fusion_metadata.json
@@ -279,7 +276,7 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 
 ### `annc-fusion-metadata`
 
-`annc-fusion-metadata` 从融合后的 ATIR 中提取 `ANNCFused` 元数据 JSON，供 `annc-converter --tf-graphdef-rewrite` 使用。
+`annc-fusion-metadata` 从融合后的 ATIR 中提取 `ANNCFused` 元数据 JSON，供 `annc-converter` 使用。
 
 ```shell
 annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
@@ -391,38 +388,24 @@ annc-verify output.bin \
 
 ### `annc-converter`
 
-`annc-converter` 支持两种模式：ATIR 反向生成 TensorFlow SavedModel，或基于融合元数据重写 GraphDef。
-
-生成 SavedModel：
+`annc-converter` 根据融合 metadata 重写二进制 TensorFlow GraphDef，将融合子图替换为 `ANNCFused` 节点。独立调用时可传入 `--metadata_json`；省略该参数时，使用位置参数提供融合后的 ATIR 以提取 metadata。
 
 ```shell
-annc-converter input.mlir -o saved_model_dir
-annc-converter input.mlir -o saved_model_dir --text_format
-```
-
-重写 GraphDef：
-
-```shell
-annc-converter model_fused_atir.mlir \
-  --tf-graphdef-rewrite \
-  --input_graphdef input.pb \
+annc-converter --input_graphdef input.pb \
   --output_graphdef output.pb \
   --shared_lib_path /abs/path/kernel.so \
   --metadata_json fusion_metadata.json
 ```
 
-常用参数：
+GraphDef 输出固定为二进制 protobuf。常用参数：
 
 | 参数 | 说明 |
 |------|------|
-| `-o <path>` | SavedModel 输出目录，或默认模式输出位置 |
-| `--text_format` | 输出 `.pbtxt` 文本格式 |
-| `--verbose` | 打印转换详情 |
-| `--tf-graphdef-rewrite` | 启用 GraphDef 重写模式 |
+| `--verbose` | 打印图重写详情 |
 | `--input_graphdef <path>` | GraphDef 重写模式输入 |
 | `--output_graphdef <path>` | GraphDef 重写模式输出 |
 | `--shared_lib_path <path>` | `ANNCFused` 运行时共享库路径 |
-| `--metadata_json <path>` | `annc-fusion-metadata` 生成的元数据 |
+| `--metadata_json <path>` | 可选的 `annc-fusion-metadata` 输出；省略时需提供融合后的 ATIR 位置参数 |
 | `--kernel_name <name>` | 覆盖融合 kernel 名称 |
 
 ### TensorFlow 集成

@@ -1,39 +1,18 @@
-# annc-converter: Atir MLIR → TF GraphDef
+# annc-converter: TensorFlow GraphDef rewrite
 cmake_minimum_required(VERSION 3.16)
 
-get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
-get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
-
-set(LIBS
-  MLIROptLib
-  MLIRParser
-  ${dialect_libs}
-  ${conversion_libs}
-
-  AtirDialect
-  AtirBuilder
-  TFAdaptor
-  ANNCHelper
-  ANNCFusionMetadata
-)
-
-add_llvm_executable(annc-converter
+add_executable(annc-converter
   ANNCFusedNodeBuilder.cpp
   annc-converter.cpp
   GraphDefRewriter.cpp
-  DEPENDS
-  ${LIBS}
 )
 
 target_link_libraries(annc-converter PRIVATE
-  ${LIBS}
+  ANNCFusionMetadata
   ${TENSORFLOW_LIBS}
-  nlohmann_json::nlohmann_json
 )
 target_include_directories(annc-converter PRIVATE
   ${TENSORFLOW_INCLUDE_DIRS}
 )
 
-llvm_update_compile_flags(annc-converter)
-mlir_check_all_link_libraries(annc-converter)
 install(TARGETS annc-converter DESTINATION bin)

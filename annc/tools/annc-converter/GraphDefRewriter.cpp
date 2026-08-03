@@ -92,12 +92,6 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
     fusedNodeBuilder.appendNode(rewritten, fusion);
   }
 
-  if (options.textFormat) {
-    return tensorflow::WriteStringToFile(tensorflow::Env::Default(),
-                                         options.outputGraphPath,
-                                         rewritten.DebugString())
-        .ok();
-  }
   return writeBinaryGraphDef(rewritten, options.outputGraphPath);
 }
 
