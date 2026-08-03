@@ -11,6 +11,19 @@ func.func @main(
   %0 = "atir.MatMul"(%c, %a, %b) <{do_relu = false, left_transpose = false, output_transpose = false, relu_limit = -1.0 : f32, right_transpose = false, withBias = false}> : (!atir.tensor<64x64xf32>, !atir.tensor<64x128xf32>, !atir.tensor<128x64xf32>) -> !atir.tensor<64x64xf32>
   // CHECK: call @fused_matmul
   // CHECK: func.func private @fused_matmul
+  // CHECK: fusion.metadata
+  // CHECK: args = [
+  // CHECK: outputs = [
+  // CHECK-NOT: tf.inputs
+  // CHECK-NOT: tf.input_shapes
+  // CHECK-NOT: tf.output
+  // CHECK-NOT: Nconstants
+  // CHECK-NOT: Nfixed
+  // CHECK-NOT: Ndynamic
+  // CHECK-NOT: num_outputs
+  // CHECK-NOT: input_ranks
+  // CHECK-NOT: output_ranks
+  // CHECK-NOT: output_shapes
   return %0 : !atir.tensor<64x64xf32>
 }
 

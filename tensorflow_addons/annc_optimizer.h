@@ -33,11 +33,13 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   Status WriteGraphDefToFile(const GraphDef& graph_def, std::string* filepath);
   Status ReadGraphDefFromFile(const std::string& filepath, GraphDef* graph_def);
   Status InvokePipeline(const std::string& input_file,
-                        const std::string& output_file);
+                        const std::string& output_file,
+                        const std::string& graph_id);
   Status WaitForProcess(pid_t pid, const std::string& process_name);
   void CleanupTempFile(const std::string& filepath);
   void CleanupTempFiles(const std::vector<std::string>& filepaths);
   void LoadFusedOpLibrary();
+  std::string BuildPipelineWorkDir(const std::string& graph_id) const;
 
   std::string pipeline_path_;
   std::string annc_work_dir_;

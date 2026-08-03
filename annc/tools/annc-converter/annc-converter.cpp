@@ -1,20 +1,19 @@
-#include <iostream>
 #include <fstream>
 #include <string>
 #include <vector>
 #include <filesystem>
-#include <optional>
 #include <set>
 #include <map>
 #include <unordered_map>
 #include <queue>
 #include <algorithm>
-#include <sstream>
-#include <unordered_set>
 #include "llvm/ADT/DenseMap.h"
 
 #include "Dialect/Atir/AtirOps.h"
 #include "Adaptor/tensorflow/TFSavedModelParser.h"
+#include "FusionMetadata/FusionMetadata.h"
+#include "FusionMetadata/FusionMetadataJson.h"
+#include "GraphDefRewriter.h"
 #include "Helper.h"
 
 #include "mlir/IR/MLIRContext.h"
@@ -25,19 +24,15 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/InitAllDialects.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "tensorflow/core/protobuf/saved_model.pb.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/protobuf.h"
-#include "tensorflow/core/lib/core/status.h"
 #include "google/protobuf/text_format.h"
-#include "nlohmann/json.hpp"
 
 using namespace mlir;
 using namespace annc;
@@ -49,396 +44,11 @@ static OwningOpRef<ModuleOp> parseModuleFromFile(StringRef path,
   return parseSourceFile<ModuleOp>(path, context);
 }
 
-static std::string cleanTensorName(std::string name) {
-  if (!name.empty() && name[0] == '^') name = name.substr(1);
-  size_t colon = name.find(':');
-  if (colon != std::string::npos) name = name.substr(0, colon);
-  return name;
-}
-
-static std::string tensorSuffix(const std::string &name) {
-  if (!name.empty() && name[0] == '^') return "";
-  size_t colon = name.find(':');
-  return colon == std::string::npos ? "" : name.substr(colon);
-}
-
-static const tensorflow::NodeDef *findNode(
-    const tensorflow::GraphDef &graph, const std::string &name) {
-  for (const auto &node : graph.node()) {
-    if (node.name() == name) return &node;
-  }
-  return nullptr;
-}
-
-static int outputRank(const tensorflow::NodeDef &node) {
-  auto it = node.attr().find("_output_shapes");
-  if (it != node.attr().end() && it->second.list().shape_size() > 0) {
-    return it->second.list().shape(0).dim_size();
-  }
-  auto shapeIt = node.attr().find("shape");
-  if (shapeIt != node.attr().end()) {
-    return shapeIt->second.shape().dim_size();
-  }
-  return 2;
-}
-
-static tensorflow::DataType nodeDType(const tensorflow::NodeDef &node) {
-  auto t = node.attr().find("T");
-  if (t != node.attr().end()) return t->second.type();
-  auto dstT = node.attr().find("DstT");
-  if (dstT != node.attr().end()) return dstT->second.type();
-  auto srcT = node.attr().find("SrcT");
-  if (srcT != node.attr().end()) return srcT->second.type();
-  auto tparams = node.attr().find("Tparams");
-  if (tparams != node.attr().end() && tparams->second.list().type_size() > 0) {
-    return tparams->second.list().type(0);
-  }
-  auto dtype = node.attr().find("dtype");
-  if (dtype != node.attr().end()) return dtype->second.type();
-  return tensorflow::DT_FLOAT;
-}
-
-static bool writeBinaryGraphDef(const tensorflow::GraphDef &graph,
-                                const std::string &path) {
-  std::string out;
-  if (!graph.SerializeToString(&out)) return false;
-  return tensorflow::WriteStringToFile(tensorflow::Env::Default(), path, out).ok();
-}
-
-static bool readBinaryGraphDef(const std::string &path,
-                               tensorflow::GraphDef *graph) {
-  std::string data;
-  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data).ok()) {
-    return false;
-  }
-  return graph->ParseFromString(data);
-}
-
-static bool readTextGraphDef(const std::string &path,
-                             tensorflow::GraphDef *graph) {
-  std::string data;
-  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data).ok()) {
-    return false;
-  }
-  return google::protobuf::TextFormat::ParseFromString(data, graph);
-}
-
-struct FusionInfo {
-  std::string name;
-  std::string pattern;
-  std::string kernelName;
-  std::string outputTensor;
-  std::vector<std::string> originalNodes;
-  std::vector<std::string> inputs;
-  std::vector<std::vector<int64_t>> inputShapes;
-  std::vector<int64_t> outputShape;
-  std::string abi = "mlir_ciface";
-  int64_t nConstants = 0;
-  int64_t nFixed = 0;
-  int64_t nDynamic = 0;
-  int64_t numOutputs = 1;
-  std::vector<int64_t> outputRanks;
-  std::vector<int64_t> inputRanks;
-  std::vector<int64_t> dynamicDims;
-  std::vector<int64_t> kernelArgOrder;
-  std::string symbolicSignature;
-  std::string fallbackFunction;
-};
-
-static std::string formatRuntimeOutputShape(const FusionInfo &fusion) {
-  std::unordered_set<int64_t> dynamicDims(fusion.dynamicDims.begin(),
-                                          fusion.dynamicDims.end());
-  std::string shape;
-  for (size_t i = 0; i < fusion.outputShape.size(); ++i) {
-    if (i > 0) shape += ",";
-    if (dynamicDims.count(static_cast<int64_t>(i)) > 0) {
-      shape += "?";
-    } else {
-      shape += std::to_string(fusion.outputShape[i]);
-    }
-  }
-  return shape;
-}
-
-static std::optional<FusionInfo> parseFusionInfoJson(const nlohmann::json &j) {
-  if (!j.is_object()) return std::nullopt;
-  FusionInfo info;
-  try {
-    info.name = j.value("name", "");
-    info.pattern = j.value("pattern", "");
-    info.kernelName = j.value("kernel_name", "");
-    info.outputTensor = j.value("output_tensor", "");
-    info.originalNodes = j.value("original_nodes", std::vector<std::string>{});
-    info.inputs = j.value("inputs", std::vector<std::string>{});
-    info.inputShapes =
-        j.value("input_shapes", std::vector<std::vector<int64_t>>{});
-    info.outputShape = j.value("output_shape", std::vector<int64_t>{});
-    info.abi = j.value("abi", "mlir_ciface");
-    if (info.abi.empty()) info.abi = "mlir_ciface";
-    info.nConstants = j.value("n_constants", int64_t{0});
-    info.nFixed = j.value("n_fixed", int64_t{0});
-    info.nDynamic = j.value("n_dynamic", int64_t{0});
-    info.numOutputs = j.value("num_outputs", int64_t{1});
-    info.outputRanks = j.value("output_ranks", std::vector<int64_t>{});
-    info.inputRanks = j.value("input_ranks", std::vector<int64_t>{});
-    info.dynamicDims = j.value("dynamic_dims", std::vector<int64_t>{});
-    info.kernelArgOrder = j.value("kernel_arg_order", std::vector<int64_t>{});
-    info.symbolicSignature = j.value("symbolic_signature", "");
-    info.fallbackFunction = j.value("fallback_function", "");
-  } catch (const std::exception &) {
-    return std::nullopt;
-  }
-
-  if (info.name.empty() || info.originalNodes.empty() || info.inputs.empty() ||
-      info.outputTensor.empty()) {
-    return std::nullopt;
-  }
-  return info;
-}
-
-static std::vector<FusionInfo> readFusionInfosJson(const std::string &path) {
-  std::ifstream in(path);
-  if (!in.is_open()) return {};
-  nlohmann::json j;
-  try {
-    in >> j;
-  } catch (const std::exception &) {
-    return {};
-  }
-
-  std::vector<FusionInfo> infos;
-  if (j.is_object() && j.contains("fusions") && j["fusions"].is_array()) {
-    for (const auto &item : j["fusions"]) {
-      auto info = parseFusionInfoJson(item);
-      if (info.has_value()) infos.push_back(std::move(*info));
-    }
-    return infos;
-  }
-
-  auto info = parseFusionInfoJson(j);
-  if (info.has_value()) infos.push_back(std::move(*info));
-  return infos;
-}
-
-static std::string chooseFusionDevice(const tensorflow::GraphDef &graph,
-                                      const FusionInfo &fusion) {
-  const tensorflow::NodeDef *output = findNode(graph, fusion.outputTensor);
-  if (output && !output->device().empty()) return output->device();
-
-  for (const auto &nodeName : fusion.originalNodes) {
-    const tensorflow::NodeDef *node = findNode(graph, nodeName);
-    if (node && !node->device().empty()) return node->device();
-  }
-
-  for (const auto &input : fusion.inputs) {
-    const tensorflow::NodeDef *node = findNode(graph, cleanTensorName(input));
-    if (node && !node->device().empty()) return node->device();
-  }
-
-  return "/job:localhost/replica:0/task:0/device:CPU:0";
-}
-
-static std::string rewriteFusionInput(
-    const std::string &input,
-    const std::unordered_map<std::string, const FusionInfo *> &fusionByOutput) {
-  std::string prefix;
-  std::string clean = input;
-  if (!clean.empty() && clean[0] == '^') {
-    prefix = "^";
-    clean = clean.substr(1);
-  }
-  std::string src = cleanTensorName(clean);
-  auto fusedIt = fusionByOutput.find(src);
-  if (fusedIt == fusionByOutput.end()) return input;
-  return prefix + fusedIt->second->name + tensorSuffix(clean);
-}
-
-static tensorflow::DataType fusionInputDType(
-    const tensorflow::GraphDef &graph, const std::string &input) {
-  const tensorflow::NodeDef *node = findNode(graph, cleanTensorName(input));
-  return node ? nodeDType(*node) : tensorflow::DT_FLOAT;
-}
-
-static tensorflow::DataType firstOrDefault(
-    ArrayRef<tensorflow::DataType> types,
-    tensorflow::DataType fallback = tensorflow::DT_FLOAT) {
-  return types.empty() ? fallback : types.front();
-}
-
-static void appendANNCFusedNode(tensorflow::GraphDef &rewritten,
-                                const tensorflow::GraphDef &original,
-                                const FusionInfo &fusion,
-                                const std::string &sharedLibPath,
-                                const std::unordered_map<
-                                    std::string, const FusionInfo *> &fusionByOutput) {
-  const tensorflow::NodeDef *reluNode = findNode(original, fusion.outputTensor);
-  int rank = reluNode ? outputRank(*reluNode) : 2;
-  tensorflow::DataType dtype =
-      reluNode ? nodeDType(*reluNode) : tensorflow::DT_FLOAT;
-
-  tensorflow::NodeDef *fused = rewritten.add_node();
-  fused->set_name(fusion.name);
-  fused->set_op("ANNCFused");
-  fused->set_device(chooseFusionDevice(original, fusion));
-  for (const auto &input : fusion.inputs) {
-    fused->add_input(rewriteFusionInput(input, fusionByOutput));
-  }
-
-  auto *attrs = fused->mutable_attr();
-  (*attrs)["kernel_name"].set_s(fusion.kernelName);
-  (*attrs)["shared_lib_path"].set_s(sharedLibPath);
-  (*attrs)["abi"].set_s(fusion.abi);
-  (*attrs)["num_outputs"].set_i(fusion.numOutputs);
-  (*attrs)["T"].set_type(dtype);
-
-  SmallVector<tensorflow::DataType> inputTypes;
-  inputTypes.reserve(fusion.inputs.size());
-  for (const auto &input : fusion.inputs) {
-    inputTypes.push_back(fusionInputDType(original, input));
-  }
-
-  SmallVector<tensorflow::DataType> constantTypes;
-  SmallVector<tensorflow::DataType> fixedTypes;
-  SmallVector<tensorflow::DataType> dynamicTypes;
-  size_t inputIndex = 0;
-  for (int64_t i = 0; i < fusion.nConstants && inputIndex < inputTypes.size();
-       ++i, ++inputIndex) {
-    constantTypes.push_back(inputTypes[inputIndex]);
-  }
-  for (int64_t i = 0; i < fusion.nFixed && inputIndex < inputTypes.size();
-       ++i, ++inputIndex) {
-    fixedTypes.push_back(inputTypes[inputIndex]);
-  }
-  for (int64_t i = 0; i < fusion.nDynamic && inputIndex < inputTypes.size();
-       ++i, ++inputIndex) {
-    dynamicTypes.push_back(inputTypes[inputIndex]);
-  }
-
-  SmallVector<tensorflow::DataType> outputTypes;
-  for (int64_t i = 0; i < fusion.numOutputs; ++i) {
-    outputTypes.push_back(dtype);
-  }
-  (*attrs)["Tconstants"].set_type(firstOrDefault(constantTypes));
-  (*attrs)["Tfixed"].set_type(firstOrDefault(fixedTypes));
-  (*attrs)["Tdynamic"].set_type(firstOrDefault(dynamicTypes));
-  (*attrs)["Toutputs"].set_type(firstOrDefault(outputTypes, dtype));
-
-  auto *rankList = (*attrs)["output_ranks"].mutable_list();
-  if (fusion.outputRanks.empty()) {
-    rankList->add_i(rank);
-  } else {
-    for (int64_t value : fusion.outputRanks) rankList->add_i(value);
-  }
-  auto *inputRanks = (*attrs)["input_ranks"].mutable_list();
-  if (fusion.inputRanks.empty()) {
-    for (const auto &shape : fusion.inputShapes) {
-      inputRanks->add_i(static_cast<int64_t>(shape.size()));
-    }
-  } else {
-    for (int64_t value : fusion.inputRanks) inputRanks->add_i(value);
-  }
-  auto *outputShapes = (*attrs)["output_shapes"].mutable_list();
-  if (!fusion.outputShape.empty()) {
-    outputShapes->add_s(formatRuntimeOutputShape(fusion));
-  }
-  auto *kernelArgOrder = (*attrs)["kernel_arg_order"].mutable_list();
-  for (int64_t value : fusion.kernelArgOrder) kernelArgOrder->add_i(value);
-  auto *dynamicDims = (*attrs)["dynamic_dims"].mutable_list();
-  for (int64_t value : fusion.dynamicDims) dynamicDims->add_i(value);
-  (*attrs)["symbolic_signature"].set_s(fusion.symbolicSignature);
-  (*attrs)["Nconstants"].set_i(fusion.nConstants);
-  (*attrs)["Nfixed"].set_i(fusion.nFixed);
-  (*attrs)["Ndynamic"].set_i(fusion.nDynamic);
-  (*attrs)["fallback_function"].mutable_func()->set_name(fusion.fallbackFunction);
-  (*attrs)["fusion_pattern"].set_s(fusion.pattern);
-  for (const auto &node : fusion.originalNodes) {
-    (*attrs)["annc_original_nodes"].mutable_list()->add_s(node);
-  }
-}
-
-static bool rewriteGraphDefWithANNCFused(
-    std::vector<FusionInfo> fusionInfos, const std::string &inputGraphPath,
-    const std::string &outputGraphPath, const std::string &kernelName,
-    const std::string &sharedLibPath, bool textFormat, bool verbose) {
-  tensorflow::GraphDef graph;
-  if (!readBinaryGraphDef(inputGraphPath, &graph) &&
-      !readTextGraphDef(inputGraphPath, &graph)) {
-    llvm::errs() << "[annc-converter] Error: failed to read GraphDef: "
-                 << inputGraphPath << "\n";
-    return false;
-  }
-
-  if (fusionInfos.empty()) {
-    llvm::errs() << "[annc-converter] Error: no ANNCFused metadata entries\n";
-    return false;
-  }
-
-  if (!kernelName.empty()) {
-    if (fusionInfos.size() != 1) {
-      llvm::errs() << "[annc-converter] Error: --kernel_name override is only "
-                      "supported for single-fusion metadata\n";
-      return false;
-    }
-    fusionInfos.front().kernelName = kernelName;
-  }
-
-  std::set<std::string> removed;
-  std::unordered_map<std::string, const FusionInfo *> fusionByOutput;
-  for (const auto &fusion : fusionInfos) {
-    if (verbose) {
-      llvm::outs() << "[annc-converter] Rewriting fusion node from ATIR: "
-                   << fusion.name << " pattern=" << fusion.pattern << "\n";
-    }
-    removed.insert(fusion.originalNodes.begin(), fusion.originalNodes.end());
-    fusionByOutput[fusion.outputTensor] = &fusion;
-  }
-
-  for (const auto &fusion : fusionInfos) {
-    for (const auto &node : graph.node()) {
-      if (node.op() == "ReadVariableOp" && node.input_size() > 0) {
-        std::string src = cleanTensorName(node.input(0));
-        if (std::find(fusion.inputs.begin(), fusion.inputs.end(), src) !=
-            fusion.inputs.end()) {
-          removed.insert(node.name());
-        }
-      }
-      if ((node.op() == "VarIsInitializedOp" ||
-           node.op() == "AssignVariableOp") &&
-          node.input_size() > 0) {
-        std::string src = cleanTensorName(node.input(0));
-        if (std::find(fusion.inputs.begin(), fusion.inputs.end(), src) !=
-            fusion.inputs.end()) {
-          removed.insert(node.name());
-        }
-      }
-    }
-  }
-
-  tensorflow::GraphDef rewritten;
-  for (const auto &node : graph.node()) {
-    if (removed.count(node.name())) continue;
-    tensorflow::NodeDef *out = rewritten.add_node();
-    *out = node;
-
-    out->clear_input();
-    for (const auto &input : node.input()) {
-      std::string rewrittenInput = rewriteFusionInput(input, fusionByOutput);
-      if (rewrittenInput != input ||
-          !removed.count(cleanTensorName(input))) {
-        out->add_input(rewrittenInput);
-      }
-    }
-  }
-
-  for (const auto &fusion : fusionInfos) {
-    appendANNCFusedNode(rewritten, graph, fusion, sharedLibPath, fusionByOutput);
-  }
-
-  if (textFormat) {
-    return tensorflow::WriteStringToFile(tensorflow::Env::Default(), outputGraphPath,
-                                         rewritten.DebugString()).ok();
-  }
-  return writeBinaryGraphDef(rewritten, outputGraphPath);
+static void reportError(const char *prefix, llvm::Error error) {
+  llvm::handleAllErrors(
+      std::move(error), [&](const llvm::ErrorInfoBase &errorInfo) {
+        llvm::errs() << prefix << errorInfo.message() << "\n";
+      });
 }
 
 }  // namespace
@@ -1488,7 +1098,9 @@ int main(int argc, char **argv) {
       llvm::cl::init(""));
 
   llvm::cl::opt<std::string> metadata_json(
-      "metadata_json", llvm::cl::desc("ANNCFused metadata JSON path"),
+      "metadata_json",
+      llvm::cl::desc("Optional ANNCFused metadata JSON path; when omitted, "
+                     "metadata is extracted from the optimized ATIR input"),
       llvm::cl::init(""));
 
   llvm::cl::ParseCommandLineOptions(argc, argv,
@@ -1509,24 +1121,40 @@ int main(int argc, char **argv) {
       llvm::errs() << "[annc-converter] Error: --shared_lib_path is required\n";
       return 1;
     }
-    if (metadata_json.empty()) {
-      llvm::errs() << "[annc-converter] Error: --metadata_json is required "
-                      "for --tf-graphdef-rewrite\n";
-      return 1;
+    std::vector<annc::fusion::FusionInfo> fusionInfos;
+    if (!metadata_json.empty()) {
+      auto fusions = annc::fusion::readFusionMetadataJson(metadata_json);
+      if (!fusions) {
+        reportError("[annc-converter] Error: ", fusions.takeError());
+        llvm::errs() << "[annc-converter] Error: failed to read ANNCFused "
+                        "metadata JSON: "
+                     << metadata_json << "\n";
+        return 1;
+      }
+      fusionInfos = std::move(*fusions);
+    } else {
+      auto fusions =
+          annc::fusion::extractFusionInfosFromMlirText(inputFilename);
+      if (!fusions) {
+        reportError("[annc-converter] Error: ", fusions.takeError());
+        llvm::errs() << "[annc-converter] Error: failed to extract ANNCFused "
+                        "metadata from optimized ATIR: "
+                     << inputFilename << "\n";
+        return 1;
+      }
+      fusionInfos = std::move(*fusions);
     }
 
-    auto fusions = readFusionInfosJson(metadata_json);
-    if (fusions.empty()) {
-      llvm::errs() << "[annc-converter] Error: failed to read ANNCFused "
-                      "metadata JSON: "
-                   << metadata_json << "\n";
-      return 1;
-    }
+    annc::fusion::GraphDefRewriteOptions rewriteOptions;
+    rewriteOptions.inputGraphPath = input_graphdef;
+    rewriteOptions.outputGraphPath = output_graphdef;
+    rewriteOptions.kernelNameOverride = kernel_name;
+    rewriteOptions.sharedLibPath = shared_lib_path;
+    rewriteOptions.textFormat = text_format;
+    rewriteOptions.verbose = verbose;
 
-    return rewriteGraphDefWithANNCFused(std::move(fusions), input_graphdef,
-                                        output_graphdef, kernel_name,
-                                        shared_lib_path,
-                                        text_format, verbose)
+    return annc::fusion::rewriteGraphDefWithANNCFused(
+               std::move(fusionInfos), rewriteOptions)
                ? 0
                : 1;
   }

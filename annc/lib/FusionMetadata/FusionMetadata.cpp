@@ -4,10 +4,9 @@
 #include <cctype>
 #include <fstream>
 #include <map>
-#include <sstream>
 #include <system_error>
+#include <unordered_set>
 
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Error.h"
 
 using namespace mlir;
@@ -34,14 +33,30 @@ int64_t intAttr(DictionaryAttr dict, StringRef key,
   return defaultValue;
 }
 
-std::vector<std::string> stringArrayAttr(DictionaryAttr dict, StringRef key) {
-  std::vector<std::string> values;
+std::vector<int64_t> intArrayAttr(DictionaryAttr dict, StringRef key);
+
+FusionArg fusionArgFromAttr(DictionaryAttr dict) {
+  FusionArg arg;
+  if (!dict) return arg;
+  arg.role = stringAttr(dict, "role");
+  arg.tfName = stringAttr(dict, "tf_name");
+  arg.shape = intArrayAttr(dict, "shape");
+  arg.rank = intAttr(dict, "rank", -1);
+  arg.dtype = stringAttr(dict, "dtype");
+  return arg;
+}
+
+std::vector<FusionArg> fusionArgArrayAttr(DictionaryAttr dict, StringRef key) {
+  std::vector<FusionArg> values;
   if (!dict) return values;
   Attribute raw = dict.get(key);
   auto arr = raw ? dyn_cast<ArrayAttr>(raw) : ArrayAttr();
   if (!arr) return values;
+  values.reserve(arr.size());
   for (Attribute attr : arr) {
-    if (auto str = dyn_cast<StringAttr>(attr)) values.push_back(str.str());
+    if (auto item = dyn_cast<DictionaryAttr>(attr)) {
+      values.push_back(fusionArgFromAttr(item));
+    }
   }
   return values;
 }
@@ -56,28 +71,6 @@ std::vector<int64_t> intArrayAttr(DictionaryAttr dict, StringRef key) {
     if (auto i = dyn_cast<IntegerAttr>(attr)) values.push_back(i.getInt());
   }
   return values;
-}
-
-std::vector<int64_t> parseShapeString(const std::string &shape) {
-  std::vector<int64_t> dims;
-  std::stringstream ss(shape);
-  std::string item;
-  while (std::getline(ss, item, ',')) {
-    if (item.empty() || item == "?") {
-      dims.push_back(-1);
-      continue;
-    }
-    dims.push_back(std::stoll(item));
-  }
-  return dims;
-}
-
-std::vector<std::vector<int64_t>> parseShapeStrings(
-    const std::vector<std::string> &shapes) {
-  std::vector<std::vector<int64_t>> parsed;
-  parsed.reserve(shapes.size());
-  for (const auto &shape : shapes) parsed.push_back(parseShapeString(shape));
-  return parsed;
 }
 
 std::string trim(std::string value) {
@@ -178,21 +171,6 @@ std::string parseQuotedString(StringRef value) {
   return "";
 }
 
-std::vector<std::string> parseQuotedStringArray(StringRef value) {
-  std::vector<std::string> result;
-  size_t open = value.find('[');
-  size_t close = value.rfind(']');
-  if (open == StringRef::npos || close == StringRef::npos || close <= open) {
-    return result;
-  }
-  for (const std::string &part :
-       splitTopLevel(value.slice(open + 1, close), ',')) {
-    std::string parsed = parseQuotedString(part);
-    if (!parsed.empty()) result.push_back(parsed);
-  }
-  return result;
-}
-
 bool parseInteger(StringRef value, int64_t *out) {
   size_t pos = 0;
   while (pos < value.size() &&
@@ -235,46 +213,67 @@ std::map<std::string, std::string> parseMetadataDictionary(StringRef body) {
   return entries;
 }
 
+FusionArg fusionArgFromMetadataEntries(
+    const std::map<std::string, std::string> &entries) {
+  FusionArg arg;
+  auto value = [&](const char *key) -> StringRef {
+    auto it = entries.find(key);
+    return it == entries.end() ? StringRef{} : StringRef(it->second);
+  };
+  arg.role = parseQuotedString(value("role"));
+  arg.tfName = parseQuotedString(value("tf_name"));
+  arg.shape = parseIntegerArray(value("shape"));
+  if (!parseInteger(value("rank"), &arg.rank)) arg.rank = -1;
+  arg.dtype = parseQuotedString(value("dtype"));
+  return arg;
+}
+
+std::vector<FusionArg> fusionArgArrayFromMetadata(StringRef value) {
+  std::vector<FusionArg> values;
+  size_t open = value.find('[');
+  size_t close = value.rfind(']');
+  if (open == StringRef::npos || close == StringRef::npos || close <= open) {
+    return values;
+  }
+  for (const std::string &part :
+       splitTopLevel(value.slice(open + 1, close), ',')) {
+    StringRef partRef(part);
+    size_t dictOpen = partRef.find('{');
+    size_t dictClose = partRef.rfind('}');
+    if (dictOpen == StringRef::npos || dictClose == StringRef::npos ||
+        dictClose <= dictOpen) {
+      continue;
+    }
+    auto entries =
+        parseMetadataDictionary(partRef.slice(dictOpen + 1, dictClose));
+    if (!entries.empty()) {
+      values.push_back(fusionArgFromMetadataEntries(entries));
+    }
+  }
+  return values;
+}
+
 FusionInfo fusionInfoFromMetadataEntries(
     const std::map<std::string, std::string> &entries, StringRef attrContext) {
   FusionInfo info;
+  auto rawValue = [&](const char *key) -> StringRef {
+    auto it = entries.find(key);
+    return it == entries.end() ? StringRef{} : StringRef(it->second);
+  };
   auto stringValue = [&](const char *key) -> std::string {
-    auto it = entries.find(key);
-    return it == entries.end() ? "" : parseQuotedString(it->second);
-  };
-  auto stringArrayValue = [&](const char *key) -> std::vector<std::string> {
-    auto it = entries.find(key);
-    return it == entries.end() ? std::vector<std::string>{}
-                               : parseQuotedStringArray(it->second);
-  };
-  auto intValue = [&](const char *key, int64_t fallback = 0) -> int64_t {
-    auto it = entries.find(key);
-    int64_t parsed = fallback;
-    if (it != entries.end()) parseInteger(it->second, &parsed);
-    return parsed;
+    return parseQuotedString(rawValue(key));
   };
   auto intArrayValue = [&](const char *key) -> std::vector<int64_t> {
-    auto it = entries.find(key);
-    return it == entries.end() ? std::vector<int64_t>{}
-                               : parseIntegerArray(it->second);
+    return parseIntegerArray(rawValue(key));
   };
 
   info.name = stringValue("tf.name");
   info.pattern = stringValue("fusion.pattern");
   info.kernelName = stringValue("kernel_name");
-  info.outputTensor = stringValue("tf.output");
-  info.originalNodes = stringArrayValue("tf.nodes");
-  info.inputs = stringArrayValue("tf.inputs");
-  info.inputShapes = parseShapeStrings(stringArrayValue("tf.input_shapes"));
-  info.outputShape = parseShapeString(stringValue("tf.output_shape"));
+  info.args = fusionArgArrayFromMetadata(rawValue("args"));
+  info.outputs = fusionArgArrayFromMetadata(rawValue("outputs"));
   info.abi = stringValue("abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
-  info.nConstants = intValue("Nconstants");
-  info.nFixed = intValue("Nfixed");
-  info.nDynamic = intValue("Ndynamic");
-  info.numOutputs = intValue("num_outputs", 1);
-  info.outputRanks = intArrayValue("output_ranks");
-  info.inputRanks = intArrayValue("input_ranks");
   info.dynamicDims = intArrayValue("dynamic_dims");
   info.kernelArgOrder = intArrayValue("kernel_arg_order");
   info.symbolicSignature = stringValue("symbolic_signature");
@@ -291,96 +290,7 @@ FusionInfo fusionInfoFromMetadataEntries(
     }
   }
 
-  normalizeFusionInfo(info);
   return info;
-}
-
-int64_t rankOf(ArrayRef<int64_t> shape) {
-  return static_cast<int64_t>(shape.size());
-}
-
-FusionArg makeFusionArg(StringRef role, StringRef tfName,
-                        ArrayRef<int64_t> shape) {
-  FusionArg arg;
-  arg.role = role.str();
-  arg.tfName = tfName.str();
-  arg.shape.assign(shape.begin(), shape.end());
-  arg.rank = rankOf(shape);
-  return arg;
-}
-
-std::string roleForInputIndex(const FusionInfo &info, size_t index) {
-  if (index < static_cast<size_t>(std::max<int64_t>(info.nConstants, 0))) {
-    return "constant";
-  }
-  index -= static_cast<size_t>(std::max<int64_t>(info.nConstants, 0));
-  if (index < static_cast<size_t>(std::max<int64_t>(info.nFixed, 0))) {
-    return "fixed";
-  }
-  index -= static_cast<size_t>(std::max<int64_t>(info.nFixed, 0));
-  if (index < static_cast<size_t>(std::max<int64_t>(info.nDynamic, 0))) {
-    return "dynamic";
-  }
-  return "input";
-}
-
-void populateContractFromLegacy(FusionInfo &info) {
-  if (info.args.empty()) {
-    info.args.reserve(info.inputs.size());
-    for (size_t i = 0; i < info.inputs.size(); ++i) {
-      ArrayRef<int64_t> shape;
-      if (i < info.inputShapes.size()) shape = info.inputShapes[i];
-      info.args.push_back(makeFusionArg(roleForInputIndex(info, i),
-                                        info.inputs[i], shape));
-    }
-  }
-
-  if (info.outputs.empty() && !info.outputTensor.empty()) {
-    info.outputs.push_back(
-        makeFusionArg("output", info.outputTensor, info.outputShape));
-  }
-}
-
-void populateLegacyFromContract(FusionInfo &info) {
-  if (info.inputs.empty()) {
-    for (const FusionArg &arg : info.args) info.inputs.push_back(arg.tfName);
-  }
-  if (info.inputShapes.empty()) {
-    for (const FusionArg &arg : info.args) info.inputShapes.push_back(arg.shape);
-  }
-  if (info.inputRanks.empty()) {
-    for (const FusionArg &arg : info.args) {
-      info.inputRanks.push_back(arg.rank >= 0 ? arg.rank : rankOf(arg.shape));
-    }
-  }
-
-  if (info.outputShape.empty() && !info.outputs.empty()) {
-    info.outputShape = info.outputs.front().shape;
-  }
-  if (info.outputRanks.empty() && !info.outputs.empty()) {
-    for (const FusionArg &output : info.outputs) {
-      info.outputRanks.push_back(output.rank >= 0 ? output.rank
-                                                  : rankOf(output.shape));
-    }
-  }
-  if (info.outputTensor.empty() && !info.outputs.empty()) {
-    info.outputTensor = info.outputs.front().tfName;
-  }
-
-  if (info.nConstants == 0 && info.nFixed == 0 && info.nDynamic == 0) {
-    for (const FusionArg &arg : info.args) {
-      if (arg.role == "constant") {
-        ++info.nConstants;
-      } else if (arg.role == "fixed") {
-        ++info.nFixed;
-      } else if (arg.role == "dynamic") {
-        ++info.nDynamic;
-      }
-    }
-  }
-  if (info.numOutputs == 1 && !info.outputs.empty()) {
-    info.numOutputs = static_cast<int64_t>(info.outputs.size());
-  }
 }
 
 void populatePatternAttrs(FusionInfo &info, func::FuncOp func) {
@@ -397,17 +307,47 @@ llvm::Error missingFieldError(StringRef field) {
 
 }  // namespace
 
-void normalizeFusionInfo(FusionInfo &info) {
-  populateLegacyFromContract(info);
-  populateContractFromLegacy(info);
-}
-
 llvm::Error validateFusionInfo(const FusionInfo &info) {
   if (info.name.empty()) return missingFieldError("name");
-  if (info.inputs.empty() && info.args.empty()) {
-    return missingFieldError("inputs");
+  if (info.pattern.empty()) return missingFieldError("pattern");
+  if (info.kernelName.empty()) return missingFieldError("kernel_name");
+  if (info.args.empty()) return missingFieldError("args");
+  if (info.outputs.empty()) return missingFieldError("outputs");
+
+  static const std::unordered_set<std::string> inputRoles = {
+      "constant", "fixed", "dynamic"};
+  for (const FusionArg &arg : info.args) {
+    if (!inputRoles.count(arg.role)) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "fusion input '%s' has invalid role '%s'", arg.tfName.c_str(),
+          arg.role.c_str());
+    }
+    if (arg.tfName.empty()) return missingFieldError("args.tf_name");
+    if (arg.rank < 0 || arg.rank != static_cast<int64_t>(arg.shape.size())) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "fusion input '%s' rank does not match its shape", arg.tfName.c_str());
+    }
+    if (arg.dtype.empty()) return missingFieldError("args.dtype");
   }
-  if (info.outputTensor.empty()) return missingFieldError("output_tensor");
+  for (const FusionArg &output : info.outputs) {
+    if (output.role != "output") {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "fusion output '%s' has invalid role '%s'", output.tfName.c_str(),
+          output.role.c_str());
+    }
+    if (output.tfName.empty()) return missingFieldError("outputs.tf_name");
+    if (output.rank < 0 ||
+        output.rank != static_cast<int64_t>(output.shape.size())) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "fusion output '%s' rank does not match its shape",
+          output.tfName.c_str());
+    }
+    if (output.dtype.empty()) return missingFieldError("outputs.dtype");
+  }
   return llvm::Error::success();
 }
 
@@ -427,26 +367,15 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   info.name = stringAttr(metadata, "tf.name");
   info.pattern = stringAttr(metadata, "fusion.pattern");
   info.kernelName = stringAttr(metadata, "kernel_name");
-  info.outputTensor = stringAttr(metadata, "tf.output");
-  info.originalNodes = stringArrayAttr(metadata, "tf.nodes");
-  info.inputs = stringArrayAttr(metadata, "tf.inputs");
-  info.inputShapes =
-      parseShapeStrings(stringArrayAttr(metadata, "tf.input_shapes"));
-  info.outputShape = parseShapeString(stringAttr(metadata, "tf.output_shape"));
+  info.args = fusionArgArrayAttr(metadata, "args");
+  info.outputs = fusionArgArrayAttr(metadata, "outputs");
   info.abi = stringAttr(metadata, "abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
-  info.nConstants = intAttr(metadata, "Nconstants");
-  info.nFixed = intAttr(metadata, "Nfixed");
-  info.nDynamic = intAttr(metadata, "Ndynamic");
-  info.numOutputs = intAttr(metadata, "num_outputs", 1);
-  info.outputRanks = intArrayAttr(metadata, "output_ranks");
-  info.inputRanks = intArrayAttr(metadata, "input_ranks");
   info.dynamicDims = intArrayAttr(metadata, "dynamic_dims");
   info.kernelArgOrder = intArrayAttr(metadata, "kernel_arg_order");
   info.symbolicSignature = stringAttr(metadata, "symbolic_signature");
   info.fallbackFunction = stringAttr(metadata, "fallback_function");
   populatePatternAttrs(info, func);
-  normalizeFusionInfo(info);
 
   if (auto err = validateFusionInfo(info)) return std::move(err);
   return info;

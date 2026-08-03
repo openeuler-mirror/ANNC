@@ -5,7 +5,9 @@
 #include <fcntl.h>
 #include <signal.h>
 
+#include <atomic>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +35,7 @@ constexpr int kDefaultTimeoutSeconds = 300;
 constexpr char kDefaultTempDir[] = "/tmp";
 constexpr char kDefaultPipelinePath[] = "/usr/local/bin/annc-tf-pipeline";
 constexpr char kOutputPrefix[] = "tf_graph_output_";
+constexpr char kDefaultWorkRoot[] = "annc_optimizer_work";
 
 void AnncOptimizerLibraryAnchor() {}
 
@@ -52,6 +55,22 @@ int GetEnvInt(const char* name, int default_val = 0) {
   const char* val = getenv(name);
   if (!val) return default_val;
   return std::stoi(val);
+}
+
+std::string SanitizePathComponent(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (char c : value) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    if (std::isalnum(uc) || c == '_' || c == '-' || c == '.') {
+      out.push_back(c);
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) out = "graph";
+  if (out.size() > 96) out.resize(96);
+  return out;
 }
 
 }  // namespace
@@ -213,7 +232,8 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
     return OkStatus();
   }
 
-  Status status = InvokePipeline(input_graphdef_file, output_graphdef_file);
+  Status status = InvokePipeline(input_graphdef_file, output_graphdef_file,
+                                 grappler_item.id);
   if (!status.ok()) {
     LOG(WARNING) << "annc-tf-pipeline graph rewrite failed: " << status.message()
                  << ", returning original graph";
@@ -302,11 +322,34 @@ Status ANNCOptimizer::ReadGraphDefFromFile(const std::string& filepath,
   return OkStatus();
 }
 
+std::string ANNCOptimizer::BuildPipelineWorkDir(
+    const std::string& graph_id) const {
+  if (!keep_temp_files_ && annc_work_dir_.empty()) return "";
+
+  static std::atomic<uint64_t> invocation_counter{0};
+  uint64_t ordinal = invocation_counter.fetch_add(1, std::memory_order_relaxed);
+  auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+
+  std::string base = annc_work_dir_;
+  if (base.empty()) {
+    base = absl::StrCat(temp_dir_, "/", kDefaultWorkRoot);
+  }
+  while (!base.empty() && base.back() == '/') base.pop_back();
+
+  return absl::StrCat(base, "/", SanitizePathComponent(graph_id), "_", now,
+                      "_", ordinal);
+}
+
 Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
-                                     const std::string& output_file) {
+                                     const std::string& output_file,
+                                     const std::string& graph_id) {
+  const std::string pipeline_work_dir = BuildPipelineWorkDir(graph_id);
   LOG(INFO) << "Invoking annc-tf-pipeline graph rewrite: " << pipeline_path_
             << " with input=" << input_file
-            << ", output=" << output_file;
+            << ", output=" << output_file
+            << ", work_dir="
+            << (pipeline_work_dir.empty() ? "<pipeline-default>"
+                                          : pipeline_work_dir);
 
   pid_t pid = fork();
 
@@ -329,11 +372,11 @@ Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
     argv.push_back(const_cast<char*>(input_file.c_str()));
     argv.push_back(const_cast<char*>("--output_graphdef"));
     argv.push_back(const_cast<char*>(output_file.c_str()));
-    if (!annc_work_dir_.empty()) {
+    if (!pipeline_work_dir.empty()) {
       argv.push_back(const_cast<char*>("--work_dir"));
-      argv.push_back(const_cast<char*>(annc_work_dir_.c_str()));
+      argv.push_back(const_cast<char*>(pipeline_work_dir.c_str()));
     }
-    if (keep_temp_files_ || !annc_work_dir_.empty()) {
+    if (keep_temp_files_ || !pipeline_work_dir.empty()) {
       argv.push_back(const_cast<char*>("--keep_temps"));
     }
     if (annc_verbose_) {
@@ -416,4 +459,3 @@ void ANNCOptimizer::CleanupTempFiles(const std::vector<std::string>& filepaths) 
 
 }  // namespace grappler
 }  // namespace tensorflow
-

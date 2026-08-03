@@ -21,18 +21,21 @@ REGISTER_OP("ANNCFused")
     .Attr("num_outputs: int >= 1")
     .Attr("output_ranks: list(int)")            // Rank for each output
     .Attr("input_ranks: list(int) = []")        // Rank for each runtime input
-    .Attr("output_shapes: list(string) = []")   // Comma-separated dims, -1 uses dynamic input dim
-    .Attr("kernel_arg_order: list(int) = []")   // Order of input/output memrefs passed to kernel
+    // Comma-separated dimensions; "?" uses the corresponding dynamic input
+    // dimension.
+    .Attr("output_shapes: list(string) = []")
+    // Permutation over the combined [input memrefs..., output memrefs...] list.
+    .Attr("kernel_arg_order: list(int) = []")
 
     // Dynamic shape support
-    .Attr("dynamic_dims: list(int)")            // Global dynamic dimension indices
-    .Attr("symbolic_signature: string")         // Symbolic shape signature
+    .Attr("dynamic_dims: list(int)")            // Dynamic output-axis indices
+    // Reserved compatibility value; runtime does not interpret it.
+    .Attr("symbolic_signature: string")
 
     // Legacy metadata kept for GraphDef compatibility. Runtime fallback is
     // intentionally not executed by ANNCFused.
-    .Attr("fallback_function: func")
+    .Attr("fallback_function: func")  // Reserved; runtime does not execute it
     .Attr("fusion_pattern: string = ''")
-    .Attr("annc_original_nodes: list(string) = []")
 
     // Input counts
     .Attr("Nconstants: int >= 0")

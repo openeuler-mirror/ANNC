@@ -14,10 +14,13 @@ set(LIBS
   AtirBuilder
   TFAdaptor
   ANNCHelper
+  ANNCFusionMetadata
 )
 
 add_llvm_executable(annc-converter
+  ANNCFusedNodeBuilder.cpp
   annc-converter.cpp
+  GraphDefRewriter.cpp
   DEPENDS
   ${LIBS}
 )

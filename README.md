@@ -285,7 +285,7 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
 ```
 
-当 `--atir-op-fusion` 在同一个计算图中融合出多个独立 MatMul kernel 时，`fusion_metadata.json` 使用顶层 `fusions` 数组保存所有融合信息。数组中每一项都保持单个融合节点的字段结构，包括 `name`、`pattern`、`kernel_name`、`output_tensor`、`original_nodes`、`inputs`、shape、rank 和 ABI 信息。`annc-converter --tf-graphdef-rewrite` 会遍历 `fusions` 数组，为每个 fusion 分别删除原始子图并插入独立的 `ANNCFused` 节点；旧版单 fusion JSON 对象仍可被读取。
+当 `--atir-op-fusion` 在同一个计算图中融合出多个独立 kernel 时，`fusion_metadata.json` 使用顶层 `fusions` 数组保存所有融合信息。每个 fusion 只保存结构化 `args`、`outputs` 和不能从 tensor contract 推导的 ABI 信息；GraphDef rewrite 所需的输入计数、rank 和 output shape 在构造 `ANNCFused` 节点时派生，不在 metadata 中重复保存。
 
 示例：
 
@@ -296,9 +296,37 @@ annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
       "name": "annc_fused_dense_MatMul",
       "pattern": "matmul",
       "kernel_name": "fused_matmul_abcd1234",
-      "output_tensor": "dense/MatMul",
-      "original_nodes": ["dense/MatMul"],
-      "inputs": ["dense/kernel", "input"]
+      "args": [
+        {
+          "role": "fixed",
+          "tf_name": "dense/kernel",
+          "shape": [128, 64],
+          "rank": 2,
+          "dtype": "f32"
+        },
+        {
+          "role": "dynamic",
+          "tf_name": "input",
+          "shape": [-1, 128],
+          "rank": 2,
+          "dtype": "f32"
+        }
+      ],
+      "outputs": [
+        {
+          "role": "output",
+          "tf_name": "dense/MatMul",
+          "shape": [-1, 64],
+          "rank": 2,
+          "dtype": "f32"
+        }
+      ],
+      "abi": "mlir_ciface",
+      "dynamic_dims": [0],
+      "kernel_arg_order": [1, 0, 2],
+      "symbolic_signature": "F:0|S:1;?,?",
+      "fallback_function": "original_subgraph",
+      "pattern_attrs": {}
     }
   ]
 }
