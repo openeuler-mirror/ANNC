@@ -203,7 +203,7 @@ flowchart TB
 | ------------- | ------------- | ---------------------- | ----------------------------- | ------------------- | ---------------------------- |
 | ATIR 原型开发与验证  | 编译器算法工程师      | 算法验证、新融合模式开发           | Python 构建的 ATIR MLIR          | 验证结果、lowering 后的 IR | 在完整 pipeline 之外快速迭代新算子、新融合策略 |
 | 自定义 Kernel 集成 | 后端/kernel 开发者 | 接入 KDNN、手写 SIMD kernel | 符合 ANNC Kernel 接口的 C++ kernel | 被编译流水线识别并调用的 kernel | 扩展 ANNC 后端能力，复用 vendor 优化    |
-| TF↔ATIR 双向转换  | 调试工程师         | 模型调试、可视化               | TF SavedModel ↔ ATIR MLIR     | 双向转换结果              | 便于问题定位、结果对比、生态互操作            |
+| TF GraphDef 重写   | Serving/部署工程师 | 融合子图替换与运行时回接       | GraphDef + Fusion Metadata    | 包含 ANNCFused 的 GraphDef | 保持原图其余节点与输入关系不变                |
 
 ### 3.2 特性影响分析
 
@@ -325,7 +325,7 @@ flowchart LR
 
 > **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。
 
-> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir (--batch_size) -> annc-opt --atir-op-fusion -> annc-fusion-metadata -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter --tf-graphdef-rewrite`（共 6 步；编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）；`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
+> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir (--batch_size) -> annc-opt --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
 
 #### 4.1.3 编译时与运行时边界
 
@@ -357,13 +357,13 @@ flowchart LR
 
 | 接口契约                | 格式                              | 产生方（所属层）                           | 消费方（所属层）                       | 核心字段                                                                              | 稳定性承诺                                                                     |
 | ------------------- | ------------------------------- | ---------------------------------- | ------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| **NodeInfo**        | C++ struct（`annc/include/Builder/`、`annc/include/Adaptor/tensorflow/`，两套实现） | ANNC 框架对接层（前端适配 / annc-converter 逆向） | 工具链前端（ATIR 方言构建）               | 公共字段：`op_type`、`name`、`inputs`、`outputs`（`OutputInfo` 含 `name`/`dtype`/`shape`）、`tf_attrs`、`raw_data`、`isInputNode`/`isOutputNode`；仅 Builder 版：`attrs`（typed variant）、`numBuckets` 等；仅 Adaptor 版：`OutputInfo` 为嵌套定义且多 `id` 字段、`tf_attrs` 为 `std::map`                       | `op_type`/`dtype` 不可变；Builder 版为契约基准，Adaptor 版为 TF 变体，尚未统一                                      |
+| **NodeInfo**        | C++ struct（`annc/include/Builder/MLIROpBuilder.h`） | ANNC 框架对接层前端适配 | 工具链前端（ATIR 方言构建） | `op_type`、`name`、`inputs`、`outputs` 等 | 仅用于 GraphDef → ATIR 正向路径 |
 | **Fusion Metadata** | JSON（`annc-fusion-metadata` 输出，外层 `{"fusions":[...]}`） | 工具链前端（annc-fusion-metadata 切分决策提取） | ANNC 框架对接层（annc-converter 图重写） | `name`、`pattern`、`kernel_name`、`original_nodes`、`inputs`、`input_shapes`、`output_tensor`、`output_shape`、`abi`、`n_constants`/`n_fixed`/`n_dynamic`、`num_outputs`、`output_ranks`/`input_ranks`、`dynamic_dims`、`kernel_arg_order`、`symbolic_signature`、`fallback_function` | `pattern`/`original_nodes`/`inputs`/`output_tensor` 不可变；其余字段可扩展（`shared_lib_path` 不在此 JSON，由 annc-converter 写入 GraphDef 节点属性） |
 | **Kernel C ABI**    | C 函数签名（`_mlir_ciface_*`）        | 工具链后端（annc driver 编译产出）            | ANNC 框架对接层（ANNCFusedOp 运行时回接）  | 函数名、参数列表（MemRef 描述子指针）、返回值                                                        | 函数名编码规则不可变；MemRef 布局遵循 MLIR 标准约定                                          |
 
 **设计要点**：
 
-- NodeInfo 是ANNC 框架对接层向工具链前端传递计算图信息的通道；当前生产 CLI `annc-tf2atir` 通过 `StandalonePbParser`（仅依赖 protobuf，不链接 TF Runtime）将 GraphDef 解析为 Builder 版 NodeInfo 列表，再经 `MLIRBuilder` 构建 ATIR——跳过的是 JSON 中间格式，而非 NodeInfo；Adaptor 版 NodeInfo 用于 annc-converter 逆向转换；新增框架（如 ONNX）仅需实现 NodeInfo 构建器，工具链前端与后端无需改动。
+- NodeInfo 是 ANNC 框架对接层向工具链前端传递计算图信息的通道；当前生产 CLI `annc-tf2atir` 通过 `StandalonePbParser`（仅依赖 protobuf，不链接 TF Runtime）将 GraphDef 解析为 Builder 版 NodeInfo 列表，再经 `MLIRBuilder` 构建 ATIR。`annc-converter` 的 GraphDef 重写路径直接消费 GraphDef 与 Fusion Metadata，不再使用 NodeInfo。
 - Fusion Metadata 是工具链前端产出的切分决策，由ANNC 框架对接层消费以执行图重写；两者可独立迭代。
 - Kernel C ABI 是工具链后端与ANNC 框架对接层（运行时回接）之间的唯一调用约定，kernel 的内部实现（手写/MLIR 生成）对运行时透明。
 
@@ -371,19 +371,19 @@ flowchart LR
 
 #### 4.2.1 ANNC 框架对接层
 
-**职责**：对接具体推理框架，完成计算图的双向转换与运行时透明回接。该层是 ANNC 与外部框架的唯一接触面，隔离框架差异，使工具链前端与后端不感知具体框架。
+**职责**：对接具体推理框架，完成计算图前端适配、GraphDef 重写与运行时透明回接。该层是 ANNC 与外部框架的唯一接触面，隔离框架差异，使工具链前端与后端不感知具体框架。
 
 | 组件            | 职责                                        | 输入                                | 输出                        |
 | ------------- | ----------------------------------------- | --------------------------------- | ------------------------- |
 | 前端适配          | 将外部模型格式转换为框架无关的 `NodeInfo`                | GraphDef / ONNX 模型                | `NodeInfo` 列表             |
-| 图重写           | 根据切分决策将融合子图替换为 ANNCFused 节点 / ATIR->TF 逆向 | ATIR + GraphDef + Fusion Metadata | 重写后 GraphDef / SavedModel |
+| 图重写           | 根据切分决策将融合子图替换为 ANNCFused 节点 | GraphDef + Fusion Metadata + shared library | 重写后 GraphDef |
 | ANNCOptimizer | Grappler 插件，编排编译 pipeline 并触发三层流水线        | GraphDef                          | 重写后 GraphDef              |
 | ANNCFusedOp   | 运行时加载 `.so` 并执行 kernel                    | TF Tensor                         | TF Tensor                 |
 | 线程池桥接         | 通过 TLS 将 TF ThreadPool 桥接到 ANNC kernel    | TF ThreadPool                     | AnncThreadPool            |
 
 **关键设计要点**：
 
-- 生产 CLI `annc-tf2atir` 通过 `StandalonePbParser` 仅依赖 protobuf（不链接 TF Runtime），实现框架隔离；`TFAdaptor` 库（供 annc-converter 逆向转换使用）链接 TF Runtime。为 ONNX 等后续框架预留扩展点，新增框架仅需实现 NodeInfo 构建器与对应的图重写逻辑。
+- 生产 CLI `annc-tf2atir` 通过 `StandalonePbParser` 仅依赖 protobuf（不链接 TF Runtime），实现框架隔离；`annc-converter` 自身链接 TensorFlow，负责根据 Fusion Metadata 重写 GraphDef。为 ONNX 等后续框架预留扩展点，新增框架仅需实现 NodeInfo 构建器与对应的图重写逻辑。
 - 图重写消费工具链前端产出的 Fusion Metadata，将可融合子图替换为 `ANNCFused` 节点，并在节点属性中记录 `shared_lib_path`。
 - `ANNCOptimizer` 通过 `fork/exec` 子进程调用 `annc-tf-pipeline`，实现 MLIR/LLVM 与 TF 的 ABI 隔离；任何阶段失败均返回原始 GraphDef，保证推理服务可用性。
 - `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。
@@ -506,12 +506,11 @@ sequenceDiagram
 3. 进程启动时（main 前的静态初始化）`KernelRegistry` 收集注册项。
 4. `resolveBestKernelInfo()` 在 lowering 阶段选择最佳 kernel。
 
-#### 4.3.5 Use Case 5：TF↔ATIR 双向转换
+#### 4.3.5 Use Case 5：TF GraphDef 重写
 
 1. `annc-tf2atir` 将 SavedModel/GraphDef 转为 ATIR MLIR。
-2. 用户查看/修改 ATIR IR。
-3. `annc-converter` 将 ATIR MLIR 转回 SavedModel（可选拆分融合节点）。
-4. 注：逆向转换为 annc-converter 默认模式（无需特殊 flag）；当前不支持 LoadOp->StridedSlice 与 region op（For/If/SwitchCase/Parallel）。
+2. `annc-fusion-metadata` 从融合后的 ATIR 提取融合子图边界与运行时元数据。
+3. `annc-converter` 以原始 GraphDef、融合元数据和生成的共享库路径为输入，将对应子图替换为 `ANNCFused` 节点。
 
 #### 4.3.6 Use Case 6：搜推广 Embedding 层优化
 
@@ -544,7 +543,6 @@ sequenceDiagram
 | US-009   | TF ThreadPool 桥接到 kernel | UC1             | US-008         | 中   |
 | US-010   | ONNX 前端支持                | UC1/UC2/UC5     | US-001         | 中   |
 | US-011   | 自定义 Kernel 注册            | UC4             | US-005         | 中   |
-| US-012   | ATIR→SavedModel 逆向       | UC5             | US-001         | 中   |
 | US-013   | Embedding Lookup 聚合      | UC6             | US-001         | 高   |
 
 ### 4.5 模块设计
@@ -559,7 +557,7 @@ sequenceDiagram
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
 | `annc/tools/annc-asm`             | ATIR lowering                 | CLI：`annc-asm --convert-atir-to-affine`     | 工具链后端      | 早期  |
 | `annc/tools/annc`                 | 编译 driver                     | CLI：`annc --shared -o kernel.so`            | 工具链后端      | 稳定  |
-| `annc/tools/annc-converter`       | 图重写 / 逆向                      | CLI：`annc-converter --tf-graphdef-rewrite`  | ANNC 框架对接层 | 稳定  |
+| `annc/tools/annc-converter`       | GraphDef 图重写                    | CLI：`annc-converter --input_graphdef ...` | ANNC 框架对接层 | 稳定  |
 | `annc/tools/annc-tf-pipeline`     | 端到端编排                         | CLI：`annc-tf-pipeline --input_graphdef ...` | 编排         | 稳定  |
 | `tensorflow_addons`               | TF Grappler 插件 + ANNCFused Op | TF CustomGraphOptimizer / OpKernel          | ANNC 框架对接层 | 稳定  |
 | `annc/lib/Kernel`                 | Kernel 注册与线程池                 | C++ API：`KernelRegistry`、`AnncThreadPool`   | 工具链后端      | 稳定  |
@@ -614,7 +612,7 @@ flowchart TB
 | **资源**   | 构建阶段消耗大量磁盘（\~50GB）和内存；运行期 `.so` 加载占用进程地址空间      |
 | **可维护性** | ANNC 框架对接层、工具链前端、工具链后端三层解耦；各层独立演进               |
 | **可观测性** | 通过 `annc_verbose`、TF 日志、临时文件保留进行问题定位            |
-| **兼容性**  | 失败自动回退原生执行；保留 TF↔ATIR 双向转换能力                    |
+| **兼容性**  | 失败自动回退原生执行；保留 GraphDef → ATIR 与 GraphDef 重写能力    |
 
 ***
 
@@ -802,7 +800,7 @@ flowchart TB
 | **Backend**         | Kernel 的后端分类，如 `aarch64`、`kdnn`                                               |
 | **Fusion Metadata** | 描述融合子图信息的 JSON（`annc-fusion-metadata` 输出，键含 `pattern`/`original_nodes`/`inputs`/`output_tensor`/`kernel_name` 等，外层 `{"fusions":[...]}`），用于图重写；`shared_lib_path` 不在此 JSON，由 annc-converter 写入 GraphDef 节点属性                                                          |
 | **MemRef**          | MLIR 的运行时张量描述符，包含指针、offset、sizes、strides                                      |
-| **NodeInfo**        | 前端无关的图节点中间表示，用于隔离 TF/ONNX 等前端差异；当前存在 Builder/Adaptor 两套实现（`include/Builder/`、`include/Adaptor/tensorflow/`），dtype/shape 嵌于 `OutputInfo` 子结构                                               |
+| **NodeInfo**        | GraphDef → ATIR 正向路径使用的图节点中间表示，定义在 `annc/include/Builder/MLIROpBuilder.h`                                               |
 | **Distribute Pass** | 编译策略层入口，根据算子模式选择编译流水线（GEMM / 通用 Lowering / LLM / XLA）；当前仅 GEMM 分支实际可用，LLM/XLA 为 stub                         |
 | **FastCodegen**     | GEMM 路径的快速代码生成 Pass，通过 PatternRegistry 注入已注册的融合 rewrite pattern（如 MatmulToCustomCallRewrite），将 MatMul(+Add)(+Relu) 改写为 CustomizeOp；kernel 符号的匹配与优先级选择由 KernelRegistry / resolveBestKernelInfo 在后续 lowering 完成                            |
 | **Tiling**          | 循环分块变换；ATIR `Tiling` Pass 为 MatMul 单级块 tiling（硬编码 BLOCK_M/K/N），多级 tiling 抽象在 AArch64 后端（六级），将计算按 CPU 缓存层次拆分以提升数据局部性                                              |
@@ -845,7 +843,6 @@ flowchart TB
 
 ### 9.4 遗留问题
 
-- NodeInfo 存在 Builder（`annc/include/Builder/`）与 Adaptor（`annc/include/Adaptor/tensorflow/`）两套实现尚未统一（命名空间与字段均有差异，见 4.1.5 节），后续需收敛为单一契约。
 - GEMM MLIR 优化路径的 Lowering 策略（Affine vs Linalg）尚未收敛，Linalg 路径仅 MatMul/Customize 实现完整。
 - LLM 自动生成路径和 XLA 接入路径处于开发/规划阶段。
 - ONNX 前端支持处于规划阶段。
@@ -865,11 +862,9 @@ flowchart TB
 | FR-005 | 编译器分层解耦                              | 全模块                                      | 高   | 已实现  | 架构团队                |
 | FR-006 | 动态 Shape 支持                          | annc-converter + ANNCFusedOp             | 中   | 已实现  | 编译器开发团队             |
 | FR-007 | 自定义 Kernel 扩展                        | annc/lib/Kernel                          | 中   | 已实现  | AI 技术创新团队           |
-| FR-008 | 双向转换                                 | annc-converter + annc-tf2atir            | 中   | 已实现  | 编译器开发团队             |
 | FR-009 | Embedding 层优化（访存密集型融合 + 通用 Lowering） | annc-opt / Dialect/Atir / Target/aarch64 | 高   | 部分实现 | 编译器开发团队 + AI 技术创新团队 |
 | US-010 | ONNX 前端支持                            | annc/tools/annc-tf2atir                  | 中   | 规划中  | 编译器开发团队             |
 | US-011 | 自定义 Kernel 注册                        | annc/lib/Kernel                          | 中   | 已实现  | AI 技术创新团队           |
-| US-012 | ATIR→SavedModel 逆向                   | annc-converter                           | 中   | 已实现  | 编译器开发团队             |
 | US-013 | Embedding Lookup 聚合                  | annc-opt / Dialect/Atir                  | 高   | 已实现  | 编译器开发团队             |
 | US-014 | GEMM MLIR 优化路径收敛                     | Target/aarch64 + Conversion              | 中   | 开发中  | AI 技术创新团队           |
 | US-015 | LLM 自动生成路径                           | Dialect/Atir/Passes/LLMCodeGen           | 中   | 开发中  | AI 技术创新团队           |
