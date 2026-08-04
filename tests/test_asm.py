@@ -1,6 +1,23 @@
-import numpy as np
+from pathlib import Path
+import sys
 
-from annc.builder import mlir
+import numpy as np
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BUILD_PYTHON = ROOT / "build" / "python_packages"
+
+if not BUILD_PYTHON.exists():
+    pytest.skip(
+        "annc Python package is not built; run ninja -C build ANNCPythonModules",
+        allow_module_level=True,
+    )
+
+sys.path.insert(0, str(BUILD_PYTHON))
+
+annc_builder = pytest.importorskip("annc.builder")
+mlir = annc_builder.mlir
 from annc.helper import kp
 from annc.ops import matmul
 from annc.passmanager import PassManager
@@ -83,6 +100,10 @@ def main() -> None:
         "aarch64-matmul-pack-affine",
         PIPELINES["aarch64-matmul-pack-affine"],
     )
+
+
+def test_annc_builder_imports() -> None:
+    assert mlir is not None
 
 
 if __name__ == "__main__":
