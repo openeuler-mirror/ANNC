@@ -325,7 +325,7 @@ flowchart LR
 
 > **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。
 
-> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir (--batch_size) -> annc-opt --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
+> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
 
 #### 4.1.3 编译时与运行时边界
 
@@ -383,7 +383,7 @@ flowchart LR
 
 **关键设计要点**：
 
-- 生产 CLI `annc-tf2atir` 通过 `StandalonePbParser` 仅依赖 protobuf（不链接 TF Runtime），实现框架隔离；`annc-converter` 自身链接 TensorFlow，负责根据 Fusion Metadata 重写 GraphDef。为 ONNX 等后续框架预留扩展点，新增框架仅需实现 NodeInfo 构建器与对应的图重写逻辑。
+- 生产 CLI `annc-tf2atir` 通过 `StandalonePbParser` 仅依赖 protobuf（不链接 TF Runtime），实现框架隔离；`annc-converter` 复用 `tf_protos_minimal` 的 GraphDef protobuf，仅链接系统 protobuf，不链接 TensorFlow Runtime，负责根据 Fusion Metadata 重写 GraphDef。为 ONNX 等后续框架预留扩展点，新增框架仅需实现 NodeInfo 构建器与对应的图重写逻辑。
 - 图重写消费工具链前端产出的 Fusion Metadata，将可融合子图替换为 `ANNCFused` 节点，并在节点属性中记录 `shared_lib_path`。
 - `ANNCOptimizer` 通过 `fork/exec` 子进程调用 `annc-tf-pipeline`，实现 MLIR/LLVM 与 TF 的 ABI 隔离；任何阶段失败均返回原始 GraphDef，保证推理服务可用性。
 - `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。
@@ -551,7 +551,7 @@ sequenceDiagram
 
 | 模块                                | 职责                            | 对外接口                                        | 所属层        | 稳定性 |
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
-| `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> --batch_size N`               | ANNC 框架对接层 | 稳定  |
+| `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N]`（未指定时保留动态 shape） | ANNC 框架对接层 | 稳定  |
 | `annc/tools/annc-opt`             | ATIR 优化与融合                    | CLI：`annc-opt --atir-op-fusion`（默认流水线用；另暴露完整 pass 集）             | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |

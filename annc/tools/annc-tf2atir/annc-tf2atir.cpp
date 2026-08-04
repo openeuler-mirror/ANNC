@@ -28,7 +28,8 @@ int main(int argc, char **argv) {
     
     if (argc < 2) {
         llvm::errs() << "Usage: " << argv[0]
-                     << " <model_path> [--output_tensor <name>]... "
+                     << " <model_path> [--batch_size N] "
+                        "[--output_tensor <name>]... "
                         "[mlir-opt options]\n";
         return 1;
     }

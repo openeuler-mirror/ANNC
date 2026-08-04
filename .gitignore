@@ -22,4 +22,6 @@ tensorflow_addons/logs
 tensorflow_addons/build
 .cache/
 .claude/
+docs/codex/
 docs/superpowers/
+benchmark/

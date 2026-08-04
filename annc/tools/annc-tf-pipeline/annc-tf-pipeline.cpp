@@ -17,7 +17,7 @@ struct PipelineOptions {
   std::string sharedLibPath;
   std::string workDir;
   std::vector<std::string> outputTensors;
-  int64_t batchSize = 2;
+  int64_t batchSize = -1;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
   bool verbose = false;
@@ -90,7 +90,7 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->kernelName = takeValue(argc, argv, "--kernel_name", opts->kernelName);
   opts->sharedLibPath = takeValue(argc, argv, "--shared_lib_path");
   opts->workDir = takeValue(argc, argv, "--work_dir", defaultWorkDir());
-  opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "2"));
+  opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "-1"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
@@ -159,8 +159,12 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 #endif
 
   std::vector<std::string> tf2atirArgs = {
-      anncTf2Atir, opts.inputGraphDef, "--batch_size",
-      std::to_string(opts.batchSize), "-o", rawAtir.string()};
+      anncTf2Atir, opts.inputGraphDef, "-o", rawAtir.string()};
+  if (opts.batchSize > 0) {
+    tf2atirArgs.insert(tf2atirArgs.begin() + 2, "--batch_size");
+    tf2atirArgs.insert(tf2atirArgs.begin() + 3,
+                       std::to_string(opts.batchSize));
+  }
   for (const std::string &tensor : opts.outputTensors) {
     tf2atirArgs.push_back("--output_tensor");
     tf2atirArgs.push_back(tensor);

@@ -21,7 +21,7 @@
 class StandalonePbParser {
 public:
     explicit StandalonePbParser(
-        const std::string& model_path, int64_t default_batch_size = 2,
+        const std::string& model_path, int64_t batch_size = -1,
         std::vector<std::string> explicit_output_tensors = {});
     bool parse();
 
@@ -30,7 +30,9 @@ public:
 
 private:
     std::string model_path_;
-    int64_t default_batch_size_ = 2;
+    // A positive value is an explicit override; non-positive preserves the
+    // dimensions parsed from GraphDef, including dynamic dimensions.
+    int64_t batch_size_ = -1;
     std::vector<std::string> explicit_output_tensors_;
     bool valid_ = false;
     std::vector<annc::NodeInfo> nodes_;

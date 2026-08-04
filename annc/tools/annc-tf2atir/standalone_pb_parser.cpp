@@ -30,10 +30,10 @@ static bool hasSuffix(const std::string& filename, const std::string& suffix) {
 
 // 构造函数
 StandalonePbParser::StandalonePbParser(
-    const std::string& model_path, int64_t default_batch_size,
+    const std::string& model_path, int64_t batch_size,
     std::vector<std::string> explicit_output_tensors)
     : model_path_(model_path),
-      default_batch_size_(default_batch_size),
+      batch_size_(batch_size),
       explicit_output_tensors_(std::move(explicit_output_tensors)) {}
 
 // 加载模型
@@ -602,7 +602,7 @@ void StandalonePbParser::filterConvertibleNodes() {
 
 void StandalonePbParser::inferMvpMatMulAddReluShapes() {
     // 未指定 --batch_size 时保留动态 shape，不做替换
-    const bool replaceBatch = default_batch_size_ > 0;
+    const bool replaceBatch = batch_size_ > 0;
 
     std::unordered_map<std::string, annc::NodeInfo*> by_name;
     for (auto& node : nodes_) {
@@ -617,7 +617,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
 
         if (replaceBatch && !node.outputs[0].shape.empty() &&
             node.outputs[0].shape[0] == -1) {
-            node.outputs[0].shape[0] = default_batch_size_;
+            node.outputs[0].shape[0] = batch_size_;
         }
         const std::vector<int64_t>& out_shape = node.outputs[0].shape;
         annc::NodeInfo* lhs = by_name.count(node.inputs[0]) ? by_name[node.inputs[0]] : nullptr;
@@ -633,7 +633,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
         }
         if (replaceBatch && !lhs->outputs[0].shape.empty() &&
             lhs->outputs[0].shape[0] == -1) {
-            lhs->outputs[0].shape[0] = default_batch_size_;
+            lhs->outputs[0].shape[0] = batch_size_;
         }
         rhs->outputs[0].shape = {k, out_shape[1]};
         rhs->outputs[0].dtype = node.outputs[0].dtype;
@@ -645,7 +645,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
             }
             if (replaceBatch && !maybe_add.outputs[0].shape.empty() &&
                 maybe_add.outputs[0].shape[0] == -1) {
-                maybe_add.outputs[0].shape[0] = default_batch_size_;
+                maybe_add.outputs[0].shape[0] = batch_size_;
             }
             if (std::find(maybe_add.inputs.begin(), maybe_add.inputs.end(),
                           node.name) == maybe_add.inputs.end()) {
@@ -668,7 +668,7 @@ void StandalonePbParser::inferMvpMatMulAddReluShapes() {
         if (replaceBatch && (node.op_type == "Relu" || node.isOutputNode) &&
             !node.outputs.empty() && !node.outputs[0].shape.empty() &&
             node.outputs[0].shape[0] == -1) {
-            node.outputs[0].shape[0] = default_batch_size_;
+            node.outputs[0].shape[0] = batch_size_;
         }
     }
 }
