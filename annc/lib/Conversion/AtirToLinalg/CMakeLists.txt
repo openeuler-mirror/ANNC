@@ -21,6 +21,7 @@ add_mlir_library(AtirToLinalgConversion
         MLIRArithDialect
         MLIRFuncDialect
         MLIRMemRefDialect
+        MLIRBufferizationDialect
         CommonConversion
         AtirDialect
         ANNCKernel

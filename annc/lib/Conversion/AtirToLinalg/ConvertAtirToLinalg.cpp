@@ -28,6 +28,7 @@ namespace atir {
                                    bufferization::BufferizationDialect,
                                    memref::MemRefDialect,
                                    func::FuncDialect>();
+            target.addIllegalOp<atir::BufferOp, atir::MatMulOp>();
             AtirTypeToLinalgConverter atirTypeConverter;
             InputTypeConverter inputTypeConverter;
             RewritePatternSet patterns(&getContext());

@@ -246,16 +246,17 @@ void ConcatLoweringToAffine::Lowering(PatternRewriter& rewriter, ConcatOpAdaptor
 
 void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor adaptor, MatMulOp op) const
 {
-    MLIRContext *cxt = getContext();
     auto loc = op.getLoc();
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
     Value c = adaptor.getC();
-    Value bias = adaptor.getBias();
+    if (op.getBias() || op->hasAttr("annc.gemm.epilogue")) {
+        op.emitOpError("requires the Linalg GEMM path for an ordered epilogue");
+        return;
+    }
 
     auto lShape = mlir::cast<MemRefType>(lhs.getType()).getShape();
     auto rShape = mlir::cast<MemRefType>(rhs.getType()).getShape();
-    auto cShape = mlir::cast<MemRefType>(c.getType()).getShape();
     int64_t m = lShape[0], k = lShape[1], n = rShape[1];
     SmallVector<int64_t> strides(2, 1);
 
@@ -279,36 +280,20 @@ void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
     SmallVector rSize{k, n};
     SmallVector cSize{m, n};
 
-    int axis = -1;
-    if (op.getWithBias()) {
-        axis = getBiasAxis(bias, cShape);
-        SmallVector biasOffsets{cOffsets[axis]};
-        SmallVector biasSize{cSize[axis]};
-        SmallVector biasStrides{strides[axis]};
-        bias = rewriter.create<memref::SubViewOp>(loc, bias, biasOffsets, biasSize, biasStrides);
-    }
-
     lhs = rewriter.create<memref::SubViewOp>(loc, lhs, lOffsets, lSize, strides);
     rhs = rewriter.create<memref::SubViewOp>(loc, rhs, rOffsets, rSize, strides);
     Value cView = rewriter.create<memref::SubViewOp>(loc, c, cOffsets, cSize, strides);
 
-    Value biasVal;
     auto dim0For = rewriter.create<affine::AffineForOp>(loc, 0, m);
     {
         OpBuilder::InsertionGuard guardDim0(rewriter);
         rewriter.setInsertionPointToStart(dim0For.getBody());
         auto i = dim0For.getInductionVar();
-        if (op.getWithBias() && axis == 0) {
-            biasVal = rewriter.create<affine::AffineLoadOp>(loc, bias, ValueRange{i});
-        }
         auto dim1For = rewriter.create<affine::AffineForOp>(loc, 0, n);
         {
             OpBuilder::InsertionGuard guardDim1(rewriter);
             rewriter.setInsertionPointToStart(dim1For.getBody());
             auto j = dim1For.getInductionVar();
-            if (op.getWithBias() && axis == 1) {
-                biasVal = rewriter.create<affine::AffineLoadOp>(loc, bias, ValueRange{j});
-            }
             auto dim2For = rewriter.create<affine::AffineForOp>(loc, 0, k);
             {
                 OpBuilder::InsertionGuard guardDim2(rewriter);
@@ -322,16 +307,6 @@ void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
                 rewriter.create<affine::AffineStoreOp>(loc, sum, cView, ValueRange{i, j});
             }
 
-            if (op.getWithBias()) {
-                auto old = rewriter.create<affine::AffineLoadOp>(loc, cView, ValueRange{i, j});
-                auto biasAdd = rewriter.create<arith::AddFOp>(loc, old, biasVal);
-                rewriter.create<affine::AffineStoreOp>(loc, biasAdd, cView, ValueRange{i, j});
-            }
-            if (op.getDoRelu()) {
-                Value originVal = rewriter.create<affine::AffineLoadOp>(loc, cView, ValueRange{i, j});
-                Value reluVal = doRelu(rewriter, loc, op.getReluLimitAttr(), originVal);
-                rewriter.create<affine::AffineStoreOp>(loc, reluVal, cView, ValueRange{i, j});
-            }
         }
     }
 

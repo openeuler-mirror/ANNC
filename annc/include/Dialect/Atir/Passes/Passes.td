@@ -30,6 +30,14 @@ def AtirIdentityCanonicalize : Pass<"atir-identity-canonicalize", "ModuleOp"> {
   ];
 }
 
+/* Ordered, hardware-independent GEMM epilogue fusion. */
+def AtirGemmEpilogueFusion
+    : Pass<"atir-gemm-epilogue-fusion", "ModuleOp"> {
+  let summary = "fuse an ordered GEMM elementwise epilogue";
+  let constructor = "createAtirGemmEpilogueFusionPass()";
+  let dependentDialects = ["AtirDialect"];
+}
+
 /* Select Lowering Strategy */
 def AtirSelectLoweringStrategy : Pass<"atir-select-lowering-strategy", "ModuleOp"> {
   let summary = "select lowering strategy";
