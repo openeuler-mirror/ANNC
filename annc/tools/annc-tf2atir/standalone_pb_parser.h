@@ -20,7 +20,9 @@
 
 class StandalonePbParser {
 public:
-    explicit StandalonePbParser(const std::string& model_path, int64_t default_batch_size = 2);
+    explicit StandalonePbParser(
+        const std::string& model_path, int64_t default_batch_size = 2,
+        std::vector<std::string> explicit_output_tensors = {});
     bool parse();
 
     bool isValid() const { return valid_; }
@@ -29,6 +31,7 @@ public:
 private:
     std::string model_path_;
     int64_t default_batch_size_ = 2;
+    std::vector<std::string> explicit_output_tensors_;
     bool valid_ = false;
     std::vector<annc::NodeInfo> nodes_;
     

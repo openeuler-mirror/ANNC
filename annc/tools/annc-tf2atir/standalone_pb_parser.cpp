@@ -29,8 +29,12 @@ static bool hasSuffix(const std::string& filename, const std::string& suffix) {
 } // namespace
 
 // 构造函数
-StandalonePbParser::StandalonePbParser(const std::string& model_path, int64_t default_batch_size)
-    : model_path_(model_path), default_batch_size_(default_batch_size) {}
+StandalonePbParser::StandalonePbParser(
+    const std::string& model_path, int64_t default_batch_size,
+    std::vector<std::string> explicit_output_tensors)
+    : model_path_(model_path),
+      default_batch_size_(default_batch_size),
+      explicit_output_tensors_(std::move(explicit_output_tensors)) {}
 
 // 加载模型
 bool StandalonePbParser::loadModel() {
@@ -126,8 +130,8 @@ bool StandalonePbParser::parse() {
         node_map[node.name()] = &node;
     }
     
-    std::vector<std::string> output_defs;
-    if (saved_model_ && saved_model_->meta_graphs_size() > 0 &&
+    std::vector<std::string> output_defs = explicit_output_tensors_;
+    if (output_defs.empty() && saved_model_ && saved_model_->meta_graphs_size() > 0 &&
         saved_model_->meta_graphs(0).signature_def().count("serving_default")) {
         const auto& meta_graph = saved_model_->meta_graphs(0);
         const auto& sdef = meta_graph.signature_def().at("serving_default");

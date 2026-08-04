@@ -16,6 +16,7 @@ struct PipelineOptions {
   std::string kernelName;
   std::string sharedLibPath;
   std::string workDir;
+  std::vector<std::string> outputTensors;
   int64_t batchSize = 2;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
@@ -95,6 +96,18 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
 
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) != "--output_tensor") continue;
+    if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
+        std::string(argv[i + 1]).front() == '-') {
+      std::cerr << "[annc-tf-pipeline] --output_tensor requires a non-empty "
+                   "value\n";
+      return false;
+    }
+    opts->outputTensors.emplace_back(argv[i + 1]);
+    ++i;
+  }
+
   if (opts->inputGraphDef.empty() || opts->outputGraphDef.empty()) {
     std::cerr << "[annc-tf-pipeline] --input_graphdef and --output_graphdef "
               << "are required\n";
@@ -145,10 +158,16 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   asmArgs[3] = "--atir-fast-codegen=enable-kdnn=true";
 #endif
 
+  std::vector<std::string> tf2atirArgs = {
+      anncTf2Atir, opts.inputGraphDef, "--batch_size",
+      std::to_string(opts.batchSize), "-o", rawAtir.string()};
+  for (const std::string &tensor : opts.outputTensors) {
+    tf2atirArgs.push_back("--output_tensor");
+    tf2atirArgs.push_back(tensor);
+  }
+
   bool ok =
-      runCommand({anncTf2Atir, opts.inputGraphDef, "--batch_size",
-                  std::to_string(opts.batchSize), "-o", rawAtir.string()},
-                 opts.verbose) &&
+      runCommand(tf2atirArgs, opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), fusionPass, "-o",
                   fusedAtir.string()},
                  opts.verbose);

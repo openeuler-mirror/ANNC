@@ -27,18 +27,29 @@ int main(int argc, char **argv) {
     llvm::cl::ResetAllOptionOccurrences();
     
     if (argc < 2) {
-        llvm::errs() << "Usage: " << argv[0] << " <model_path> [mlir-opt options]\n";
+        llvm::errs() << "Usage: " << argv[0]
+                     << " <model_path> [--output_tensor <name>]... "
+                        "[mlir-opt options]\n";
         return 1;
     }
 
     // Extract --batch_size before MlirOptMain consumes argv
     // -1 means "not specified": keep dynamic shapes as-is
     int64_t batch_size = -1;
+    std::vector<std::string> output_tensors;
     std::vector<char*> filtered_argv;
     filtered_argv.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--batch_size" && i + 1 < argc) {
             batch_size = std::stoll(argv[i + 1]);
+            ++i;
+        } else if (std::string(argv[i]) == "--output_tensor") {
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
+                std::string(argv[i + 1]).front() == '-') {
+                llvm::errs() << "Error: --output_tensor requires a non-empty value.\n";
+                return 1;
+            }
+            output_tensors.emplace_back(argv[i + 1]);
             ++i;
         } else {
             filtered_argv.push_back(argv[i]);
@@ -53,7 +64,7 @@ int main(int argc, char **argv) {
     atir::registerAllAtirPasses();
     atir::registerAtirConversionPasses();
 
-    StandalonePbParser parser(model_path, batch_size);
+    StandalonePbParser parser(model_path, batch_size, std::move(output_tensors));
     if (!parser.parse()) {
         llvm::errs() << "Error: Failed to parse PB file.\n";
         return 1;
