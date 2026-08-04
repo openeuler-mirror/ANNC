@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "Kernel/MemRefTypes.h"
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/ThreadPool.h"
 
 using KernelFn = void (*)(AnncMemRef2DF32*, AnncMemRef2DF32*, AnncMemRef2DF32*);
 using SetThreadPoolFn = void (*)(annc::threadpool::AnncThreadPool*);

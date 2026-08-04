@@ -12,7 +12,7 @@
 #include <iostream>
 
 #include "Kernel/MemRefTypes.h"
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/ThreadPool.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"

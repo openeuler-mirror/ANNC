@@ -29,7 +29,7 @@ void impl(::annc::threadpool::AnncThreadPool* thread_pool,
 最小例子：
 
 ```cpp
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
 
 namespace {
@@ -80,16 +80,16 @@ ANNC_KERNEL(
 如果 kernel 需要并行，优先用：
 
 ```cpp
-#include "Kernel/threadpool/Parallel.h"
+#include "Support/ThreadPool/Parallel.h"
 
-annc::kernels::parallel_for(thread_pool, total, fn);
-annc::kernels::parallel_for(thread_pool, total, options, fn);
+annc::threadpool::parallel_for(thread_pool, total, fn);
+annc::threadpool::parallel_for(thread_pool, total, options, fn);
 ```
 
 最常用的是简洁版：
 
 ```cpp
-annc::kernels::parallel_for(thread_pool, total,
+annc::threadpool::parallel_for(thread_pool, total,
                             [&](int64_t begin, int64_t end) {
     for (int64_t i = begin; i < end; ++i) {
         ...
@@ -103,7 +103,7 @@ annc::kernels::parallel_for(thread_pool, total,
 annc::threadpool::ParallelForOptions options;
 options.grain_size = 16;
 
-annc::kernels::parallel_for(thread_pool, total, options, fn);
+annc::threadpool::parallel_for(thread_pool, total, options, fn);
 ```
 
 ## 5. 带类型约束的写法
