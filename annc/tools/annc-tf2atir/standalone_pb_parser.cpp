@@ -26,6 +26,14 @@ static bool hasSuffix(const std::string& filename, const std::string& suffix) {
     return filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+static bool isTextProtoPath(const std::string& filename) {
+    return hasSuffix(filename, ".pbtxt");
+}
+
+static bool isSavedModelFilename(const std::string& filename) {
+    return filename == "saved_model.pb" || filename == "saved_model.pbtxt";
+}
+
 } // namespace
 
 // 构造函数
@@ -38,118 +46,163 @@ StandalonePbParser::StandalonePbParser(
 
 // 加载模型
 bool StandalonePbParser::loadModel() {
-    saved_model_ = std::make_unique<SavedModel>();
-    graph_def_ = std::make_unique<GraphDef>();
+    saved_model_.reset();
+    graph_def_.reset();
+    gdef_ = nullptr;
+    model_kind_ = ModelKind::Unknown;
 
     namespace fs = std::filesystem;
-    if (fs::is_regular_file(model_path_)) {
-        std::string filename = fs::path(model_path_).filename().string();
-        bool is_text = hasSuffix(filename, ".pbtxt");
-        bool is_saved_model_file = (filename == "saved_model.pb" || filename == "saved_model.pbtxt");
+    const fs::path model_path(model_path_);
+    if (fs::is_regular_file(model_path)) {
+        const std::string filename = model_path.filename().string();
+        const bool is_text = isTextProtoPath(filename);
 
-        if (is_saved_model_file) {
-            if (is_text) {
-                std::string content = readFileContent(model_path_);
-                if (content.empty()) {
-                    std::cerr << "Error: Cannot read SavedModel pbtxt at " << model_path_ << std::endl;
-                    return false;
-                }
-                if (!google::protobuf::TextFormat::ParseFromString(content, saved_model_.get())) {
-                    std::cerr << "Error: Failed to parse SavedModel pbtxt at " << model_path_ << std::endl;
-                    return false;
-                }
-            } else {
-                std::ifstream pb_file(model_path_, std::ios::binary);
-                if (!pb_file) {
-                    std::cerr << "Error: Cannot open SavedModel file at " << model_path_ << std::endl;
-                    return false;
-                }
-                if (!saved_model_->ParseFromIstream(&pb_file)) {
-                    std::cerr << "Error: Failed to parse SavedModel file at " << model_path_ << std::endl;
-                    return false;
-                }
-            }
-            if (saved_model_->meta_graphs_size() == 0) {
-                std::cerr << "Error: No meta graphs found in saved model file\n";
-                return false;
-            }
-            gdef_ = &(saved_model_->meta_graphs(0).graph_def());
-            return true;
+        if (isSavedModelFilename(filename)) {
+            return loadSavedModel(model_path.string(), is_text);
         }
 
-        if (is_text) {
-            std::string content = readFileContent(model_path_);
-            if (content.empty()) {
-                std::cerr << "Error: Cannot read GraphDef pbtxt at " << model_path_ << std::endl;
-                return false;
-            }
-            if (!google::protobuf::TextFormat::ParseFromString(content, graph_def_.get())) {
-                std::cerr << "Error: Failed to parse GraphDef pbtxt at " << model_path_ << std::endl;
-                return false;
-            }
-        } else {
-            std::ifstream graph_file(model_path_, std::ios::binary);
-            if (!graph_file) {
-                std::cerr << "Error: Cannot open GraphDef at " << model_path_ << std::endl;
-                return false;
-            }
-            if (!graph_def_->ParseFromIstream(&graph_file)) {
-                std::cerr << "Error: Failed to parse GraphDef at " << model_path_ << std::endl;
-                return false;
-            }
-        }
-        gdef_ = graph_def_.get();
-        return true;
+        return loadGraphDef(model_path.string(), is_text);
     }
 
-    std::string pb_path = model_path_ + "/saved_model.pb";
-    
-    std::ifstream pb_file(pb_path, std::ios::binary);
-    if (!pb_file) {
-        std::cerr << "Error: Cannot open SavedModel at " << pb_path
-                  << " (need binary saved_model.pb, not .pbtxt)" << std::endl;
+    if (fs::is_directory(model_path)) {
+        const fs::path saved_model_pb = model_path / "saved_model.pb";
+        const fs::path saved_model_pbtxt = model_path / "saved_model.pbtxt";
+        if (fs::is_regular_file(saved_model_pb)) {
+            return loadSavedModel(saved_model_pb.string(), false);
+        }
+        if (fs::is_regular_file(saved_model_pbtxt)) {
+            return loadSavedModel(saved_model_pbtxt.string(), true);
+        }
+
+        std::cerr << "Error: SavedModel directory must contain saved_model.pb "
+                     "or saved_model.pbtxt: "
+                  << model_path_ << std::endl;
         return false;
     }
-    if (!saved_model_->ParseFromIstream(&pb_file)) {
-        std::cerr << "Error: Failed to parse SavedModel at " << pb_path << std::endl;
-        return false;
+
+    std::cerr << "Error: Model path is neither a file nor a SavedModel directory: "
+              << model_path_ << std::endl;
+    return false;
+}
+
+bool StandalonePbParser::loadSavedModel(const std::string& path, bool is_text) {
+    saved_model_ = std::make_unique<SavedModel>();
+    if (is_text) {
+        const std::string content = readFileContent(path);
+        if (content.empty()) {
+            std::cerr << "Error: Cannot read SavedModel pbtxt at " << path << std::endl;
+            return false;
+        }
+        if (!google::protobuf::TextFormat::ParseFromString(content, saved_model_.get())) {
+            std::cerr << "Error: Failed to parse SavedModel pbtxt at " << path << std::endl;
+            return false;
+        }
+    } else {
+        std::ifstream pb_file(path, std::ios::binary);
+        if (!pb_file) {
+            std::cerr << "Error: Cannot open SavedModel file at " << path << std::endl;
+            return false;
+        }
+        if (!saved_model_->ParseFromIstream(&pb_file)) {
+            std::cerr << "Error: Failed to parse SavedModel file at " << path << std::endl;
+            return false;
+        }
     }
+
     if (saved_model_->meta_graphs_size() == 0) {
-        std::cerr << "Error: No meta graphs found in saved model\n";
+        std::cerr << "Error: No meta graphs found in SavedModel: " << path << std::endl;
         return false;
     }
     gdef_ = &(saved_model_->meta_graphs(0).graph_def());
+    model_kind_ = ModelKind::SavedModel;
     return true;
+}
+
+bool StandalonePbParser::loadGraphDef(const std::string& path, bool is_text) {
+    graph_def_ = std::make_unique<GraphDef>();
+    if (is_text) {
+        const std::string content = readFileContent(path);
+        if (content.empty()) {
+            std::cerr << "Error: Cannot read GraphDef pbtxt at " << path << std::endl;
+            return false;
+        }
+        if (!google::protobuf::TextFormat::ParseFromString(content, graph_def_.get())) {
+            std::cerr << "Error: Failed to parse GraphDef pbtxt at " << path << std::endl;
+            return false;
+        }
+    } else {
+        std::ifstream graph_file(path, std::ios::binary);
+        if (!graph_file) {
+            std::cerr << "Error: Cannot open GraphDef at " << path << std::endl;
+            return false;
+        }
+        if (!graph_def_->ParseFromIstream(&graph_file)) {
+            std::cerr << "Error: Failed to parse GraphDef at " << path << std::endl;
+            return false;
+        }
+    }
+
+    gdef_ = graph_def_.get();
+    model_kind_ = ModelKind::GraphDef;
+    return true;
+}
+
+std::vector<std::string> StandalonePbParser::getSavedModelOutputDefs() const {
+    std::vector<std::string> output_defs;
+    if (!saved_model_ || saved_model_->meta_graphs_size() == 0) {
+        return output_defs;
+    }
+
+    const auto& meta_graph = saved_model_->meta_graphs(0);
+    if (!meta_graph.signature_def().count("serving_default")) {
+        return output_defs;
+    }
+
+    const auto& sdef = meta_graph.signature_def().at("serving_default");
+    for (const auto& output_elem : sdef.outputs()) {
+        output_defs.push_back(output_elem.second.name());
+    }
+    return output_defs;
+}
+
+std::vector<std::string> StandalonePbParser::resolveOutputDefs() const {
+    if (model_kind_ == ModelKind::SavedModel) {
+        std::vector<std::string> output_defs = getSavedModelOutputDefs();
+        if (output_defs.empty()) {
+            std::cerr << "Error: SavedModel must provide serving_default "
+                         "signature_def outputs\n";
+        }
+        return output_defs;
+    }
+
+    if (model_kind_ == ModelKind::GraphDef) {
+        if (explicit_output_tensors_.empty()) {
+            std::cerr << "Error: GraphDef input has no output metadata; "
+                         "provide at least one --output_tensor\n";
+        }
+        return explicit_output_tensors_;
+    }
+
+    std::cerr << "Error: No model loaded before resolving outputs\n";
+    return {};
 }
 
 bool StandalonePbParser::parse() {
     if (!loadModel()) return false;
-    
+
+    if (!gdef_) {
+        std::cerr << "Error: Loaded model has no GraphDef\n";
+        return false;
+    }
+
+    std::vector<std::string> output_defs = resolveOutputDefs();
+    if (output_defs.empty()) {
+        return false;
+    }
+
     std::unordered_map<std::string, const NodeDef*> node_map;
     for (const auto& node : gdef_->node()) {
         node_map[node.name()] = &node;
-    }
-    
-    std::vector<std::string> output_defs = explicit_output_tensors_;
-    if (output_defs.empty() && saved_model_ && saved_model_->meta_graphs_size() > 0 &&
-        saved_model_->meta_graphs(0).signature_def().count("serving_default")) {
-        const auto& meta_graph = saved_model_->meta_graphs(0);
-        const auto& sdef = meta_graph.signature_def().at("serving_default");
-        for (const auto& output_elem : sdef.outputs()) {
-            output_defs.push_back(output_elem.second.name());
-        }
-    }
-
-    if (output_defs.empty()) {
-        // Bare GraphDef has no signature_def. Use broad candidate outputs and
-        // let filterConvertibleNodes keep the ATIR-supported subgraph. Picking
-        // only the last graph node often selects save/restore bookkeeping and
-        // drops the actual compute path.
-        for (const auto& node : gdef_->node()) {
-            if (!isPlaceholder(node) && node.op() != "Const" && node.op() != "NoOp") {
-                output_defs.push_back(node.name());
-            }
-        }
     }
 
     std::vector<std::string> pruned_nodes;

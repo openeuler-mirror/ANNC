@@ -29,12 +29,19 @@ public:
     const std::vector<annc::NodeInfo>& getNodes() const { return nodes_; }
 
 private:
+    enum class ModelKind {
+        Unknown,
+        SavedModel,
+        GraphDef,
+    };
+
     std::string model_path_;
     // A positive value is an explicit override; non-positive preserves the
     // dimensions parsed from GraphDef, including dynamic dimensions.
     int64_t batch_size_ = -1;
     std::vector<std::string> explicit_output_tensors_;
     bool valid_ = false;
+    ModelKind model_kind_ = ModelKind::Unknown;
     std::vector<annc::NodeInfo> nodes_;
     
     // SavedModel 数据
@@ -44,6 +51,10 @@ private:
 
     // 内部方法
     bool loadModel();
+    bool loadSavedModel(const std::string& path, bool is_text);
+    bool loadGraphDef(const std::string& path, bool is_text);
+    std::vector<std::string> resolveOutputDefs() const;
+    std::vector<std::string> getSavedModelOutputDefs() const;
     std::string getDataTypeStr(int dtype) const;
     static std::vector<int64_t> shapeFromProto(const tensorflow::TensorShapeProto& proto);
     std::string getInputName(const std::string& name) const;
