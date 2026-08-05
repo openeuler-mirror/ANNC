@@ -233,7 +233,7 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
   }
 
   Status status = InvokePipeline(input_graphdef_file, output_graphdef_file,
-                                 grappler_item.id);
+                                 grappler_item.id, grappler_item.fetch);
   if (!status.ok()) {
     LOG(WARNING) << "annc-tf-pipeline graph rewrite failed: " << status.message()
                  << ", returning original graph";
@@ -342,7 +342,8 @@ std::string ANNCOptimizer::BuildPipelineWorkDir(
 
 Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
                                      const std::string& output_file,
-                                     const std::string& graph_id) {
+                                     const std::string& graph_id,
+                                     const std::vector<std::string>& output_tensors) {
   const std::string pipeline_work_dir = BuildPipelineWorkDir(graph_id);
   LOG(INFO) << "Invoking annc-tf-pipeline graph rewrite: " << pipeline_path_
             << " with input=" << input_file
@@ -391,6 +392,10 @@ Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
     if (!backend_.empty()) {
       argv.push_back(const_cast<char*>("--backend"));
       argv.push_back(const_cast<char*>(backend_.c_str()));
+    }
+    for (const std::string& tensor : output_tensors) {
+      argv.push_back(const_cast<char*>("--output_tensor"));
+      argv.push_back(const_cast<char*>(tensor.c_str()));
     }
     argv.push_back(nullptr);
 

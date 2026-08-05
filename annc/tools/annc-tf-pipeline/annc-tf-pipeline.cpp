@@ -16,7 +16,8 @@ struct PipelineOptions {
   std::string kernelName;
   std::string sharedLibPath;
   std::string workDir;
-  int64_t batchSize = 2;
+  std::vector<std::string> outputTensors;
+  int64_t batchSize = -1;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
   bool verbose = false;
@@ -89,11 +90,23 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->kernelName = takeValue(argc, argv, "--kernel_name", opts->kernelName);
   opts->sharedLibPath = takeValue(argc, argv, "--shared_lib_path");
   opts->workDir = takeValue(argc, argv, "--work_dir", defaultWorkDir());
-  opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "2"));
+  opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "-1"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
+
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) != "--output_tensor") continue;
+    if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
+        std::string(argv[i + 1]).front() == '-') {
+      std::cerr << "[annc-tf-pipeline] --output_tensor requires a non-empty "
+                   "value\n";
+      return false;
+    }
+    opts->outputTensors.emplace_back(argv[i + 1]);
+    ++i;
+  }
 
   if (opts->inputGraphDef.empty() || opts->outputGraphDef.empty()) {
     std::cerr << "[annc-tf-pipeline] --input_graphdef and --output_graphdef "
@@ -145,10 +158,20 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   asmArgs[3] = "--atir-fast-codegen=enable-kdnn=true";
 #endif
 
+  std::vector<std::string> tf2atirArgs = {
+      anncTf2Atir, opts.inputGraphDef, "-o", rawAtir.string()};
+  if (opts.batchSize > 0) {
+    tf2atirArgs.insert(tf2atirArgs.begin() + 2, "--batch_size");
+    tf2atirArgs.insert(tf2atirArgs.begin() + 3,
+                       std::to_string(opts.batchSize));
+  }
+  for (const std::string &tensor : opts.outputTensors) {
+    tf2atirArgs.push_back("--output_tensor");
+    tf2atirArgs.push_back(tensor);
+  }
+
   bool ok =
-      runCommand({anncTf2Atir, opts.inputGraphDef, "--batch_size",
-                  std::to_string(opts.batchSize), "-o", rawAtir.string()},
-                 opts.verbose) &&
+      runCommand(tf2atirArgs, opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), fusionPass, "-o",
                   fusedAtir.string()},
                  opts.verbose);

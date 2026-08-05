@@ -158,7 +158,6 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg + 公共工具（`Common/`） |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
-| `annc/lib/Adaptor/tensorflow/` | TF 模型解析适配器 |
 | `annc/lib/Builder/` | MLIR Op 构建器 |
 | `annc/lib/Kernel/` | 内置 kernel（`builtin_kernels/matmul_aarch64`）+ 线程池（`threadpool/`） |
 | `annc/lib/CAPI/` | C API（Dialect + Passes） |

@@ -1,14 +1,13 @@
 #include "GraphDefRewriter.h"
 
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 
 #include "ANNCFusedNodeBuilder.h"
 #include "llvm/Support/raw_ostream.h"
 #include "tensorflow/core/framework/graph.pb.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/protobuf.h"
 #include "google/protobuf/text_format.h"
 
 namespace annc::fusion {
@@ -16,27 +15,30 @@ namespace {
 
 bool writeBinaryGraphDef(const tensorflow::GraphDef &graph,
                          const std::string &path) {
-  std::string out;
-  if (!graph.SerializeToString(&out)) return false;
-  return tensorflow::WriteStringToFile(tensorflow::Env::Default(), path, out)
-      .ok();
+  std::string serialized;
+  if (!graph.SerializeToString(&serialized)) return false;
+  std::ofstream output(path, std::ios::binary);
+  if (!output.is_open()) return false;
+  output.write(serialized.data(),
+               static_cast<std::streamsize>(serialized.size()));
+  return output.good();
 }
 
 bool readBinaryGraphDef(const std::string &path, tensorflow::GraphDef *graph) {
-  std::string data;
-  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data)
-           .ok()) {
-    return false;
-  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) return false;
+  std::string data((std::istreambuf_iterator<char>(input)),
+                   std::istreambuf_iterator<char>());
+  if (input.bad()) return false;
   return graph->ParseFromString(data);
 }
 
 bool readTextGraphDef(const std::string &path, tensorflow::GraphDef *graph) {
-  std::string data;
-  if (!tensorflow::ReadFileToString(tensorflow::Env::Default(), path, &data)
-           .ok()) {
-    return false;
-  }
+  std::ifstream input(path);
+  if (!input.is_open()) return false;
+  std::string data((std::istreambuf_iterator<char>(input)),
+                   std::istreambuf_iterator<char>());
+  if (input.bad()) return false;
   return google::protobuf::TextFormat::ParseFromString(data, graph);
 }
 

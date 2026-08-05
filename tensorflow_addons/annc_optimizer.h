@@ -34,7 +34,8 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   Status ReadGraphDefFromFile(const std::string& filepath, GraphDef* graph_def);
   Status InvokePipeline(const std::string& input_file,
                         const std::string& output_file,
-                        const std::string& graph_id);
+                        const std::string& graph_id,
+                        const std::vector<std::string>& output_tensors);
   Status WaitForProcess(pid_t pid, const std::string& process_name);
   void CleanupTempFile(const std::string& filepath);
   void CleanupTempFiles(const std::vector<std::string>& filepaths);
@@ -49,7 +50,7 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   bool enabled_;
   bool keep_temp_files_;
   bool annc_verbose_;
-  int64_t batch_size_ = 2;
+  int64_t batch_size_ = -1;
 
   std::string GenerateTempFilename(const std::string& prefix);
 };
