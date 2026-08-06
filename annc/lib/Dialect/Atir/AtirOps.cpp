@@ -51,6 +51,7 @@ constexpr const char kTensorAddress[] = "address";
 constexpr const char kTensorDeviceParl[] = "device";
 constexpr const char kTensorOnchipParl[] = "onchip";
 constexpr const char kTensorData[] = "data";
+constexpr const char kTensorStringData[] = "strings";
 
 Type TensorType::parse(AsmParser &odsParser) {
   if (odsParser.parseLess())
@@ -62,7 +63,7 @@ Type TensorType::parse(AsmParser &odsParser) {
   if (odsParser.parseType(elementType))
     PARSE_TENSOR_ERROR("element-type")
 
-  FailureOr<DenseElementsAttr> cacheData;
+  DenseElementsAttr cacheData;
   Attribute encoding;
   StringAttr name;
   ArrayAttr stride;
@@ -127,9 +128,42 @@ Type TensorType::parse(AsmParser &odsParser) {
     if (!odsParser.parseOptionalKeyword(kTensorData)) {
       if (odsParser.parseEqual())
         PARSE_TENSOR_ERROR(kTensorData)
-      cacheData = FieldParser<DenseElementsAttr>::parse(odsParser);
-      if (failed(cacheData))
-        PARSE_TENSOR_ERROR(kTensorData)
+      auto stringEncoding = dyn_cast_or_null<StringAttr>(encoding);
+      if (stringEncoding && stringEncoding.getValue() == "string") {
+        if (odsParser.parseKeyword(kTensorStringData) ||
+            odsParser.parseLSquare())
+          PARSE_TENSOR_ERROR(kTensorData)
+        std::vector<std::string> strings;
+        if (failed(odsParser.parseOptionalRSquare())) {
+          if (failed(odsParser.parseCommaSeparatedList([&]() {
+                std::string value;
+                if (odsParser.parseString(&value)) return failure();
+                strings.push_back(std::move(value));
+                return success();
+              })) ||
+              odsParser.parseRSquare())
+            PARSE_TENSOR_ERROR(kTensorData)
+        }
+
+        auto dataType = RankedTensorType::get(shape, elementType);
+        if (!dataType.hasStaticShape())
+          PARSE_TENSOR_ERROR("static string data shape")
+        const int64_t elementCount = dataType.getNumElements();
+        if ((strings.empty() && elementCount != 0) ||
+            (!strings.empty() && strings.size() != 1 &&
+             strings.size() != static_cast<size_t>(elementCount)))
+          PARSE_TENSOR_ERROR("string data element count")
+        std::vector<StringRef> stringRefs;
+        stringRefs.reserve(strings.size());
+        for (const std::string& value : strings)
+          stringRefs.emplace_back(value.data(), value.size());
+        cacheData = DenseElementsAttr::get(dataType, stringRefs);
+      } else {
+        auto parsedCacheData = FieldParser<DenseElementsAttr>::parse(odsParser);
+        if (failed(parsedCacheData))
+          PARSE_TENSOR_ERROR(kTensorData)
+        cacheData = *parsedCacheData;
+      }
     }
   }
   
@@ -137,7 +171,7 @@ Type TensorType::parse(AsmParser &odsParser) {
     PARSE_TENSOR_ERROR("Greater")
   auto tensor = TensorType::get(odsParser.getContext(), 
     shape, elementType, name, encoding, stride, layout, memType, 
-    address, device, onchip, cacheData.value_or(DenseElementsAttr()));
+    address, device, onchip, cacheData);
   return tensor;
 }
 
@@ -177,7 +211,17 @@ void TensorType::print(AsmPrinter &odsPrinter) const {
   }
   if (getCacheData()) {
     odsPrinter << ", " << kTensorData << " = ";
-    odsPrinter.printStrippedAttrOrType(getCacheData());
+    if (auto stringData = dyn_cast<DenseStringElementsAttr>(getCacheData())) {
+      odsPrinter << kTensorStringData << "[";
+      for (auto [index, value] : llvm::enumerate(
+               stringData.getValues<StringRef>())) {
+        if (index != 0) odsPrinter << ", ";
+        odsPrinter.printString(value);
+      }
+      odsPrinter << "]";
+    } else {
+      odsPrinter.printStrippedAttrOrType(getCacheData());
+    }
   }
   odsPrinter << ">";
 }

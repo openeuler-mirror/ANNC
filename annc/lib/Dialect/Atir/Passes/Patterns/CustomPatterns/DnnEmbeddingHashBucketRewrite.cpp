@@ -228,6 +228,21 @@ struct DnnEmbeddingHashBucketRewrite
     return succeeded(valOr) && *valOr == expected;
   }
 
+  // The TF frontend now represents DT_STRING Const payloads with
+  // DenseStringElementsAttr. Older ATIR dumps encoded the same empty-string
+  // sentinel as integer zero, so callers that need this semantic value accept
+  // either representation during the transition.
+  static bool checkEmptyStringConstant(Value v) {
+    auto constOp = v.getDefiningOp<ConstantOp>();
+    if (!constOp) return false;
+    auto tensorType = dyn_cast<atir::TensorType>(v.getType());
+    if (!tensorType) return false;
+    auto dataAttr =
+        dyn_cast<DenseStringElementsAttr>(tensorType.getCacheData());
+    if (!dataAttr || dataAttr.getNumElements() != 1) return false;
+    return *dataAttr.getValues<StringRef>().begin() == "";
+  }
+
   // Returns true if `v` is a 1-D ConstantOp whose integer values equal
   // `expected` (element-wise, length must match).
   static bool checkConstantInts(Value v, ArrayRef<int64_t> expected) {
@@ -294,9 +309,12 @@ struct DnnEmbeddingHashBucketRewrite
       if (auto cmp = dyn_cast<CompareOp>(op)) {
         StringRef dir = cmp.getComparisonDirection();
         if (dir == "NE") {
-          // ExpandDims-output NE compare: rhs must be 0 (string-encoded i32).
-          // Kernel hashes all input strings regardless of value.
-          if (!checkConstantInt(cmp.getRhs(), 0)) return failure();
+          // ExpandDims-output NE compare: rhs must be an empty string. The
+          // integer-zero form is retained solely to read legacy ATIR dumps.
+          if (!checkEmptyStringConstant(cmp.getRhs()) &&
+              !checkConstantInt(cmp.getRhs(), 0)) {
+            return failure();
+          }
         } else if (dir == "GE") {
           // GreaterEqual/y: rhs must be 0 (i64).  hash>=0 is always true.
           if (!checkConstantInt(cmp.getRhs(), 0)) return failure();

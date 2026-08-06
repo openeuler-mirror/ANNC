@@ -532,15 +532,19 @@ mlir::Value MLIRBuilder::addConstantNode(const NodeInfo& node) {
     return emitConstant(elems, ComplexType::get(builder_.getF64Type()));
   }
   if (dtype == "string") {
-    // String constants (e.g., ignore_value markers) used for filtering ops.
-    // ANNC has no native string support; emit an i32 placeholder to keep the
-    // graph structure intact for analysis.
     size_t elemCount = elementCountFromShape();
-    std::vector<int32_t> zeros(elemCount, 0);
+    if (node.string_values.size() != elemCount) {
+      llvm::report_fatal_error(
+          llvm::StringRef("String constant value count mismatch for " + name));
+    }
+    std::vector<StringRef> values;
+    values.reserve(node.string_values.size());
+    for (const std::string& value : node.string_values)
+      values.emplace_back(value.data(), value.size());
+    auto stringType = ComplexType::get(builder_.getF32Type());
     elems = DenseElementsAttr::get(
-        RankedTensorType::get(shape, builder_.getI32Type()),
-        ArrayRef<int32_t>(zeros));
-    return emitConstant(elems, builder_.getI32Type(),
+        RankedTensorType::get(shape, stringType), ArrayRef<StringRef>(values));
+    return emitConstant(elems, stringType,
                         builder_.getStringAttr("string"));
   }
 
@@ -1096,13 +1100,46 @@ void MLIRBuilder::createProdNode(const NodeInfo& node, ArrayRef<Type> outs, Arra
 }
 
 void MLIRBuilder::createGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {
-  if (ins.size() < 3) { createUnsupportedNode(node, outs, ins); return; }
+  if (outs.empty()) {
+    createUnsupportedNode(node, outs, ins);
+    return;
+  }
   auto loc = getLoc(builder_.getContext(), node.name);
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = builder_.create<atir::BufferOp>(loc, outputType);
+
+  Value axis;
+  if (node.op_type == "Gather") {
+    if (ins.size() != 2) {
+      createUnsupportedNode(node, outs, ins);
+      return;
+    }
+
+    // The legacy TF Gather op has an implicit axis of zero.  ATIR models
+    // axis as an operand, so materialize the equivalent scalar constant.
+    auto i32Type = builder_.getI32Type();
+    auto axisRankedType = RankedTensorType::get({}, i32Type);
+    auto axisElems = DenseElementsAttr::get(axisRankedType,
+                                            static_cast<int32_t>(0));
+    auto axisTensorType = atir::TensorType::get(
+        {}, i32Type, builder_.getStringAttr(node.name + "/axis"),
+        /*encoding=*/{}, /*stride=*/{}, /*layout=*/{}, /*memType=*/{},
+        /*address=*/{}, /*device=*/{}, /*onchip=*/{}, axisElems);
+    axis = builder_.create<atir::ConstantOp>(
+        loc, axisTensorType, builder_.getStringAttr(node.name + "/axis"),
+        builder_.getStringAttr("private"));
+  } else {
+    if (ins.size() != 3) {
+      createUnsupportedNode(node, outs, ins);
+      return;
+    }
+    axis = ins[2];
+  }
+
   int32_t batchDims = lookupTfIntMask(node, "batch_dims");
-  SINGLE_OUT(builder_.create<atir::GatherOp>(loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2],
-                                           builder_.getI32IntegerAttr(batchDims)));
+  SINGLE_OUT(builder_.create<atir::GatherOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], axis,
+      builder_.getI32IntegerAttr(batchDims)));
 }
 
 void MLIRBuilder::createGatherNdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins) {

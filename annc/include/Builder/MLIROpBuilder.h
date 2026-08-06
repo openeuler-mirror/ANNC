@@ -26,6 +26,8 @@ struct NodeInfo {
     std::vector<std::string> inputs;
     std::vector<OutputInfo> outputs;
     std::string raw_data;
+    // Const(DT_STRING) payload. Numeric constants retain their raw_data path.
+    std::vector<std::string> string_values;
     using TfAttrValue =
         std::variant<int64_t, double, bool, std::string, std::vector<int64_t>,
                      std::vector<double>, std::vector<bool>,
