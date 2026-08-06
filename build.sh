@@ -492,7 +492,6 @@ check_source_glob_changes() {
     "annc/lib/Conversion/AtirToAffine|"
     "annc/lib/Conversion/AtirToLinalg|"
     "annc/lib/Target/aarch64|"
-    "annc/lib/Adaptor/tensorflow|"
   )
 
   for entry in "${glob_dirs[@]}"; do
