@@ -1,5 +1,6 @@
 .vscode
 .venv
+# Model-specific tests and replay artifacts stay under logs/<model>/.
 logs/
 
 .idea

@@ -35,6 +35,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-003 | 两层选择算子接入策略 | accepted | [decisions.md#adr-003](decisions.md#adr-003) |
 | ADR-004 | fork/exec 进程隔离 | accepted | [decisions.md#adr-004](decisions.md#adr-004) |
 | ADR-005 | 运行时无 fallback 决策 | accepted | [decisions.md#adr-005](decisions.md#adr-005) |
+| ADR-006 | tf2atir 使用已解析 TF 图作为 NodeInfo 前置边界 | accepted | [decisions.md#adr-006](decisions.md#adr-006) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

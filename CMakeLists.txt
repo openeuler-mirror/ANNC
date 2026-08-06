@@ -186,6 +186,8 @@ if(ANNC_ENABLE_COVERAGE)
   message(STATUS "ANNC code coverage enabled (--coverage / gcov).")
 endif()
 
+include(CTest)
+
 add_subdirectory(annc)
 add_subdirectory(python)
 # TensorFlow addons are part of the top-level build.  Build and install the
@@ -194,7 +196,6 @@ set(ANNC_FOR_TF_SERVING ON CACHE BOOL
     "Build TensorFlow addons for TF Serving (LD_PRELOAD mode)" FORCE)
 add_subdirectory(tensorflow_addons)
 
-include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
 endif()

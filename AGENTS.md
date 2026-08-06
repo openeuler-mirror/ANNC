@@ -130,7 +130,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 | 工具 | 功能 |
 |------|------|
-| `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接，无需 JSON；含 `standalone_pb_parser`） |
+| `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接，无需 JSON；使用 `TfGraphParser`/`TfTensorResolver`） |
 | `annc-opt` | ATIR 优化（算子融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON） |
 | `annc-asm` | ATIR → lowered MLIR（affine/linalg） |

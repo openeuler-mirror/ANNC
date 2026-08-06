@@ -363,7 +363,7 @@ flowchart LR
 
 **设计要点**：
 
-- NodeInfo 是 ANNC 框架对接层向工具链前端传递计算图信息的通道；当前生产 CLI `annc-tf2atir` 通过 `StandalonePbParser`（仅依赖 protobuf，不链接 TF Runtime）将 GraphDef 解析为 Builder 版 NodeInfo 列表，再经 `MLIRBuilder` 构建 ATIR。`annc-converter` 的 GraphDef 重写路径直接消费 GraphDef 与 Fusion Metadata，不再使用 NodeInfo。
+- NodeInfo 是 ANNC 框架对接层向工具链前端传递计算图信息的兼容通道，而不是 TF 解析的内部表示。生产 CLI `annc-tf2atir` 依次执行 `TfModelLoader -> TfGraphParser -> TfTensorResolver -> NodeInfoAdapter -> MLIRBuilder`：前两步加载并裁剪 GraphDef，`TfNode.outputs` 显式保存输出 slot，parser 先记录边和函数输出所引用的 slot，resolver 再按签名补全完整输出列表并为每个 `TensorRef` 解析 dtype、rank 和动态维，adapter 才构造 Builder 版 NodeInfo。该路径仅依赖 protobuf，不链接 TF Runtime；`annc-converter` 的 GraphDef 重写路径直接消费 GraphDef 与 Fusion Metadata，不使用 NodeInfo。
 - Fusion Metadata 是工具链前端产出的切分决策，由ANNC 框架对接层消费以执行图重写；两者可独立迭代。
 - Kernel C ABI 是工具链后端与ANNC 框架对接层（运行时回接）之间的唯一调用约定，kernel 的内部实现（手写/MLIR 生成）对运行时透明。
 
@@ -383,7 +383,7 @@ flowchart LR
 
 **关键设计要点**：
 
-- 生产 CLI `annc-tf2atir` 通过 `StandalonePbParser` 仅依赖 protobuf（不链接 TF Runtime），实现框架隔离；`annc-converter` 复用 `tf_protos_minimal` 的 GraphDef protobuf，仅链接系统 protobuf，不链接 TensorFlow Runtime，负责根据 Fusion Metadata 重写 GraphDef。为 ONNX 等后续框架预留扩展点，新增框架仅需实现 NodeInfo 构建器与对应的图重写逻辑。
+- `annc-tf2atir` 使用 protobuf 前端而非 TensorFlow Runtime：`TfGraphParser` 保留完整的可达数据图和 `TensorRef` slot，`TfTensorResolver` 按“GraphDef 事实、集中 op 签名、已解析输入”的顺序完成 descriptor 解析，缺少可表示 dtype 或 rank 时失败；`VarHandleOp` 是推理变量的显式合法化例外，映射为 ATIR `VariableOp` 的值 tensor，而非把任意 resource dtype 伪装成普通 tensor。`NodeInfoAdapter` 是唯一的旧 builder 适配边界。所有可达而无 ATIR lowering 的 op 均在进入 builder 前报错，不允许退化为 `CustomizeOp`。`annc-converter` 复用 `tf_protos_minimal` 的 GraphDef protobuf，仅链接系统 protobuf，不链接 TensorFlow Runtime，负责根据 Fusion Metadata 重写 GraphDef。
 - 图重写消费工具链前端产出的 Fusion Metadata，将可融合子图替换为 `ANNCFused` 节点，并在节点属性中记录 `shared_lib_path`。
 - `ANNCOptimizer` 通过 `fork/exec` 子进程调用 `annc-tf-pipeline`，实现 MLIR/LLVM 与 TF 的 ABI 隔离；任何阶段失败均返回原始 GraphDef，保证推理服务可用性。
 - `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。
