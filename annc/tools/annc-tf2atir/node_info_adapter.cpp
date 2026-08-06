@@ -89,7 +89,9 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
 
     annc::NodeInfo info;
     info.name = node.name;
-    info.op_type = annc::MLIRBuilder::normalizeOpType(node.op);
+    // Aliases (AddV2, GatherV2, ...) are declared inside the OpSpec table
+    // itself, so the builder resolves them directly; no normalization layer.
+    info.op_type = node.op;
     info.isInputNode = is_input;
     info.tf_attrs["tf.name"] = node.name;
     info.tf_attrs["tf.op"] = node.op;
@@ -138,7 +140,7 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
             error = "Const node '" + node.name + "' has no TensorProto value";
           return false;
         }
-        info.raw_data = base64Encode(bytes);
+        info.raw_data = std::move(bytes);
       }
     }
     result.push_back(std::move(info));
