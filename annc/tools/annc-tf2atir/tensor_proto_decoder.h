@@ -14,6 +14,10 @@ class TensorProtoDecoder {
   static bool decode(const tensorflow::TensorProto& tensor,
                      const std::string& dtype, std::vector<uint8_t>& bytes,
                      std::string& error);
+
+  static bool decodeStrings(const tensorflow::TensorProto& tensor,
+                            std::vector<std::string>& values,
+                            std::string& error);
 };
 
 std::string base64Encode(const std::vector<uint8_t>& data);

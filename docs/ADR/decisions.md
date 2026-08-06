@@ -65,5 +65,5 @@
 | --- | --- |
 | **上下文** | 原 `StandalonePbParser` 同时加载模型、裁剪图、重写 Identity/输出、推导 dtype/shape 和构造 NodeInfo。Tensor 名称字符串混用节点与输出 slot，类型规则分散，且 builder 的 `CustomizeOp` fallback 可能掩盖无法表达的可达 TF op。 |
 | **决策** | `annc-tf2atir` 固定为 `TfModelLoader -> TfGraphParser -> TfTensorResolver -> NodeInfoAdapter -> MLIROpBuilder`。`TensorRef{node, output_index}` 是 TF 前端内部唯一 tensor 标识；resolver 以 GraphDef 直接事实为先、集中本地 op 签名和已解析输入为补充，要求每个 tensor 的 dtype 与 rank 在创建 ATIR 前确定。 |
-| **后果** | ✅ 图结构、类型/shape 解析和 ATIR 发射职责隔离；✅ `out:1`、多输出和 control edge 不再依赖字符串重写；✅ 可达不支持 op、未知 dtype/rank 均可在前端明确报错；❌ 需维护本地签名规则表；❌ 当前 ATIR 缺少 string 常量的完整字节表示，仍受 builder/dialect 既有编码限制。 |
+| **后果** | ✅ 图结构、类型/shape 解析和 ATIR 发射职责隔离；✅ `out:1`、多输出和 control edge 不再依赖字符串重写；✅ 可达不支持 op、未知 dtype/rank 均可在前端明确报错；✅ `Const(DT_STRING)` 以既有 `encoding="string"` 和 `DenseStringElementsAttr` 导入；❌ 需维护本地签名规则表；❌ 动态 string 张量及其运行时 ABI 仍未定义。 |
 | **备选方案** | (a) 在旧 parser 中继续增加 op 特判——改动小但职责继续耦合；(b) 链接 TensorFlow OpDef/runtime——类型规则完整但引入运行时依赖和版本耦合；(c) 未知 dtype/rank 延后给 ATIR 推导——当前 ATIR 无法表达。 |

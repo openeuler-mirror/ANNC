@@ -120,16 +120,26 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
     }
     if (node.source->op() == "Const") {
       const auto value = node.source->attr().find("value");
-      std::vector<uint8_t> bytes;
-      if (value == node.source->attr().end() ||
-          !TensorProtoDecoder::decode(value->second.tensor(),
-                                      info.outputs.front().dtype, bytes,
-                                      error)) {
-        if (error.empty())
-          error = "Const node '" + node.name + "' has no TensorProto value";
+      if (value == node.source->attr().end()) {
+        error = "Const node '" + node.name + "' has no TensorProto value";
         return false;
       }
-      info.raw_data = base64Encode(bytes);
+      if (info.outputs.front().dtype == "string") {
+        if (!TensorProtoDecoder::decodeStrings(value->second.tensor(),
+                                               info.string_values, error)) {
+          return false;
+        }
+      } else {
+        std::vector<uint8_t> bytes;
+        if (!TensorProtoDecoder::decode(value->second.tensor(),
+                                        info.outputs.front().dtype, bytes,
+                                        error)) {
+          if (error.empty())
+            error = "Const node '" + node.name + "' has no TensorProto value";
+          return false;
+        }
+        info.raw_data = base64Encode(bytes);
+      }
     }
     result.push_back(std::move(info));
   }

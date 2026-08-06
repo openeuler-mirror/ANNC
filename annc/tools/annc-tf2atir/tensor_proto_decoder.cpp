@@ -142,6 +142,43 @@ bool TensorProtoDecoder::decode(const tensorflow::TensorProto& tensor,
   return false;
 }
 
+bool TensorProtoDecoder::decodeStrings(const tensorflow::TensorProto& tensor,
+                                       std::vector<std::string>& values,
+                                       std::string& error) {
+  values.clear();
+  error.clear();
+  if (tensor.dtype() != tensorflow::DT_STRING) {
+    error = "TensorProto is not DT_STRING";
+    return false;
+  }
+  if (!tensor.tensor_content().empty()) {
+    error = "DT_STRING TensorProto must use string_val, not tensor_content";
+    return false;
+  }
+
+  const std::size_t count = elementCount(tensor);
+  if (static_cast<std::size_t>(tensor.string_val_size()) > count) {
+    error = "DT_STRING TensorProto has more string_val entries than elements";
+    return false;
+  }
+  if (count == 0) {
+    if (tensor.string_val_size() != 0) {
+      error = "empty DT_STRING TensorProto has string_val entries";
+      return false;
+    }
+    return true;
+  }
+  if (tensor.string_val_size() == 0) {
+    error = "DT_STRING TensorProto has no string_val entries";
+    return false;
+  }
+
+  values.reserve(count);
+  for (const std::string& value : tensor.string_val()) values.push_back(value);
+  values.resize(count, values.back());
+  return true;
+}
+
 std::string base64Encode(const std::vector<uint8_t>& data) {
   static const char* characters =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
