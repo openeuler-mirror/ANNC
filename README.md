@@ -113,7 +113,7 @@ TF SavedModel/GraphDef
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
 ATIR MLIR
-  ├─→ annc-opt (--atir-op-fusion, --atir-block-fusion) → 融合后的 ATIR
+  ├─→ annc-opt (--atir-identity-canonicalize, --atir-op-fusion, --atir-block-fusion) → 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
   ├─→ annc-asm (--atir-prune-func, --atir-tiling, --atir-unroll, --convert-atir-to-affine)
   │     └─→ lowered MLIR (affine/linalg)
@@ -223,6 +223,7 @@ annc-tf2atir input.pb -o raw.mlir
 
 # 2. ATIR 算子融合
 annc-opt raw.mlir \
+  --atir-identity-canonicalize \
   --atir-op-fusion \
   -o fused.mlir
 
@@ -261,7 +262,7 @@ annc-tf2atir input.pb -o model_raw_atir.mlir
 `annc-opt` 是注册了 ATIR 方言和 ANNC pass 的 `mlir-opt` 风格工具，用于 ATIR 优化。
 
 ```shell
-annc-opt model_raw_atir.mlir --atir-op-fusion -o model_fused_atir.mlir
+annc-opt model_raw_atir.mlir --atir-identity-canonicalize --atir-op-fusion -o model_fused_atir.mlir
 annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 ```
 
@@ -269,6 +270,7 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 
 | Pass | 说明 |
 |------|------|
+| `--atir-identity-canonicalize` | 清理语义等价的 Identity 透传，供后续融合匹配规范化图形 |
 | `--atir-op-fusion` | 算子融合 |
 | `--atir-block-fusion` | 块融合 |
 | `--atir-Eltwise` | Elementwise 融合（当前为占位 stub） |

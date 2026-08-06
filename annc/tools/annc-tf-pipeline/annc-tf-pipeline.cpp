@@ -148,6 +148,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
     converterArgs.push_back(opts.kernelName);
   }
 
+  std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string fusionPass = "--atir-op-fusion";
 
   std::vector<std::string> asmArgs = {
@@ -172,7 +173,8 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   bool ok =
       runCommand(tf2atirArgs, opts.verbose) &&
-      runCommand({anncOpt, rawAtir.string(), fusionPass, "-o",
+      runCommand({anncOpt, rawAtir.string(), identityCanonicalizePass,
+                  fusionPass, "-o",
                   fusedAtir.string()},
                  opts.verbose);
   if (ok && opts.dumpFusionMetadata) {

@@ -14,6 +14,7 @@ namespace atir {
 std::unique_ptr<OperationPass<ModuleOp>> createAtirTilingPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirOpFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirCanonicalizePass();
+std::unique_ptr<OperationPass<ModuleOp>> createAtirIdentityCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirDistributePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirBlockFusionPass();
