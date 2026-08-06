@@ -24,7 +24,6 @@ add_mlir_library(ANNCHelper
 add_subdirectory(Dialect)
 add_subdirectory(Builder)
 add_subdirectory(CAPI)
-add_subdirectory(Adaptor)
 add_subdirectory(Conversion)
 add_subdirectory(Target)
 add_subdirectory(Kernel)
