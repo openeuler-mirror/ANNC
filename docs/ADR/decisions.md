@@ -56,3 +56,14 @@
 | **决策** | 当前运行时不实现 fallback，`.so` 失败直接报错；未来可通过在 GraphDef 重写时保留原始节点为 fallback\_function 属性实现运行时回退 |
 | **后果** | ✅ 实现简单，避免运行时 fallback 路径的语义正确性风险；❌ 运行时失败不可恢复，影响推理服务可用性；❌ 与编译时"失败自动回退"的承诺不对称 |
 | **备选方案** | (a) 重写时保留原始子图节点——增加 GraphDef 体积和 Session 构建开销；(b) 运行时 fallback 到 TF 原生 Op——需在 ANNCFusedOp 内部重建原始计算图，复杂度高 |
+
+<a id="adr-006"></a>
+
+## ADR-006：tf2atir 使用已解析 TF 图作为 NodeInfo 前置边界
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | 原 `StandalonePbParser` 同时加载模型、裁剪图、重写 Identity/输出、推导 dtype/shape 和构造 NodeInfo。Tensor 名称字符串混用节点与输出 slot，类型规则分散，且 builder 的 `CustomizeOp` fallback 可能掩盖无法表达的可达 TF op。 |
+| **决策** | `annc-tf2atir` 固定为 `TfModelLoader -> TfGraphParser -> TfTensorResolver -> NodeInfoAdapter -> MLIROpBuilder`。`TensorRef{node, output_index}` 是 TF 前端内部唯一 tensor 标识；resolver 以 GraphDef 直接事实为先、集中本地 op 签名和已解析输入为补充，要求每个 tensor 的 dtype 与 rank 在创建 ATIR 前确定。 |
+| **后果** | ✅ 图结构、类型/shape 解析和 ATIR 发射职责隔离；✅ `out:1`、多输出和 control edge 不再依赖字符串重写；✅ 可达不支持 op、未知 dtype/rank 均可在前端明确报错；❌ 需维护本地签名规则表；❌ 当前 ATIR 缺少 string 常量的完整字节表示，仍受 builder/dialect 既有编码限制。 |
+| **备选方案** | (a) 在旧 parser 中继续增加 op 特判——改动小但职责继续耦合；(b) 链接 TensorFlow OpDef/runtime——类型规则完整但引入运行时依赖和版本耦合；(c) 未知 dtype/rank 延后给 ATIR 推导——当前 ATIR 无法表达。 |

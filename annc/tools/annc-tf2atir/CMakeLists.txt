@@ -9,7 +9,10 @@ file(GLOB_RECURSE PROTO_SRCS "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code/*.p
 
 add_executable(annc-tf2atir
     annc-tf2atir.cpp
-    standalone_pb_parser.cpp
+    tf_frontend.cpp
+    tf_tensor_resolver.cpp
+    tensor_proto_decoder.cpp
+    node_info_adapter.cpp
     absl_log_shim.cpp
     ${PROTO_SRCS}
 )
@@ -70,3 +73,38 @@ set_target_properties(annc-tf2atir PROPERTIES
     BUILD_RPATH "${Protobuf_LIB_DIRS}"
 )
 install(TARGETS annc-tf2atir DESTINATION bin)
+
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/logs/dffm/tf2atir_tf_frontend_test.cpp")
+  enable_testing()
+  add_executable(annc-tf2atir-frontend-test
+      "${CMAKE_SOURCE_DIR}/logs/dffm/tf2atir_tf_frontend_test.cpp"
+      tf_frontend.cpp
+      tf_tensor_resolver.cpp
+      tensor_proto_decoder.cpp
+      node_info_adapter.cpp
+      ${PROTO_SRCS}
+  )
+  target_include_directories(annc-tf2atir-frontend-test BEFORE PRIVATE
+      "${CMAKE_SOURCE_DIR}/annc/tools/annc-tf2atir"
+      "${CMAKE_SOURCE_DIR}/tf_protos_minimal/gen_code"
+  )
+  target_include_directories(annc-tf2atir-frontend-test SYSTEM PRIVATE
+      "${Protobuf_INCLUDE_DIRS}"
+  )
+  target_link_libraries(annc-tf2atir-frontend-test PRIVATE
+      ${Protobuf_LIBRARIES}
+      AtirBuilder
+      AtirDialect
+      MLIRDialect
+      MLIRFuncDialect
+      MLIRInferTypeOpInterface
+  )
+  if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
+    target_link_libraries(annc-tf2atir-frontend-test PRIVATE
+        ${ABSL_LOG_LIBRARIES}
+        ${ABSL_CHECK_OP_LIBRARIES}
+    )
+  endif()
+  add_test(NAME annc-tf2atir-frontend-test
+      COMMAND annc-tf2atir-frontend-test)
+endif()
