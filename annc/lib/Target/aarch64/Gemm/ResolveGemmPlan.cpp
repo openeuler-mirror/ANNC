@@ -1,51 +1,11 @@
 #include "GemmPlan.h"
+#include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 namespace annc {
 namespace {
-
-bool matchesProjectedMap(AffineMap map,
-                         llvm::ArrayRef<unsigned> dimensions) {
-  if (map.getNumDims() != 3 || map.getNumSymbols() != 0 ||
-      map.getNumResults() != dimensions.size())
-    return false;
-  for (auto [expression, dimension] :
-       llvm::zip_equal(map.getResults(), dimensions)) {
-    auto dim = llvm::dyn_cast<AffineDimExpr>(expression);
-    if (!dim || dim.getPosition() != dimension)
-      return false;
-  }
-  return true;
-}
-
-LogicalResult validateGemmGeneric(linalg::GenericOp generic) {
-  if (generic->getNumResults() != 0)
-    return generic.emitOpError(
-        "AArch64 GEMM requires buffer-semantics linalg.generic");
-  if (generic.getInputs().size() < 2 || generic.getOutputs().size() != 1)
-    return generic.emitOpError(
-        "annc.gemm requires A/B inputs and exactly one C output");
-
-  auto iteratorTypes = generic.getIteratorTypesArray();
-  if (iteratorTypes.size() != 3 ||
-      iteratorTypes[0] != utils::IteratorType::parallel ||
-      iteratorTypes[1] != utils::IteratorType::parallel ||
-      iteratorTypes[2] != utils::IteratorType::reduction)
-    return generic.emitOpError(
-        "annc.gemm requires M/N/K iterator types "
-        "parallel/parallel/reduction");
-
-  auto maps = generic.getIndexingMapsArray();
-  if (maps.size() != generic.getInputs().size() + generic.getOutputs().size() ||
-      !matchesProjectedMap(maps[0], {0, 2}) ||
-      !matchesProjectedMap(maps[1], {2, 1}) ||
-      !matchesProjectedMap(maps.back(), {0, 1}))
-    return generic.emitOpError(
-        "annc.gemm requires A=(M,K), B=(K,N), and C=(M,N) indexing maps");
-  return success();
-}
 
 LogicalResult validateMemRef(Operation *op, MemRefType type,
                              llvm::StringRef operandName) {
@@ -109,7 +69,7 @@ LogicalResult resolveGemmProblem(Operation *op) {
   }
 
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(op);
-      generic && failed(validateGemmGeneric(generic)))
+      generic && failed(aarch64::gemm::validateGemmGeneric(generic)))
     return failure();
 
   FailureOr<aarch64::gemm::GemmProblem> problem = getGemmProblem(op);
