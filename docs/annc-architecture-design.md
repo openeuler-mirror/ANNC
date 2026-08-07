@@ -325,7 +325,7 @@ flowchart LR
 
 > **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。
 
-> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
+> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-identity-canonicalize --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
 
 #### 4.1.3 编译时与运行时边界
 
@@ -401,7 +401,7 @@ flowchart LR
 **关键设计要点**：
 
 - ATIR `TensorType` 类型携带数据（cacheData），使常量折叠和验证无需外部存储。
-- 默认流水线启用 `OpFusion`（含 Embedding Lookup 聚合 `FuseDnnEmbeddingHashBucketAsFuncCallPattern` 与 MatMul 融合）；`BlockFusion`（已实现 FuseRelu/MatMulWithBias pattern）、`EltwiseFusion`（当前为占位 stub，runOnOperation 待实现）未纳入默认。
+- 默认流水线先执行 `IdentityCanonicalize`，再启用 `OpFusion`（含 Embedding Lookup 聚合 `FuseDnnEmbeddingHashBucketAsFuncCallPattern` 与 MatMul 融合）；`BlockFusion`（已实现 FuseRelu/MatMulWithBias pattern）、`EltwiseFusion`（当前为占位 stub，runOnOperation 待实现）未纳入默认。
 - 算子融合支持多种融合模式：计算密集型融合（如 MatMul+BiasAdd+ReLU 融合为单 kernel，消除中间内存读写）和访存密集型融合（如多个 Embedding Lookup 聚合为融合子图，将 kernel launch 开销从 O(数千) 降至 O(1)）。融合模式由 NodeInfo 和 ATIR Op 语义驱动，新增融合模式仅需扩展 Fusion Pattern。
 - 前端产出的 Fusion Metadata 是与ANNC 框架对接层之间的契约，描述了"切哪些、怎么映射"，ANNC 框架对接层据此执行图重写，两者解耦演进。
 
@@ -552,7 +552,7 @@ sequenceDiagram
 | 模块                                | 职责                            | 对外接口                                        | 所属层        | 稳定性 |
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
 | `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N]`（未指定时保留动态 shape） | ANNC 框架对接层 | 稳定  |
-| `annc/tools/annc-opt`             | ATIR 优化与融合                    | CLI：`annc-opt --atir-op-fusion`（默认流水线用；另暴露完整 pass 集）             | 工具链前端      | 稳定  |
+| `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
 | `annc/tools/annc-asm`             | ATIR lowering                 | CLI：`annc-asm --convert-atir-to-affine`     | 工具链后端      | 早期  |
@@ -829,7 +829,7 @@ flowchart TB
 ### 9.2 约束
 
 - 内置 kernel 与默认编译路径仅支持 float32（ANNCFused 旧 `T: {float}` 属性、内置 kernel `TypeConstraint<float>`）；ATIR 类型系统与 ANNCFused 新的 `Tconstants/Tfixed/Tdynamic/Toutputs` 属性在类型层面已无约束，但尚无 f32 以外的内置 kernel 实现。
-- 当前默认 pipeline 仅启用 OpFusion，BlockFusion/EltwiseFusion 未纳入。
+- 当前默认 pipeline 启用 IdentityCanonicalize 和 OpFusion，BlockFusion/EltwiseFusion 未纳入。
 - 动态 shape 支持有限，主要覆盖动态 batch 场景。
 - AArch64 后端 tiling 配置需手动标注，未实现自动推导。
 
