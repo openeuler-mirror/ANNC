@@ -20,8 +20,6 @@ class TensorProtoDecoder {
                             std::string& error);
 };
 
-std::string base64Encode(const std::vector<uint8_t>& data);
-
 }  // namespace annc::tf2atir
 
 #endif  // ANNC_TF2ATIR_TENSOR_PROTO_DECODER_H

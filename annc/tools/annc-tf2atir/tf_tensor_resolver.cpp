@@ -166,7 +166,17 @@ bool resolveDtype(const TfNode& node, int output_index,
     error = "VarHandleOp node '" + node.name + "' has no dtype attribute";
     return false;
   }
+  // Range's output dtype comes from Tidx (int32/int64), which carries no
+  // Tout/T/dtype fact; TF defaults it to int32.
+  if (source.op() == "Range") {
+    if (const auto type = typeAttr(source, "Tidx")) return setType(*type);
+    return setType(tensorflow::DT_INT32);
+  }
   if (isComparisonOp(source.op())) return setType(tensorflow::DT_BOOL);
+  // Logical ops produce a boolean mask too, but carry no type attr at all
+  // (e.g. LogicalAnd has neither T nor Tout), so generic inference would
+  // fall back to float32 unless forced.
+  if (source.op() == "LogicalAnd") return setType(tensorflow::DT_BOOL);
   if (source.op() == "StringToHashBucketFast")
     return setType(tensorflow::DT_INT64);
   if (source.op() == "Where") {
@@ -267,6 +277,56 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       const TensorRef output{node.name, static_cast<int>(index)};
       result.tensors.emplace(output, std::move(descriptor));
       node.outputs.push_back(output);
+    }
+
+    // TF frozen graphs may only attach _output_shapes for the outputs that
+    // are actually consumed. Ops with fixed arity must still expose every
+    // result so the builder can construct the full ATIR op (e.g. TopKV2 =
+    // values+indices, Unique = y+idx, Merge = output+value_index, Split =
+    // num_split outputs, DynamicPartition = num_partitions outputs).
+    const std::string& op = node.source->op();
+    auto ensureOutput = [&](int index) -> bool {
+      for (const TensorRef& out : node.outputs)
+        if (out.output_index == index) return true;
+      TensorDescriptor descriptor;
+      if (op == "Unique" || op == "Merge") {
+        // Unique idx / Merge value_index: fixed int32, no GraphDef type fact.
+        descriptor.dtype = "int32";
+      } else if (op == "TopK" || op == "TopKV2") {
+        if (!resolveDtype(node, index, result.tensors, descriptor.dtype,
+                          error))
+          return false;
+      } else {
+        // Split / DynamicPartition extra outputs share output 0's descriptor.
+        const auto it = result.tensors.find(TensorRef{node.name, 0});
+        if (it == result.tensors.end()) {
+          error = "node '" + node.name + "' output 0 is unresolved";
+          return false;
+        }
+        descriptor = it->second;
+      }
+      if (op == "TopK" || op == "TopKV2" || op == "Unique") {
+        // Indices share the values' shape (approximate for dynamic sizes).
+        const auto it0 = result.tensors.find(TensorRef{node.name, 0});
+        if (it0 != result.tensors.end()) descriptor.shape = it0->second.shape;
+      }
+      const TensorRef output{node.name, index};
+      result.tensors.emplace(output, std::move(descriptor));
+      node.outputs.push_back(output);
+      return true;
+    };
+    if (op == "TopK" || op == "TopKV2" || op == "Unique" || op == "Merge") {
+      if (!ensureOutput(1)) return false;
+    } else if (op == "Split" || op == "DynamicPartition") {
+      int64_t count = 0;
+      const char* key = op == "Split" ? "num_split" : "num_partitions";
+      if (const auto it = node.source->attr().find(key);
+          it != node.source->attr().end() &&
+          it->second.value_case() == AttrValue::kI)
+        count = it->second.i();
+      for (int64_t i = static_cast<int64_t>(node.outputs.size()); i < count;
+           ++i)
+        if (!ensureOutput(static_cast<int>(i))) return false;
     }
   }
 
