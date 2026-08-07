@@ -7,6 +7,7 @@ namespace annc {
 inline void registerAllTargetPasses()
 {
     registerAArch64CodeGenPasses();
+    registerAArch64CodegenPipeline();
 }
 }
 

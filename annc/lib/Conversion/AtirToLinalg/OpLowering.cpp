@@ -5,8 +5,9 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 
 namespace {
 constexpr llvm::StringLiteral kGemmEpilogueAttrName = "annc.gemm.epilogue";
@@ -180,9 +181,12 @@ LogicalResult BufferLoweringToLinalg::matchAndRewrite(
   if (!rankedType || !rankedType.hasStaticShape())
     return rewriter.notifyMatchFailure(
         op, "BufferOp lowering requires a statically shaped tensor");
-  auto alloc = rewriter.create<bufferization::AllocTensorOp>(
-      op.getLoc(), rankedType, ValueRange{});
-  rewriter.replaceOp(op, alloc.getResult());
+  auto memrefType =
+      MemRefType::get(rankedType.getShape(), rankedType.getElementType());
+  auto alloc = rewriter.create<memref::AllocaOp>(op.getLoc(), memrefType);
+  auto tensor = rewriter.create<bufferization::ToTensorOp>(
+      op.getLoc(), rankedType, alloc, /*restrict=*/true, /*writable=*/true);
+  rewriter.replaceOp(op, tensor.getResult());
   return success();
 }
 

@@ -8,6 +8,7 @@
 #include "Target/Passes.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
           atir::AtirDialect
           >();
   linalg::registerBufferizableOpInterfaceExternalModels(registry);
+  arith::registerBufferizableOpInterfaceExternalModels(registry);
   bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
 
   MLIRContext context(registry);

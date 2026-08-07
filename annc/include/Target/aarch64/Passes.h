@@ -30,6 +30,8 @@ std::unique_ptr<mlir::Pass> createAArch64GemmKernelTiling();
 std::unique_ptr<mlir::Pass> createAArch64GemmLeafMaterialization();
 std::unique_ptr<mlir::Pass> createAArch64GemmMicrokernelLowering();
 std::unique_ptr<mlir::Pass> createAArch64GemmABILowering();
+std::unique_ptr<mlir::Pass> createAArch64GemmEpilogueLowering();
+std::unique_ptr<mlir::Pass> createAArch64VerifyGemmSchedule();
 std::unique_ptr<mlir::Pass> createCacheParallel();
 std::unique_ptr<mlir::Pass> createMatmulPackAffine();
 std::unique_ptr<mlir::Pass> createCacheReduction();
@@ -40,6 +42,7 @@ std::unique_ptr<mlir::Pass> createVectorReduction();
 #define GEN_PASS_CLASSES
 #include "Target/aarch64/Passes.h.inc"
 
-void buildAArch64CodegenPipeline(PassManager& passManager);
+void buildAArch64CodegenPipeline(OpPassManager& passManager);
+void registerAArch64CodegenPipeline();
 }
 #endif // PIMP_MLIR_AARCH64_CODEGEN_PASSES_H

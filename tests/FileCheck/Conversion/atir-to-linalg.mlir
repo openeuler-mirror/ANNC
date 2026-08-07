@@ -2,7 +2,8 @@
 // ConvertAtirToLinalg: atir op -> linalg
 
 // CHECK-LABEL: func @matmul_to_linalg
-// CHECK: bufferization.alloc_tensor
+// CHECK: %[[BUFFER:.*]] = memref.alloca() : memref<4x4xf32>
+// CHECK: bufferization.to_tensor %[[BUFFER]] restrict writable
 // CHECK: linalg.matmul
 // CHECK-NOT: "atir.MatMul"
 func.func @matmul_to_linalg(
@@ -22,10 +23,11 @@ func.func @empty() {
 
 // -----
 
-// CHECK-LABEL: func @buffer_to_alloc_tensor
-// CHECK: bufferization.alloc_tensor
+// CHECK-LABEL: func @buffer_to_alloca
+// CHECK: %[[BUFFER:.*]] = memref.alloca() : memref<4x4xf32>
+// CHECK: bufferization.to_tensor %[[BUFFER]] restrict writable
 // CHECK-NOT: "atir.buffer"
-func.func @buffer_to_alloc_tensor() {
+func.func @buffer_to_alloca() {
   %0 = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
   return
 }
