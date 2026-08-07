@@ -9,7 +9,17 @@
 
 namespace annc::aarch64::gemm {
 
+struct MemRefBaseAndOffset {
+  mlir::Value base;
+  mlir::Value offset;
+};
+
 void disableLoopUnrolling(mlir::OpBuilder &builder, mlir::scf::ForOp loop);
+
+mlir::FailureOr<MemRefBaseAndOffset> getMemRefBaseAndOffset(
+    mlir::OpBuilder &builder, mlir::Location loc, mlir::Value memref);
+mlir::Value castToUnrankedF32MemRef(mlir::OpBuilder &builder,
+                                    mlir::Location loc, mlir::Value memref);
 mlir::LogicalResult validateGemmGeneric(mlir::linalg::GenericOp generic);
 mlir::FailureOr<mlir::linalg::GenericOp> cloneTiledGemmGeneric(
     mlir::OpBuilder &builder, mlir::linalg::GenericOp generic,

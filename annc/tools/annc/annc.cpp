@@ -20,6 +20,10 @@ string getKernelLibPath() {
     return KERNEL_LIB_PATH;
 }
 
+#ifndef ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+#define ANNC_AARCH64_GEMM_KERNELS_AVAILABLE 0
+#endif
+
 static string getClangPath() {
     const char* env_clang = getenv("ANNC_CLANG");
     if (env_clang && env_clang[0] != '\0') {
@@ -147,6 +151,28 @@ private:
         if (config.verbose) {
             cerr << "[ANNC] : " << command << endl;
         }
+    }
+
+    bool validateGemmKernelAvailability(const fs::path& objectFile) {
+#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+        return true;
+#else
+        string output;
+        string command = "nm -u \"" + objectFile.string() + "\"";
+        if (!CommandExecutor::executeCommand(command, output)) {
+            log("Error: Failed to inspect unresolved object symbols");
+            return false;
+        }
+        if (output.find("annc_aarch64_neon_") == string::npos &&
+            output.find("annc_aarch64_sve_") == string::npos) {
+            return true;
+        }
+        cerr << "ANNC error: AArch64 GEMM output requires the optional "
+                "microkernel archive. Configure "
+                "ANNC_AARCH64_GEMM_KERNEL_LIBRARY with a valid library."
+             << endl;
+        return false;
+#endif
     }
     
 public:
@@ -474,6 +500,7 @@ private:
         
         string inputFile = "step4.o";
         string outputFile = config.outputFile;
+        if (!validateGemmKernelAvailability(tempDir / inputFile)) return false;
         
         // 
         if (!fs::exists(config.testFile)) {
@@ -484,6 +511,10 @@ private:
         string command = getClangPath() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+        command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
+#endif
+        command += " -L" + getKernelLibPath() + " -lANNCGemmSupport";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + getKernelLibPath() +
@@ -507,12 +538,17 @@ private:
         log("Step 5: ");
         
         string inputFile = "step4.o";
+        if (!validateGemmKernelAvailability(tempDir / inputFile)) return false;
         string sharedLibName = config.outputFile.empty()
                                    ? config.mLirSymbolName + ".so"
                                    : config.outputFile;
         
         string command = getClangPath() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+        command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
+#endif
+        command += " -L" + getKernelLibPath() + " -lANNCGemmSupport";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + getKernelLibPath() +
