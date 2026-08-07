@@ -88,6 +88,10 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
     return set(
         {{"int32", {1, 1}}, {"int32", {1}}, {"float32", {1}}, {"float32", {}}},
         {{"float32", {2}}});
+  if (op == "SparseTensorDenseMatMul")
+    return set({{"int64", {1, 2}}, {"float32", {1}}, {"int64", {2}},
+                {"float32", {2, 2}}},
+               {{"float32", {1, 2}}});
   if (op == "SparseReshape")
     return set({{"int32", {1, 1}}, {"int32", {1}}, {"int32", {1}}},
                {{"int32", {1}}, {"int32", {1}}});
@@ -103,6 +107,13 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
     return set({{"float32", {4}}, {"int32", {2}}}, {{"float32", {2}}});
   if (op == "StringToHashBucketFast")
     return set({{"float32", {2}}}, {{"int64", {2}}});
+  if (op == "StringToNumber")
+    return set({{"string", {2}}}, {{"int64", {2}}});
+  if (op == "StaticRegexReplace")
+    return set({{"string", {2}}}, {{"string", {2}}});
+  if (op == "StringSplit")
+    return set({{"string", {2}}, {"string", {}}},
+               {{"int64", {1, 2}}, {"string", {1}}, {"int64", {1}}});
   if (op == "Unique")
     return set({{"float32", {2}}}, {{"float32", {2}}, {"int32", {2}}});
   if (op == "TopK" || op == "TopKV2")

@@ -30,6 +30,10 @@ mlir::Value buildPrivateF32Const(OpContext& ctx, llvm::StringRef name,
 // Matrix / shape semantics.
 mlir::LogicalResult transformMatMul(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
                                     llvm::ArrayRef<mlir::Value>, OpContext&);
+mlir::LogicalResult transformBatchMatMul(const NodeInfo&,
+                                         llvm::ArrayRef<mlir::Type>,
+                                         llvm::ArrayRef<mlir::Value>,
+                                         OpContext&);
 mlir::LogicalResult transformReshape(const NodeInfo&,
                                      llvm::ArrayRef<mlir::Type>,
                                      llvm::ArrayRef<mlir::Value>, OpContext&);
@@ -69,6 +73,10 @@ mlir::LogicalResult transformSparseToDense(const NodeInfo&,
                                            llvm::ArrayRef<mlir::Type>,
                                            llvm::ArrayRef<mlir::Value>,
                                            OpContext&);
+mlir::LogicalResult transformSparseTensorDenseMatMul(const NodeInfo&,
+                                                     llvm::ArrayRef<mlir::Type>,
+                                                     llvm::ArrayRef<mlir::Value>,
+                                                     OpContext&);
 mlir::LogicalResult transformSparseReshape(const NodeInfo&,
                                            llvm::ArrayRef<mlir::Type>,
                                            llvm::ArrayRef<mlir::Value>,
@@ -113,6 +121,14 @@ mlir::LogicalResult transformStringToHashBucketFast(const NodeInfo&,
                                                     llvm::ArrayRef<mlir::Type>,
                                                     llvm::ArrayRef<mlir::Value>,
                                                     OpContext&);
+mlir::LogicalResult transformStaticRegexReplace(const NodeInfo&,
+                                                llvm::ArrayRef<mlir::Type>,
+                                                llvm::ArrayRef<mlir::Value>,
+                                                OpContext&);
+mlir::LogicalResult transformStringSplit(const NodeInfo&,
+                                         llvm::ArrayRef<mlir::Type>,
+                                         llvm::ArrayRef<mlir::Value>,
+                                         OpContext&);
 mlir::LogicalResult transformUnique(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
                                     llvm::ArrayRef<mlir::Value>, OpContext&);
 mlir::LogicalResult transformTopK(const NodeInfo&, llvm::ArrayRef<mlir::Type>,

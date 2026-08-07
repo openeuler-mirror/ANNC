@@ -198,6 +198,55 @@ LogicalResult transformStringToHashBucketFast(const NodeInfo& node,
   return success();
 }
 
+// atir.StaticRegexReplace: pattern/rewrite/replace_global from the TF attrs.
+LogicalResult transformStaticRegexReplace(const NodeInfo& node,
+                                          ArrayRef<Type> outs,
+                                          ArrayRef<Value> ins,
+                                          OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.size() < 1 || outs.empty())
+    return ctx.emitError(node, "requires one input");
+  Location loc = ctx.loc(node.name);
+  // pattern/rewrite come from TF attrs; absent attrs fall back to defaults so
+  // synthetic op-coverage graphs (which carry no attrs) still build.
+  std::string pattern;
+  node.getAttr("pattern", pattern);
+  std::string rewrite;
+  node.getAttr("rewrite", rewrite);
+  bool replaceGlobal = true;
+  if (!node.getAttr("replace_global", replaceGlobal)) {
+    if (int64_t v; node.getAttr("replace_global", v)) replaceGlobal = (v != 0);
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
+  auto op = b.create<atir::StaticRegexReplaceOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0],
+      b.getStringAttr(pattern), b.getStringAttr(rewrite),
+      b.getBoolAttr(replaceGlobal));
+  ctx.bindResult(node.outputs[0].name, op.getResult());
+  return success();
+}
+
+// atir.StringSplit: three results (indices, values, dense_shape).
+LogicalResult transformStringSplit(const NodeInfo& node, ArrayRef<Type> outs,
+                                   ArrayRef<Value> ins, OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.size() < 2 || outs.size() < 3)
+    return ctx.emitError(node, "requires input and delimiter, three outputs");
+  Location loc = ctx.loc(node.name);
+  bool skipEmpty = false;
+  if (!node.getAttr("skip_empty", skipEmpty)) {
+    if (int64_t v; node.getAttr("skip_empty", v)) skipEmpty = (v != 0);
+  }
+  auto op = b.create<atir::StringSplitOp>(loc, outs[0], outs[1], outs[2],
+                                          ins[0], ins[1],
+                                          b.getBoolAttr(skipEmpty));
+  ctx.bindResult(node.outputs[0].name, op.getIndices());
+  ctx.bindResult(node.outputs[1].name, op.getValues());
+  ctx.bindResult(node.outputs[2].name, op.getDenseShape());
+  return success();
+}
+
 // atir.Unique: two results (unique values, indices).
 LogicalResult transformUnique(const NodeInfo& node, ArrayRef<Type> outs,
                               ArrayRef<Value> ins, OpContext& ctx) {

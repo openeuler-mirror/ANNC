@@ -163,12 +163,13 @@ void SparseToDenseOp::Interpret() {
     return;
   }
   std::vector<float> result(static_cast<size_t>(denseSize), (*defaultValOr)[0]);
+  const bool validate = getValidateIndices();
   for (int64_t i = 0; i < n; ++i) {
     int64_t flat = 0;
     for (int64_t a = 0; a < rank; ++a) {
       int64_t c = (*indicesValsOr)[i * rank + a];
       int64_t d = (*denseShapeOr)[a];
-      if (c < 0 || c >= d) {
+      if (validate && (c < 0 || c >= d)) {
         emitOpError("SparseToDense index out of range");
         return;
       }
@@ -479,5 +480,103 @@ void SparseSegmentMeanOp::Interpret() {
   this->inferShape();
   (void)interpretSparseSegment(getOperation(),
       getData(), getIndices(), getSegmentIds(), getNumSegments(), SparseSegmentMode::Mean);
+}
+
+// atir.SparseTensorDenseMatMul: out[i][k] = sum_j A[i][j] * B[j][k], where A is
+// the sparse matrix (indices/values/denseShape) and B the dense [N, K] matrix.
+// adjointA/adjointB apply a real transpose to the respective operand first.
+void SparseTensorDenseMatMulOp::Interpret() {
+  this->inferShape();
+  atir::TensorType indicesType, valuesType, shapeType, denseType;
+  DenseElementsAttr indicesAttr, valuesAttr, shapeAttr, denseAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getIndices(),
+                                  "SparseTensorDenseMatMul indices",
+                                  indicesType, indicesAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getValues(),
+                                  "SparseTensorDenseMatMul values", valuesType,
+                                  valuesAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getDenseShape(),
+                                  "SparseTensorDenseMatMul denseShape",
+                                  shapeType, shapeAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getDense(),
+                                  "SparseTensorDenseMatMul dense", denseType,
+                                  denseAttr))) {
+    return;
+  }
+  auto indicesOr = getIntValues(indicesAttr);
+  auto valuesOr = getFloatValues(valuesAttr);
+  auto shapeOr = getIntValues(shapeAttr);
+  auto denseOr = getFloatValues(denseAttr);
+  if (failed(indicesOr) || failed(valuesOr) || failed(shapeOr) ||
+      failed(denseOr)) {
+    emitOpError(
+        "SparseTensorDenseMatMul requires integer-like indices/denseShape and "
+        "numeric values/dense");
+    return;
+  }
+  const auto& indices = *indicesOr;
+  const auto& values = *valuesOr;
+  const auto& shape = *shapeOr;
+  const auto& dense = *denseOr;
+  auto indicesShape = indicesType.getShape();
+  if (indicesShape.size() != 2 || indicesShape[1] != 2) {
+    emitOpError("SparseTensorDenseMatMul indices must be [nnz, 2]");
+    return;
+  }
+  int64_t nnz = indicesShape[0];
+  if (nnz < 0 || static_cast<int64_t>(values.size()) != nnz ||
+      static_cast<int64_t>(indices.size()) != nnz * 2) {
+    emitOpError("SparseTensorDenseMatMul data size mismatch");
+    return;
+  }
+  if (shape.size() != 2) {
+    emitOpError("SparseTensorDenseMatMul denseShape must have two elements");
+    return;
+  }
+  auto denseShape = denseType.getShape();
+  if (denseShape.size() != 2) {
+    emitOpError("SparseTensorDenseMatMul dense must be rank-2");
+    return;
+  }
+  int64_t m = shape[0];
+  int64_t n = shape[1];
+  const bool adjA = getAdjointA();
+  const bool adjB = getAdjointB();
+  if (adjA) std::swap(m, n);
+  int64_t dRows = denseShape[0];
+  int64_t dCols = denseShape[1];
+  if (adjB) std::swap(dRows, dCols);
+  if (dRows != n) {
+    emitOpError("SparseTensorDenseMatMul dense rows must match sparse columns");
+    return;
+  }
+  const int64_t k = dCols;
+  if (m <= 0 || k <= 0) {
+    emitOpError("SparseTensorDenseMatMul requires positive static dims");
+    return;
+  }
+  std::vector<float> out(static_cast<size_t>(m * k), 0.0f);
+  for (int64_t r = 0; r < nnz; ++r) {
+    int64_t i = indices[2 * r];
+    int64_t j = indices[2 * r + 1];
+    if (adjA) std::swap(i, j);
+    if (i < 0 || i >= m || j < 0 || j >= n) {
+      emitOpError("SparseTensorDenseMatMul index out of range");
+      return;
+    }
+    const float v = values[static_cast<size_t>(r)];
+    for (int64_t c = 0; c < k; ++c) {
+      // Row-major dense layout; adjoint_b transposes B ([k, n] -> [n, k]).
+      const float d = adjB ? dense[static_cast<size_t>(c * dCols + j)]
+                           : dense[static_cast<size_t>(j * dCols + c)];
+      out[static_cast<size_t>(i * k + c)] += v * d;
+    }
+  }
+  auto resultType = dyn_cast<atir::TensorType>(getResult().getType());
+  if (!resultType) {
+    emitOpError("SparseTensorDenseMatMul result must be atir::TensorType");
+    return;
+  }
+  (void)setDenseResult(resultType, {m, k}, out);
 }
 } // namespace atir

@@ -14,8 +14,8 @@ module attributes {module.state = "atir"} {
     %0 = "atir.buffer"() : () -> !atir.tensor<?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">
     %1 = atir.constant "public" @"expand_dim" -> <i32, name = "expand_dim", data = dense<-1> : tensor<i32>>
     %2 = atir.ExpandDims %0, %arg0, %1 : <?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">, <?xcomplex<f32>, encoding = <"string">, name = "input">, <i32, name = "expand_dim", data = dense<-1> : tensor<i32>> -> <?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">
-    %3 = atir.constant "public" @"ignore_value" -> <i32, encoding = <"string">, name = "ignore_value", data = dense<0> : tensor<i32>>
-    %4 = atir.Compare %2, %3 {comparisonDirection = "NE"} : (!atir.tensor<?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">, !atir.tensor<i32, encoding = <"string">, name = "ignore_value", data = dense<0> : tensor<i32>>) -> !atir.tensor<?x1xi32, encoding = <"bool">, name = "not_equal">
+    %3 = atir.constant "public" @"ignore_value" -> <complex<f32>, encoding = <"string">, name = "ignore_value", data = strings[""]>
+    %4 = atir.Compare %2, %3 {comparisonDirection = "NE"} : (!atir.tensor<?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">, !atir.tensor<complex<f32>, encoding = <"string">, name = "ignore_value", data = strings[""]>) -> !atir.tensor<?x1xi32, encoding = <"bool">, name = "not_equal">
     %5 = "atir.buffer"() : () -> !atir.tensor<?x2xi64, name = "indices">
     %6 = atir.Where %5, (%4) : <?x2xi64, name = "indices">, !atir.tensor<?x1xi32, encoding = <"bool">, name = "not_equal"> -> <?x2xi64, name = "indices">
     %7 = "atir.buffer"() : () -> !atir.tensor<?xcomplex<f32>, encoding = <"string">, name = "values">

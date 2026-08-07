@@ -23,11 +23,42 @@ LogicalResult transformSparseToDense(const NodeInfo& node, ArrayRef<Type> outs,
   auto& b = ctx.builder();
   if (ins.size() < 4) return ctx.emitError(node, "requires 4 inputs");
   Location loc = ctx.loc(node.name);
+  bool validate = true;
+  if (!node.getAttr("validate_indices", validate)) {
+    if (int64_t v; node.getAttr("validate_indices", v)) validate = (v != 0);
+  }
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
   auto op = b.create<atir::SparseToDenseOp>(
       loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2], ins[3],
-      b.getBoolAttr(true));
+      b.getBoolAttr(validate));
+  ctx.bindResult(node.outputs[0].name, op.getResult());
+  return success();
+}
+
+// atir.SparseTensorDenseMatMul: sparse A (indices/values/dense_shape) x dense B.
+LogicalResult transformSparseTensorDenseMatMul(const NodeInfo& node,
+                                               ArrayRef<Type> outs,
+                                               ArrayRef<Value> ins,
+                                               OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.size() < 4 || outs.empty())
+    return ctx.emitError(node,
+                         "requires indices, values, dense_shape and dense inputs");
+  Location loc = ctx.loc(node.name);
+  bool adjointA = false;
+  bool adjointB = false;
+  if (!node.getAttr("adjoint_a", adjointA)) {
+    if (int64_t v; node.getAttr("adjoint_a", v)) adjointA = (v != 0);
+  }
+  if (!node.getAttr("adjoint_b", adjointB)) {
+    if (int64_t v; node.getAttr("adjoint_b", v)) adjointB = (v != 0);
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
+  auto op = b.create<atir::SparseTensorDenseMatMulOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], ins[1], ins[2], ins[3],
+      b.getBoolAttr(adjointA), b.getBoolAttr(adjointB));
   ctx.bindResult(node.outputs[0].name, op.getResult());
   return success();
 }
