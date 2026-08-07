@@ -1,4 +1,5 @@
 #include "Builder/MLIROpBuilder.h"
+#include "Builder/Transformers.h"
 
 #include <algorithm>
 #include <complex>
