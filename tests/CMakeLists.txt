@@ -1,3 +1,4 @@
+add_subdirectory(annc)
 add_subdirectory(kernels)
 
 if(ANNC_ENABLE_COVERAGE)

@@ -20,6 +20,68 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
       makeSpec({"Identity", "IdentityN", "ReadVariableOp", "StopGradient"},
                "atir.Identity", 1, 1, 1, true));
 
+  // ---- elementwise / activation ----
+  specs.push_back(makeSpec({"Mul"}, "atir.Mul", 2, 2, 1, true));
+  specs.push_back(makeSpec({"Sub"}, "atir.Sub", 2, 2, 1, true));
+  specs.push_back(
+      makeSpec({"Div", "RealDiv", "Divide"}, "atir.RealDiv", 2, 2, 1, true));
+  specs.push_back(makeSpec({"FloorDiv"}, "atir.FloorDiv", 2, 2, 1, true));
+  specs.push_back(makeSpec({"FloorMod"}, "atir.FloorMod", 2, 2, 1, true));
+  specs.push_back(makeSpec({"Maximum"}, "atir.Maximum", 2, 2, 1, true));
+  specs.push_back(makeSpec({"Minimum"}, "atir.Minimum", 2, 2, 1, true));
+  specs.push_back(
+      makeSpec({"Relu"}, "atir.Relu", 1, 1, 1, true, kDefaultsRelu));
+  specs.push_back(
+      makeSpec({"Sigmoid", "Logistic"}, "atir.Logistic", 1, 1, 1, true));
+  specs.push_back(makeSpec({"Abs"}, "atir.Abs", 1, 1, 1, true));
+  specs.push_back(makeSpec({"Rsqrt"}, "atir.Rsqrt", 1, 1, 1, true));
+
+  // ---- comparisons (no buffer operand) ----
+  specs.push_back(
+      makeSpec({"Equal"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredEQ));
+  specs.push_back(
+      makeSpec({"Less"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredLT));
+  specs.push_back(
+      makeSpec({"NotEqual"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredNE));
+  specs.push_back(
+      makeSpec({"Greater"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredGT));
+  specs.push_back(makeSpec({"GreaterEqual", "GreaterEqualV2"}, "atir.Compare",
+                           2, 2, 1, false, kDefaultsPredGE));
+  specs.push_back(
+      makeSpec({"LessEqual"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredLE));
+  // LogicalAnd is a bitwise-AND on bool tensors (i32+bool encoding); atir.And
+  // needs no buffer operand, same as the compare family.
+  specs.push_back(makeSpec({"LogicalAnd"}, "atir.And", 2, 2, 1, false));
+
+  // ---- shape / index ----
+  specs.push_back(makeSpec({"Size"}, "atir.Size", 1, 1, 1, false));
+  specs.push_back(makeSpec({"ZerosLike"}, "atir.ZerosLike", 1, 1, 1, false));
+  specs.push_back(makeSpec({"Cast"}, "atir.Cast", 1, 1, 1, true));
+  specs.push_back(makeSpec({"Fill"}, "atir.Fill", 2, 2, 1, true));
+  specs.push_back(makeSpec({"Range"}, "atir.Range", 3, 3, 1, true));
+  specs.push_back(makeSpec({"Tile"}, "atir.Tile", 2, 2, 1, true));
+  specs.push_back(makeSpec({"Slice"}, "atir.Slice", 3, 3, 1, true));
+  specs.push_back(makeSpec({"Concat"}, "atir.Concat", 1, kUnbounded, 1, true,
+                           kDefaultsConcat));
+  specs.push_back(
+      makeSpec({"Where", "Select", "SelectV2"}, "atir.Where", 1, 3, 1, true));
+
+  // ---- reduce / math ----
+  specs.push_back(makeSpec({"Mean"}, "atir.ReduceMean", 2, 2, 1, true,
+                           kDefaultsReduceMean, kMappingKeepDims));
+  specs.push_back(makeSpec({"Softmax"}, "atir.Softmax", 1, 1, 1, true));
+  specs.push_back(makeSpec({"Pow"}, "atir.Pow", 2, 2, 1, true));
+  specs.push_back(makeSpec({"UnsortedSegmentMin"}, "atir.UnsortedSegmentMin", 3,
+                           3, 1, true));
+  specs.push_back(makeSpec({"TensorScatterUpdate"}, "atir.TensorScatterUpdate",
+                           3, 3, 1, true));
+
+  // ---- identity / matrix ----
+  specs.push_back(makeSpec({"GatherNd"}, "atir.GatherNd", 2, 2, 1, true));
+  specs.push_back(makeSpec({"BatchMatMul", "BatchMatMulV2"}, "atir.BatchMatMul",
+                           2, 2, 1, true));
+  specs.push_back(makeSpec({"Dot"}, "atir.Dot", 2, 2, 1, true));
+
   // ---- transformer-driven ops (non-1:1 shapes / special semantics) ----
   specs.push_back(makeSpec({"MatMul"}, "atir.MatMul", 2, 3, 1, true, {}, {},
                            transformMatMul));
