@@ -1,10 +1,12 @@
 #ifndef ANNC_OP_BUILDER_H
 #define ANNC_OP_BUILDER_H
-#include <vector>
 #include <string>
 #include <unordered_map>
 #include <variant>
+#include <vector>
 
+#include "Builder/DType.h"
+#include "Builder/OpSpec.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "Helper.h"
 #include "llvm/ADT/StringRef.h"
@@ -12,152 +14,97 @@
 using namespace mlir;
 namespace annc {
 
-// 输出张量信息
 struct OutputInfo {
-    std::string name;
-    std::string dtype;
-    std::vector<int64_t> shape;
+  std::string name;
+  std::string dtype;
+  std::vector<int64_t> shape;
 };
 
-// 节点信息
 struct NodeInfo {
-    std::string name;
-    std::string op_type;
-    std::vector<std::string> inputs;
-    std::vector<OutputInfo> outputs;
-    std::string raw_data;
-    // Const(DT_STRING) payload. Numeric constants retain their raw_data path.
-    std::vector<std::string> string_values;
-    using TfAttrValue =
-        std::variant<int64_t, double, bool, std::string, std::vector<int64_t>,
-                     std::vector<double>, std::vector<bool>,
-                     std::vector<std::string>>;
-    // Typed TensorFlow attributes used to build ATIR op semantics, such as
-    // transpose_a, keep_dims, axis, and other compute-affecting options.
-    std::unordered_map<std::string, TfAttrValue> attrs;
-    // String metadata preserved for GraphDef rewrite and converter recovery.
-    // Keep this separate from attrs so TF source names/inputs do not pollute
-    // typed ATIR attribute application.
-    std::unordered_map<std::string, std::string> tf_attrs;
-    bool has_numBuckets = false;
-    int64_t numBuckets = 0;
-    bool isInputNode = false;
-    bool isOutputNode = false;
+  std::string name;
+  std::string op_type;
+  std::vector<std::string> inputs;
+  std::vector<OutputInfo> outputs;
+  // Raw Const bytes in TensorProto tensor_content layout (little-endian).
+  std::vector<uint8_t> raw_data;
+  // Const(DT_STRING) payload: real string values (ComplexType<f32> carrier).
+  std::vector<std::string> string_values;
+  using TfAttrValue = std::variant<int64_t, double, bool, std::string,
+                                   std::vector<int64_t>, std::vector<double>,
+                                   std::vector<bool>, std::vector<std::string>>;
+  // Typed TF attributes (transpose_a, keep_dims, axis, ...) driving ATIR op
+  // semantics.
+  std::unordered_map<std::string, TfAttrValue> attrs;
+  // String metadata for GraphDef rewrite / converter recovery; kept separate
+  // from attrs so TF source names/inputs never pollute typed attr application.
+  std::unordered_map<std::string, std::string> tf_attrs;
+  bool isInputNode = false;
+  bool isOutputNode = false;
+
+  // Typed attribute lookup; true only for an exact type T match (no coercion).
+  template <typename T>
+  bool getAttr(const std::string& name, T& out) const {
+    auto it = attrs.find(name);
+    if (it == attrs.end()) return false;
+    if (auto* value = std::get_if<T>(&it->second)) {
+      out = *value;
+      return true;
+    }
+    return false;
+  }
 };
 
+template <typename T>
+bool OpContext::getAttr(const NodeInfo& node, llvm::StringRef name,
+                        T& out) const {
+  return node.getAttr(name.str(), out);
+}
+
+// Table-driven TF graph -> ATIR builder: addNode() validates a node against
+// its declarative OpSpec, builds the op (generic for 1:1 ops, transformer
+// otherwise), applies attr mappings, attaches metadata and registers results.
+// All failure paths report a diagnostic and return failure; nothing aborts.
 class MLIRBuilder {
  public:
   MLIRBuilder(ModuleOp& module)
       : module_(module), builder_(module.getContext()) {}
   virtual ~MLIRBuilder() = default;
 
-  void buildFromNodes(const std::vector<NodeInfo>& nodes);
-  static std::string normalizeOpType(llvm::StringRef opType);
+  bool buildFromNodes(const std::vector<NodeInfo>& nodes);
   static bool isSupportedOp(llvm::StringRef opType);
-
-  void createAddNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSubNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createRealDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createFloorModNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createFloorDivNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createNotEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createLessNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createGreaterNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createGreaterEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createLessEqualNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createMaximumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createMinimumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createConcatNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createConcatV2Node(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createPackNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createMergeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createDynamicPartitionNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createParallelDynamicStitchNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createWhereNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createVariableNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createIdentityNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createShapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createFillNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createRangeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createProdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createGatherNdNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createStridedSliceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createMatMulOp(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createBatchMatMulNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createDotNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createTransposeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createExpandDimsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createTileNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createBroadcastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createPadNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseToDenseNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseReshapeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseFillEmptyRowsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseSegmentMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseSegmentSumNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSparseSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createResourceGatherNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createCastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createStringToHashBucketFastNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createUniqueNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createTopKNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createUnsortedSegmentMinNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createTensorScatterUpdateNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createReluNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createLogisticNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createAbsNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createRsqrtNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createZerosLikeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSqueezeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSquareNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSquaredDifferenceNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createReduceMeanNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSoftmaxNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createSplitNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createPowNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-
-  // Op handlers will be added in subsequent PRs
-  void createUnsupportedNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
-  void createCustomizeNode(const NodeInfo& node, ArrayRef<Type> outs, ArrayRef<Value> ins);
+  // All declared op specs (drives isSupportedOp); used by tests and tooling.
+  static llvm::ArrayRef<OpSpec> getAllOpSpecs();
 
  private:
-  ModuleOp module_;
-  OpBuilder builder_;
-
-  func::FuncOp mainFunc_;
-  Value noneValue_;
+  const OpSpec* lookupSpec(llvm::StringRef opType) const;
+  mlir::LogicalResult addNode(const NodeInfo& node);
+  mlir::LogicalResult buildConstantNode(const NodeInfo& node);
+  mlir::FailureOr<Operation*> buildGenericOp(const OpSpec& spec,
+                                             const NodeInfo& node,
+                                             llvm::ArrayRef<Type> outs,
+                                             llvm::ArrayRef<Value> ins);
+  mlir::LogicalResult applyAttrMappings(Operation* op, const NodeInfo& node,
+                                        const OpSpec& spec);
+  void attachMetadata(Operation* op, const NodeInfo& node, const OpSpec& spec);
+  mlir::FailureOr<atir::TensorType> getTensorType(const NodeInfo& node,
+                                                  unsigned outIdx);
+  // Resolves a name to a produced value; strips a ":0" output-index suffix.
+  mlir::Value resolveValue(llvm::StringRef name) const;
+  mlir::LogicalResult emitNodeError(const NodeInfo& node,
+                                    const std::string& message);
 
   std::vector<Value> addGraphInputs(const std::vector<NodeInfo>& inputNodes);
   std::vector<Value> addGraphOutputs(const std::vector<NodeInfo>& outputNodes);
 
-  mlir::Value addConstantNode(const NodeInfo& node);
-
-  void addNode(const NodeInfo& node);
-
+  ModuleOp module_;
+  OpBuilder builder_;
+  func::FuncOp mainFunc_;
+  // Output name -> produced SSA value (later nodes resolve inputs by name).
   std::unordered_map<std::string, Value> tensorValues_;
-  // Name -> NodeInfo lookup, populated during buildFromNodes so handlers can
-  // resolve constant inputs (e.g. Transpose's perm) by name.
+  // Name -> NodeInfo, so handlers can resolve constant inputs by name.
   std::unordered_map<std::string, const NodeInfo*> nodesByName_;
-  // Decode an integer Const node's raw_data into int64 values (handles
-  // int32/int64 dtypes). Returns false if the node is missing or not an
-  // integer constant.
-  bool decodeIntConstValues(const std::string& name,
-                            std::vector<int64_t>& out) const;
-  atir::TensorType getTensorType(const std::string& name,
-                                 const std::string& dtype,
-                                 const std::vector<int64_t>& shape);
-
-  template <typename T>
-  std::vector<T> loadData(const std::string& dataStr) {
-    std::vector<T> result;
-    return result;
-  }
+  // Set when a node cannot be built; buildFromNodes reports and stops.
+  bool failed_ = false;
 };
 }  // namespace annc
 #endif  // ANNC_OP_BUILDER_H
