@@ -179,6 +179,18 @@ bool resolveDtype(const TfNode& node, int output_index,
   if (source.op() == "LogicalAnd") return setType(tensorflow::DT_BOOL);
   if (source.op() == "StringToHashBucketFast")
     return setType(tensorflow::DT_INT64);
+  if (source.op() == "StaticRegexReplace")
+    return setType(tensorflow::DT_STRING);
+  // StringSplit emits a sparse triplet with no type facts: indices [nnz, rank+1]
+  // and dense_shape [rank+1] are int64, values are the split substrings (string).
+  if (source.op() == "StringSplit") {
+    if (output_index == 0 || output_index == 2)
+      return setType(tensorflow::DT_INT64);
+    if (output_index == 1) return setType(tensorflow::DT_STRING);
+    error = "StringSplit node '" + node.name +
+            "' has invalid output index " + std::to_string(output_index);
+    return false;
+  }
   if (source.op() == "Where") {
     if (node.inputs.size() == 1) return setType(tensorflow::DT_INT64);
     if (node.inputs.size() == 3) return inputDtype(1);

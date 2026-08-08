@@ -1,9 +1,33 @@
 #include "Common.h"
 #include "Dialect/Atir/AtirOps.h"
 
+#include <cstdlib>
+#include <regex>
+#include <string>
+
 using namespace atir::interpret;
 
 namespace atir {
+
+// Splits `s` by `delimiter` (delimiter not included in the parts). Mirrors the
+// TF StringSplit semantics: every occurrence splits, empty parts are kept and
+// filtered by the caller when skip_empty is set.
+static std::vector<std::string> splitByDelimiter(const std::string& s,
+                                                 const std::string& delimiter) {
+  std::vector<std::string> parts;
+  if (delimiter.empty()) return parts;
+  std::size_t start = 0;
+  while (true) {
+    const std::size_t pos = s.find(delimiter, start);
+    if (pos == std::string::npos) {
+      parts.push_back(s.substr(start));
+      break;
+    }
+    parts.push_back(s.substr(start, pos - start));
+    start = pos + delimiter.size();
+  }
+  return parts;
+}
 
 void CastOp::Interpret() {
   this->inferShape();
@@ -60,6 +84,164 @@ void CastOp::Interpret() {
 }
 
 void StringToHashBucketFastOp::Interpret() {}
+
+// atir.StringToNumber: parse each string element to the result's element type
+// (float uses strtof semantics, integers use strtoll semantics, matching TF).
+void StringToNumberOp::Interpret() {
+  this->inferShape();
+  atir::TensorType inputType;
+  DenseElementsAttr inputAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getInput(),
+                                  "StringToNumber input", inputType,
+                                  inputAttr))) {
+    return;
+  }
+  auto strValsOr = getStringValues(inputAttr);
+  if (failed(strValsOr)) {
+    emitOpError("StringToNumber input must be a string tensor");
+    return;
+  }
+  auto resultType = dyn_cast<atir::TensorType>(getResult().getType());
+  if (!resultType) {
+    emitOpError("StringToNumber result must be atir::TensorType");
+    return;
+  }
+  const auto& strVals = *strValsOr;
+  auto outputShape = resultType.getShape();
+  if (isa<FloatType>(resultType.getElementType())) {
+    std::vector<float> out;
+    out.reserve(strVals.size());
+    for (const std::string& s : strVals) {
+      if (s.empty()) {
+        emitOpError("StringToNumber cannot parse an empty string");
+        return;
+      }
+      out.push_back(std::strtof(s.c_str(), nullptr));
+    }
+    (void)setDenseResult(resultType, outputShape, out);
+    return;
+  }
+  std::vector<int64_t> out;
+  out.reserve(strVals.size());
+  for (const std::string& s : strVals) {
+    if (s.empty()) {
+      emitOpError("StringToNumber cannot parse an empty string");
+      return;
+    }
+    out.push_back(std::strtoll(s.c_str(), nullptr, 10));
+  }
+  (void)setDenseIntResult(resultType, outputShape, out);
+}
+
+// atir.StaticRegexReplace: RE2-compatible pattern applied per string element.
+// Replacements follow std::regex ECMAScript syntax; the anchored patterns used
+// by the benchmark models ("^t=" etc.) are syntax-identical to RE2.
+void StaticRegexReplaceOp::Interpret() {
+  this->inferShape();
+  atir::TensorType inputType;
+  DenseElementsAttr inputAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getInput(),
+                                  "StaticRegexReplace input", inputType,
+                                  inputAttr))) {
+    return;
+  }
+  auto strValsOr = getStringValues(inputAttr);
+  if (failed(strValsOr)) {
+    emitOpError("StaticRegexReplace input must be a string tensor");
+    return;
+  }
+  std::regex re(getPattern().str());
+  const std::string rewrite = getRewrite().str();
+  const bool global = getReplaceGlobal();
+  std::vector<std::string> out;
+  out.reserve(strValsOr->size());
+  for (const std::string& s : *strValsOr) {
+    if (global) {
+      out.push_back(std::regex_replace(s, re, rewrite));
+    } else {
+      out.push_back(std::regex_replace(s, re, rewrite,
+                                       std::regex_constants::format_first_only));
+    }
+  }
+  auto resultType = dyn_cast<atir::TensorType>(getResult().getType());
+  if (!resultType) {
+    emitOpError("StaticRegexReplace result must be atir::TensorType");
+    return;
+  }
+  (void)setStringResult(resultType, resultType.getShape(), out);
+}
+
+// atir.StringSplit: split each string element by the scalar delimiter into a
+// sparse triplet [indices, values, denseShape], matching TF StringSplit.
+void StringSplitOp::Interpret() {
+  this->inferShape();
+  atir::TensorType inputType, delimiterType;
+  DenseElementsAttr inputAttr, delimiterAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getInput(),
+                                  "StringSplit input", inputType,
+                                  inputAttr)) ||
+      failed(getTensorTypeAndData(getOperation(), getDelimiter(),
+                                  "StringSplit delimiter", delimiterType,
+                                  delimiterAttr))) {
+    return;
+  }
+  auto inputStrOr = getStringValues(inputAttr);
+  auto delimiterStrOr = getStringValues(delimiterAttr);
+  if (failed(inputStrOr) || failed(delimiterStrOr) ||
+      delimiterStrOr->size() != 1) {
+    emitOpError("StringSplit requires string input and a scalar string delimiter");
+    return;
+  }
+  const std::string delimiter = (*delimiterStrOr)[0];
+  if (delimiter.empty()) {
+    emitOpError("StringSplit delimiter must not be empty");
+    return;
+  }
+  const auto inputShape = inputType.getShape();
+  int64_t inputRank = static_cast<int64_t>(inputShape.size());
+  int64_t inputFlat = getElementCount(inputShape);
+  if (inputRank < 1 || inputFlat < 0) {
+    emitOpError("StringSplit input must have static rank >= 1");
+    return;
+  }
+  if (static_cast<int64_t>(inputStrOr->size()) != inputFlat) {
+    emitOpError("StringSplit input data size mismatch");
+    return;
+  }
+  const bool skipEmpty = getSkipEmpty();
+  std::vector<int64_t> indices;
+  std::vector<std::string> values;
+  int64_t maxSubs = 0;
+  for (int64_t i = 0; i < inputFlat; ++i) {
+    std::vector<std::string> parts =
+        splitByDelimiter((*inputStrOr)[static_cast<size_t>(i)], delimiter);
+    if (skipEmpty) {
+      parts.erase(std::remove_if(parts.begin(), parts.end(),
+                                 [](const std::string& p) { return p.empty(); }),
+                  parts.end());
+    }
+    const auto multi = getMultiIndex(inputShape, i);
+    for (size_t j = 0; j < parts.size(); ++j) {
+      for (int64_t d : multi) indices.push_back(d);
+      indices.push_back(static_cast<int64_t>(j));
+      values.push_back(parts[j]);
+    }
+    maxSubs = std::max(maxSubs, static_cast<int64_t>(parts.size()));
+  }
+  const int64_t nnz = static_cast<int64_t>(values.size());
+  auto indicesType = concretizeResultType(getIndices(), {nnz, inputRank + 1});
+  auto valuesType = concretizeResultType(getValues(), {nnz});
+  auto denseShapeType = concretizeResultType(getDenseShape(), {inputRank + 1});
+  if (!indicesType || !valuesType || !denseShapeType) {
+    emitOpError("StringSplit results must be atir::TensorType");
+    return;
+  }
+  std::vector<int64_t> denseShape(inputShape.begin(), inputShape.end());
+  denseShape.push_back(maxSubs);
+  (void)setDenseIntResult(indicesType, {nnz, inputRank + 1}, indices);
+  (void)setStringResult(valuesType, {nnz}, values);
+  (void)setDenseIntResult(denseShapeType, {inputRank + 1}, denseShape);
+}
 
 void UniqueOp::Interpret() {
   this->inferShape();

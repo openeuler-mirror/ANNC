@@ -516,6 +516,94 @@ def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
   }];
 }
 
+def Atir_StringToNumberOp : Atir_Op<"StringToNumber",
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Convert each string in the input tensor to a numeric value.";
+  let description = [{
+    Converts each string element of `input` to a numeric value. The output
+    element type is fixed by the frontend (TF `out_type` attribute); the op
+    itself only requires the input to be a string tensor (encoding="string").
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_StaticRegexReplaceOp : Atir_Op<"StaticRegexReplace",
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Replaces matches of a regular expression in each string.";
+  let description = [{
+    Replaces matches of `pattern` in each string element of `input` with
+    `rewrite`. `pattern` follows the RE2-compatible syntax used by TF. When
+    `replaceGlobal` is set, every match is replaced; otherwise only the first
+    match is replaced. The result carries string elements.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    StrAttr:$pattern,
+    StrAttr:$rewrite,
+    DefaultValuedAttr<BoolAttr, "true">:$replaceGlobal
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_StringSplitOp : Atir_Op<"StringSplit", Interfaces> {
+  let summary = "Split a string tensor by a delimiter into a SparseTensor.";
+  let description = [{
+    Splits each string element of `input` by the scalar string `delimiter`,
+    producing three outputs: `indices` [nnz, rank+1] (int64), `values`
+    (the split substrings, string elements) and `denseShape` [rank+1] (int64,
+    where the trailing dim is the max substring count). When `skipEmpty` is
+    set, empty substrings are dropped.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input,
+    Atir_Tensor:$delimiter,
+    DefaultValuedAttr<BoolAttr, "false">:$skipEmpty
+  );
+  let results = (outs
+    Atir_Tensor:$indices,
+    Atir_Tensor:$values,
+    Atir_Tensor:$denseShape
+  );
+  let assemblyFormat = [{
+    $input `,` $delimiter attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SparseTensorDenseMatMulOp : Atir_Op<"SparseTensorDenseMatMul",
+    Interfaces> {
+  let summary = "Multiply a sparse matrix by a dense matrix.";
+  let description = [{
+    Computes `A * B` where `A` is a sparse matrix given by `indices` [nnz, 2]
+    (int64), `values` [nnz] and `denseShape` [M, N], and `B` is the dense
+    [N, K] matrix. The result is [M, K]. `adjointA`/`adjointB` conjugate-
+    transpose (a transpose for real values) the respective operand first.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$indices,
+    Atir_Tensor:$values,
+    Atir_Tensor:$denseShape,
+    Atir_Tensor:$dense,
+    DefaultValuedAttr<BoolAttr, "false">:$adjointA,
+    DefaultValuedAttr<BoolAttr, "false">:$adjointB
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $indices `,` $values `,` $denseShape `,` $dense attr-dict `:` type($output) `,` type($indices) `,` type($values) `,` type($denseShape) `,` type($dense) `->` type($result)
+  }];
+}
+
 def Atir_SparseReshapeOp : Atir_Op<"SparseReshape", Interfaces> {
   let summary = "Reshape a SparseTensor to a new dense shape.";
   let description = [{
@@ -1299,7 +1387,8 @@ def Atir_CompareOp : Atir_Op<"Compare", !listconcat([ResultsBroadcastableShape],
   let arguments = (ins
     Atir_Tensor:$lhs,
     Atir_Tensor:$rhs,
-    StrAttr:$comparisonDirection
+    StrAttr:$comparisonDirection,
+    DefaultValuedAttr<BoolAttr, "true">:$incompatibleShapeError
   );
   let results = (outs
     Atir_Tensor:$output

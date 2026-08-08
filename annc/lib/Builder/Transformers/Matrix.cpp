@@ -48,6 +48,33 @@ LogicalResult transformMatMul(const NodeInfo& node, ArrayRef<Type> outs,
   return success();
 }
 
+// atir.BatchMatMul: batch matmul with TF adj_x/adj_y (V1) or adjoint_a/b (V2)
+// mapped to the ATIR transposeA/transposeB attrs. TF serializes these as bool;
+// parse both bool and int64 forms.
+LogicalResult transformBatchMatMul(const NodeInfo& node, ArrayRef<Type> outs,
+                                   ArrayRef<Value> ins, OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.size() < 2 || outs.empty())
+    return ctx.emitError(node, "requires two inputs");
+  Location loc = ctx.loc(node.name);
+  auto readFlag = [&](const char* name) {
+    bool flag = false;
+    if (node.getAttr(name, flag)) return flag;
+    int64_t v = 0;
+    if (node.getAttr(name, v)) return v != 0;
+    return false;
+  };
+  bool transposeA = readFlag("adj_x") || readFlag("adjoint_a");
+  bool transposeB = readFlag("adj_y") || readFlag("adjoint_b");
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
+  auto op = b.create<atir::BatchMatMulOp>(
+      loc, outs[0], outputBuffer.getResult(), ins[0], ins[1],
+      b.getBoolAttr(transposeA), b.getBoolAttr(transposeB));
+  ctx.bindResult(node.outputs[0].name, op.getResult());
+  return success();
+}
+
 // atir.Reshape: target shape comes from the upstream SSA value when present,
 // otherwise from a private constant built from the static output shape.
 LogicalResult transformReshape(const NodeInfo& node, ArrayRef<Type> outs,

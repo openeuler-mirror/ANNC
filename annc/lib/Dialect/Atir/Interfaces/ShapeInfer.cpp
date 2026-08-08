@@ -521,6 +521,30 @@ void MinimumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void MaximumOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void CastOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void StringToHashBucketFastOp::inferShape() {inferEltwiseOpShape(getOperation());}
+void StringToNumberOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+void StaticRegexReplaceOp::inferShape() { inferEltwiseOpShape(getOperation()); }
+
+void StringSplitOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  if (!inputType) return;
+  int64_t inputRank = static_cast<int64_t>(inputType.getShape().size());
+  auto setResultShape = [&](Value result, ArrayRef<int64_t> shape) {
+    auto ty = dyn_cast<atir::TensorType>(result.getType());
+    if (!ty) return;
+    result.setType(cloneWithShape(ty, shape));
+  };
+  // indices: [nnz, inputRank+1]; values: [nnz]; denseShape: [inputRank+1].
+  if (getNumResults() >= 1)
+    setResultShape(getIndices(), {ShapedType::kDynamic, inputRank + 1});
+  if (getNumResults() >= 2)
+    setResultShape(getValues(), {ShapedType::kDynamic});
+  if (getNumResults() >= 3)
+    setResultShape(getDenseShape(), {inputRank + 1});
+}
+
+// Output [M, K] is fixed by the frontend (_output_shapes); interpretation
+// concretizes dynamic dims from runtime data.
+void SparseTensorDenseMatMulOp::inferShape() {}
 void LogisticOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void AbsOp::inferShape() { inferEltwiseOpShape(getOperation()); }
 void SoftmaxOp::inferShape() { inferEltwiseOpShape(getOperation()); }

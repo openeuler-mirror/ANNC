@@ -150,8 +150,23 @@ const AttrDefault kDefaultsPredGT[] = {{"comparisonDirection", defPredGT}};
 const AttrDefault kDefaultsPredGE[] = {{"comparisonDirection", defPredGE}};
 const AttrDefault kDefaultsPredLE[] = {{"comparisonDirection", defPredLE}};
 
+// Equal/NotEqual incompatible_shape_error: read as bool (TF default true) or
+// int64, mapped onto atir.Compare's incompatibleShapeError attr.
+Attribute transformIncompatibleShapeError(OpBuilder& b, const NodeInfo& node,
+                                          StringRef atirAttr) {
+  bool flag = true;
+  if (node.getAttr("incompatible_shape_error", flag))
+    return b.getBoolAttr(flag);
+  if (int64_t v; node.getAttr("incompatible_shape_error", v))
+    return b.getBoolAttr(v != 0);
+  return b.getBoolAttr(true);
+}
+
 const AttrMapping kMappingKeepDims[] = {
     {"keep_dims", "keep_dims", AttrKind::Direct, nullptr}};
+const AttrMapping kMappingIncompatibleShapeError[] = {
+    {"incompatible_shape_error", "incompatibleShapeError", AttrKind::Transform,
+     transformIncompatibleShapeError}};
 
 }  // namespace
 
@@ -450,14 +465,38 @@ void MLIRBuilder::attachMetadata(Operation* op, const NodeInfo& node,
       "Tpaddings", "Tshape", "Tperm", "Tindices", "Tsegment_ids",
       "Timage", "Tfilter", "Tkey", "Tvalue", "Tsplits", "Taxis", "Tdim",
       "N", "dtype", "value", "shape", "device",
+      // TF variable resource naming attrs: only affect resource-container
+      // addressing at TF runtime, never tensor computation. Variables are
+      // modeled as atir.variable in the inference path, so these are inert.
+      "container", "shared_name",
       "rhs_format", "num_split", "batch_dims", "num_segments", "num_buckets",
       "keepdims", "keep_dims", "sorted", "perm", "axis", "squeeze_dims",
       "begin_mask", "end_mask", "ellipsis_mask", "new_axis_mask",
       "shrink_axis_mask",
       "transpose_a", "transpose_b",
+      // BatchMatMulV2 adjoint flags: atir.BatchMatMul has no transpose
+      // support; only the default (false,false) is harmless. A non-default
+      // model silently loses the transpose — flag for future op extension.
+      "adj_x", "adj_y",
+      // SparseTensorDenseMatMul adjoint flags: consumed by the transformer and
+      // encoded into the ATIR op attrs (adjointA/adjointB).
+      "adjoint_a", "adjoint_b",
+      // DynamicPartition num_partitions: consumed indirectly by the
+      // transformer via the resolved output count.
+      "num_partitions",
+      // String-op semantics consumed by their transformers (kept in metadata
+      // and encoded into the ATIR op attrs, never applied generically).
+      "pattern", "rewrite", "replace_global", "skip_empty",
+      // SparseToDense validate_indices: ATIR assumes valid indices (semantic
+      // superset of the default validate=true; identical when indices valid).
+      "validate_indices",
       // TF validation flag on Equal/NotEqual: false broadcasts instead of
       // erroring; atir.Compare always broadcasts, a superset, so no data loss.
       "incompatible_shape_error",
+      // Cast float->int rounding flag: verified on TF 2.15 CPU that
+      // Truncate=true/false both truncate (2.5->2, 3.5->3, -2.5->-2), matching
+      // ATIR's static_cast conversion. No behavior difference to preserve.
+      "Truncate",
   };
   auto isHarmless = [&](llvm::StringRef key) {
     for (const auto& s : kHarmlessTfAttrs)

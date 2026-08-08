@@ -37,18 +37,19 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
   specs.push_back(makeSpec({"Rsqrt"}, "atir.Rsqrt", 1, 1, 1, true));
 
   // ---- comparisons (no buffer operand) ----
-  specs.push_back(
-      makeSpec({"Equal"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredEQ));
-  specs.push_back(
-      makeSpec({"Less"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredLT));
-  specs.push_back(
-      makeSpec({"NotEqual"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredNE));
-  specs.push_back(
-      makeSpec({"Greater"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredGT));
+  specs.push_back(makeSpec({"Equal"}, "atir.Compare", 2, 2, 1, false,
+                           kDefaultsPredEQ, kMappingIncompatibleShapeError));
+  specs.push_back(makeSpec({"Less"}, "atir.Compare", 2, 2, 1, false,
+                           kDefaultsPredLT, kMappingIncompatibleShapeError));
+  specs.push_back(makeSpec({"NotEqual"}, "atir.Compare", 2, 2, 1, false,
+                           kDefaultsPredNE, kMappingIncompatibleShapeError));
+  specs.push_back(makeSpec({"Greater"}, "atir.Compare", 2, 2, 1, false,
+                           kDefaultsPredGT, kMappingIncompatibleShapeError));
   specs.push_back(makeSpec({"GreaterEqual", "GreaterEqualV2"}, "atir.Compare",
-                           2, 2, 1, false, kDefaultsPredGE));
-  specs.push_back(
-      makeSpec({"LessEqual"}, "atir.Compare", 2, 2, 1, false, kDefaultsPredLE));
+                           2, 2, 1, false, kDefaultsPredGE,
+                           kMappingIncompatibleShapeError));
+  specs.push_back(makeSpec({"LessEqual"}, "atir.Compare", 2, 2, 1, false,
+                           kDefaultsPredLE, kMappingIncompatibleShapeError));
   // LogicalAnd is a bitwise-AND on bool tensors (i32+bool encoding); atir.And
   // needs no buffer operand, same as the compare family.
   specs.push_back(makeSpec({"LogicalAnd"}, "atir.And", 2, 2, 1, false));
@@ -79,7 +80,7 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
   // ---- identity / matrix ----
   specs.push_back(makeSpec({"GatherNd"}, "atir.GatherNd", 2, 2, 1, true));
   specs.push_back(makeSpec({"BatchMatMul", "BatchMatMulV2"}, "atir.BatchMatMul",
-                           2, 2, 1, true));
+                           2, 2, 1, true, {}, {}, transformBatchMatMul));
   specs.push_back(makeSpec({"Dot"}, "atir.Dot", 2, 2, 1, true));
 
   // ---- transformer-driven ops (non-1:1 shapes / special semantics) ----
@@ -125,6 +126,9 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
   // ---- sparse / segment / control flow ----
   specs.push_back(makeSpec({"SparseToDense"}, "atir.SparseToDense", 4, 4, 1,
                            true, {}, {}, transformSparseToDense));
+  specs.push_back(makeSpec({"SparseTensorDenseMatMul"},
+                           "atir.SparseTensorDenseMatMul", 4, 4, 1, true, {},
+                           {}, transformSparseTensorDenseMatMul));
   specs.push_back(makeSpec({"SparseReshape"}, "atir.SparseReshape", 3, 3, 2,
                            false, {}, {}, transformSparseReshape));
   specs.push_back(makeSpec({"SparseFillEmptyRows"}, "atir.SparseFillEmptyRows",
@@ -148,6 +152,14 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
   specs.push_back(makeSpec({"StringToHashBucketFast"},
                            "atir.StringToHashBucketFast", 1, 1, 1, true, {}, {},
                            transformStringToHashBucketFast));
+  // StringToNumber: 1:1 string->numeric; output dtype comes from the TF
+  // out_type attr via the frontend (resolved result type), no ATIR attr.
+  specs.push_back(
+      makeSpec({"StringToNumber"}, "atir.StringToNumber", 1, 1, 1, true));
+  specs.push_back(makeSpec({"StaticRegexReplace"}, "atir.StaticRegexReplace", 1,
+                           1, 1, true, {}, {}, transformStaticRegexReplace));
+  specs.push_back(makeSpec({"StringSplit"}, "atir.StringSplit", 2, 2, 3, false,
+                           {}, {}, transformStringSplit));
   specs.push_back(makeSpec({"Unique"}, "atir.Unique", 1, 1, 2, false, {}, {},
                            transformUnique));
   specs.push_back(makeSpec({"TopK", "TopKV2"}, "atir.TopK", 2, 2, 2, false, {},

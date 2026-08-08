@@ -62,6 +62,30 @@ void CompareOp::Interpret() {
     return;
   }
 
+  // TF Equal/NotEqual: incompatible_shape_error=true errors on
+  // non-broadcastable shapes instead of broadcasting. Dynamic dims are treated
+  // as compatible (frontend already resolved the output shape).
+  if (getIncompatibleShapeError()) {
+    auto broadcastable = [](ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
+      int64_t ra = static_cast<int64_t>(a.size());
+      int64_t rb = static_cast<int64_t>(b.size());
+      int64_t len = std::max(ra, rb);
+      for (int64_t i = 1; i <= len; ++i) {
+        int64_t da = i <= ra ? a[ra - i] : 1;
+        int64_t db = i <= rb ? b[rb - i] : 1;
+        if (da != db && da != 1 && db != 1 &&
+            da != ShapedType::kDynamic && db != ShapedType::kDynamic)
+          return false;
+      }
+      return true;
+    };
+    if (!broadcastable(lhsType.getShape(), rhsType.getShape())) {
+      emitOpError(
+          "Compare inputs are not broadcast-compatible (incompatible_shape_error=true)");
+      return;
+    }
+  }
+
   StringRef dir = getComparisonDirection();
   auto resultType = getResult().getType();
   auto outputShape = resultType.getShape();

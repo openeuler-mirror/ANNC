@@ -77,6 +77,10 @@ static bool dispatchOp(Operation &op) {
       DISPATCH_ATIR_OP(SparseSegmentMeanOp)
       DISPATCH_ATIR_OP(SparseFillEmptyRowsOp)
       DISPATCH_ATIR_OP(StringToHashBucketFastOp)
+      DISPATCH_ATIR_OP(StringToNumberOp)
+      DISPATCH_ATIR_OP(StaticRegexReplaceOp)
+      DISPATCH_ATIR_OP(StringSplitOp)
+      DISPATCH_ATIR_OP(SparseTensorDenseMatMulOp)
       .Default([](Operation *op) {
         llvm::errs() << "Warning: No interpreter registered for op: " 
                      << op->getName() << "\n";
