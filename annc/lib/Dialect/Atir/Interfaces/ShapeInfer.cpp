@@ -786,6 +786,8 @@ void ShapeOp::inferShape() {
 
 void SizeOp::inferShape() { (void)setSingleResultShape(getOperation(), {}); }
 
+void RankOp::inferShape() { (void)setSingleResultShape(getOperation(), {}); }
+
 void FillOp::inferShape() {
   auto shapeInTy = dyn_cast<atir::TensorType>(getShapeInput().getType());
   if (!shapeInTy) {

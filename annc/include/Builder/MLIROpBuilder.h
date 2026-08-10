@@ -79,6 +79,9 @@ class MLIRBuilder {
   const OpSpec* lookupSpec(llvm::StringRef opType) const;
   mlir::LogicalResult addNode(const NodeInfo& node);
   mlir::LogicalResult buildConstantNode(const NodeInfo& node);
+  // Fallback for TF ops with no OpSpec: emit a warning and build an
+  // atir.opaque placeholder that passes inputs/outputs through structurally.
+  mlir::LogicalResult buildOpaqueOp(const NodeInfo& node);
   mlir::FailureOr<Operation*> buildGenericOp(const OpSpec& spec,
                                              const NodeInfo& node,
                                              llvm::ArrayRef<Type> outs,

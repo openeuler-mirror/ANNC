@@ -80,12 +80,9 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
     }
     const bool is_input =
         node.op == "Placeholder" || node.op == "PlaceholderV2";
-    const bool is_const = node.op == "Const";
-    if (!is_input && !is_const && !annc::MLIRBuilder::isSupportedOp(node.op)) {
-      error = "unsupported op '" + node.op + "' at node '" + node.name +
-              "': no ATIR lowering; CustomizeOp fallback is disabled";
-      return false;
-    }
+    // Ops without an OpSpec row are no longer fatal here: the builder lowers
+    // them to atir.opaque with a warning (see MLIRBuilder::buildOpaqueOp),
+    // keeping the graph structurally convertible for the fusion stage.
 
     annc::NodeInfo info;
     info.name = node.name;
@@ -120,7 +117,7 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
       error = "node '" + node.name + "' has no resolved outputs";
       return false;
     }
-    if (node.source->op() == "Const") {
+    if (node.source->op() == "Const" || node.source->op() == "HostConst") {
       const auto value = node.source->attr().find("value");
       if (value == node.source->attr().end()) {
         error = "Const node '" + node.name + "' has no TensorProto value";

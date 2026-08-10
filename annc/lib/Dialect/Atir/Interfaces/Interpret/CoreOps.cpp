@@ -156,6 +156,21 @@ void SizeOp::Interpret() {
   }
 }
 
+void RankOp::Interpret() {
+  this->inferShape();
+  auto inputType = dyn_cast<atir::TensorType>(getInput().getType());
+  auto resultType = dyn_cast<atir::TensorType>(getOutput().getType());
+  if (!inputType || !resultType) {
+    emitOpError("Rank expects tensor input and output");
+    return;
+  }
+  std::vector<int64_t> value = {
+      static_cast<int64_t>(inputType.getShape().size())};
+  if (failed(setDenseIntResult(resultType, {}, value))) {
+    emitOpError("Rank output element type must be integer or index");
+  }
+}
+
 void FillOp::Interpret() {
   inferShape();
   atir::TensorType shapeTy;

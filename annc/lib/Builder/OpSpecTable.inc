@@ -6,8 +6,10 @@
 // alongside their transformer implementations.
 
 static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
-  // Constant: raw tensor bytes decoded by buildConstantNode.
-  specs.push_back(makeSpec({"Const", "Constant"}, "atir.constant", 0, 0, 1,
+  // Constant: raw tensor bytes decoded by buildConstantNode. HostConst is
+  // the host-memory variant emitted by TF freezing; same decoding path.
+  specs.push_back(makeSpec({"Const", "Constant", "HostConst"}, "atir.constant",
+                           0, 0, 1,
                            /*needsBuffer=*/false, {}, {}, nullptr,
                            OpKind::Constant));
   // Generic 1:1 build with a buffer operand and defaulted attributes.
@@ -15,6 +17,8 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
                            kUnbounded, 1, /*needsBuffer=*/true, kDefaultsAdd));
   // Generic 1:1 build without a buffer operand.
   specs.push_back(makeSpec({"Shape"}, "atir.Shape", 1, 1, 1, false));
+  // Rank: scalar int32 result, no buffer operand (same family as Shape/Size).
+  specs.push_back(makeSpec({"Rank"}, "atir.Rank", 1, 1, 1, false));
   // Identity: also required by the frontend's per-output Identity boundary.
   specs.push_back(
       makeSpec({"Identity", "IdentityN", "ReadVariableOp", "StopGradient"},
@@ -166,6 +170,11 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
                            {}, transformTopK));
   specs.push_back(makeSpec({"Merge"}, "atir.Merge", 1, kUnbounded, 2, false, {},
                            {}, transformMerge));
+  // Switch: control-flow routing (data, pred) -> (false_out, true_out). Both
+  // branches carry the same data, so C0 maps them to a single atir.Identity
+  // (numerically lossless for static inference graphs).
+  specs.push_back(makeSpec({"Switch"}, "atir.Identity", 2, 2, 2, false, {}, {},
+                           transformSwitch));
   specs.push_back(makeSpec({"DynamicPartition"}, "atir.DynamicPartition", 2, 2,
                            kVariableOutputs, false, {}, {},
                            transformDynamicPartition));

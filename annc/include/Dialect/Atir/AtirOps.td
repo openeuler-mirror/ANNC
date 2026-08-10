@@ -81,6 +81,26 @@ def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
   }];
 }
 
+def Atir_OpaqueOp : Atir_Op<"opaque"> {
+  let summary = "opaque placeholder for an unrecognized TF op";
+  let description = [{
+    Placeholder for a TF op that has no ATIR lowering yet. Inputs and
+    outputs pass through structurally (types/shapes from graph facts) so
+    the graph can still convert; the node is expected to be absorbed by a
+    fusion pattern and cut away. A warning is emitted at conversion time;
+    if the op survives to code generation (no fusion matched), the
+    lowering pass reports it there instead of silently dropping it.
+  }];
+  let arguments = (ins Variadic<Atir_Tensor>:$inputs,
+                       StrAttr:$opType,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs Variadic<Atir_Tensor>:$output);
+  let assemblyFormat = [{
+    ( `(` $inputs^ `)` )?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def Atir_ConstantOp : Atir_Op<"constant", Interfaces> {
   let summary = "declare or define a constant";
   let description = [{}];
@@ -382,6 +402,23 @@ def Atir_ShapeOp : Atir_Op<"Shape", Interfaces> {
     Atir_Tensor:$input
   );
   let results = (outs 
+    Atir_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_RankOp : Atir_Op<"Rank", Interfaces> {
+  let summary = "Returns the rank of a tensor.";
+  let description = [{
+    Given a tensor input, this operation generates a scalar tensor holding
+    the number of dimensions (rank) of the input.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input
+  );
+  let results = (outs
     Atir_Tensor:$output
   );
   let assemblyFormat = [{

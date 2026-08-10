@@ -116,6 +116,12 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
                {{"int64", {1, 2}}, {"string", {1}}, {"int64", {1}}});
   if (op == "Unique")
     return set({{"float32", {2}}}, {{"float32", {2}}, {"int32", {2}}});
+  if (op == "Rank")
+    return set({{"float32", {2}}}, {{"int32", {}}});
+  // Switch routes data to false/true branches; both outputs equal the input.
+  if (op == "Switch")
+    return set({{"float32", {2}}, {"bool", {}}},
+               {{"float32", {2}}, {"float32", {2}}});
   if (op == "TopK" || op == "TopKV2")
     return set({{"float32", {4}}, {"int32", {}}},
                {{"float32", {2}}, {"int32", {2}}});
@@ -216,7 +222,7 @@ std::vector<NodeInfo> makeGraph(const OpSpec& spec, const std::string& tfOp) {
   }
   // Constant rows need real bytes now that the builder rejects empty
   // raw_data instead of silently zero-filling.
-  if (tfOp == "Const" || tfOp == "Constant") {
+  if (tfOp == "Const" || tfOp == "Constant" || tfOp == "HostConst") {
     const auto& so = op.outputs[0];
     size_t elemCount = 1;
     for (int64_t d : so.shape) elemCount *= static_cast<size_t>(d);
