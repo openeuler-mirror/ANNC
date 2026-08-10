@@ -179,6 +179,8 @@ bool resolveDtype(const TfNode& node, int output_index,
   if (source.op() == "LogicalAnd") return setType(tensorflow::DT_BOOL);
   if (source.op() == "StringToHashBucketFast")
     return setType(tensorflow::DT_INT64);
+  // Rank: scalar int32 by TF signature (no out_type attr to infer from).
+  if (source.op() == "Rank") return setType(tensorflow::DT_INT32);
   if (source.op() == "StaticRegexReplace")
     return setType(tensorflow::DT_STRING);
   // StringSplit emits a sparse triplet with no type facts: indices [nnz, rank+1]
@@ -254,7 +256,7 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       error = "parsed node '" + node.name + "' has no source NodeDef";
       return false;
     }
-    if (node.source->op() == "Const") {
+    if (node.source->op() == "Const" || node.source->op() == "HostConst") {
       const auto value = node.source->attr().find("value");
       if (value == node.source->attr().end() ||
           value->second.value_case() != AttrValue::kTensor) {

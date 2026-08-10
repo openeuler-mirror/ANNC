@@ -56,6 +56,7 @@ static bool dispatchOp(Operation &op) {
       DISPATCH_ATIR_OP(CastOp)
       DISPATCH_ATIR_OP(ShapeOp)
       DISPATCH_ATIR_OP(SizeOp)
+      DISPATCH_ATIR_OP(RankOp)
       DISPATCH_ATIR_OP(TileOp)
       DISPATCH_ATIR_OP(ZerosLikeOp)
       DISPATCH_ATIR_OP(BatchMatMulOp)

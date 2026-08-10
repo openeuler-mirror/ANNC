@@ -359,8 +359,7 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   const std::string& type = node.op_type;
 
   const OpSpec* spec = lookupSpec(type);
-  if (spec == nullptr)
-    return emitNodeError(node, "unsupported op '" + type + "'");
+  if (spec == nullptr) return buildOpaqueOp(node);
 
   if (spec->kind == OpKind::Constant) return buildConstantNode(node);
 
@@ -435,6 +434,61 @@ FailureOr<Operation*> MLIRBuilder::buildGenericOp(const OpSpec& spec,
   for (unsigned i = 0; i < node.outputs.size(); ++i)
     tensorValues_[node.outputs[i].name] = op->getResult(i);
   return op;
+}
+
+// Fallback for TF ops with no OpSpec row: the graph still converts. The node
+// becomes an atir.opaque placeholder that passes inputs/outputs through
+// structurally (types/shapes from graph facts). A warning flags the op for
+// later per-op addition; if no fusion pattern absorbs it, the lowering pass
+// reports it instead of silently dropping it.
+LogicalResult MLIRBuilder::buildOpaqueOp(const NodeInfo& node) {
+  mlir::emitWarning(annc::getLoc(builder_.getContext(), node.name))
+      << "unsupported op '" << node.op_type << "' at node '" << node.name
+      << "' lowered to atir.opaque: no ATIR semantics yet, expected to be "
+         "absorbed by fusion";
+
+  SmallVector<Type> outs;
+  outs.reserve(node.outputs.size());
+  for (unsigned i = 0; i < node.outputs.size(); ++i) {
+    auto type = getTensorType(node, i);
+    if (failed(type)) return failure();
+    outs.push_back(*type);
+  }
+
+  SmallVector<Value> ins;
+  ins.reserve(node.inputs.size());
+  for (const auto& input : node.inputs) {
+    Value val = resolveValue(input);
+    if (val == nullptr)
+      return emitNodeError(node, "unknown input tensor '" + input + "'");
+    ins.push_back(val);
+  }
+
+  OperationState state(annc::getLoc(builder_.getContext(), node.name),
+                       "atir.opaque");
+  state.operands.append(ins.begin(), ins.end());
+  state.types.append(outs.begin(), outs.end());
+  state.addAttribute(builder_.getStringAttr("opType"),
+                     builder_.getStringAttr(node.op_type));
+  // Keep the raw TF attrs in metadata for converter recovery.
+  SmallVector<NamedAttribute> attrs;
+  attrs.push_back(
+      builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)));
+  attrs.push_back(
+      builder_.getNamedAttr("tf.op", builder_.getStringAttr(node.op_type)));
+  for (const auto& [key, value] : node.attrs) {
+    if (key == "tf.name" || key == "tf.op" || key.empty() || key[0] == '_')
+      continue;
+    attrs.push_back(builder_.getNamedAttr(
+        key, builder_.getStringAttr(tfAttrValueToString(value))));
+  }
+  state.addAttribute(builder_.getStringAttr("metadata"),
+                     DictionaryAttr::get(builder_.getContext(), attrs));
+
+  Operation* op = builder_.create(state);
+  for (unsigned i = 0; i < node.outputs.size(); ++i)
+    tensorValues_[node.outputs[i].name] = op->getResult(i);
+  return success();
 }
 
 LogicalResult MLIRBuilder::applyAttrMappings(Operation* op,

@@ -135,6 +135,29 @@ LogicalResult transformMerge(const NodeInfo& node, ArrayRef<Type> outs,
   return success();
 }
 
+// atir.Identity alias for TF Switch: Switch(data, pred) routes data to its
+// false/true outputs without changing the value. In a static inference graph
+// both branches are evaluated and carry identical data, so C0 maps both
+// outputs onto a single Identity of `data` — numerically lossless. The
+// pred (ins[1]) is intentionally unused; its routing semantics only matter
+// for dynamic control flow, which ATIR's static interpreter cannot express.
+LogicalResult transformSwitch(const NodeInfo& node, ArrayRef<Type> outs,
+                              ArrayRef<Value> ins, OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.empty())
+    return ctx.emitError(node, "Switch requires data and pred inputs");
+  Location loc = ctx.loc(node.name);
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
+  auto identity = b.create<atir::IdentityOp>(loc, outs[0],
+                                             outputBuffer.getResult(), ins[0]);
+  if (node.outputs.size() >= 1)
+    ctx.bindResult(node.outputs[0].name, identity.getResult());
+  if (node.outputs.size() >= 2)
+    ctx.bindResult(node.outputs[1].name, identity.getResult());
+  return success();
+}
+
 // atir.DynamicPartition: splits data by partition ids.
 LogicalResult transformDynamicPartition(const NodeInfo& node,
                                         ArrayRef<Type> outs,
