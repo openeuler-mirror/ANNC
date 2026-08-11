@@ -5,8 +5,10 @@ using namespace mlir;
 using namespace atir;
 
 struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
-  MatmulToCustomCallRewrite(MLIRContext* context, PatternBenefit benefit = 8)
-      : CustomFusionPatternBase<MatMulOp>(context, benefit){}
+  MatmulToCustomCallRewrite(MLIRContext *context,
+                            const CustomOpTypeFilter &customOpFilter,
+                            PatternBenefit benefit = 8)
+      : CustomFusionPatternBase<MatMulOp>(context, customOpFilter, benefit) {}
 
   mlir::LogicalResult matchFusion(
       MatMulOp anchor,
@@ -34,7 +36,7 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
 
   std::string getCustomOpName(
       MatMulOp anchor,
-      llvm::ArrayRef<mlir::Operation *> fusedOps) const override{
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
     if (fusedOps.size() == 3) {
       return "MatMulAddRelu";
     }

@@ -8,6 +8,9 @@
 ///   struct MyPattern : public CustomFusionPatternBase<AnchorOp> { ... };
 ///   REGISTER_CUSTOM_PATTERN(MyPattern)
 ///
+/// PatternType must accept `(MLIRContext *, const CustomOpTypeFilter &)`,
+/// allowing FastCodegen's type-level policy to reach the pattern.
+///
 /// For patterns that only make sense when a specific kernel library is
 /// compiled in, wrap the registration with the corresponding macro guard:
 ///

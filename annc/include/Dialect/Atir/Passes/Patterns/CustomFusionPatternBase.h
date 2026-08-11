@@ -1,14 +1,15 @@
 #ifndef ANNC_CUSTOMFUSIONPATTERNBASE_H
 #define ANNC_CUSTOMFUSIONPATTERNBASE_H
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "Dialect/Atir//AtirOps.h"
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/Pass/PassManager.h"
+#include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
+#include "Kernel/KernelPriorityResolver.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
-#include "Kernel/KernelPriorityResolver.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 namespace atir {
 
@@ -41,9 +42,14 @@ namespace atir {
 //      operands.
 template <typename AnchorOp>
 struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
+  CustomFusionPatternBase(MLIRContext *context, PatternBenefit benefit = 9)
+      : OpRewritePattern<AnchorOp>(context, benefit) {}
 
-  CustomFusionPatternBase(MLIRContext* context, PatternBenefit benefit = 9)
-      :OpRewritePattern<AnchorOp>(context, benefit) {}
+  CustomFusionPatternBase(MLIRContext *context,
+                          const CustomOpTypeFilter &customOpFilter,
+                          PatternBenefit benefit = 9)
+      : OpRewritePattern<AnchorOp>(context, benefit),
+        customOpFilter(customOpFilter) {}
 
  public:
   virtual mlir::LogicalResult matchFusion(
@@ -51,20 +57,24 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const = 0;
 
   virtual std::string getCustomOpName(
-      AnchorOp anchor,
-      llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
+      AnchorOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
 
   virtual CustomOpSchema getCustomOpSchema(
-      AnchorOp anchor,
-      llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
+      AnchorOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps) const = 0;
 
  public:
   mlir::LogicalResult matchAndRewrite(
-      AnchorOp anchor,
-      mlir::PatternRewriter &rewriter) const override {
+      AnchorOp anchor, mlir::PatternRewriter &rewriter) const override {
     SmallVector<Operation *> fusedOps;
     auto matchres = matchFusion(anchor, fusedOps);
     if (failed(matchres)) {
+      return failure();
+    }
+
+    auto customOpName = getCustomOpName(anchor, fusedOps);
+    if (!customOpFilter.isEnabled(customOpName)) {
+      llvm::dbgs() << "ANNC: Custom op type '" << customOpName
+                   << "' filtered by FastCodegen type policy, skipping rewrite\n";
       return failure();
     }
 
@@ -146,17 +156,19 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       resultTypes.push_back(value.getType());
     }
 
-    auto customOpName = getCustomOpName(anchor, fusedOps);
     auto schema = getCustomOpSchema(anchor, fusedOps);
     auto metadata = schema.toMetadata(rewriter.getContext());
 
     auto module = anchor->template getParentOfType<mlir::ModuleOp>();
-    auto attr = module->template getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
+    auto attr =
+        module->template getAttrOfType<mlir::BoolAttr>("annc.enable_kdnn");
     bool enableKdnn = attr && attr.getValue();
     annc::kernels::KernelResolveRequest req;
     req.op_type = customOpName;
-    req.type_constraints = inferTypeConstraintsFromSchema(metadata, inputValues);
-    if (auto rhsFormat = anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
+    req.type_constraints =
+        inferTypeConstraintsFromSchema(metadata, inputValues);
+    if (auto rhsFormat =
+            anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
       req.rhs_format = rhsFormat.getValue().str();
     }
     if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
@@ -188,12 +200,14 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
 
     auto customCallOp = rewriter.create<CustomizeOp>(
         anchor.getLoc(), resultTypes, inputValues, callee, metadata);
-    if (auto rhsFormat = anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
+    if (auto rhsFormat =
+            anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
       customCallOp->setAttr("rhs_format", rhsFormat);
     }
 
     // Replace escaping SSA results with the CustomizeOp's results.
-    for (auto [oldV, newV] : llvm::zip(outputValues, customCallOp.getResults())) {
+    for (auto [oldV, newV] :
+         llvm::zip(outputValues, customCallOp.getResults())) {
       rewriter.replaceAllUsesWith(oldV, newV);
     }
 
@@ -224,7 +238,10 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
 
     return success();
   }
+
+ private:
+  CustomOpTypeFilter customOpFilter;
 };
 
-}// namespace atir
+}  // namespace atir
 #endif  // ANNC_CUSTOMFUSIONPATTERNBASE_H
