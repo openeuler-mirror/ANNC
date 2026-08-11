@@ -61,7 +61,11 @@ def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
            /*defaultValue=*/"false",
            "Enable KDNN optimized kernels where available. "
            "Kernels with a KDNN implementation will use it; "
-           "others fall back to aarch64.">
+           "others fall back to aarch64.">,
+    ListOption<"enabledCustomOps", "enable-custom-ops", "std::string",
+               "Only rewrite the listed custom op types. Empty means all types.">,
+    ListOption<"disabledCustomOps", "disable-custom-ops", "std::string",
+               "Do not rewrite the listed custom op types. Takes precedence over enable-custom-ops.">
   ];
 }
 

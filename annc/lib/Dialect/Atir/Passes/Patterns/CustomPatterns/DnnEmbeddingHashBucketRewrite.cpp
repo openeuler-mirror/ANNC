@@ -33,8 +33,10 @@ using namespace atir;
 struct DnnEmbeddingHashBucketRewrite
     : public CustomFusionPatternBase<StringToHashBucketFastOp> {
   DnnEmbeddingHashBucketRewrite(MLIRContext *context,
+                                const CustomOpTypeFilter &customOpFilter,
                                 PatternBenefit benefit = 8)
-      : CustomFusionPatternBase<StringToHashBucketFastOp>(context, benefit) {}
+      : CustomFusionPatternBase<StringToHashBucketFastOp>(
+            context, customOpFilter, benefit) {}
 
   mlir::LogicalResult matchFusion(
       StringToHashBucketFastOp anchor,
