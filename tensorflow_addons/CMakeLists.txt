@@ -9,10 +9,37 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ANNC_FOR_TF_SERVING "Build for TF Serving (LD_PRELOAD mode, no TF linkage)" ON)
 option(ANNC_WITH_THREADPOOL "Include ThreadPool in annc_fused_op" OFF)
+set(ANNC_TENSORFLOW_CXX11_ABI "1" CACHE STRING
+    "_GLIBCXX_USE_CXX11_ABI value required by the TensorFlow host")
+set(ANNC_TENSORFLOW_BAZEL_BIN "" CACHE PATH
+    "TensorFlow bazel-bin directory containing generated C++ headers")
+set(ANNC_TENSORFLOW_BAZEL_ROOT "" CACHE PATH
+    "TensorFlow Bazel execroot containing external dependency headers")
+set(TENSORFLOW_ROOT "" CACHE PATH
+    "ANNC TensorFlow SDK root containing include/ and share/annc/manifest.json")
 
-# ── TF Serving mode (LD_PRELOAD, no TF linkage, ABI=0) ───────────────────────
+# ── TF Serving mode (LD_PRELOAD, no TF linkage) ───────────────────────
 if(ANNC_FOR_TF_SERVING)
-    if(DEFINED TENSORFLOW_INCLUDE_DIRS)
+    set(_annc_tf_sdk FALSE)
+    if(TENSORFLOW_ROOT)
+        get_filename_component(_annc_tf_sdk_root "${TENSORFLOW_ROOT}" ABSOLUTE)
+        set(TF_INCLUDE_DIR "${_annc_tf_sdk_root}/include")
+        set(_annc_tf_manifest "${_annc_tf_sdk_root}/share/annc/manifest.json")
+        if(NOT EXISTS "${TF_INCLUDE_DIR}/tensorflow"
+           OR NOT EXISTS "${_annc_tf_manifest}")
+            message(FATAL_ERROR
+                "TENSORFLOW_ROOT must contain include/tensorflow and "
+                "share/annc/manifest.json: ${_annc_tf_sdk_root}")
+        endif()
+        file(READ "${_annc_tf_manifest}" _annc_tf_manifest_json)
+        string(JSON _annc_tf_sdk_abi GET "${_annc_tf_manifest_json}" cxx11_abi)
+        if(NOT _annc_tf_sdk_abi STREQUAL "${ANNC_TENSORFLOW_CXX11_ABI}")
+            message(FATAL_ERROR
+                "ANNC_TENSORFLOW_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI} "
+                "does not match SDK ABI=${_annc_tf_sdk_abi}")
+        endif()
+        set(_annc_tf_sdk TRUE)
+    elseif(DEFINED TENSORFLOW_INCLUDE_DIRS)
         set(TF_INCLUDE_DIR ${TENSORFLOW_INCLUDE_DIRS})
     else()
         execute_process(
@@ -26,7 +53,8 @@ if(ANNC_FOR_TF_SERVING)
         message(FATAL_ERROR "TensorFlow headers not found at ${TF_INCLUDE_DIR}")
     endif()
 
-    message(STATUS "TF Serving mode: using TF headers from ${TF_INCLUDE_DIR} with ABI=0")
+    message(STATUS "TF Serving mode: using TF headers from ${TF_INCLUDE_DIR} "
+                   "with ABI=${ANNC_TENSORFLOW_CXX11_ABI}")
 
     include_directories(
         ${TF_INCLUDE_DIR}
@@ -35,7 +63,25 @@ if(ANNC_FOR_TF_SERVING)
         ${CMAKE_CURRENT_SOURCE_DIR}/../annc/include
     )
 
-    add_compile_options(-D_GLIBCXX_USE_CXX11_ABI=0)
+    if(NOT _annc_tf_sdk AND ANNC_TENSORFLOW_BAZEL_BIN)
+        include_directories(${ANNC_TENSORFLOW_BAZEL_BIN})
+        include_directories(${ANNC_TENSORFLOW_BAZEL_BIN}/external/local_xla)
+        include_directories(${ANNC_TENSORFLOW_BAZEL_BIN}/external/local_tsl)
+    endif()
+    if(NOT _annc_tf_sdk AND ANNC_TENSORFLOW_BAZEL_ROOT)
+        include_directories(
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/protobuf~/src
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/protobuf~/src/google/protobuf/_virtual_includes/protobuf
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/protobuf~/src/google/protobuf/_virtual_includes/protobuf_lite
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/abseil-cpp~
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/local_xla
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/local_tsl
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/eigen_archive
+            ${ANNC_TENSORFLOW_BAZEL_ROOT}/external/ml_dtypes_py
+        )
+    endif()
+
+    add_compile_options(-D_GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI})
 
     # LLVM's HandleLLVMOptions may add -Wl,-z,defs globally, which rejects
     # unresolved symbols when linking shared libraries.  In TF Serving mode the
