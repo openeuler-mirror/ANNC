@@ -562,7 +562,10 @@ allowlist；命令行和环境的 denylist 会合并。
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `TENSORFLOW_LIBRARY_DIR` | TensorFlow 库目录 | 自动检测 | CMake 配置时显式指定 TF 库路径 |
+| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
+| `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
+| `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
+| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | `1` | TensorFlow C++11 ABI |
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
