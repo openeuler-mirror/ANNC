@@ -16,6 +16,10 @@ CXX_COMPILER="${CXX:-g++}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_DEPS="YES"
 REGEN_TF_PROTOS="NO"
+ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
+ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
+ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
+ANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI:-1}"
 
 # Internal flags used to detect whether the user explicitly passed certain
 # options on the command line.  These are not user-tunable defaults.
@@ -112,6 +116,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
+      echo "  TensorFlow addon env vars:"
+      echo "    ANNC_TENSORFLOW_PRELOAD=ON|OFF        TF addon preload mode (default: ON)"
+      echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
+      echo "    ANNC_TENSORFLOW_LIBRARIES=<list>      TensorFlow libraries for linked mode"
+      echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: 1)"
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -153,6 +162,21 @@ if [[ -n "${_user_kdnn_lib_variant_set}" && \
       "${KDNN_LIB_VARIANT}" != "sve2-threadpool" && \
       "${KDNN_LIB_VARIANT}" != "sve2-omp" ]]; then
   echo "ERROR: --kdnn-lib-variant must be one of: sve-threadpool, sve-omp, sve2-threadpool, sve2-omp, got '${KDNN_LIB_VARIANT}'" >&2
+  exit 1
+fi
+
+if [[ "${ANNC_TENSORFLOW_PRELOAD}" != "ON" && "${ANNC_TENSORFLOW_PRELOAD}" != "OFF" ]]; then
+  echo "ERROR: ANNC_TENSORFLOW_PRELOAD must be ON or OFF, got '${ANNC_TENSORFLOW_PRELOAD}'" >&2
+  exit 1
+fi
+
+if [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
+  echo "ERROR: ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1, got '${ANNC_TENSORFLOW_CXX11_ABI}'" >&2
+  exit 1
+fi
+
+if [[ "${ANNC_TENSORFLOW_PRELOAD}" == "ON" && -n "${ANNC_TENSORFLOW_LIBRARIES}" ]]; then
+  echo "ERROR: ANNC_TENSORFLOW_LIBRARIES is invalid when ANNC_TENSORFLOW_PRELOAD=ON." >&2
   exit 1
 fi
 
@@ -448,6 +472,10 @@ check_cache_consistency() {
     "ANNC_KDNN_SOURCE:${KDNN_SOURCE}"
     "ANNC_KDNN_DIR:${KDNN_DIR}"
     "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
+    "ANNC_TENSORFLOW_PRELOAD:${ANNC_TENSORFLOW_PRELOAD}"
+    "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
+    "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
+    "ANNC_TENSORFLOW_CXX11_ABI:${ANNC_TENSORFLOW_CXX11_ABI}"
   )
 
   for entry in "${cache_checks[@]}"; do
@@ -557,6 +585,10 @@ else
   elif [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
     echo "  KDNN Lib Variant: ${KDNN_LIB_VARIANT}"
   fi
+  echo "  TensorFlow Preload: ${ANNC_TENSORFLOW_PRELOAD}"
+  echo "  TensorFlow Include Dir: ${ANNC_TENSORFLOW_INCLUDE_DIR:-<auto>}"
+  echo "  TensorFlow Libraries: ${ANNC_TENSORFLOW_LIBRARIES:-<none>}"
+  echo "  TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI}"
 
   cmake .. \
     -G Ninja \
@@ -566,6 +598,10 @@ else
     -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
+    -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
+    -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
+    -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \
+    -DANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI}" \
     -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
     -DANNC_KDNN_DIR="${KDNN_DIR}" \
     -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \
