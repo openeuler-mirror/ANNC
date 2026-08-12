@@ -179,31 +179,4 @@ bool TensorProtoDecoder::decodeStrings(const tensorflow::TensorProto& tensor,
   return true;
 }
 
-std::string base64Encode(const std::vector<uint8_t>& data) {
-  static const char* characters =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string result;
-  result.reserve((data.size() + 2) / 3 * 4);
-  std::size_t i = 0;
-  for (; i + 2 < data.size(); i += 3) {
-    const uint32_t value = (static_cast<uint32_t>(data[i]) << 16) |
-                           (static_cast<uint32_t>(data[i + 1]) << 8) |
-                           static_cast<uint32_t>(data[i + 2]);
-    result.push_back(characters[(value >> 18) & 0x3f]);
-    result.push_back(characters[(value >> 12) & 0x3f]);
-    result.push_back(characters[(value >> 6) & 0x3f]);
-    result.push_back(characters[value & 0x3f]);
-  }
-  if (i < data.size()) {
-    uint32_t value = static_cast<uint32_t>(data[i]) << 16;
-    if (i + 1 < data.size()) value |= static_cast<uint32_t>(data[i + 1]) << 8;
-    result.push_back(characters[(value >> 18) & 0x3f]);
-    result.push_back(characters[(value >> 12) & 0x3f]);
-    result.push_back(i + 1 < data.size() ? characters[(value >> 6) & 0x3f]
-                                         : '=');
-    result.push_back('=');
-  }
-  return result;
-}
-
 }  // namespace annc::tf2atir

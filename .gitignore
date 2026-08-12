@@ -23,6 +23,8 @@ tensorflow_addons/logs
 tensorflow_addons/build
 .cache/
 .claude/
+.trae/
 docs/codex/
 docs/superpowers/
 benchmark/
+/Testing/

@@ -1,4 +1,4 @@
-file(GLOB _srcs *.cpp)
+file(GLOB_RECURSE _srcs *.cpp)
 
 add_mlir_library(AtirBuilder
     ${_srcs}

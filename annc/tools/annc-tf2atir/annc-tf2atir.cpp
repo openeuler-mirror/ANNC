@@ -101,6 +101,20 @@ int main(int argc, char **argv) {
   context.loadAllAvailableDialects();
   context.allowsUnregisteredDialects();
 
+  // The MLIR diagnostic engine drops Warning/Note diagnostics when no
+  // handler is registered; only Errors reach stderr by default. The builder
+  // relies on emitWarning for unmapped-attribute reporting, so surface
+  // warnings here. Errors keep the default formatting (return failure()).
+  context.getDiagEngine().registerHandler([](Diagnostic& diag) {
+    if (diag.getSeverity() == DiagnosticSeverity::Error) return failure();
+    llvm::errs() << diag.getLocation() << ": "
+                 << (diag.getSeverity() == DiagnosticSeverity::Warning
+                         ? "warning: "
+                         : "note: ")
+                 << diag << '\n';
+    return success();
+  });
+
   auto builder = std::make_shared<annc::ANNCBuilder>(&context);
   auto module = builder->buildModule("main", nodes);
   if (!module) {

@@ -56,6 +56,7 @@ static bool dispatchOp(Operation &op) {
       DISPATCH_ATIR_OP(CastOp)
       DISPATCH_ATIR_OP(ShapeOp)
       DISPATCH_ATIR_OP(SizeOp)
+      DISPATCH_ATIR_OP(RankOp)
       DISPATCH_ATIR_OP(TileOp)
       DISPATCH_ATIR_OP(ZerosLikeOp)
       DISPATCH_ATIR_OP(BatchMatMulOp)
@@ -77,6 +78,10 @@ static bool dispatchOp(Operation &op) {
       DISPATCH_ATIR_OP(SparseSegmentMeanOp)
       DISPATCH_ATIR_OP(SparseFillEmptyRowsOp)
       DISPATCH_ATIR_OP(StringToHashBucketFastOp)
+      DISPATCH_ATIR_OP(StringToNumberOp)
+      DISPATCH_ATIR_OP(StaticRegexReplaceOp)
+      DISPATCH_ATIR_OP(StringSplitOp)
+      DISPATCH_ATIR_OP(SparseTensorDenseMatMulOp)
       .Default([](Operation *op) {
         llvm::errs() << "Warning: No interpreter registered for op: " 
                      << op->getName() << "\n";
