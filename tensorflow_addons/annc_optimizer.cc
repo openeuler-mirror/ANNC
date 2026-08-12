@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <signal.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cctype>
@@ -71,6 +72,20 @@ std::string SanitizePathComponent(const std::string& value) {
   if (out.empty()) out = "graph";
   if (out.size() > 96) out.resize(96);
   return out;
+}
+
+bool IsRestoreFetch(const std::string& fetch) {
+  std::string normalized = fetch;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return normalized.find("restore") != std::string::npos;
+}
+
+bool ContainsAnncFusedNode(const GraphDef& graph) {
+  return std::any_of(graph.node().begin(), graph.node().end(),
+                     [](const NodeDef& node) {
+                       return node.op() == "ANNCFused";
+                     });
 }
 
 }  // namespace
@@ -210,6 +225,20 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
   }
 
   LOG(INFO) << "Running ANNCOptimizer on graph: " << grappler_item.id;
+
+  for (const std::string& fetch : grappler_item.fetch) {
+    if (IsRestoreFetch(fetch)) {
+      LOG(INFO) << "ANNCOptimizer skipping restore graph fetch: " << fetch;
+      *output = grappler_item.graph;
+      return OkStatus();
+    }
+  }
+
+  if (ContainsAnncFusedNode(grappler_item.graph)) {
+    LOG(INFO) << "ANNCOptimizer skipping graph that already contains ANNCFused";
+    *output = grappler_item.graph;
+    return OkStatus();
+  }
 
   GraphDef input_graph = grappler_item.graph;
 
