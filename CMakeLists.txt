@@ -116,52 +116,6 @@ include_directories(${pybind11_INCLUDE_DIRS})
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 find_package(nanobind CONFIG REQUIRED)
 
-set(TENSORFLOW_LIBRARY_DIR $ENV{TENSORFLOW_LIBRARY_DIR})
-if(NOT TENSORFLOW_LIBRARY_DIR)
-  execute_process(
-    COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_lib())"
-    OUTPUT_VARIABLE TENSORFLOW_LIBRARY_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-endif()
-
-execute_process(
-  COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_include())"
-  OUTPUT_VARIABLE TENSORFLOW_INCLUDE_DIRS
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-if(NOT TENSORFLOW_INCLUDE_DIRS)
-  set(TENSORFLOW_INCLUDE_DIRS "${TENSORFLOW_LIBRARY_DIR}/include")
-endif()
-
-# Allow finding versioned TF shared libraries when the unversioned .so symlink is absent.
-# Scope the suffix change so it does not leak to other find_library calls.
-set(_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
-list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES .so.2)
-
-find_library(TENSORFLOW_FRAMEWORK_LIB
-  NAMES tensorflow_framework
-  PATHS ${TENSORFLOW_LIBRARY_DIR}
-  NO_DEFAULT_PATH
-)
-
-find_library(TENSORFLOW_CC_LIB
-  NAMES tensorflow_cc
-  PATHS ${TENSORFLOW_LIBRARY_DIR}
-  NO_DEFAULT_PATH
-)
-
-set(CMAKE_FIND_LIBRARY_SUFFIXES ${_ORIGINAL_CMAKE_FIND_LIBRARY_SUFFIXES})
-
-if (NOT TENSORFLOW_FRAMEWORK_LIB OR NOT TENSORFLOW_CC_LIB)
-  message(FATAL_ERROR "Could not find TensorFlow libraries. Please ensure they are installed.")
-endif()
-
-set(TENSORFLOW_LIBS ${TENSORFLOW_FRAMEWORK_LIB} ${TENSORFLOW_CC_LIB})
-
-message(STATUS "TensorFlow include dir: ${TENSORFLOW_INCLUDE_DIRS}")
-#message(STATUS "TensorFlow library dir: ${TENSORFLOW_LIBRARY_DIR}")
-message(STATUS "TensorFlow libraries: ${TENSORFLOW_LIBS}")
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -190,10 +144,7 @@ include(CTest)
 
 add_subdirectory(annc)
 add_subdirectory(python)
-# TensorFlow addons are part of the top-level build.  Build and install the
-# TF Serving/LD_PRELOAD variant from this CMake project.
-set(ANNC_FOR_TF_SERVING ON CACHE BOOL
-    "Build TensorFlow addons for TF Serving (LD_PRELOAD mode)" FORCE)
+# TensorFlow configuration is owned by the addon subdirectory alone.
 add_subdirectory(tensorflow_addons)
 
 if(BUILD_TESTING)
