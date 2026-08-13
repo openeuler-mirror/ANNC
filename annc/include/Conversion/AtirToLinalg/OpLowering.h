@@ -13,4 +13,15 @@ void populateAtirToLinalgConversionPatterns(TypeConverter &inputTypeConverter, T
 
 OpLowering(None)OpLowering(Constant)OpLowering(Relu)OpLowering(Add)OpLowering(Concat)OpLowering(MatMul)
   OpLowering(Return)OpLowering(Load)OpLowering(Customize)
+
+#undef OpLowering
+
+struct BufferLoweringToLinalg
+    : public mlir::OpConversionPattern<atir::BufferOp> {
+  using OpConversionPattern<atir::BufferOp>::OpConversionPattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      atir::BufferOp op, atir::BufferOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
 }

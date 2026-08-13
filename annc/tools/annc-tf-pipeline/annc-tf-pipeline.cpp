@@ -154,7 +154,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::vector<std::string> asmArgs = {
       anncAsm, fusedAtir.string(), "--atir-prune-func",
       "--atir-fast-codegen",
-      "--convert-atir-to-affine", "-o", loweredMlir.string()};
+      "--convert-atir-to-linalg", "-o", loweredMlir.string()};
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
   asmArgs[3] = "--atir-fast-codegen=enable-kdnn=true";
 #endif
