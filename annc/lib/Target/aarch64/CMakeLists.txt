@@ -2,6 +2,10 @@ file(GLOB _srcs *.cpp)
 
 set(_gemm_srcs
         Gemm/GemmPlan.cpp
+        Gemm/ResolveGemmPlan.cpp
+        Gemm/SelectGemmStrategy.cpp
+        Gemm/GemmAutotune.cpp
+        Gemm/FinalizeGemmPlan.cpp
 )
 
 add_mlir_library(AArch64Codegen
