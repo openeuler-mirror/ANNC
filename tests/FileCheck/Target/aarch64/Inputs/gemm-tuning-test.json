@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "target_arch": "kp950",
+  "isa": "sve",
+  "data_type": "f32",
+  "cache_tile": {
+    "mc": 12,
+    "nc": 16,
+    "kc": 8
+  },
+  "kernel_tile": {
+    "mr": 3,
+    "panel_lanes": 2
+  }
+}
