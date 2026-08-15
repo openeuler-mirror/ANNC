@@ -12,6 +12,8 @@ set(_gemm_srcs
         Gemm/GemmLeafMaterialization.cpp
         Gemm/GemmMicrokernelLowering.cpp
         Gemm/GemmABILowering.cpp
+        Gemm/GemmEpilogueLowering.cpp
+        Gemm/VerifyGemmSchedule.cpp
 )
 
 add_mlir_library(AArch64Codegen

@@ -123,6 +123,29 @@ def AArch64GemmABILowering
   ];
 }
 
+/* Diagnose unsupported AArch64 GEMM epilogues. */
+def AArch64GemmEpilogueLowering
+    : Pass<"aarch64-gemm-epilogue-lowering", "ModuleOp"> {
+  let summary = "reject unsupported AArch64 GEMM epilogues";
+  let constructor = "createAArch64GemmEpilogueLowering()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect"
+  ];
+}
+
+/* Reject partially lowered or internally inconsistent GEMM schedules. */
+def AArch64VerifyGemmSchedule
+    : Pass<"aarch64-verify-gemm-schedule", "ModuleOp"> {
+  let summary = "verify the lowered AArch64 GEMM schedule";
+  let constructor = "createAArch64VerifyGemmSchedule()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect"
+  ];
+}
+
 /*  */
 def CacheParallel : Pass<"cache-parallel", "ModuleOp"> {
   let summary = "cache parallel on linalg op";
