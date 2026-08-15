@@ -59,6 +59,33 @@ def AArch64FinalizeGemmPlan
   ];
 }
 
+/* Materialize MC/NC/KC blocking from the resolved target plan. */
+def AArch64GemmCacheBlocking
+    : Pass<"aarch64-gemm-cache-blocking", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM cache blocking";
+  let constructor = "createAArch64GemmCacheBlocking()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
+/* Materialize the fixed MR/NR micro-tile loops. */
+def AArch64GemmKernelTiling
+    : Pass<"aarch64-gemm-kernel-tiling", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM kernel tiling";
+  let constructor = "createAArch64GemmKernelTiling()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
 
 /*  */
 def CacheParallel : Pass<"cache-parallel", "ModuleOp"> {

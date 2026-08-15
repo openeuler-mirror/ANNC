@@ -6,6 +6,9 @@ set(_gemm_srcs
         Gemm/SelectGemmStrategy.cpp
         Gemm/GemmAutotune.cpp
         Gemm/FinalizeGemmPlan.cpp
+        Gemm/GemmTilingUtils.cpp
+        Gemm/GemmCacheBlocking.cpp
+        Gemm/GemmKernelTiling.cpp
 )
 
 add_mlir_library(AArch64Codegen
@@ -33,4 +36,5 @@ add_mlir_library(AArch64Codegen
         MLIRBufferizationTransforms
         MLIRLinalgDialect
         MLIRLinalgTransforms
+        MLIRLLVMDialect
 )

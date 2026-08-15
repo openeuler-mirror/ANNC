@@ -25,6 +25,8 @@ std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
     llvm::StringRef configPath);
 std::unique_ptr<mlir::Pass> createAArch64AutotuneGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64FinalizeGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64GemmCacheBlocking();
+std::unique_ptr<mlir::Pass> createAArch64GemmKernelTiling();
 std::unique_ptr<mlir::Pass> createCacheParallel();
 std::unique_ptr<mlir::Pass> createMatmulPackAffine();
 std::unique_ptr<mlir::Pass> createCacheReduction();
