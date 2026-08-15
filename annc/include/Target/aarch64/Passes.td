@@ -87,6 +87,42 @@ def AArch64GemmKernelTiling
   ];
 }
 
+/* Materialize target-private leaves from the finalized GEMM plan. */
+def AArch64GemmLeafMaterialization
+    : Pass<"aarch64-gemm-leaf-materialization", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM leaf calls";
+  let constructor = "createAArch64GemmLeafMaterialization()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+/* Select the handwritten microkernel symbol for every leaf call. */
+def AArch64GemmMicrokernelLowering
+    : Pass<"aarch64-gemm-microkernel-lowering", "ModuleOp"> {
+  let summary = "select AArch64 handwritten GEMM microkernels";
+  let constructor = "createAArch64GemmMicrokernelLowering()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+}
+
+/* Convert target-private leaf calls to their raw-pointer assembly ABI. */
+def AArch64GemmABILowering
+    : Pass<"aarch64-gemm-abi-lowering", "ModuleOp"> {
+  let summary = "lower AArch64 GEMM leaf calls to the assembly ABI";
+  let constructor = "createAArch64GemmABILowering()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 /*  */
 def CacheParallel : Pass<"cache-parallel", "ModuleOp"> {
   let summary = "cache parallel on linalg op";

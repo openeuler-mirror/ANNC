@@ -9,6 +9,9 @@ set(_gemm_srcs
         Gemm/GemmTilingUtils.cpp
         Gemm/GemmCacheBlocking.cpp
         Gemm/GemmKernelTiling.cpp
+        Gemm/GemmLeafMaterialization.cpp
+        Gemm/GemmMicrokernelLowering.cpp
+        Gemm/GemmABILowering.cpp
 )
 
 add_mlir_library(AArch64Codegen
