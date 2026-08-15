@@ -50,6 +50,7 @@ for f in $FILES; do
         run="${run// | FileCheck / | $FILTER | FileCheck }"
         run="${run//FileCheck/$FILECHECK}"
         run="${run//%s/$f}"
+        run="${run//%S/$(dirname "$f")}"
         run="${run//%t/$temp_file}"
 
         if ! eval "$run" > /dev/null 2>&1; then

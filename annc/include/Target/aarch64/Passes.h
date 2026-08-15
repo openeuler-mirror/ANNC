@@ -1,6 +1,7 @@
 #ifndef ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
 #define ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
 
+#include "llvm/ADT/StringRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -18,6 +19,12 @@ using namespace mlir;
 namespace annc {
 
 std::unique_ptr<mlir::Pass> createKPGemmOneShotBufferize();
+std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
+std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
+    llvm::StringRef configPath);
+std::unique_ptr<mlir::Pass> createAArch64AutotuneGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64FinalizeGemmPlan();
 std::unique_ptr<mlir::Pass> createCacheParallel();
 std::unique_ptr<mlir::Pass> createMatmulPackAffine();
 std::unique_ptr<mlir::Pass> createCacheReduction();
