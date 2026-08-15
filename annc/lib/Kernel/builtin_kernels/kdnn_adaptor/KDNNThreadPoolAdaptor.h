@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <functional>
 
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/ThreadPool.h"
 #include "kdnn_config.h"
 #include "service/kdnn_threading.hpp"
 

@@ -91,6 +91,7 @@ endif()
 
 target_link_libraries(ANNCBuiltinKernels PUBLIC
     ANNCKernel
+    ANNCThreadPool
     LLVMSupport
     LLVMDemangle
 )

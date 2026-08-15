@@ -1,7 +1,7 @@
 #include "Kernel/MemRefTypes.h"
 #include "Kernel/KernelStatus.h"
-#include "Kernel/threadpool/Parallel.h"
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/Parallel.h"
+#include "Support/ThreadPool/ThreadPool.h"
 #include "fingerprint64.h"
 
 #include <algorithm>
@@ -96,7 +96,7 @@ annc::kernels::KernelStatus kp_fused_embedding_hash_bucket_aarch64_impl(
     const float* weight = ANNC_MEMREF_DATA(*embedding_weight);
 
     try {
-        annc::kernels::parallel_for(
+        annc::threadpool::parallel_for(
             thread_pool, batch, [&](int64_t begin, int64_t end) {
                 for (int64_t i = begin; i < end; ++i) {
                     const AnncStringRef& item = strings[i];
