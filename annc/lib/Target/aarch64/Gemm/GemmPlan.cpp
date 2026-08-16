@@ -1,8 +1,8 @@
 #include "GemmPlan.h"
 
 #include <fstream>
-
 #include <nlohmann/json.hpp>
+#include <optional>
 
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/IR/Diagnostics.h"
@@ -14,6 +14,23 @@ llvm::Error configError(llvm::StringRef path, llvm::StringRef message) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                  "invalid GEMM tuning config '%s': %s",
                                  path.str().c_str(), message.str().c_str());
+}
+
+std::optional<GemmTarget> parseTargetName(llvm::StringRef name) {
+  if (name == "hip12") return GemmTarget::kHip12;
+  if (name == "hip09") return GemmTarget::kHip09;
+  return std::nullopt;
+}
+
+std::optional<GemmIsa> parseIsaName(llvm::StringRef name) {
+  if (name == "neon") return GemmIsa::kNeon;
+  if (name == "sve") return GemmIsa::kSve;
+  return std::nullopt;
+}
+
+std::optional<GemmDataType> parseDataTypeName(llvm::StringRef name) {
+  if (name == "f32") return GemmDataType::kF32;
+  return std::nullopt;
 }
 
 llvm::Expected<int64_t> getConfigI64(const nlohmann::json &object,
@@ -71,15 +88,45 @@ mlir::LogicalResult requireThreadPartition(mlir::Operation *op,
   return mlir::success();
 }
 
+llvm::Expected<GemmTarget> parseConfigTarget(const nlohmann::json &config,
+                                             llvm::StringRef path) {
+  auto value = config.find("target_arch");
+  if (value == config.end() || !value->is_string())
+    return configError(path, "requires string field target_arch");
+  const std::string target = value->get<std::string>();
+  if (auto parsed = parseTargetName(target)) return *parsed;
+  return configError(path, "has unsupported target_arch " + target);
+}
+
+llvm::Expected<GemmIsa> parseConfigIsa(const nlohmann::json &config,
+                                       llvm::StringRef path) {
+  auto value = config.find("isa");
+  if (value == config.end() || !value->is_string())
+    return configError(path, "requires string field isa");
+  const std::string isa = value->get<std::string>();
+  if (auto parsed = parseIsaName(isa)) return *parsed;
+  return configError(path, "has unsupported isa " + isa);
+}
+
+llvm::Expected<GemmDataType> parseConfigDataType(const nlohmann::json &config,
+                                                 llvm::StringRef path) {
+  auto value = config.find("data_type");
+  if (value == config.end() || !value->is_string())
+    return configError(path, "requires string field data_type");
+  const std::string dataType = value->get<std::string>();
+  if (auto parsed = parseDataTypeName(dataType)) return *parsed;
+  return configError(path, "has unsupported data_type " + dataType);
+}
+
 mlir::FailureOr<GemmTarget> parseTarget(mlir::Operation *op,
-                                         mlir::DictionaryAttr dictionary,
-                                         llvm::StringRef stateName) {
+                                        mlir::DictionaryAttr dictionary,
+                                        llvm::StringRef stateName) {
   auto value = dictionary.getAs<mlir::StringAttr>("target_arch");
   if (!value) {
     op->emitOpError() << "requires string field target_arch in " << stateName;
     return mlir::failure();
   }
-  if (value.getValue() == "kp950") return GemmTarget::kKp950;
+  if (auto parsed = parseTargetName(value.getValue())) return *parsed;
   op->emitOpError() << "has unsupported target_arch " << value.getValue()
                     << " in " << stateName;
   return mlir::failure();
@@ -93,22 +140,21 @@ mlir::FailureOr<GemmIsa> parseIsa(mlir::Operation *op,
     op->emitOpError() << "requires string field isa in " << stateName;
     return mlir::failure();
   }
-  if (value.getValue() == "neon") return GemmIsa::kNeon;
-  if (value.getValue() == "sve") return GemmIsa::kSve;
+  if (auto parsed = parseIsaName(value.getValue())) return *parsed;
   op->emitOpError() << "has unsupported isa " << value.getValue() << " in "
                     << stateName;
   return mlir::failure();
 }
 
-mlir::FailureOr<GemmDataType> parseDataType(
-    mlir::Operation *op, mlir::DictionaryAttr dictionary,
-    llvm::StringRef stateName) {
+mlir::FailureOr<GemmDataType> parseDataType(mlir::Operation *op,
+                                            mlir::DictionaryAttr dictionary,
+                                            llvm::StringRef stateName) {
   auto value = dictionary.getAs<mlir::StringAttr>("data_type");
   if (!value) {
     op->emitOpError() << "requires string field data_type in " << stateName;
     return mlir::failure();
   }
-  if (value.getValue() == "f32") return GemmDataType::kF32;
+  if (auto parsed = parseDataTypeName(value.getValue())) return *parsed;
   op->emitOpError() << "has unsupported data_type " << value.getValue()
                     << " in " << stateName;
   return mlir::failure();
@@ -140,12 +186,9 @@ llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
   return kernelTile.panelLanes * (vectorLengthBytes / elementBytes);
 }
 
-llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(
-    llvm::StringRef path, GemmTarget target, GemmIsa isa,
-    GemmDataType dataType) {
+llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
   std::ifstream input(path.str());
-  if (!input)
-    return configError(path, "cannot open file");
+  if (!input) return configError(path, "cannot open file");
 
   nlohmann::json config;
   try {
@@ -153,14 +196,23 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(
     if (!config.is_object()) return configError(path, "root must be an object");
     if (config.value("version", 0) != 1)
       return configError(path, "requires version = 1");
-    if (config.value("target_arch", "") != getGemmTargetName(target).str() ||
-        config.value("isa", "") != getGemmIsaName(isa).str() ||
-        config.value("data_type", "") != getGemmDataTypeName(dataType).str())
-      return configError(path, "target_arch, isa, or data_type does not match");
+    auto target = parseConfigTarget(config, path);
+    auto isa = parseConfigIsa(config, path);
+    auto dataType = parseConfigDataType(config, path);
+    if (!target || !isa || !dataType) {
+      llvm::Error error = llvm::Error::success();
+      if (!target)
+        error = llvm::joinErrors(std::move(error), target.takeError());
+      if (!isa) error = llvm::joinErrors(std::move(error), isa.takeError());
+      if (!dataType)
+        error = llvm::joinErrors(std::move(error), dataType.takeError());
+      return error;
+    }
 
     auto cache = getConfigObject(config, path, "cache_tile");
     auto kernel = getConfigObject(config, path, "kernel_tile");
-    if (!cache || !kernel) return llvm::joinErrors(cache.takeError(), kernel.takeError());
+    if (!cache || !kernel)
+      return llvm::joinErrors(cache.takeError(), kernel.takeError());
     auto mc = getConfigI64(*cache, path, "mc");
     auto nc = getConfigI64(*cache, path, "nc");
     auto kc = getConfigI64(*cache, path, "kc");
@@ -169,10 +221,12 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(
     if (!mc || !nc || !kc || !mr || !panelLanes) {
       llvm::Error error = llvm::Error::success();
       for (auto *value : {&mc, &nc, &kc, &mr, &panelLanes})
-        if (!*value) error = llvm::joinErrors(std::move(error), value->takeError());
+        if (!*value)
+          error = llvm::joinErrors(std::move(error), value->takeError());
       return error;
     }
-    return GemmTuningConfig{GemmCacheTile{*mc, *nc, *kc},
+    return GemmTuningConfig{*target, *isa, *dataType,
+                            GemmCacheTile{*mc, *nc, *kc},
                             GemmKernelTile{*mr, *panelLanes}};
   } catch (const std::exception &error) {
     return configError(path, error.what());
@@ -353,8 +407,7 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
 }
 
 llvm::StringRef getGemmTargetName(GemmTarget target) {
-  (void)target;
-  return "kp950";
+  return target == GemmTarget::kHip09 ? "hip09" : "hip12";
 }
 
 llvm::StringRef getGemmIsaName(GemmIsa isa) {

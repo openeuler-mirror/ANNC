@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "target_arch": "hip12",
-  "isa": "sve",
+  "target_arch": "hip09",
+  "isa": "neon",
   "data_type": "f32",
   "cache_tile": {
     "mc": 12,

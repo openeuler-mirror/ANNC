@@ -40,21 +40,16 @@ LogicalResult selectGemmStrategy(
   NamedAttrList candidate;
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
-  constexpr aarch64::gemm::GemmTarget target =
-      aarch64::gemm::GemmTarget::kKp950;
-  constexpr aarch64::gemm::GemmIsa isa = aarch64::gemm::GemmIsa::kSve;
-  constexpr aarch64::gemm::GemmDataType dataType =
-      aarch64::gemm::GemmDataType::kF32;
-  const aarch64::gemm::GemmKernelABI &abi =
-      aarch64::gemm::getGemmKernelABI(target, isa, dataType);
-  candidate.append("target_arch",
-                   builder.getStringAttr(aarch64::gemm::getGemmTargetName(
-                       target)));
-  candidate.append("isa", builder.getStringAttr(
-                                aarch64::gemm::getGemmIsaName(isa)));
-  candidate.append("data_type", builder.getStringAttr(
-                                    aarch64::gemm::getGemmDataTypeName(
-                                        dataType)));
+  const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
+      config.target, config.isa, config.dataType);
+  candidate.append(
+      "target_arch",
+      builder.getStringAttr(aarch64::gemm::getGemmTargetName(config.target)));
+  candidate.append(
+      "isa", builder.getStringAttr(aarch64::gemm::getGemmIsaName(config.isa)));
+  candidate.append("data_type",
+                   builder.getStringAttr(
+                       aarch64::gemm::getGemmDataTypeName(config.dataType)));
   candidate.append("kernel_family", builder.getStringAttr(abi.family));
   candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
   candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
@@ -62,8 +57,7 @@ LogicalResult selectGemmStrategy(
   candidate.append("mr", builder.getI64IntegerAttr(config.kernelTile.mr));
   candidate.append("panel_lanes",
                    builder.getI64IntegerAttr(config.kernelTile.panelLanes));
-  candidate.append("thread_count",
-                   builder.getI64IntegerAttr(intraThreadCount));
+  candidate.append("thread_count", builder.getI64IntegerAttr(intraThreadCount));
   candidate.append("thread_partition", builder.getStringAttr("static-2d"));
   op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
                          candidate.getDictionary(op->getContext()));
@@ -101,10 +95,7 @@ class AArch64SelectGemmStrategy
               "requires --config-path or ANNC_GEMM_CONFIG for AArch64 GEMM");
           return WalkResult::interrupt();
         }
-        auto loaded = aarch64::gemm::loadGemmTuningConfig(
-            path, aarch64::gemm::GemmTarget::kKp950,
-            aarch64::gemm::GemmIsa::kSve,
-            aarch64::gemm::GemmDataType::kF32);
+        auto loaded = aarch64::gemm::loadGemmTuningConfig(path);
         if (!loaded) {
           op->emitOpError() << llvm::toString(loaded.takeError());
           return WalkResult::interrupt();

@@ -53,7 +53,7 @@ inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
 
 inline constexpr int64_t kPlanVersion = 1;
 
-enum class GemmTarget { kKp950 };
+enum class GemmTarget { kHip12, kHip09 };
 enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
 
@@ -69,6 +69,9 @@ struct GemmKernelTile {
 };
 
 struct GemmTuningConfig {
+  GemmTarget target;
+  GemmIsa isa;
+  GemmDataType dataType;
   GemmCacheTile cacheTile;
   GemmKernelTile kernelTile;
 };
@@ -83,9 +86,7 @@ struct GemmKernelABI {
 
 const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
                                       GemmDataType dataType);
-llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(
-    llvm::StringRef path, GemmTarget target, GemmIsa isa,
-    GemmDataType dataType);
+llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path);
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
                                    GemmDataType dataType);

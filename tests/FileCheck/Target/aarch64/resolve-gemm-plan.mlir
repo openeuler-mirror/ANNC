@@ -1,6 +1,8 @@
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan | FileCheck %s --check-prefix=PROBLEM
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=CANDIDATE
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=HIP09_CANDIDATE
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=HIP09_PLAN
 
 // PROBLEM-LABEL: func.func @external_destination(
 // PROBLEM: linalg.matmul {
@@ -24,10 +26,35 @@
 // CANDIDATE-SAME: mr = 3 : i64
 // CANDIDATE-SAME: nc = 16 : i64
 // CANDIDATE-SAME: panel_lanes = 2 : i64
-// CANDIDATE-SAME: target_arch = "kp950"
+// CANDIDATE-SAME: target_arch = "hip12"
 // CANDIDATE-SAME: thread_count = 1 : i64
 // CANDIDATE-SAME: thread_partition = "static-2d"
 // CANDIDATE-SAME: annc.aarch64.gemm_problem = {
+
+// HIP09_CANDIDATE-LABEL: func.func @external_destination(
+// HIP09_CANDIDATE: linalg.matmul {
+// HIP09_CANDIDATE-SAME: annc.aarch64.gemm_candidate = {
+// HIP09_CANDIDATE-SAME: data_type = "f32"
+// HIP09_CANDIDATE-SAME: isa = "neon"
+// HIP09_CANDIDATE-SAME: kc = 8 : i64
+// HIP09_CANDIDATE-SAME: kernel_family = "annc-neon-f32-v1"
+// HIP09_CANDIDATE-SAME: mc = 12 : i64
+// HIP09_CANDIDATE-SAME: mr = 3 : i64
+// HIP09_CANDIDATE-SAME: nc = 16 : i64
+// HIP09_CANDIDATE-SAME: panel_lanes = 2 : i64
+// HIP09_CANDIDATE-SAME: target_arch = "hip09"
+
+// HIP09_PLAN-LABEL: func.func @external_destination(
+// HIP09_PLAN: linalg.matmul {
+// HIP09_PLAN-SAME: annc.aarch64.gemm_plan = {
+// HIP09_PLAN-SAME: data_type = "f32"
+// HIP09_PLAN-SAME: isa = "neon"
+// HIP09_PLAN-SAME: kernel_family = "annc-neon-f32-v1"
+// HIP09_PLAN-SAME: mr = 3 : i64
+// HIP09_PLAN-SAME: pack_b_schema = "annc-neon-packed-b-v1"
+// HIP09_PLAN-SAME: panel_lanes = 2 : i64
+// HIP09_PLAN-SAME: target_arch = "hip09"
+// HIP09_PLAN-SAME: vector_length_bytes = 16 : i64
 
 // PLAN-LABEL: func.func @external_destination(
 // PLAN: linalg.matmul {
@@ -52,7 +79,7 @@
 // PLAN-SAME: pack_b_schema = "annc-sve-packed-b-v2"
 // PLAN-SAME: panel_lanes = 2 : i64
 // PLAN-SAME: rhs_packing = "packed"
-// PLAN-SAME: target_arch = "kp950"
+// PLAN-SAME: target_arch = "hip12"
 // PLAN-SAME: thread_count = 1 : i64
 // PLAN-SAME: thread_partition = "static-2d"
 // PLAN-SAME: vector_length_bytes = 32 : i64
