@@ -514,7 +514,6 @@ private:
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
         command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
 #endif
-        command += " -L" + getKernelLibPath() + " -lANNCGemmSupport";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + getKernelLibPath() +
@@ -548,7 +547,6 @@ private:
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
         command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
 #endif
-        command += " -L" + getKernelLibPath() + " -lANNCGemmSupport";
         command += " -Wl,--whole-archive -L" + getKernelLibPath() +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + getKernelLibPath() +
