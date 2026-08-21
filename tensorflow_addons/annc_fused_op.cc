@@ -1,4 +1,5 @@
 #include "annc_fused_op.h"
+#include "annc_fused_op_jit.h"
 
 #include <algorithm>
 #include <array>
@@ -7,9 +8,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <iostream>
+#include <string>
 
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
@@ -719,6 +722,73 @@ std::vector<int> BuildDefaultKernelArgOrder(int num_inputs, int num_outputs) {
   return order;
 }
 
+std::vector<int> ResolveKernelArgOrder(const std::vector<int>& configured_order,
+                                       int num_inputs, int num_outputs,
+                                       bool has_input_ranks) {
+  if (!configured_order.empty()) return configured_order;
+  if (num_inputs == 3 && num_outputs == 1 && !has_input_ranks) {
+    return {2, 0, 3, 1};
+  }
+  return BuildDefaultKernelArgOrder(num_inputs, num_outputs);
+}
+
+std::vector<int64_t> ShapeVector(const TensorShape& shape) {
+  std::vector<int64_t> dims;
+  dims.reserve(shape.dims());
+  for (int i = 0; i < shape.dims(); ++i) dims.push_back(shape.dim_size(i));
+  return dims;
+}
+
+Status BuildRuntimeArgumentShapes(
+    OpKernelContext* context, int num_constants, int num_fixed, int num_dynamic,
+    int num_outputs, const std::vector<int>& input_ranks,
+    const std::vector<int>& output_ranks,
+    const std::vector<std::string>& output_shapes,
+    const std::vector<int>& configured_order,
+    std::vector<std::vector<int64_t>>* arguments) {
+  const int num_inputs = num_constants + num_fixed + num_dynamic;
+  if (context->num_inputs() != num_inputs) {
+    return errors::InvalidArgument("ANNCFused expected ", num_inputs,
+                                   " inputs, got ", context->num_inputs());
+  }
+
+  std::vector<std::vector<int64_t>> tensors;
+  tensors.reserve(num_inputs + num_outputs);
+  for (int i = 0; i < num_inputs; ++i) {
+    const Tensor& tensor = context->input(i);
+    if (!input_ranks.empty() && tensor.dims() != input_ranks[i]) {
+      return errors::InvalidArgument("ANNCFused input ", i, " expected rank ",
+                                     input_ranks[i], ", got ", tensor.dims());
+    }
+    tensors.push_back(ShapeVector(tensor.shape()));
+  }
+
+  for (int i = 0; i < num_outputs; ++i) {
+    TensorShape shape = InferOutputShape(
+        context, i, output_ranks[i], output_shapes, num_constants, num_fixed);
+    tensors.push_back(ShapeVector(shape));
+  }
+
+  std::vector<int> order = ResolveKernelArgOrder(
+      configured_order, num_inputs, num_outputs, !input_ranks.empty());
+  if (order.size() != tensors.size()) {
+    return errors::InvalidArgument("kernel_arg_order has ", order.size(),
+                                   " entries, expected ", tensors.size());
+  }
+
+  arguments->clear();
+  arguments->reserve(order.size());
+  for (int index : order) {
+    if (index < 0 || index >= static_cast<int>(tensors.size())) {
+      return errors::InvalidArgument("kernel_arg_order index ", index,
+                                     " is out of range [0, ", tensors.size(),
+                                     ")");
+    }
+    arguments->push_back(tensors[index]);
+  }
+  return OkStatus();
+}
+
 Status CheckKernelStatus(std::int32_t status_code) {
   if (status_code == 0) {
     return OkStatus();
@@ -822,6 +892,10 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
     OP_REQUIRES_OK(context,
                    context->GetAttr("shared_lib_path", &shared_lib_path_));
   }
+  if (context->HasAttr("atir_module_path")) {
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("atir_module_path", &atir_module_path_));
+  }
   if (context->HasAttr("abi")) {
     OP_REQUIRES_OK(context, context->GetAttr("abi", &abi_));
   } else {
@@ -837,6 +911,10 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
 
   OP_REQUIRES(context, !kernel_name_.empty(),
               errors::InvalidArgument("kernel_name cannot be empty"));
+  OP_REQUIRES(
+      context, !shared_lib_path_.empty() || !atir_module_path_.empty(),
+      errors::InvalidArgument("ANNCFused requires shared_lib_path for AOT or "
+                              "atir_module_path for JIT"));
   OP_REQUIRES(context, abi_ == "mlir_ciface" || abi_ == "annc_execution_v2",
               errors::InvalidArgument("Unsupported ANNCFused abi: ", abi_));
   OP_REQUIRES(context, num_outputs_ == static_cast<int>(output_ranks_.size()),
@@ -861,6 +939,19 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
 }
 
 ANNCFusedOp::~ANNCFusedOp() {}
+
+Status ANNCFusedOp::CompileJitKernel(OpKernelContext* context,
+                                     std::string* work_dir,
+                                     std::string* so_path) {
+  AnncJitCompileRequest request;
+  request.atir_module_path = atir_module_path_;
+  request.kernel_name = kernel_name_;
+  TF_RETURN_IF_ERROR(BuildRuntimeArgumentShapes(
+      context, num_constants_, num_fixed_, num_dynamic_, num_outputs_,
+      input_ranks_, output_ranks_, output_shapes_, kernel_arg_order_,
+      &request.argument_shapes));
+  return CompileAnncJitKernel(request, work_dir, so_path);
+}
 
 void ANNCFusedOp::Compute(OpKernelContext* context) {
   const bool profile_enabled = IsAnncFusedProfilingEnabled();
@@ -887,18 +978,34 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         ElapsedUs(t_backend_dispatch_start);
   }
 
-  OP_REQUIRES(context, !shared_lib_path_.empty(),
-              errors::InvalidArgument("ANNCFused requires shared_lib_path"));
+  const bool jit_mode = shared_lib_path_.empty();
+  std::unique_ptr<mutex_lock> jit_lock;
+  std::string jit_work_dir;
+  std::string runtime_so_path = shared_lib_path_;
+  bool library_loaded_this_call = false;
+  auto t_load_start = profile_enabled ? Clock::now() : TimePoint{};
 
-  if (!loaded_ || current_so_path_ != shared_lib_path_) {
-    auto t_load_start = profile_enabled ? Clock::now() : TimePoint{};
+  if (jit_mode) {
+    jit_lock = std::make_unique<mutex_lock>(jit_mu_);
+    OP_REQUIRES(
+        context, !atir_module_path_.empty(),
+        errors::InvalidArgument("ANNCFused JIT requires atir_module_path"));
+    OP_REQUIRES_OK(context,
+                   CompileJitKernel(context, &jit_work_dir, &runtime_so_path));
+    Status load_status = LoadJitLibrary(runtime_so_path);
+    if (!load_status.ok()) CleanupAnncJitWorkDir(jit_work_dir);
+    OP_REQUIRES_OK(context, load_status);
+    library_loaded_this_call = true;
+  } else if (!loaded_ || current_so_path_ != shared_lib_path_) {
     OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
-    if (profile_enabled) {
-      profile_sample.load_library_us = ElapsedUs(t_load_start);
-    }
     current_so_path_ = shared_lib_path_;
+    library_loaded_this_call = true;
+  }
+  if (profile_enabled && library_loaded_this_call) {
+    profile_sample.load_library_us = ElapsedUs(t_load_start);
   }
 
+  Status execute_status;
   auto t_threadpool_start = profile_enabled ? Clock::now() : TimePoint{};
   thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
   TensorFlowAnncThreadPool adapter(tf_thread_pool);
@@ -909,13 +1016,16 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
     profile_sample.threadpool_setup_us = ElapsedUs(t_threadpool_start);
   }
 
-  Status execute_status;
   if (abi_ == "annc_execution_v2") {
     execute_status =
         ExecuteExecutionV2Kernel(context, profile_enabled, &profile_sample);
   } else {
     execute_status =
         ExecuteMlirCifaceKernel(context, profile_enabled, &profile_sample);
+  }
+  if (jit_mode) {
+    UnloadJitLibrary();
+    CleanupAnncJitWorkDir(jit_work_dir);
   }
   OP_REQUIRES_OK(context, execute_status);
   auto t_threadpool_restore_start =
@@ -1075,6 +1185,25 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
     lib_cache_[so_path] = handle_;
   }
 
+  return ResolveLibrarySymbols(so_path);
+}
+
+Status ANNCFusedOp::LoadJitLibrary(const std::string& so_path) {
+  handle_ = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!handle_) {
+    const char* error = dlerror();
+    LOG(ERROR) << "[ANNC-JIT] dlopen failed so_path=" << so_path
+               << " error=" << (error ? error : "<null>");
+    return errors::NotFound("Cannot load JIT library ", so_path, ": ",
+                            error ? error : "<null>");
+  }
+
+  Status status = ResolveLibrarySymbols(so_path);
+  if (!status.ok()) UnloadJitLibrary();
+  return status;
+}
+
+Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
   std::string symbol_name = "_mlir_ciface_" + kernel_name_;
   void* symbol = dlsym(handle_, symbol_name.c_str());
   if (!symbol) {
@@ -1103,9 +1232,19 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
   return OkStatus();
 }
 
-Status ANNCFusedOp::ExecuteMlirCifaceKernel(
-    OpKernelContext* context, bool profile_enabled,
-    AnncFusedProfileSample* profile_sample) {
+void ANNCFusedOp::UnloadJitLibrary() {
+  if (handle_) dlclose(handle_);
+  handle_ = nullptr;
+  mlir_ciface_func_ = nullptr;
+  annc_set_current_threadpool_ = nullptr;
+  annc_get_current_threadpool_ = nullptr;
+  loaded_ = false;
+  current_so_path_.clear();
+}
+
+Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
+                                            bool profile_enabled,
+                                            AnncFusedProfileSample* profile_sample) {
   if (!mlir_ciface_func_) {
     LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel symbol is null kernel="
                << kernel_name_;
@@ -1198,19 +1337,8 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(
   }
 
   auto t_arg_order_start = profile_enabled ? Clock::now() : TimePoint{};
-  std::vector<int> order = kernel_arg_order_;
-  if (order.empty()) {
-    // Legacy compatibility: the original ANNC pipeline produced kernels with
-    // 3 inputs + 1 output (total 4 memrefs) but expected the argument order
-    // [dynamic, constant, output, fixed] i.e. {2, 0, 3, 1}.  When
-    // input_ranks is not specified and the shape matches this pattern, apply
-    // the legacy reordering so that old compiled .so files still work.
-    if (expected_inputs == 3 && num_outputs_ == 1 && input_ranks_.empty()) {
-      order = {2, 0, 3, 1};
-    } else {
-      order = BuildDefaultKernelArgOrder(expected_inputs, num_outputs_);
-    }
-  }
+  std::vector<int> order = ResolveKernelArgOrder(
+      kernel_arg_order_, expected_inputs, num_outputs_, !input_ranks_.empty());
 
   std::vector<void*> args;
   args.reserve(order.size());

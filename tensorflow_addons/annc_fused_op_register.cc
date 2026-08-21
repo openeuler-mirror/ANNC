@@ -51,6 +51,8 @@ REGISTER_OP("ANNCFused")
 
     // Shared library path produced by ANNCOptimizerPass.
     .Attr("shared_lib_path: string = ''")
+    // Fusion-only ATIR module used by synchronous runtime compilation.
+    .Attr("atir_module_path: string = ''")
     .Attr("abi: string = 'mlir_ciface'")
     // Set to false only when the generated kernel is known to fully overwrite
     // every output element.

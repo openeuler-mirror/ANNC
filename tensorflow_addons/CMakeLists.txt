@@ -157,12 +157,20 @@ set(ANNC_OPTIMIZER_SOURCES
 
 set(ANNC_FUSED_OP_SOURCES
     annc_fused_op.cc
+    annc_fused_op_jit.cc
     annc_fused_op_register.cc
 )
 
 # ── Build targets ────────────────────────────────────────────────────────────
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
+if(TARGET nlohmann_json::nlohmann_json)
+    target_link_libraries(annc_fused_op PRIVATE nlohmann_json::nlohmann_json)
+else()
+    target_include_directories(annc_fused_op PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/json/include
+    )
+endif()
 
 foreach(_target annc_optimizer annc_fused_op)
     target_include_directories(${_target} PRIVATE

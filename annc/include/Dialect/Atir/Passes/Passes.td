@@ -105,6 +105,28 @@ def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
   ];
 }
 
+/* Select one fused kernel from a fusion-only runtime template. */
+def AtirSelectKernel : Pass<"atir-select-kernel", "ModuleOp"> {
+  let summary = "select one fused kernel function for runtime compilation";
+  let constructor = "createAtirSelectKernelPass()";
+  let options = [
+    Option<"kernelName", "kernel-name", "std::string", "",
+           "Symbol name of the fused kernel to retain">
+  ];
+  let dependentDialects = ["AtirDialect"];
+}
+
+/* Bind runtime argument shapes before lowering. */
+def AtirSpecializeShapes : Pass<"atir-specialize-shapes", "ModuleOp"> {
+  let summary = "specialize fused kernel arguments with runtime shapes";
+  let constructor = "createAtirSpecializeShapesPass()";
+  let options = [
+    Option<"shapeSpec", "shape-spec", "std::string", "",
+           "Path to the runtime shape specification JSON">
+  ];
+  let dependentDialects = ["AtirDialect"];
+}
+
 /* unroll pass */
 def AtirUnroll : Pass<"atir-unroll", "ModuleOp"> {
   let summary = "unroll";

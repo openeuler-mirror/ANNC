@@ -23,6 +23,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createAtirUnrollPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirEltwiseFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirLLMCodeGenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirPruneFuncPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectKernelPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAtirSpecializeShapesPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectLoweringStrategyPass();
 
 #define GEN_PASS_REGISTRATION

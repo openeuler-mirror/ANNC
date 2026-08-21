@@ -13,6 +13,7 @@ struct GraphDefRewriteOptions {
   std::string outputGraphPath;
   std::string kernelNameOverride;
   std::string sharedLibPath;
+  std::string atirModulePath;
   bool verbose = false;
 };
 

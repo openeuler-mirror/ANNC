@@ -31,6 +31,7 @@ constexpr char kEnvVerbose[] = "ANNC_VERBOSE";
 constexpr char kEnvTimeout[] = "ANNC_TIMEOUT";
 constexpr char kEnvKeepTemps[] = "ANNC_KEEP_TEMPS";
 constexpr char kEnvFusedOpPath[] = "ANNC_FUSED_OP_PATH";
+constexpr char kEnvJitEnable[] = "ANNC_JIT_ENABLE";
 
 constexpr int kDefaultTimeoutSeconds = 300;
 constexpr char kDefaultTempDir[] = "/tmp";
@@ -95,6 +96,7 @@ Status ANNCOptimizer::Init(
   enabled_ = true;
   keep_temp_files_ = false;
   annc_verbose_ = false;
+  jit_enabled_ = GetEnvFlag(kEnvJitEnable);
   timeout_seconds_ = kDefaultTimeoutSeconds;
   temp_dir_ = kDefaultTempDir;
   pipeline_path_ = kDefaultPipelinePath;
@@ -160,6 +162,8 @@ Status ANNCOptimizer::Init(
         batch_size_ = std::stoll(value);
       } else if (name == "backend") {
         backend_ = value;
+      } else if (name == "jit_enabled" || name == "defer_codegen") {
+        jit_enabled_ = (value == "true" || value == "1");
       }
     }
   }
@@ -175,6 +179,7 @@ Status ANNCOptimizer::Init(
             << ", keep_temp_files=" << keep_temp_files_
             << ", annc_verbose=" << annc_verbose_
             << ", batch_size=" << batch_size_
+            << ", jit_enabled=" << jit_enabled_
             << ", backend=" << (backend_.empty() ? "generic" : backend_);
 
   return OkStatus();
@@ -411,6 +416,9 @@ Status ANNCOptimizer::InvokePipeline(const std::string& input_file,
     }
     if (annc_verbose_) {
       argv.push_back(const_cast<char*>("--verbose"));
+    }
+    if (jit_enabled_) {
+      argv.push_back(const_cast<char*>("--defer-codegen"));
     }
     if (batch_size_ > 0) {
       static std::string batch_size_str;

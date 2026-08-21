@@ -67,3 +67,14 @@
 | **决策** | `annc-tf2atir` 固定为 `TfModelLoader -> TfGraphParser -> TfTensorResolver -> NodeInfoAdapter -> MLIROpBuilder`。`TensorRef{node, output_index}` 是 TF 前端内部唯一 tensor 标识；resolver 以 GraphDef 直接事实为先、集中本地 op 签名和已解析输入为补充，要求每个 tensor 的 dtype 与 rank 在创建 ATIR 前确定。 |
 | **后果** | ✅ 图结构、类型/shape 解析和 ATIR 发射职责隔离；✅ `out:1`、多输出和 control edge 不再依赖字符串重写；✅ 可达不支持 op、未知 dtype/rank 均可在前端明确报错；✅ `Const(DT_STRING)` 以既有 `encoding="string"` 和 `DenseStringElementsAttr` 导入；❌ 需维护本地签名规则表；❌ 动态 string 张量及其运行时 ABI 仍未定义。 |
 | **备选方案** | (a) 在旧 parser 中继续增加 op 特判——改动小但职责继续耦合；(b) 链接 TensorFlow OpDef/runtime——类型规则完整但引入运行时依赖和版本耦合；(c) 未知 dtype/rank 延后给 ATIR 推导——当前 ATIR 无法表达。 |
+
+<a id="adr-007"></a>
+
+## ADR-007：TensorFlow 无缓存同步 JIT
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | Grappler 阶段无法为动态 shape 融合子图预先生成唯一的后端 kernel；运行时必须使用实际输入 shape 完成后端特化。 |
+| **决策** | `ANNCOptimizer` 在 `ANNC_JIT_ENABLE=1` 时让 pipeline 只保留 fusion-only ATIR，并将其路径写入 `ANNCFused`。`ANNCFusedOp::Compute` 提取实际 shape，同步调用 `annc-asm` 和 `annc`，加载生成的共享库并执行 kernel。本阶段不引入编译缓存、异步编译或运行时 fallback。 |
+| **后果** | 动态 shape 的编译决策延后到运行时且边界清晰；首次调用包含编译开销，每次调用都可能重新生成共享库，缓存和并发控制留待后续独立提交。 |
+| **备选方案** | 在 Grappler 阶段按样例 shape 预编译——无法覆盖运行时动态 shape；异步 JIT——需要额外的请求排队和失败语义。 |

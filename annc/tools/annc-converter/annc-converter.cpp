@@ -17,6 +17,7 @@ struct ConverterOptions {
   std::string outputGraphDef;
   std::string kernelName;
   std::string sharedLibPath;
+  std::string atirModulePath;
   std::string metadataJson;
   bool verbose = false;
 };
@@ -24,7 +25,8 @@ struct ConverterOptions {
 void printUsage(std::ostream &stream) {
   stream << "Usage: annc-converter [fused-atir.mlir] "
             "--input_graphdef <path> --output_graphdef <path> "
-            "--shared_lib_path <path> [--metadata_json <path>] "
+            "[--shared_lib_path <path> | --atir_module_path <path>] "
+            "[--metadata_json <path>] "
             "[--kernel_name <name>] [--verbose]\n";
 }
 
@@ -76,6 +78,10 @@ bool parseOptions(int argc, char **argv, ConverterOptions *options,
       if (!takeValue(&options->sharedLibPath, "--shared_lib_path")) {
         return false;
       }
+    } else if (option == "--atir_module_path") {
+      if (!takeValue(&options->atirModulePath, "--atir_module_path")) {
+        return false;
+      }
     } else if (option == "--metadata_json") {
       if (!takeValue(&options->metadataJson, "--metadata_json")) {
         return false;
@@ -121,8 +127,9 @@ int main(int argc, char **argv) {
                  "--output_graphdef are required\n";
     return 1;
   }
-  if (options.sharedLibPath.empty()) {
-    std::cerr << "[annc-converter] Error: --shared_lib_path is required\n";
+  if (options.sharedLibPath.empty() && options.atirModulePath.empty()) {
+    std::cerr << "[annc-converter] Error: provide --shared_lib_path for AOT or "
+                 "--atir_module_path for JIT\n";
     return 1;
   }
   if (options.metadataJson.empty() && options.fusedAtirPath.empty()) {
@@ -154,6 +161,7 @@ int main(int argc, char **argv) {
   rewriteOptions.outputGraphPath = options.outputGraphDef;
   rewriteOptions.kernelNameOverride = options.kernelName;
   rewriteOptions.sharedLibPath = options.sharedLibPath;
+  rewriteOptions.atirModulePath = options.atirModulePath;
   rewriteOptions.verbose = options.verbose;
 
   return annc::fusion::rewriteGraphDefWithANNCFused(std::move(fusionInfos),
