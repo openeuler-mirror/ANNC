@@ -354,9 +354,11 @@ annc-asm output.bin \
   -o asm.mlir
 ```
 
-`--atir-fast-codegen` 默认允许所有已注册的自定义算子类型。可以按最终生成的
-`custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist
-优先级更高：
+`--atir-fast-codegen` 默认允许非 GEMM 的已注册自定义算子类型；`MatMul`、
+`MatMulAdd` 和 `MatMulAddRelu` 默认禁用，以便交给
+`--annc-aarch64-gemm-pipeline`。可以按最终生成的 `custom.op_name` 使用 allowlist
+或 denylist 控制改写；名称区分大小写，显式 allowlist 可重新启用 GEMM pattern，
+denylist 优先级更高：
 
 ```shell
 # 只允许 MatMulAdd，其他自定义算子保持原 ATIR
@@ -529,11 +531,12 @@ ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 allowlist；非空时仅改写列出的类型 |
+| `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 allowlist；非空时仅改写列出的类型，并可显式启用默认禁用的 GEMM 类型 |
 | `ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 denylist；始终优先于 allowlist |
 
 环境变量是默认策略。`--atir-fast-codegen=enable-custom-ops=...` 非空时覆盖环境
-allowlist；命令行和环境的 denylist 会合并。
+allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`MatMul`、
+`MatMulAdd` 和 `MatMulAddRelu` 仍默认禁用。
 
 ### `ANNCOptimizer`（Grappler 插件）
 

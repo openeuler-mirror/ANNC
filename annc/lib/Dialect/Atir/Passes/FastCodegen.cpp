@@ -17,6 +17,8 @@ namespace {
 
 constexpr char kEnableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS";
 constexpr char kDisableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS";
+constexpr StringLiteral kDefaultDisabledCustomOps[] = {"MatMul", "MatMulAdd",
+                                                       "MatMulAddRelu"};
 
 void appendCustomOpTypesFromEnv(const char *name,
                                 SmallVectorImpl<std::string> &types) {
@@ -69,6 +71,12 @@ class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
                                effectiveDisabledCustomOps);
     effectiveDisabledCustomOps.append((*disabledCustomOps).begin(),
                                       (*disabledCustomOps).end());
+    for (StringRef type : kDefaultDisabledCustomOps) {
+      bool explicitlyEnabled = llvm::any_of(
+          effectiveEnabledCustomOps,
+          [&](const std::string &entry) { return StringRef(entry) == type; });
+      if (!explicitlyEnabled) effectiveDisabledCustomOps.push_back(type.str());
+    }
 
     CustomOpTypeFilter customOpFilter(effectiveEnabledCustomOps,
                                       effectiveDisabledCustomOps);
