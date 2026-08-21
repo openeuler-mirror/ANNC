@@ -261,15 +261,33 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
         "requires identity-layout bases with statically strided subviews");
   }
 
-  FailureOr<PackedBBlock> packed =
-      materializePackedBBlock(module, op, *plan, workspaces, packedBlocks);
-  if (failed(packed)) return failure();
+  Value rhsBase;
+  Value rhsOffset;
+  const bool isDirectRhs =
+      plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
+  if (isDirectRhs) {
+    FailureOr<aarch64::gemm::MemRefBaseAndOffset> rhs =
+        aarch64::gemm::getMemRefBaseAndOffset(builder, loc, rhsInput);
+    if (failed(rhs)) {
+      return op->emitOpError(
+          "requires identity-layout bases with statically strided direct RHS");
+    }
+    rhsBase = rhs->base;
+    rhsOffset = rhs->offset;
+  } else {
+    FailureOr<PackedBBlock> packed =
+        materializePackedBBlock(module, op, *plan, workspaces, packedBlocks);
+    if (failed(packed)) return failure();
+    rhsBase = packed->base;
+    rhsOffset = packed->offset;
+  }
 
   FailureOr<int64_t> staticM = getStaticDimension(lhsInput, 0);
   FailureOr<int64_t> staticK = getStaticDimension(lhsInput, 1);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);
   FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
-      plan->kernelTile, plan->vectorLengthBytes, plan->dataType);
+      plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
+      plan->executionKind);
   if (failed(staticM) || failed(staticK) || failed(staticN) || *staticM < 1 ||
       *staticM > plan->kernelTile.mr) {
     return op->emitOpError(
@@ -293,11 +311,15 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   } else {
     const aarch64::gemm::GemmKernelABI &abi =
         aarch64::gemm::getGemmKernelABI(plan->target, plan->isa,
-                                        plan->dataType);
-    if (abi.kUnroll <= 0)
-      return op->emitOpError("requires a positive NEON kernel ABI K unroll");
-    familyArgument =
-        builder.create<arith::ConstantIndexOp>(loc, *staticK / abi.kUnroll);
+                                        plan->dataType,
+                                        plan->executionKind);
+    FailureOr<int64_t> kScalarUnroll =
+        aarch64::gemm::getGemmKScalarUnroll(abi, plan->dataType);
+    if (failed(kScalarUnroll))
+      return op->emitOpError(
+          "requires a valid NEON kernel ABI vector K unroll");
+    familyArgument = builder.create<arith::ConstantIndexOp>(
+        loc, *staticK / *kScalarUnroll);
   }
 
   auto unranked = UnrankedMemRefType::get(builder.getF32Type(), 0);
@@ -316,7 +338,12 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   }
   auto kernelCall = builder.create<func::CallOp>(
       loc, aarch64::gemm::kMicrokernelLeafName, TypeRange{},
-      ValueRange{lhsBase, packed->base, outBase, lhs->offset, packed->offset,
+      ValueRange{lhsBase,
+                 isDirectRhs
+                     ? aarch64::gemm::castToUnrankedF32MemRef(builder, loc,
+                                                              rhsBase)
+                     : rhsBase,
+                 outBase, lhs->offset, rhsOffset,
                  out->offset, lda, ldc, kSize, familyArgument});
   copyScheduleAttrs(op, kernelCall, builder);
   kernelCall->setDiscardableAttr(aarch64::gemm::kMicrokernelMAttrName,

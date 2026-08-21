@@ -117,7 +117,8 @@ LogicalResult materializeKernelTiling(Operation *op) {
   FailureOr<GemmTilingPlan> plan = aarch64::gemm::readTilingPlan(op);
   if (failed(plan)) return failure();
   FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
-      plan->kernelTile, plan->vectorLengthBytes, plan->dataType);
+      plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
+      plan->executionKind);
   if (failed(nr)) return op->emitOpError("has an invalid kernel N tile");
   const bool isCacheBlocked =
       aarch64::gemm::hasStage(op, aarch64::gemm::kCacheBlockedStage);
