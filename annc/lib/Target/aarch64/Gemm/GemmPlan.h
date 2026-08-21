@@ -30,6 +30,11 @@ inline constexpr llvm::StringLiteral kMicrokernelKAttrName =
     "annc.aarch64.microkernel_k";
 inline constexpr llvm::StringLiteral kIntraThreadCountAttrName =
     "annc.intra_thread_count";
+inline constexpr llvm::StringLiteral kExecutionKindAttrName =
+    "execution_kind";
+inline constexpr llvm::StringLiteral kRhsPackingAttrName = "rhs_packing";
+inline constexpr llvm::StringLiteral kRhsPackSourceAttrName =
+    "rhs_pack_source";
 
 inline constexpr llvm::StringLiteral kCacheBlockedStage = "cache_blocked";
 inline constexpr llvm::StringLiteral kThreadTiledStage = "thread_tiled";
@@ -56,6 +61,7 @@ inline constexpr int64_t kPlanVersion = 1;
 enum class GemmTarget { kHip12, kHip09 };
 enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
+enum class GemmExecutionKind { kGemm, kGemvAB };
 
 struct GemmCacheTile {
   int64_t mc;
@@ -81,15 +87,20 @@ struct GemmKernelABI {
   int64_t vectorLengthBytes;
   int64_t maxMr;
   int64_t maxPanelLanes;
-  int64_t kUnroll;
+  // Number of vector registers consumed by one fixed-count K iteration.
+  int64_t kVectorUnroll;
 };
 
 const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
-                                      GemmDataType dataType);
+                                      GemmDataType dataType,
+                                      GemmExecutionKind executionKind);
+llvm::FailureOr<int64_t> getGemmKScalarUnroll(const GemmKernelABI &abi,
+                                              GemmDataType dataType);
 llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path);
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
-                                   GemmDataType dataType);
+                                   GemmDataType dataType,
+                                   GemmExecutionKind executionKind);
 llvm::StringRef getGemmDataTypeName(GemmDataType dataType);
 
 struct GemmProblem {
@@ -110,10 +121,12 @@ struct GemmCandidate {
   GemmCacheTile cacheTile;
   GemmKernelTile kernelTile;
   int64_t threadCount;
+  GemmExecutionKind executionKind;
 };
 
 enum class KcMode { kOverwrite, kAccumulate };
-enum class RhsPacking { kPacked };
+enum class RhsPacking { kDirect, kPacked };
+enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 struct GemmTilingPlan {
   int64_t version;
@@ -130,12 +143,14 @@ struct GemmTilingPlan {
   int64_t threadCount;
   KcMode firstKcMode;
   KcMode nextKcMode;
+  GemmExecutionKind executionKind;
+  RhsPacking rhsPacking;
+  RhsPackSource rhsPackSource;
 };
 
 struct GemmPlan : GemmTilingPlan {
   GemmTarget target;
   GemmIsa isa;
-  RhsPacking rhsPacking;
 };
 
 bool isGemmAnchor(mlir::Operation *op);
@@ -147,6 +162,7 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op);
 mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op);
 llvm::StringRef getGemmTargetName(GemmTarget target);
 llvm::StringRef getGemmIsaName(GemmIsa isa);
+llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind);
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa);
 llvm::StringRef getKcModeName(KcMode mode);
 mlir::LogicalResult requireStage(mlir::Operation *op, llvm::StringRef expected);

@@ -33,6 +33,25 @@ std::optional<GemmDataType> parseDataTypeName(llvm::StringRef name) {
   return std::nullopt;
 }
 
+std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
+  if (name == "gemm") return GemmExecutionKind::kGemm;
+  if (name == "gemv-ab") return GemmExecutionKind::kGemvAB;
+  return std::nullopt;
+}
+
+std::optional<RhsPacking> parseRhsPackingName(llvm::StringRef name) {
+  if (name == "direct") return RhsPacking::kDirect;
+  if (name == "packed") return RhsPacking::kPacked;
+  return std::nullopt;
+}
+
+std::optional<RhsPackSource> parseRhsPackSourceName(llvm::StringRef name) {
+  if (name == "none") return RhsPackSource::kNone;
+  if (name == "generated") return RhsPackSource::kGenerated;
+  if (name == "prepacked") return RhsPackSource::kPrepacked;
+  return std::nullopt;
+}
+
 llvm::Expected<int64_t> getConfigI64(const nlohmann::json &object,
                                      llvm::StringRef path,
                                      llvm::StringRef name) {
@@ -163,12 +182,27 @@ mlir::FailureOr<GemmDataType> parseDataType(mlir::Operation *op,
 }  // namespace
 
 const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
-                                      GemmDataType dataType) {
+                                      GemmDataType dataType,
+                                      GemmExecutionKind executionKind) {
   (void)target;
   (void)dataType;
-  static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 4};
+  static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 1};
   static const GemmKernelABI sve{"annc-sve-f32-v1", 32, 6, 4, 0};
+  static const GemmKernelABI gemv{"annc-neon-gemv-ab-f32-v1", 16, 4, 1,
+                                  4};
+  if (executionKind == GemmExecutionKind::kGemvAB &&
+      isa == GemmIsa::kNeon)
+    return gemv;
   return isa == GemmIsa::kSve ? sve : neon;
+}
+
+llvm::FailureOr<int64_t> getGemmKScalarUnroll(const GemmKernelABI &abi,
+                                              GemmDataType dataType) {
+  const int64_t elementBytes = dataType == GemmDataType::kF32 ? 4 : 0;
+  if (elementBytes == 0 || abi.vectorLengthBytes <= 0 ||
+      abi.vectorLengthBytes % elementBytes != 0 || abi.kVectorUnroll <= 0)
+    return mlir::failure();
+  return abi.kVectorUnroll * (abi.vectorLengthBytes / elementBytes);
 }
 
 llvm::StringRef getGemmDataTypeName(GemmDataType dataType) {
@@ -178,11 +212,16 @@ llvm::StringRef getGemmDataTypeName(GemmDataType dataType) {
 
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
-                                   GemmDataType dataType) {
+                                   GemmDataType dataType,
+                                   GemmExecutionKind executionKind) {
   const int64_t elementBytes = dataType == GemmDataType::kF32 ? 4 : 0;
   if (elementBytes == 0 || vectorLengthBytes <= 0 ||
       vectorLengthBytes % elementBytes != 0 || kernelTile.panelLanes <= 0)
     return mlir::failure();
+  if (executionKind == GemmExecutionKind::kGemvAB) {
+    if (kernelTile.panelLanes != 1) return mlir::failure();
+    return int64_t{1};
+  }
   return kernelTile.panelLanes * (vectorLengthBytes / elementBytes);
 }
 
@@ -304,7 +343,18 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
       parseDataType(op, candidate, kCandidateAttrName);
   if (mlir::failed(target) || mlir::failed(isa) || mlir::failed(dataType))
     return mlir::failure();
-  const GemmKernelABI &abi = getGemmKernelABI(*target, *isa, *dataType);
+  GemmExecutionKind executionKind = GemmExecutionKind::kGemm;
+  if (auto value = candidate.getAs<mlir::StringAttr>(kExecutionKindAttrName)) {
+    auto parsed = parseExecutionKindName(value.getValue());
+    if (!parsed) {
+      op->emitOpError() << "has unsupported execution_kind "
+                        << value.getValue();
+      return mlir::failure();
+    }
+    executionKind = *parsed;
+  }
+  const GemmKernelABI &abi =
+      getGemmKernelABI(*target, *isa, *dataType, executionKind);
   if (mlir::failed(
           requireString(op, candidate, "kernel_family", abi.family)) ||
       mlir::failed(requireThreadPartition(op, candidate,
@@ -314,7 +364,10 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
   GemmKernelTile kernelTile{values[4], values[5]};
   if (kernelTile.mr > abi.maxMr ||
       kernelTile.panelLanes > abi.maxPanelLanes ||
-      mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType))) {
+      mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType,
+                             executionKind)) ||
+      (executionKind == GemmExecutionKind::kGemvAB &&
+       (kernelTile.mr != 4 || kernelTile.panelLanes != 1))) {
     op->emitOpError("has a candidate unsupported by the selected target and ISA");
     return mlir::failure();
   }
@@ -324,7 +377,8 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
                        *dataType,
                        GemmCacheTile{values[1], values[2], values[3]},
                        kernelTile,
-                       values[6]};
+                       values[6],
+                       executionKind};
 }
 
 mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
@@ -358,11 +412,53 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
                                           /*allowLegacySerial=*/true))) {
     return mlir::failure();
   }
+  GemmExecutionKind executionKind = GemmExecutionKind::kGemm;
+  if (auto value = plan.getAs<mlir::StringAttr>(kExecutionKindAttrName)) {
+    auto parsed = parseExecutionKindName(value.getValue());
+    if (!parsed) {
+      op->emitOpError() << "has unsupported execution_kind "
+                        << value.getValue();
+      return mlir::failure();
+    }
+    executionKind = *parsed;
+  }
+  RhsPacking rhsPacking = RhsPacking::kPacked;
+  if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackingAttrName)) {
+    auto parsed = parseRhsPackingName(value.getValue());
+    if (!parsed) {
+      op->emitOpError() << "has unsupported rhs_packing " << value.getValue();
+      return mlir::failure();
+    }
+    rhsPacking = *parsed;
+  }
+  RhsPackSource rhsPackSource = rhsPacking == RhsPacking::kPacked
+                                    ? RhsPackSource::kGenerated
+                                    : RhsPackSource::kNone;
+  if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackSourceAttrName)) {
+    auto parsed = parseRhsPackSourceName(value.getValue());
+    if (!parsed) {
+      op->emitOpError() << "has unsupported rhs_pack_source "
+                        << value.getValue();
+      return mlir::failure();
+    }
+    rhsPackSource = *parsed;
+  }
+  if ((rhsPacking == RhsPacking::kDirect &&
+       rhsPackSource != RhsPackSource::kNone) ||
+      (rhsPacking == RhsPacking::kPacked &&
+       rhsPackSource == RhsPackSource::kNone) ||
+      (executionKind == GemmExecutionKind::kGemvAB &&
+       (rhsPacking != RhsPacking::kDirect ||
+        rhsPackSource != RhsPackSource::kNone))) {
+    op->emitOpError("has an invalid execution/RHS representation combination");
+    return mlir::failure();
+  }
   mlir::FailureOr<GemmDataType> dataType =
       parseDataType(op, plan, kPlanAttrName);
   if (mlir::failed(dataType)) return mlir::failure();
   GemmKernelTile kernelTile{values[10], values[11]};
-  if (mlir::failed(getGemmNr(kernelTile, values[12], *dataType))) {
+  if (mlir::failed(getGemmNr(kernelTile, values[12], *dataType,
+                             executionKind))) {
     op->emitOpError("has an invalid GEMM kernel tile shape");
     return mlir::failure();
   }
@@ -381,7 +477,10 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
       values[12],
       values[13],
       KcMode::kOverwrite,
-      KcMode::kAccumulate};
+      KcMode::kAccumulate,
+      executionKind,
+      rhsPacking,
+      rhsPackSource};
 }
 
 mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
@@ -392,18 +491,23 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
       parseTarget(op, plan, kPlanAttrName);
   mlir::FailureOr<GemmIsa> isa = parseIsa(op, plan, kPlanAttrName);
   if (mlir::failed(target) || mlir::failed(isa)) return mlir::failure();
-  const GemmKernelABI &abi =
-      getGemmKernelABI(*target, *isa, tiling->dataType);
+  const GemmKernelABI &abi = getGemmKernelABI(
+      *target, *isa, tiling->dataType, tiling->executionKind);
   if (tiling->vectorLengthBytes != abi.vectorLengthBytes ||
       tiling->kernelTile.mr > abi.maxMr ||
       tiling->kernelTile.panelLanes > abi.maxPanelLanes) {
     op->emitOpError("has a plan unsupported by the selected kernel ABI");
     return mlir::failure();
   }
-  if (mlir::failed(requireString(op, plan, "kernel_family", abi.family)) ||
-      mlir::failed(requireString(op, plan, "rhs_packing", "packed")))
+  if (mlir::failed(requireString(op, plan, "kernel_family", abi.family)))
     return mlir::failure();
-  return GemmPlan{*tiling, *target, *isa, RhsPacking::kPacked};
+  if (tiling->executionKind == GemmExecutionKind::kGemvAB &&
+      (tiling->kernelTile.mr != 4 || tiling->kernelTile.panelLanes != 1 ||
+       *isa != GemmIsa::kNeon)) {
+    op->emitOpError("has an invalid GEMV-AB kernel tile or ISA");
+    return mlir::failure();
+  }
+  return GemmPlan{*tiling, *target, *isa};
 }
 
 llvm::StringRef getGemmTargetName(GemmTarget target) {
@@ -412,6 +516,10 @@ llvm::StringRef getGemmTargetName(GemmTarget target) {
 
 llvm::StringRef getGemmIsaName(GemmIsa isa) {
   return isa == GemmIsa::kSve ? "sve" : "neon";
+}
+
+llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind) {
+  return kind == GemmExecutionKind::kGemvAB ? "gemv-ab" : "gemm";
 }
 
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa) {

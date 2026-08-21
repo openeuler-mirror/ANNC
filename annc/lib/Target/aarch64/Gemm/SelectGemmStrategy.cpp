@@ -40,8 +40,12 @@ LogicalResult selectGemmStrategy(
   NamedAttrList candidate;
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
+  const auto executionKind =
+      (problem->n == 1 && config.isa == aarch64::gemm::GemmIsa::kNeon)
+          ? aarch64::gemm::GemmExecutionKind::kGemvAB
+          : aarch64::gemm::GemmExecutionKind::kGemm;
   const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
-      config.target, config.isa, config.dataType);
+      config.target, config.isa, config.dataType, executionKind);
   candidate.append(
       "target_arch",
       builder.getStringAttr(aarch64::gemm::getGemmTargetName(config.target)));
@@ -54,11 +58,19 @@ LogicalResult selectGemmStrategy(
   candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
   candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
   candidate.append("kc", builder.getI64IntegerAttr(config.cacheTile.kc));
-  candidate.append("mr", builder.getI64IntegerAttr(config.kernelTile.mr));
+  const aarch64::gemm::GemmKernelTile kernelTile =
+      executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB
+          ? aarch64::gemm::GemmKernelTile{4, 1}
+          : config.kernelTile;
+  candidate.append("mr", builder.getI64IntegerAttr(kernelTile.mr));
   candidate.append("panel_lanes",
-                   builder.getI64IntegerAttr(config.kernelTile.panelLanes));
+                   builder.getI64IntegerAttr(kernelTile.panelLanes));
   candidate.append("thread_count", builder.getI64IntegerAttr(intraThreadCount));
   candidate.append("thread_partition", builder.getStringAttr("static-2d"));
+  candidate.append(
+      aarch64::gemm::kExecutionKindAttrName,
+      builder.getStringAttr(
+          aarch64::gemm::getGemmExecutionKindName(executionKind)));
   op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
                          candidate.getDictionary(op->getContext()));
   return success();

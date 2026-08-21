@@ -34,16 +34,15 @@ LogicalResult finalizeGemmPlan(Operation *op) {
                aarch64::gemm::getGemmIsaName(candidate->isa));
   const aarch64::gemm::GemmKernelABI &abi =
       aarch64::gemm::getGemmKernelABI(candidate->target, candidate->isa,
-                                      candidate->dataType);
+                                      candidate->dataType,
+                                      candidate->executionKind);
   appendString(plan, builder, "data_type",
                aarch64::gemm::getGemmDataTypeName(candidate->dataType));
   appendI64(plan, builder, "vector_length_bytes", abi.vectorLengthBytes);
   appendString(plan, builder, "kernel_family", abi.family);
-  if (candidate->isa == aarch64::gemm::GemmIsa::kSve) {
-    appendString(plan, builder, "pack_b_schema", "annc-sve-packed-b-v2");
-  } else {
-    appendString(plan, builder, "pack_b_schema", "annc-neon-packed-b-v1");
-  }
+  appendString(plan, builder, aarch64::gemm::kExecutionKindAttrName,
+               aarch64::gemm::getGemmExecutionKindName(
+                   candidate->executionKind));
   appendI64(plan, builder, "m", problem->m);
   appendI64(plan, builder, "n", problem->n);
   appendI64(plan, builder, "k", problem->k);
@@ -57,9 +56,22 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendI64(plan, builder, "panel_lanes", candidate->kernelTile.panelLanes);
   appendString(plan, builder, "macro_order", "mkn");
   appendString(plan, builder, "micro_order", "mn");
-  appendString(plan, builder, "pack_b_block_order", "pc-jc");
-  appendString(plan, builder, "pack_b_execution", "full-then-compute");
-  appendString(plan, builder, "rhs_packing", "packed");
+  if (candidate->executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB) {
+    appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "direct");
+    appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
+                 "none");
+  } else {
+    if (candidate->isa == aarch64::gemm::GemmIsa::kSve) {
+      appendString(plan, builder, "pack_b_schema", "annc-sve-packed-b-v2");
+    } else {
+      appendString(plan, builder, "pack_b_schema", "annc-neon-packed-b-v1");
+    }
+    appendString(plan, builder, "pack_b_block_order", "pc-jc");
+    appendString(plan, builder, "pack_b_execution", "full-then-compute");
+    appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "packed");
+    appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
+                 "generated");
+  }
   appendI64(plan, builder, "thread_count", candidate->threadCount);
   appendString(plan, builder, "thread_partition", "static-2d");
   appendString(plan, builder, "first_kc_mode", "overwrite");

@@ -27,7 +27,8 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
   FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(call);
   if (failed(plan)) return failure();
   FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
-      plan->kernelTile, plan->vectorLengthBytes, plan->dataType);
+      plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
+      plan->executionKind);
   if (failed(nr)) {
     call.emitOpError("has an invalid kernel N tile");
     return failure();
@@ -60,21 +61,33 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
 
   const aarch64::gemm::GemmKernelABI &abi =
       aarch64::gemm::getGemmKernelABI(plan->target, plan->isa,
-                                      plan->dataType);
-  if (abi.kUnroll <= 0) {
-    call.emitOpError("requires a positive NEON kernel ABI K unroll");
+                                      plan->dataType, plan->executionKind);
+  FailureOr<int64_t> kScalarUnroll =
+      aarch64::gemm::getGemmKScalarUnroll(abi, plan->dataType);
+  if (failed(kScalarUnroll)) {
+    call.emitOpError("requires a valid NEON kernel ABI vector K unroll");
     return failure();
   }
-  const int64_t groups = *k / abi.kUnroll;
-  const int64_t residue = *k % abi.kUnroll;
+  const int64_t groups = *k / *kScalarUnroll;
+  const int64_t residue = *k % *kScalarUnroll;
   std::string kVariant;
   if (groups == 0) {
     kVariant = (llvm::Twine("k") + llvm::Twine(residue)).str();
   } else {
     kVariant = (llvm::Twine("kg_r") + llvm::Twine(residue)).str();
   }
-  return (llvm::Twine("annc_aarch64_neon_kernel_mr") + llvm::Twine(*m) + "_n" +
-          llvm::Twine(*n) + "_" + kVariant +
+  if (plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB) {
+    if (*n != 1 || *m > 4 || abi.kVectorUnroll != 4) {
+      call.emitOpError("has an invalid GEMV-AB microtile");
+      return failure();
+    }
+    return (llvm::Twine("annc_aarch64_neon_gemv_ab_mr") + llvm::Twine(*m) +
+            "_" + kVariant +
+            (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
+        .str();
+  }
+  return (llvm::Twine("annc_aarch64_neon_kernel_mr") + llvm::Twine(*m) +
+          "_n" + llvm::Twine(*n) + "_" + kVariant +
           (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
       .str();
 }
