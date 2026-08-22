@@ -54,6 +54,10 @@ struct FusionInfo {
   // from the generated shared library for either supported ABI.
   std::string kernelName;
 
+  // Canonical semantic identity of the fused function. This intentionally
+  // excludes the exported symbol and TensorFlow source identity.
+  std::string templateFingerprint;
+
   // Ordered external inputs. This order becomes the ANNCFused input order and
   // is also the base index space used by kernelArgOrder.
   std::vector<FusionArg> args;

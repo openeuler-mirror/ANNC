@@ -1,5 +1,6 @@
 #include "annc_fused_op_jit.h"
 
+#include <dlfcn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -131,7 +132,7 @@ Status RunJitTool(const std::vector<std::string>& args, const char* tool_name) {
 
 }  // namespace
 
-void CleanupAnncJitWorkDir(const std::string& work_dir) {
+static void CleanupAnncJitWorkDir(const std::string& work_dir) {
   if (work_dir.empty() || EnvFlagEnabled("ANNC_KEEP_TEMPS")) return;
   std::error_code ec;
   fs::remove_all(work_dir, ec);
@@ -141,18 +142,24 @@ void CleanupAnncJitWorkDir(const std::string& work_dir) {
   }
 }
 
-Status CompileAnncJitKernel(const AnncJitCompileRequest& request,
-                            std::string* work_dir, std::string* so_path) {
-  TF_RETURN_IF_ERROR(CreateJitWorkDir(work_dir));
+Status CompileAnncJitKernel(
+    const AnncJitCompileRequest& request,
+    std::shared_ptr<annc::jit::JitExecutable>* executable) {
+  if (!executable) {
+    return errors::InvalidArgument("Missing ANNC JIT executable output");
+  }
+  executable->reset();
+  std::string work_dir;
+  TF_RETURN_IF_ERROR(CreateJitWorkDir(&work_dir));
 
-  fs::path work(*work_dir);
+  fs::path work(work_dir);
   const std::string shape_spec = (work / "runtime_shapes.json").string();
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
-  *so_path = (work / "kernel.so").string();
+  const std::string so_path = (work / "kernel.so").string();
   Status status = WriteRuntimeShapeSpec(shape_spec, request.kernel_name,
                                         request.argument_shapes);
   if (!status.ok()) {
-    CleanupAnncJitWorkDir(*work_dir);
+    CleanupAnncJitWorkDir(work_dir);
     return status;
   }
 
@@ -171,16 +178,44 @@ Status CompileAnncJitKernel(const AnncJitCompileRequest& request,
 #endif
   status = RunJitTool(asm_args, "annc-asm");
   if (!status.ok()) {
-    CleanupAnncJitWorkDir(*work_dir);
+    CleanupAnncJitWorkDir(work_dir);
     return status;
   }
 
   status = RunJitTool(
-      {AnncToolPath("annc"), lowered_mlir, "--shared", "-o", *so_path}, "annc");
+      {AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path}, "annc");
   if (!status.ok()) {
-    CleanupAnncJitWorkDir(*work_dir);
+    CleanupAnncJitWorkDir(work_dir);
     return status;
   }
+
+  void* handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!handle) {
+    const char* error = dlerror();
+    CleanupAnncJitWorkDir(work_dir);
+    return errors::NotFound("Cannot load JIT library ", so_path, ": ",
+                            error ? error : "<null>");
+  }
+  const std::string symbol_name = "_mlir_ciface_" + request.kernel_name;
+  dlerror();
+  void* kernel_function = dlsym(handle, symbol_name.c_str());
+  const char* symbol_error = dlerror();
+  if (symbol_error || !kernel_function) {
+    dlclose(handle);
+    CleanupAnncJitWorkDir(work_dir);
+    return errors::NotFound("Cannot find symbol ", symbol_name, " in ",
+                            so_path, ": ",
+                            symbol_error ? symbol_error : "<null>");
+  }
+  void* set_thread_pool = dlsym(handle, "annc_set_current_threadpool");
+  void* get_thread_pool = dlsym(handle, "annc_get_current_threadpool");
+  if (!set_thread_pool || !get_thread_pool) {
+    set_thread_pool = nullptr;
+    get_thread_pool = nullptr;
+  }
+  *executable = std::make_shared<annc::jit::JitExecutable>(
+      work_dir, so_path, handle, kernel_function, set_thread_pool,
+      get_thread_pool, EnvFlagEnabled("ANNC_KEEP_TEMPS"));
   return OkStatus();
 }
 

@@ -25,6 +25,7 @@ ANNC 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统与 AA
 - **TensorFlow**：`pip3 install tensorflow`（CMake 会在 configure 时自动检测）。也可通过 `pip3 install -r requirements.txt` 安装所有 Python 依赖。
 - **pybind11 + nanobind**：`pip3 install pybind11 nanobind`。`build.sh` 会在缺少时自动安装这两者；如不希望自动安装，可传入 `--no-install-deps`。
 - **protobuf-devel**：`sudo yum install -y protobuf-devel`（仅在 openEuler 上需要）
+- **OpenSSL Crypto**：`sudo yum install -y openssl-devel`（JIT cache key 哈希依赖）
 - **clang**：`annc` driver 在链接阶段需要调用 clang，构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量覆盖其路径（详见 `README.md` 环境变量参考章节）。
 - **ninja-build**：`build.sh` 默认使用 Ninja 生成器，需提前安装，例如 `sudo yum install -y ninja-build`。
 

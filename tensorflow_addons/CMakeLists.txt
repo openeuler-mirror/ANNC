@@ -162,8 +162,16 @@ set(ANNC_FUSED_OP_SOURCES
 )
 
 # ── Build targets ────────────────────────────────────────────────────────────
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+add_library(annc_jit_cache STATIC annc_jit_cache.cc)
+target_include_directories(annc_jit_cache PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(annc_jit_cache PUBLIC OpenSSL::Crypto PRIVATE dl)
+
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
+target_link_libraries(annc_fused_op PRIVATE annc_jit_cache)
 if(TARGET nlohmann_json::nlohmann_json)
     target_link_libraries(annc_fused_op PRIVATE nlohmann_json::nlohmann_json)
 else()

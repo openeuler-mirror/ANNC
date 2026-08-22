@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -225,6 +227,39 @@ void ReportExecutionError(AnncExecutionHandle* handle, AnncStatusCode status,
         errors::Internal("ANNC execution error ", static_cast<int>(status),
                          ": ", message ? message : "");
   }
+}
+
+size_t JitCacheCapacity() {
+  constexpr size_t kDefaultCapacity = 64;
+  const char* configured = std::getenv("ANNC_JIT_CACHE_MAX_ENTRIES");
+  if (!configured || configured[0] == '\0') return kDefaultCapacity;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(configured, &end, 10);
+  if (errno != 0 || end == configured || *end != '\0' ||
+      parsed > std::numeric_limits<size_t>::max()) {
+    LOG(WARNING) << "[ANNC-JIT-CACHE] invalid ANNC_JIT_CACHE_MAX_ENTRIES="
+                 << configured << ", using " << kDefaultCapacity;
+    return kDefaultCapacity;
+  }
+  return static_cast<size_t>(parsed);
+}
+
+annc::jit::JitCompilationCache& GlobalJitCompilationCache() {
+  static auto* cache = new annc::jit::JitCompilationCache(JitCacheCapacity());
+  return *cache;
+}
+
+const char* CacheEventName(annc::jit::CacheEvent event) {
+  switch (event) {
+    case annc::jit::CacheEvent::kMiss:
+      return "miss";
+    case annc::jit::CacheEvent::kWait:
+      return "wait";
+    case annc::jit::CacheEvent::kHit:
+      return "hit";
+  }
+  return "unknown";
 }
 
 bool IsAnncFusedProfilingEnabled() {
@@ -745,14 +780,14 @@ Status BuildRuntimeArgumentShapes(
     const std::vector<int>& output_ranks,
     const std::vector<std::string>& output_shapes,
     const std::vector<int>& configured_order,
-    std::vector<std::vector<int64_t>>* arguments) {
+    std::vector<annc::jit::JitArgumentSignature>* arguments) {
   const int num_inputs = num_constants + num_fixed + num_dynamic;
   if (context->num_inputs() != num_inputs) {
     return errors::InvalidArgument("ANNCFused expected ", num_inputs,
                                    " inputs, got ", context->num_inputs());
   }
 
-  std::vector<std::vector<int64_t>> tensors;
+  std::vector<annc::jit::JitArgumentSignature> tensors;
   tensors.reserve(num_inputs + num_outputs);
   for (int i = 0; i < num_inputs; ++i) {
     const Tensor& tensor = context->input(i);
@@ -760,13 +795,13 @@ Status BuildRuntimeArgumentShapes(
       return errors::InvalidArgument("ANNCFused input ", i, " expected rank ",
                                      input_ranks[i], ", got ", tensor.dims());
     }
-    tensors.push_back(ShapeVector(tensor.shape()));
+    tensors.push_back({ShapeVector(tensor.shape())});
   }
 
   for (int i = 0; i < num_outputs; ++i) {
     TensorShape shape = InferOutputShape(
         context, i, output_ranks[i], output_shapes, num_constants, num_fixed);
-    tensors.push_back(ShapeVector(shape));
+    tensors.push_back({ShapeVector(shape)});
   }
 
   std::vector<int> order = ResolveKernelArgOrder(
@@ -864,6 +899,10 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   OP_REQUIRES_OK(context, context->GetAttr("Ndynamic", &num_dynamic_));
 
   OP_REQUIRES_OK(context, context->GetAttr("kernel_name", &kernel_name_));
+  if (context->HasAttr("template_fingerprint")) {
+    OP_REQUIRES_OK(context, context->GetAttr("template_fingerprint",
+                                             &template_fingerprint_));
+  }
   OP_REQUIRES_OK(context, context->GetAttr("num_outputs", &num_outputs_));
   OP_REQUIRES_OK(context, context->GetAttr("output_ranks", &output_ranks_));
   if (context->HasAttr("input_ranks")) {
@@ -912,6 +951,9 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   OP_REQUIRES(context, !kernel_name_.empty(),
               errors::InvalidArgument("kernel_name cannot be empty"));
   OP_REQUIRES(
+      context, !shared_lib_path_.empty() || !template_fingerprint_.empty(),
+      errors::InvalidArgument("ANNCFused JIT requires template_fingerprint"));
+  OP_REQUIRES(
       context, !shared_lib_path_.empty() || !atir_module_path_.empty(),
       errors::InvalidArgument("ANNCFused requires shared_lib_path for AOT or "
                               "atir_module_path for JIT"));
@@ -940,17 +982,20 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
 
 ANNCFusedOp::~ANNCFusedOp() {}
 
-Status ANNCFusedOp::CompileJitKernel(OpKernelContext* context,
-                                     std::string* work_dir,
-                                     std::string* so_path) {
+annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
+    const std::vector<annc::jit::JitArgumentSignature>& arguments) {
   AnncJitCompileRequest request;
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
-  TF_RETURN_IF_ERROR(BuildRuntimeArgumentShapes(
-      context, num_constants_, num_fixed_, num_dynamic_, num_outputs_,
-      input_ranks_, output_ranks_, output_shapes_, kernel_arg_order_,
-      &request.argument_shapes));
-  return CompileAnncJitKernel(request, work_dir, so_path);
+  request.argument_shapes.reserve(arguments.size());
+  for (const auto& argument : arguments) {
+    request.argument_shapes.push_back(argument.dims);
+  }
+  std::shared_ptr<annc::jit::JitExecutable> executable;
+  Status status = CompileAnncJitKernel(request, &executable);
+  return status.ok()
+             ? annc::jit::JitCompileResult{std::move(executable), ""}
+             : annc::jit::JitCompileResult{nullptr, status.ToString()};
 }
 
 void ANNCFusedOp::Compute(OpKernelContext* context) {
@@ -979,23 +1024,76 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   }
 
   const bool jit_mode = shared_lib_path_.empty();
-  std::unique_ptr<mutex_lock> jit_lock;
-  std::string jit_work_dir;
-  std::string runtime_so_path = shared_lib_path_;
+  thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
+
+  std::shared_ptr<annc::jit::JitExecutable> jit_executable;
+  void* kernel_function = mlir_ciface_func_;
+  auto set_thread_pool = annc_set_current_threadpool_;
+  auto get_thread_pool = annc_get_current_threadpool_;
   bool library_loaded_this_call = false;
   auto t_load_start = profile_enabled ? Clock::now() : TimePoint{};
 
   if (jit_mode) {
-    jit_lock = std::make_unique<mutex_lock>(jit_mu_);
     OP_REQUIRES(
         context, !atir_module_path_.empty(),
         errors::InvalidArgument("ANNCFused JIT requires atir_module_path"));
-    OP_REQUIRES_OK(context,
-                   CompileJitKernel(context, &jit_work_dir, &runtime_so_path));
-    Status load_status = LoadJitLibrary(runtime_so_path);
-    if (!load_status.ok()) CleanupAnncJitWorkDir(jit_work_dir);
-    OP_REQUIRES_OK(context, load_status);
-    library_loaded_this_call = true;
+    std::vector<annc::jit::JitArgumentSignature> arguments;
+    OP_REQUIRES_OK(
+        context, BuildRuntimeArgumentShapes(
+                     context, num_constants_, num_fixed_, num_dynamic_,
+                     num_outputs_, input_ranks_, output_ranks_, output_shapes_,
+                     kernel_arg_order_, &arguments));
+
+    annc::jit::JitCacheKey cache_key;
+    std::string cache_key_error;
+    OP_REQUIRES(
+        context,
+        annc::jit::BuildJitCacheKey(template_fingerprint_, arguments,
+                                    &cache_key, &cache_key_error),
+        errors::Internal("Cannot build ANNC JIT cache key: ",
+                         cache_key_error));
+
+    const std::string key_summary = cache_key.digest.substr(0, 16);
+    annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
+    annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
+      auto compile_start = Clock::now();
+      annc::jit::JitCompileResult compiled = CompileJitKernel(arguments);
+      if (compiled.ok()) {
+        if (profile_enabled) {
+          LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << key_summary
+                    << " kernel=" << kernel_name_
+                    << " compile_ms="
+                    << (ElapsedUs(compile_start) / 1000.0);
+        }
+      } else {
+        LOG(ERROR) << "[ANNC-JIT-CACHE] compile_failed key=" << key_summary
+                   << " kernel=" << kernel_name_
+                   << " compile_ms=" << (ElapsedUs(compile_start) / 1000.0)
+                   << " error=" << compiled.error;
+      }
+      return compiled;
+    });
+    if (profile_enabled) {
+      annc::jit::JitCacheStats stats_after = cache.stats();
+      LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
+                << " key=" << key_summary << " kernel=" << kernel_name_
+                << " entries=" << stats_after.entries;
+      for (const std::string& evicted_key : lookup.evictedKeys) {
+        LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
+                  << evicted_key.substr(0, 16)
+                  << " entries=" << stats_after.entries;
+      }
+    }
+    OP_REQUIRES(context, lookup.ok(), errors::Internal(lookup.error));
+    jit_executable = std::move(lookup.executable);
+    kernel_function = jit_executable->kernelFunction();
+    set_thread_pool =
+        reinterpret_cast<void (*)(annc::threadpool::AnncThreadPool*)>(
+            jit_executable->setThreadPoolFunction());
+    get_thread_pool =
+        reinterpret_cast<annc::threadpool::AnncThreadPool* (*)()>(
+            jit_executable->getThreadPoolFunction());
+    library_loaded_this_call = lookup.event != annc::jit::CacheEvent::kHit;
   } else if (!loaded_ || current_so_path_ != shared_lib_path_) {
     OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
     current_so_path_ = shared_lib_path_;
@@ -1007,25 +1105,19 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
 
   Status execute_status;
   auto t_threadpool_start = profile_enabled ? Clock::now() : TimePoint{};
-  thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
   TensorFlowAnncThreadPool adapter(tf_thread_pool);
   ScopedAnncThreadPool scoped(tf_thread_pool ? &adapter : nullptr,
-                              annc_set_current_threadpool_,
-                              annc_get_current_threadpool_);
+                              set_thread_pool, get_thread_pool);
   if (profile_enabled) {
     profile_sample.threadpool_setup_us = ElapsedUs(t_threadpool_start);
   }
 
   if (abi_ == "annc_execution_v2") {
-    execute_status =
-        ExecuteExecutionV2Kernel(context, profile_enabled, &profile_sample);
+    execute_status = ExecuteExecutionV2Kernel(
+        context, kernel_function, profile_enabled, &profile_sample);
   } else {
-    execute_status =
-        ExecuteMlirCifaceKernel(context, profile_enabled, &profile_sample);
-  }
-  if (jit_mode) {
-    UnloadJitLibrary();
-    CleanupAnncJitWorkDir(jit_work_dir);
+    execute_status = ExecuteMlirCifaceKernel(
+        context, kernel_function, profile_enabled, &profile_sample);
   }
   OP_REQUIRES_OK(context, execute_status);
   auto t_threadpool_restore_start =
@@ -1075,9 +1167,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
 }
 
 Status ANNCFusedOp::ExecuteExecutionV2Kernel(
-    OpKernelContext* context, bool profile_enabled,
+    OpKernelContext* context, void* kernel_function, bool profile_enabled,
     AnncFusedProfileSample* profile_sample) {
-  if (!mlir_ciface_func_) {
+  if (!kernel_function) {
     return errors::FailedPrecondition(
         "Execution V2 kernel symbol is not loaded");
   }
@@ -1147,7 +1239,7 @@ Status ANNCFusedOp::ExecuteExecutionV2Kernel(
   }
 
   auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
-  Status status = CallMlirCiface(mlir_ciface_func_, args);
+  Status status = CallMlirCiface(kernel_function, args);
   if (profile_enabled && profile_sample) {
     profile_sample->kernel_us = ElapsedUs(t_kernel_start);
   }
@@ -1188,21 +1280,6 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
   return ResolveLibrarySymbols(so_path);
 }
 
-Status ANNCFusedOp::LoadJitLibrary(const std::string& so_path) {
-  handle_ = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-  if (!handle_) {
-    const char* error = dlerror();
-    LOG(ERROR) << "[ANNC-JIT] dlopen failed so_path=" << so_path
-               << " error=" << (error ? error : "<null>");
-    return errors::NotFound("Cannot load JIT library ", so_path, ": ",
-                            error ? error : "<null>");
-  }
-
-  Status status = ResolveLibrarySymbols(so_path);
-  if (!status.ok()) UnloadJitLibrary();
-  return status;
-}
-
 Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
   std::string symbol_name = "_mlir_ciface_" + kernel_name_;
   void* symbol = dlsym(handle_, symbol_name.c_str());
@@ -1232,20 +1309,11 @@ Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
   return OkStatus();
 }
 
-void ANNCFusedOp::UnloadJitLibrary() {
-  if (handle_) dlclose(handle_);
-  handle_ = nullptr;
-  mlir_ciface_func_ = nullptr;
-  annc_set_current_threadpool_ = nullptr;
-  annc_get_current_threadpool_ = nullptr;
-  loaded_ = false;
-  current_so_path_.clear();
-}
-
 Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
+                                            void* kernel_function,
                                             bool profile_enabled,
                                             AnncFusedProfileSample* profile_sample) {
-  if (!mlir_ciface_func_) {
+  if (!kernel_function) {
     LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel symbol is null kernel="
                << kernel_name_;
     return errors::FailedPrecondition("MLIR C interface kernel is not loaded");
@@ -1359,7 +1427,7 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
   }
 
   auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
-  Status status = CallMlirCiface(mlir_ciface_func_, args);
+  Status status = CallMlirCiface(kernel_function, args);
   if (!status.ok()) {
     LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel call failed kernel=" << kernel_name_
                << " status=" << status.ToString();

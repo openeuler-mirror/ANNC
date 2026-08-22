@@ -3,6 +3,7 @@
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Dialect/Atir/Passes/Patterns/CustomPatterns/KPFusedGatherMatch.h"
 #include "Dialect/Atir/Passes/Patterns/FusionBoundaryUtils.h"
+#include "Dialect/Atir/TemplateFingerprint.h"
 #include "Helper.h"
 #include "Kernel/KernelPriorityResolver.h"
 #include "llvm/ADT/SetVector.h"
@@ -758,14 +759,18 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
         match.embeddingWeight.getType(), match.outputBuffer.getType(),
         match.hashBucket.getNumBuckets(), match.kernelOps, match.dynamicInput,
         match.embeddingWeight, match.outputBuffer);
+    std::string templateFingerprint =
+        atir::computeAtirTemplateFingerprint(module, kernelFunc);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr(
         "fusion.pattern", rewriter.getStringAttr("dnn_embedding_hash_bucket")));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(
-        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "template_fingerprint", rewriter.getStringAttr(templateFingerprint)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
     SmallVector<FusionArgSpec> argSpecs;
     argSpecs.push_back({"fixed", getValueName(match.embeddingWeight),
                         match.embeddingWeight.getType()});
@@ -1064,20 +1069,22 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     std::string clusterName =
         uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
 
-    auto kernelFunc =
-        hasBiasPostOp
-            ? createMatMulPostOpKernelFunc(module, rewriter, kernelName,
-                                           matmulOp, output, bias, pattern,
-                                           customOpName)
-            : createKernelFunc(module, rewriter, kernelName, matmulOp);
+    auto kernelFunc = hasBiasPostOp
+        ? createMatMulPostOpKernelFunc(module, rewriter, kernelName, matmulOp,
+                                       output, bias, pattern, customOpName)
+        : createKernelFunc(module, rewriter, kernelName, matmulOp);
+    std::string templateFingerprint =
+        atir::computeAtirTemplateFingerprint(module, kernelFunc);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr("fusion.pattern",
                                              rewriter.getStringAttr(pattern)));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(
-        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "template_fingerprint", rewriter.getStringAttr(templateFingerprint)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
 
     bool lhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);

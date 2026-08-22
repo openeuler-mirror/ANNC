@@ -271,6 +271,7 @@ FusionInfo fusionInfoFromMetadataEntries(
   info.name = stringValue("tf.name");
   info.pattern = stringValue("fusion.pattern");
   info.kernelName = stringValue("kernel_name");
+  info.templateFingerprint = stringValue("template_fingerprint");
   info.args = fusionArgArrayFromMetadata(rawValue("args"));
   info.outputs = fusionArgArrayFromMetadata(rawValue("outputs"));
   info.abi = stringValue("abi");
@@ -313,6 +314,20 @@ llvm::Error validateFusionInfo(const FusionInfo &info) {
   if (info.name.empty()) return missingFieldError("name");
   if (info.pattern.empty()) return missingFieldError("pattern");
   if (info.kernelName.empty()) return missingFieldError("kernel_name");
+  if (!info.templateFingerprint.empty()) {
+    bool validFingerprint =
+        info.templateFingerprint.size() == 64 &&
+        std::all_of(info.templateFingerprint.begin(),
+                    info.templateFingerprint.end(), [](unsigned char c) {
+                      return std::isdigit(c) || (c >= 'a' && c <= 'f');
+                    });
+    if (!validFingerprint) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "fusion metadata template_fingerprint must be 64 lowercase hex "
+          "characters");
+    }
+  }
   if (info.args.empty()) return missingFieldError("args");
   if (info.outputs.empty()) return missingFieldError("outputs");
   if (info.abi != "mlir_ciface" && info.abi != "annc_execution_v2") {
@@ -399,6 +414,7 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   info.name = stringAttr(metadata, "tf.name");
   info.pattern = stringAttr(metadata, "fusion.pattern");
   info.kernelName = stringAttr(metadata, "kernel_name");
+  info.templateFingerprint = stringAttr(metadata, "template_fingerprint");
   info.args = fusionArgArrayAttr(metadata, "args");
   info.outputs = fusionArgArrayAttr(metadata, "outputs");
   info.abi = stringAttr(metadata, "abi");

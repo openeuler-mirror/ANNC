@@ -29,8 +29,8 @@ pip install pybind11 nanobind
 # TensorFlow 2.20（CMake 会在 configure 时自动检测）
 pip install tensorflow==2.20.0
 
-# 系统工具、Protobuf 和 GoogleTest C++ 开发库
-yum install cmake clang ninja-build protobuf-devel gtest-devel
+# 系统工具、Protobuf、OpenSSL Crypto 和 GoogleTest C++ 开发库
+yum install cmake clang ninja-build protobuf-devel openssl-devel gtest-devel
 ```
 
 > **注意**：部分命令可能需要 `sudo` 权限执行
@@ -212,6 +212,7 @@ annc-tf-pipeline \
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
 | `--defer-codegen` | 保留 fusion-only ATIR，由运行时同步 JIT 编译 |
+| `--intra_thread_count <n>` | 写入 ATIR module 的 GEMM intra 线程数；ANNCOptimizer 从 Grappler 配置透传 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
 ### 分步编译命令
@@ -448,10 +449,13 @@ GraphDef 输出固定为二进制 protobuf。常用参数：
 
 Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 `annc_generated_kernel.so`。重写后的 GraphDef 会把该 `.so` 路径写入每个 `ANNCFused` 节点的 `shared_lib_path`，运行时 `ANNCFused` 需要通过 `dlopen` 加载它。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
 
-设置 `ANNC_JIT_ENABLE=1` 后启用第一阶段同步 JIT：GraphDef 写入
-`atir_module_path`，运行时根据实际输入和输出 shape 选择并特化当前 fusion func，再同步执行
-`annc-asm` 和 `annc`。当前未实现编译缓存，每次调用都会生成并加载独立 `.so`；同一
-`ANNCFused` 节点的并发调用会串行编译和执行。
+设置 `ANNC_JIT_ENABLE=1` 后启用同步 JIT：GraphDef 写入
+`atir_module_path` 和与名字无关的 `template_fingerprint`，运行时根据实际输入和输出
+shape 选择并特化当前 fusion func，再同步执行 `annc-asm` 和 `annc`。进程内缓存按
+Grappler 生成的 `template_fingerprint`（包含影响 codegen 的 module 属性）和实际参数
+shape 复用 `.so`；工具链、GEMM 配置和 ABI 作为进程级固定上下文，不进入运行时 key，
+`kernel_name` 不进入 key。相同 key 的并发 miss 只编译一次，不同 key 可并行编译。
+Ready entry 使用有界 LRU，默认保留 64 个；编译失败不缓存，后续请求可重试。
 
 多 fusion 的 GraphDef 重写会为每个 fusion 生成一个独立的 `ANNCFused` 节点。`fusion_metadata.json` 中如果某个 fusion 带有 `dynamic_dims`，`annc-converter` 写入 `ANNCFused.output_shapes` 时会把这些维度保留为 `?`，由 `ANNCFused` 在运行时根据动态输入的实际维度推导输出形状，避免 Serving 请求 batch 与编译样例 batch 不一致时按固定维度分配输出。
 
@@ -569,6 +573,7 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 | `ANNC_FUSED_PROFILE` | 非空且非 `0` | 关闭 | 开启融合 Op 性能打点 |
 | `ANNC_FUSED_PROFILE_INTERVAL` | 正整数 | `100000` | 每隔多少次调用输出一次汇总统计 |
 | `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅对 `openblas` MatMul 路径做特殊判断 |
+| `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存 |
 
 ### 构建与测试
 

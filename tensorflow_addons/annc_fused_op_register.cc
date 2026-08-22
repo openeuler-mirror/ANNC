@@ -16,7 +16,8 @@ REGISTER_OP("ANNCFused")
     .Output("outputs: Toutputs")
 
     // Core attributes
-    .Attr("kernel_name: string")  // Base kernel name
+    .Attr("kernel_name: string")                // Base kernel name
+    .Attr("template_fingerprint: string = ''")  // Name-independent JIT identity
     .Attr("num_outputs: int >= 1")
     .Attr("output_ranks: list(int)")      // Rank for each output
     .Attr("input_ranks: list(int) = []")  // Rank for each runtime input
