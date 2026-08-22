@@ -35,7 +35,8 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   Status InvokePipeline(const std::string& input_file,
                         const std::string& output_file,
                         const std::string& graph_id,
-                        const std::vector<std::string>& output_tensors);
+                        const std::vector<std::string>& output_tensors,
+                        int intra_thread_count);
   Status WaitForProcess(pid_t pid, const std::string& process_name);
   void CleanupTempFile(const std::string& filepath);
   void CleanupTempFiles(const std::vector<std::string>& filepaths);
