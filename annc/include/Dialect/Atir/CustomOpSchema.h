@@ -13,7 +13,9 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 
 namespace atir {
 
@@ -33,6 +35,12 @@ public:
     int64_t rank = -1;
     std::string typeVar;
     int64_t i64Value = 0;
+  };
+
+  struct ResultSpec {
+    std::string name;
+    int64_t rank = -1;
+    std::string typeVar;
   };
 
   static CustomOpSchema get(llvm::StringRef name) {
@@ -61,20 +69,30 @@ public:
     return *this;
   }
 
+  CustomOpSchema &Result(llvm::StringRef name, int64_t rank,
+                         llvm::StringRef typeVar) {
+    results_.push_back(ResultSpec{name.str(), rank, typeVar.str()});
+    return *this;
+  }
+
+  llvm::ArrayRef<ResultSpec> results() const { return results_; }
+
   mlir::DictionaryAttr toMetadata(mlir::MLIRContext *ctx) const;
 
 private:
   std::string name_;
   std::vector<std::string> typeVars_;
   std::vector<Arg> args_;
+  std::vector<ResultSpec> results_;
 };
 
 std::optional<annc::kernels::TypeConstraintInfo>
 inferTypeConstraint(llvm::StringRef typeVar, mlir::Type type);
 
-std::vector<annc::kernels::TypeConstraintInfo>
+llvm::Expected<std::vector<annc::kernels::TypeConstraintInfo>>
 inferTypeConstraintsFromSchema(mlir::DictionaryAttr metadata,
-                               mlir::ValueRange operands);
+                               mlir::TypeRange operandTypes,
+                               mlir::TypeRange resultTypes);
 
 } // namespace atir
 

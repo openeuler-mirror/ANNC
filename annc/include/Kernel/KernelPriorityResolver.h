@@ -16,6 +16,7 @@ struct KernelResolveRequest {
     std::string op_type;
     std::vector<TypeConstraintInfo> type_constraints;
     std::string rhs_format;
+    std::string abi = "mlir_ciface";
 
     bool requiresSpecialization() const { return !type_constraints.empty(); }
     bool hasPackedRhsFormat() const { return !rhs_format.empty(); }

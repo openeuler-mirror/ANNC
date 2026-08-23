@@ -1,6 +1,7 @@
 add_mlir_library(ANNCFusionMetadata
   FusionMetadata.cpp
   FusionMetadataJson.cpp
+  TensorEndpoint.cpp
 
   LINK_COMPONENTS
   Support

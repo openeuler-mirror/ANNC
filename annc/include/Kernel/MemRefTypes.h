@@ -46,6 +46,30 @@ typedef struct {
     int64_t  strides[2];
 } AnncMemRef2DF32;
 
+typedef struct {
+    int32_t* allocated;
+    int32_t* aligned;
+    int64_t  offset;
+    int64_t  sizes[1];
+    int64_t  strides[1];
+} AnncMemRef1DI32;
+
+typedef struct {
+    int64_t* allocated;
+    int64_t* aligned;
+    int64_t  offset;
+    int64_t  sizes[1];
+    int64_t  strides[1];
+} AnncMemRef1DI64;
+
+typedef struct {
+    int64_t* allocated;
+    int64_t* aligned;
+    int64_t  offset;
+    int64_t  sizes[2];
+    int64_t  strides[2];
+} AnncMemRef2DI64;
+
 #define ANNC_MEMREF_DATA(memref) ((memref).aligned + (memref).offset)
 
 #define ANNC_MEMREF_SIZE_1D(memref) ((memref).sizes[0])

@@ -32,6 +32,7 @@ struct KernelInfo {
     std::string source_file;
     int line = 0;
     std::vector<TypeConstraintInfo> type_constraints;
+    std::string abi = "mlir_ciface";
 
     bool isSpecialized() const noexcept { return !type_constraints.empty(); }
 };
@@ -40,6 +41,7 @@ struct KernelQuery {
     std::string op_type;
     std::string backend = "aarch64";
     std::vector<TypeConstraintInfo> type_constraints;
+    std::string abi = "mlir_ciface";
 };
 
 namespace detail {
@@ -85,6 +87,11 @@ public:
         return *this;
     }
 
+    KernelBuilder& Abi(std::string abi) {
+        abi_ = std::move(abi);
+        return *this;
+    }
+
     template <typename T>
     KernelBuilder& TypeConstraint(const char* name) {
         type_constraints_.push_back(TypeConstraintInfo{name, detail::cppTypeName<T>()});
@@ -104,6 +111,7 @@ public:
         info.source_file = sourceFile;
         info.line = line;
         info.type_constraints = type_constraints_;
+        info.abi = abi_;
         return info;
     }
 
@@ -111,6 +119,7 @@ private:
     std::string op_type_;
     std::string backend_ = "aarch64";
     std::vector<TypeConstraintInfo> type_constraints_;
+    std::string abi_ = "mlir_ciface";
 };
 
 inline KernelBuilder Name(const char* opType) {
@@ -126,12 +135,14 @@ public:
     std::optional<KernelInfo> lookupKernel(const KernelQuery& query) const;
 
     std::optional<std::string> lookupKernelSymbol(const std::string& opType,
-                                                  const std::string& backend = "aarch64") const;
+                                                  const std::string& backend = "aarch64",
+                                                  const std::string& abi = "mlir_ciface") const;
 
     std::optional<std::string> lookupKernelSymbol(const KernelQuery& query) const;
 
     bool hasKernel(const std::string& opType,
-                   const std::string& backend = "aarch64") const;
+                   const std::string& backend = "aarch64",
+                   const std::string& abi = "mlir_ciface") const;
 
     bool hasKernel(const KernelQuery& query) const;
 

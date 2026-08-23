@@ -51,7 +51,7 @@ struct FusionInfo {
   std::string pattern;
 
   // Exported kernel symbol. The runtime resolves _mlir_ciface_<kernelName>
-  // from the generated shared library for the mlir_ciface ABI.
+  // from the generated shared library for either supported ABI.
   std::string kernelName;
 
   // Ordered external inputs. This order becomes the ANNCFused input order and
@@ -65,7 +65,8 @@ struct FusionInfo {
   // Pattern-specific, non-generic values such as embedding num_buckets.
   std::map<std::string, std::string> patternAttrs;
 
-  // Runtime calling convention. Only "mlir_ciface" is currently supported.
+  // Runtime calling convention: legacy "mlir_ciface" or context-based
+  // "annc_execution_v2".
   std::string abi = "mlir_ciface";
 
   // Output-axis indices whose sizes are resolved from the dynamic input at

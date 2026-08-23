@@ -88,6 +88,9 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
   SmallVector<std::string> argKinds;
   SmallVector<int64_t> argRanks;
   SmallVector<std::string> argTypeVars;
+  SmallVector<std::string> resultNames;
+  SmallVector<int64_t> resultRanks;
+  SmallVector<std::string> resultTypeVars;
 
   for (const Arg &arg : args_) {
     argNames.push_back(arg.name);
@@ -99,6 +102,12 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
       attrs.push_back(builder.getNamedAttr(
           attrName, builder.getI64IntegerAttr(arg.i64Value)));
     }
+  }
+
+  for (const ResultSpec &result : results_) {
+    resultNames.push_back(result.name);
+    resultRanks.push_back(result.rank);
+    resultTypeVars.push_back(result.typeVar);
   }
 
   attrs.push_back(builder.getNamedAttr("custom.op_name",
@@ -113,6 +122,12 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
                                        makeI64Array(ctx, argRanks)));
   attrs.push_back(builder.getNamedAttr("custom.arg_type_vars",
                                        makeStringArray(ctx, argTypeVars)));
+  attrs.push_back(builder.getNamedAttr("custom.result_names",
+                                       makeStringArray(ctx, resultNames)));
+  attrs.push_back(builder.getNamedAttr("custom.result_ranks",
+                                       makeI64Array(ctx, resultRanks)));
+  attrs.push_back(builder.getNamedAttr("custom.result_type_vars",
+                                       makeStringArray(ctx, resultTypeVars)));
   return DictionaryAttr::get(ctx, attrs);
 }
 
@@ -137,34 +152,89 @@ inferTypeConstraint(StringRef typeVar, Type type) {
   return annc::kernels::TypeConstraintInfo{typeVar.str(), cppType};
 }
 
-std::vector<annc::kernels::TypeConstraintInfo>
-inferTypeConstraintsFromSchema(DictionaryAttr metadata, ValueRange operands) {
+llvm::Expected<std::vector<annc::kernels::TypeConstraintInfo>>
+inferTypeConstraintsFromSchema(DictionaryAttr metadata, TypeRange operandTypes,
+                               TypeRange resultTypes) {
   std::vector<annc::kernels::TypeConstraintInfo> constraints;
   auto kindAttrs = getArrayAttr(metadata, "custom.arg_kinds");
   auto typeVarAttrs = getArrayAttr(metadata, "custom.arg_type_vars");
   if (!kindAttrs || !typeVarAttrs || kindAttrs->size() != typeVarAttrs->size()) {
-    return constraints;
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "invalid custom op argument metadata");
   }
 
-  size_t count = std::min<size_t>(operands.size(), typeVarAttrs->size());
-  for (size_t i = 0; i < count; ++i) {
-    auto kind = dyn_cast<StringAttr>((*kindAttrs)[i]);
-    auto typeVar = dyn_cast<StringAttr>((*typeVarAttrs)[i]);
-    if (!kind || !typeVar || kind.getValue() != "memref") {
-      continue;
-    }
-
-    auto constraint = inferTypeConstraint(typeVar.getValue(), operands[i].getType());
+  auto bindTypeVar = [&](StringRef typeVar, Type type) -> llvm::Error {
+    if (typeVar.empty()) return llvm::Error::success();
+    auto constraint = inferTypeConstraint(typeVar, type);
     if (!constraint) {
-      continue;
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "unsupported element type for custom op type variable '%s'",
+          typeVar.str().c_str());
     }
-
     auto existing = llvm::find_if(
         constraints, [&](const annc::kernels::TypeConstraintInfo &info) {
           return info.name == constraint->name;
         });
     if (existing == constraints.end()) {
       constraints.push_back(*constraint);
+      return llvm::Error::success();
+    }
+    if (existing->cpp_type_name != constraint->cpp_type_name) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "custom op type variable '%s' has conflicting element types",
+          typeVar.str().c_str());
+    }
+    return llvm::Error::success();
+  };
+
+  size_t operandIndex = 0;
+  for (size_t i = 0; i < typeVarAttrs->size(); ++i) {
+    auto kind = dyn_cast<StringAttr>((*kindAttrs)[i]);
+    auto typeVar = dyn_cast<StringAttr>((*typeVarAttrs)[i]);
+    if (!kind || !typeVar) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "invalid custom op argument metadata");
+    }
+    if (kind.getValue() != "memref") continue;
+    if (operandIndex >= operandTypes.size()) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "custom op has fewer operand types than schema");
+    }
+    if (auto err = bindTypeVar(typeVar.getValue(),
+                               operandTypes[operandIndex])) {
+      return std::move(err);
+    }
+    ++operandIndex;
+  }
+  if (operandIndex != operandTypes.size()) {
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "custom op has extra operand types");
+  }
+
+  auto resultTypeVarAttrs = getArrayAttr(metadata, "custom.result_type_vars");
+  if (!resultTypeVarAttrs) {
+    if (!resultTypes.empty()) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "missing custom op result metadata");
+    }
+    return constraints;
+  }
+  if (resultTypeVarAttrs->size() != resultTypes.size()) {
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "custom op result metadata does not match result types");
+  }
+  for (size_t i = 0; i < resultTypes.size(); ++i) {
+    auto typeVar = dyn_cast<StringAttr>((*resultTypeVarAttrs)[i]);
+    if (!typeVar) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "invalid custom op result metadata");
+    }
+    if (auto err = bindTypeVar(typeVar.getValue(), resultTypes[i])) {
+      return std::move(err);
     }
   }
 
