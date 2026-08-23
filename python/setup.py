@@ -21,7 +21,7 @@ setup(name=project,
       include_package_data=True,
       version=version,
       description='Accelerated Neural Network Compiler',
-      url='https://gitee.com/openeuler/ANNC',
+      url='https://atomgit.com/openeuler/ANNC',
       packages=find_packages() + [
           f'{project}',
           f'{project}/optimize',

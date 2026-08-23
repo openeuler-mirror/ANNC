@@ -20,5 +20,5 @@ b. get the sha256 hash of the commit by running:
 
 ### TensorFlow
 
-Repository: https://gitee.com/openeuler/sra_tensorflow_adapter
+Repository: https://atomgit.com/openeuler/sra_tensorflow_adapter
 Branch: r2.15
