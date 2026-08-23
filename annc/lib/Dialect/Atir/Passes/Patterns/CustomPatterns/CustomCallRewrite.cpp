@@ -4,6 +4,57 @@
 using namespace mlir;
 using namespace atir;
 
+namespace {
+
+StringRef getFusionAbi(Operation *op) {
+  auto parentFunc = op->getParentOfType<func::FuncOp>();
+  if (!parentFunc) return "mlir_ciface";
+  auto metadata = parentFunc->getAttrOfType<DictionaryAttr>("fusion.metadata");
+  if (!metadata) return "mlir_ciface";
+  auto abi = dyn_cast_or_null<StringAttr>(metadata.get("abi"));
+  return abi ? abi.getValue() : "mlir_ciface";
+}
+
+template <typename OpT>
+OpT findUniqueUser(Value value, bool &ambiguous) {
+  OpT found = nullptr;
+  ambiguous = false;
+  for (Operation *user : value.getUsers()) {
+    auto candidate = dyn_cast<OpT>(user);
+    if (!candidate) continue;
+    if (found) {
+      ambiguous = true;
+      return nullptr;
+    }
+    found = candidate;
+  }
+  return found;
+}
+
+bool hasAddAndReluBoundary(ArrayRef<Operation *> fusedOps) {
+  if (fusedOps.size() != 3) return false;
+  auto add = dyn_cast<AddOp>(fusedOps[1]);
+  auto relu = dyn_cast<ReluOp>(fusedOps[2]);
+  if (!add || !relu) return false;
+  SmallVector<Value> outputs = collectEscapingResults(fusedOps);
+  return outputs.size() == 2 && outputs[0] == add.getResult() &&
+         outputs[1] == relu.getResult();
+}
+
+bool isExecutionV2BuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu) {
+  if (!matmul || !add || !relu) return false;
+  if (matmul.getWithBias() || matmul.getDoRelu() ||
+      matmul.getRightTranspose() || matmul.getLeftTranspose() ||
+      matmul.getOutputTranspose() || matmul.getMStart() || matmul.getNStart() ||
+      matmul.getKStart() || matmul.getMSize() || matmul.getNSize() ||
+      matmul.getKSize() || matmul->getAttr("rhs_format"))
+    return false;
+  if (add.getDoRelu() || add.getScalar()) return false;
+  return relu.getReluLimit().convertToFloat() == -1.0f;
+}
+
+}  // namespace
+
 struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   MatmulToCustomCallRewrite(MLIRContext *context,
                             const CustomOpTypeFilter &customOpFilter,
@@ -13,7 +64,23 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   mlir::LogicalResult matchFusion(
       MatMulOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
     fusedOps.push_back(anchor);
+    if (getFusionAbi(anchor) == "annc_execution_v2") {
+      bool ambiguous = false;
+      AddOp add = findUniqueUser<AddOp>(anchor.getResult(), ambiguous);
+      if (ambiguous) return failure();
+      if (!add) return success();
+
+      ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
+      if (ambiguous) return failure();
+      if (relu && isExecutionV2BuiltinCompatible(anchor, add, relu)) {
+        fusedOps.push_back(add);
+        fusedOps.push_back(relu);
+      }
+      return success();
+    }
+
     if (!anchor->hasOneUse()) {
       return success();
     }
@@ -37,6 +104,10 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   std::string getCustomOpName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    if (getFusionAbi(anchor) == "annc_execution_v2" &&
+        hasAddAndReluBoundary(fusedOps)) {
+      return "MatMulAddReluWithAddOutput";
+    }
     if (fusedOps.size() == 3) {
       return "MatMulAddRelu";
     }
@@ -53,6 +124,39 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   CustomOpSchema getCustomOpSchema(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    if (getFusionAbi(anchor) == "annc_execution_v2") {
+      if (hasAddAndReluBoundary(fusedOps)) {
+        return CustomOpSchema::get("MatMulAddReluWithAddOutput")
+            .TypeVar("T")
+            .MemRefArg("lhs", 2, "T")
+            .MemRefArg("rhs", 2, "T")
+            .MemRefArg("bias", 1, "T")
+            .Result("add", 2, "T")
+            .Result("relu", 2, "T");
+      }
+      if (fusedOps.size() == 3) {
+        return CustomOpSchema::get("MatMulAddRelu")
+            .TypeVar("T")
+            .MemRefArg("lhs", 2, "T")
+            .MemRefArg("rhs", 2, "T")
+            .MemRefArg("bias", 1, "T")
+            .Result("relu", 2, "T");
+      }
+      if (fusedOps.size() == 2) {
+        return CustomOpSchema::get("MatMulAdd")
+            .TypeVar("T")
+            .MemRefArg("lhs", 2, "T")
+            .MemRefArg("rhs", 2, "T")
+            .MemRefArg("bias", 1, "T")
+            .Result("add", 2, "T");
+      }
+      return CustomOpSchema::get("MatMul")
+          .TypeVar("T")
+          .MemRefArg("lhs", 2, "T")
+          .MemRefArg("rhs", 2, "T")
+          .Result("output", 2, "T");
+    }
+
     if (fusedOps.size() == 3) {
       return CustomOpSchema::get("MatMulAddRelu")
           .TypeVar("T")

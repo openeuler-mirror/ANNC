@@ -6,6 +6,7 @@ set(LLVM_LINK_COMPONENTS
 )
 set(LIBS
   MLIROptLib
+  MLIRLLVMDialect
   MLIRParser
   ${dialect_libs}
   ${conversion_libs}

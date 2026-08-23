@@ -2,6 +2,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
@@ -13,7 +14,8 @@ int main(int argc, char **argv) {
   atir::registerAtirConversionPasses();
 
   DialectRegistry registry;
-  registry.insert<mlir::func::FuncDialect, atir::AtirDialect>();
+  registry.insert<mlir::func::FuncDialect, mlir::LLVM::LLVMDialect,
+                  atir::AtirDialect>();
 
   MLIRContext context(registry);
   context.loadAllAvailableDialects();

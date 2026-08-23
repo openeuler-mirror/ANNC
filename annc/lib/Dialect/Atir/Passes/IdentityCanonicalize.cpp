@@ -21,6 +21,36 @@ bool hasSameDescriptorExceptName(TensorType input, TensorType result) {
          input.getCacheData() == result.getCacheData();
 }
 
+void preserveOutputEndpoint(IdentityOp identity, Value input,
+                            PatternRewriter &rewriter) {
+  auto identityMetadata = identity->getAttrOfType<DictionaryAttr>("metadata");
+  auto endpoint = identityMetadata
+                      ? dyn_cast_or_null<StringAttr>(
+                            identityMetadata.get("tf.output_tensor"))
+                      : StringAttr();
+  auto producerResult = dyn_cast<OpResult>(input);
+  if (!endpoint || endpoint.empty() || !producerResult) return;
+
+  Operation *producer = producerResult.getOwner();
+  SmallVector<Attribute> endpoints(producer->getNumResults(),
+                                   rewriter.getStringAttr(""));
+  if (auto producerMetadata =
+          producer->getAttrOfType<DictionaryAttr>("metadata")) {
+    if (auto existing = dyn_cast_or_null<ArrayAttr>(
+            producerMetadata.get("tf.output_tensors"));
+        existing && existing.size() == endpoints.size()) {
+      llvm::copy(existing, endpoints.begin());
+    }
+  }
+  endpoints[producerResult.getResultNumber()] = endpoint;
+
+  NamedAttrList producerMetadata(
+      producer->getAttrOfType<DictionaryAttr>("metadata"));
+  producerMetadata.set("tf.output_tensors", rewriter.getArrayAttr(endpoints));
+  producer->setAttr("metadata",
+                    producerMetadata.getDictionary(rewriter.getContext()));
+}
+
 class EliminateIdentity final : public OpRewritePattern<IdentityOp> {
  public:
   using OpRewritePattern<IdentityOp>::OpRewritePattern;
@@ -38,8 +68,20 @@ class EliminateIdentity final : public OpRewritePattern<IdentityOp> {
       return failure();
     }
 
+    preserveOutputEndpoint(identity, input, rewriter);
+
     // Tensor names participate in TensorType identity. Preserve the Identity
-    // descriptor while bypassing its redundant data movement.
+    // descriptor while bypassing its redundant data movement. ATIR compute
+    // ops keep their output buffer as operand 0, so update that buffer too;
+    // OpFusion uses it when it reconstructs the fused function boundary.
+    if (auto *inputDefiningOp = input.getDefiningOp();
+        inputDefiningOp && inputDefiningOp->getNumOperands() > 0) {
+      Value outputBuffer = inputDefiningOp->getOperand(0);
+      if (outputBuffer.getDefiningOp<BufferOp>() &&
+          outputBuffer.getType() == inputType) {
+        outputBuffer.setType(resultType);
+      }
+    }
     input.setType(resultType);
     rewriter.replaceOp(identity, input);
     if (identityBuffer && identityBuffer->use_empty()) {

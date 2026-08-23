@@ -9,6 +9,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -27,6 +28,7 @@ int main(int argc, char **argv) {
   DialectRegistry registry;
   registry.insert<
           mlir::func::FuncDialect,
+          mlir::LLVM::LLVMDialect,
           mlir::arith::ArithDialect,
           mlir::linalg::LinalgDialect,
           mlir::memref::MemRefDialect,
@@ -50,5 +52,5 @@ int main(int argc, char **argv) {
   // root->print(llvm::errs(), flags);
   // annc-asm input.bin --xxx_pass
   return mlir::asMainReturnCode(
-    mlir::MlirOptMain(argc, argv, "ANNC Code Generation\n", registry));
+      mlir::MlirOptMain(argc, argv, "ANNC Code Generation\n", registry));
 }

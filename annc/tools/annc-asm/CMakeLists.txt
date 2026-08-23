@@ -6,6 +6,7 @@ set(LLVM_LINK_COMPONENTS
 )
 set(LIBS
   MLIROptLib
+  MLIRLLVMDialect
   MLIRParser
   ${dialect_libs}
   ${conversion_libs}
@@ -29,6 +30,7 @@ target_link_libraries(annc-asm PRIVATE
   ${dialect_libs}
   ${conversion_libs}
   MLIROptLib
+  MLIRLLVMDialect
   MLIRParser
   AtirDialect
   AtirBuilder
