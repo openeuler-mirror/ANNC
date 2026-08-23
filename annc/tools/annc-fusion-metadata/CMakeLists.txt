@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
 set(LIBS
   MLIRParser
   MLIRFuncDialect
+  MLIRLLVMDialect
   AtirDialect
   MLIRDialect
   ANNCFusionMetadata

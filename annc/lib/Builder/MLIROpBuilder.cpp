@@ -476,6 +476,10 @@ LogicalResult MLIRBuilder::buildOpaqueOp(const NodeInfo& node) {
       builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)));
   attrs.push_back(
       builder_.getNamedAttr("tf.op", builder_.getStringAttr(node.op_type)));
+  for (const auto& [key, value] : node.tf_attrs) {
+    if (key == "tf.name" || key == "tf.op") continue;
+    attrs.push_back(builder_.getNamedAttr(key, builder_.getStringAttr(value)));
+  }
   for (const auto& [key, value] : node.attrs) {
     if (key == "tf.name" || key == "tf.op" || key.empty() || key[0] == '_')
       continue;
@@ -568,6 +572,10 @@ void MLIRBuilder::attachMetadata(Operation* op, const NodeInfo& node,
       builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)));
   attrs.push_back(
       builder_.getNamedAttr("tf.op", builder_.getStringAttr(node.op_type)));
+  for (const auto& [key, value] : node.tf_attrs) {
+    if (key == "tf.name" || key == "tf.op") continue;
+    attrs.push_back(builder_.getNamedAttr(key, builder_.getStringAttr(value)));
+  }
   for (const auto& [key, value] : node.attrs) {
     if (key == "tf.name" || key == "tf.op") continue;
     if (!isDeclared(key) && !isHarmless(key) && !key.empty() &&

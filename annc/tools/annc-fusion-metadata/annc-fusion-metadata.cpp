@@ -4,6 +4,7 @@
 #include "FusionMetadata/FusionMetadata.h"
 #include "FusionMetadata/FusionMetadataJson.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
@@ -38,7 +39,8 @@ int main(int argc, char **argv) {
       argc, argv, "annc-fusion-metadata: extract ANNCFused metadata\n");
 
   DialectRegistry registry;
-  registry.insert<func::FuncDialect, atir::AtirDialect>();
+  registry.insert<func::FuncDialect, LLVM::LLVMDialect,
+                  atir::AtirDialect>();
   MLIRContext context(registry);
   context.loadAllAvailableDialects();
 

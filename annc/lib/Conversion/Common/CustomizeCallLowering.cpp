@@ -2,13 +2,14 @@
 
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Kernel/KernelPriorityResolver.h"
+#include "iostream"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "llvm/ADT/STLExtras.h"
-#include "iostream"
 
 using namespace mlir;
 
@@ -18,6 +19,12 @@ namespace {
 struct SchemaArg {
   StringRef name;
   StringRef kind;
+  int64_t rank = -1;
+  StringRef typeVar;
+};
+
+struct SchemaResult {
+  StringRef name;
   int64_t rank = -1;
   StringRef typeVar;
 };
@@ -32,8 +39,7 @@ std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata, StringRef name) {
   return std::nullopt;
 }
 
-std::optional<SmallVector<SchemaArg>>
-readSchemaArgs(DictionaryAttr metadata) {
+std::optional<SmallVector<SchemaArg>> readSchemaArgs(DictionaryAttr metadata) {
   auto names = getArrayAttr(metadata, "custom.arg_names");
   auto kinds = getArrayAttr(metadata, "custom.arg_kinds");
   auto ranks = getArrayAttr(metadata, "custom.arg_ranks");
@@ -56,11 +62,33 @@ readSchemaArgs(DictionaryAttr metadata) {
     if (!name || !kind || !rank || !typeVar) {
       return std::nullopt;
     }
-    args.push_back(
-        SchemaArg{name.getValue(), kind.getValue(), rank.getInt(),
-                  typeVar.getValue()});
+    args.push_back(SchemaArg{name.getValue(), kind.getValue(), rank.getInt(),
+                             typeVar.getValue()});
   }
   return args;
+}
+
+std::optional<SmallVector<SchemaResult>> readSchemaResults(
+    DictionaryAttr metadata) {
+  auto names = getArrayAttr(metadata, "custom.result_names");
+  auto ranks = getArrayAttr(metadata, "custom.result_ranks");
+  auto typeVars = getArrayAttr(metadata, "custom.result_type_vars");
+  if (!names || !ranks || !typeVars || names->size() != ranks->size() ||
+      ranks->size() != typeVars->size()) {
+    return std::nullopt;
+  }
+
+  SmallVector<SchemaResult> results;
+  results.reserve(names->size());
+  for (size_t i = 0; i < names->size(); ++i) {
+    auto name = dyn_cast<StringAttr>((*names)[i]);
+    auto rank = dyn_cast<IntegerAttr>((*ranks)[i]);
+    auto typeVar = dyn_cast<StringAttr>((*typeVars)[i]);
+    if (!name || !rank || !typeVar) return std::nullopt;
+    results.push_back(
+        SchemaResult{name.getValue(), rank.getInt(), typeVar.getValue()});
+  }
+  return results;
 }
 
 std::optional<int64_t> readI64AttrArg(DictionaryAttr metadata, StringRef name) {
@@ -73,8 +101,8 @@ std::optional<int64_t> readI64AttrArg(DictionaryAttr metadata, StringRef name) {
   return attr.getInt();
 }
 
-std::optional<std::pair<ArrayRef<int64_t>, Type>>
-getShapeAndElementType(Type type) {
+std::optional<std::pair<ArrayRef<int64_t>, Type>> getShapeAndElementType(
+    Type type) {
   if (auto memrefType = dyn_cast<MemRefType>(type)) {
     return std::make_pair(memrefType.getShape(), memrefType.getElementType());
   }
@@ -90,7 +118,8 @@ getShapeAndElementType(Type type) {
 
 MemRefType getCanonicalMemRefType(MLIRContext *ctx, Type type, int64_t rank) {
   auto shapeAndElement = getShapeAndElementType(type);
-  if (!shapeAndElement || static_cast<int64_t>(shapeAndElement->first.size()) != rank) {
+  if (!shapeAndElement ||
+      static_cast<int64_t>(shapeAndElement->first.size()) != rank) {
     return {};
   }
 
@@ -119,8 +148,8 @@ MemRefType getCanonicalAbiMemRefType(MLIRContext *ctx, Type type,
   return MemRefType::get(shape, IntegerType::get(ctx, 64), layout);
 }
 
-std::optional<annc::kernels::TypeConstraintInfo>
-bindTypeVar(StringRef typeVar, Type type) {
+std::optional<annc::kernels::TypeConstraintInfo> bindTypeVar(StringRef typeVar,
+                                                             Type type) {
   auto constraint = inferTypeConstraint(typeVar, type);
   if (!constraint || constraint->cpp_type_name.empty()) {
     return std::nullopt;
@@ -129,7 +158,8 @@ bindTypeVar(StringRef typeVar, Type type) {
 }
 
 LogicalResult bindOrCheckTypeVar(
-    CustomizeOp op, SmallVectorImpl<annc::kernels::TypeConstraintInfo> &bindings,
+    CustomizeOp op,
+    SmallVectorImpl<annc::kernels::TypeConstraintInfo> &bindings,
     StringRef typeVar, Type type) {
   if (typeVar.empty()) {
     return success();
@@ -149,19 +179,37 @@ LogicalResult bindOrCheckTypeVar(
   }
   if (existing->cpp_type_name != constraint->cpp_type_name) {
     return op.emitError() << "type variable '" << typeVar
-                          << "' is bound to both "
-                          << existing->cpp_type_name << " and "
-                          << constraint->cpp_type_name;
+                          << "' is bound to both " << existing->cpp_type_name
+                          << " and " << constraint->cpp_type_name;
   }
   return success();
 }
 
-} // namespace
+}  // namespace
 
 void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
-                                CustomizeOpAdaptor adaptor,
-                                CustomizeOp op) {
+                                CustomizeOpAdaptor adaptor, CustomizeOp op) {
   ModuleOp module = op->getParentOfType<ModuleOp>();
+  auto parentFunc = op->getParentOfType<func::FuncOp>();
+  if (!module || !parentFunc) {
+    op.emitError() << "CustomizeOp must be nested in a function and module";
+    return;
+  }
+
+  StringRef abi = "mlir_ciface";
+  if (auto fusionMetadata =
+          parentFunc->getAttrOfType<DictionaryAttr>("fusion.metadata")) {
+    if (auto abiAttr =
+            dyn_cast_or_null<StringAttr>(fusionMetadata.get("abi"))) {
+      abi = abiAttr.getValue();
+    }
+  }
+  if (abi != "mlir_ciface" && abi != "annc_execution_v2") {
+    op.emitError() << "unsupported fusion ABI '" << abi << "'";
+    return;
+  }
+  const bool isExecutionV2 = abi == "annc_execution_v2";
+
   auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
   auto schemaArgs = readSchemaArgs(metadata);
   if (!schemaArgs) {
@@ -175,6 +223,17 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   SmallVector<Type> callOperandTypes;
   SmallVector<Value> outputOperands;
 
+  if (isExecutionV2) {
+    if (parentFunc.getNumArguments() == 0 ||
+        !isa<LLVM::LLVMPointerType>(parentFunc.getArgument(0).getType())) {
+      op.emitError()
+          << "annc_execution_v2 kernel function must start with !llvm.ptr";
+      return;
+    }
+    callOperands.push_back(parentFunc.getArgument(0));
+    callOperandTypes.push_back(parentFunc.getArgument(0).getType());
+  }
+
   auto operands = adaptor.getOperands();
   size_t operandIndex = 0;
   for (const SchemaArg &schemaArg : *schemaArgs) {
@@ -186,17 +245,17 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
                        << schemaArg.name << "'";
         return;
       }
-      auto constant = rewriter.create<arith::ConstantIntOp>(
-          op.getLoc(), *value, 64);
+      auto constant =
+          rewriter.create<arith::ConstantIntOp>(op.getLoc(), *value, 64);
       callOperands.push_back(constant.getResult());
       callOperandTypes.push_back(rewriter.getI64Type());
       continue;
     }
 
     if (schemaArg.kind != "memref") {
-      op.emitError() << "CustomizeOp '" << op.getOpType()
-                     << "' argument " << schemaArg.name
-                     << " uses unsupported ABI kind '" << schemaArg.kind << "'";
+      op.emitError() << "CustomizeOp '" << op.getOpType() << "' argument "
+                     << schemaArg.name << " uses unsupported ABI kind '"
+                     << schemaArg.kind << "'";
       return;
     }
     if (operandIndex >= operands.size()) {
@@ -206,8 +265,9 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     }
     Value operand = operands[operandIndex];
     if (schemaArg.rank < 0) {
-      op.emitError() << "dynamic-rank CustomizeOp ABI is not supported yet for op '"
-                     << op.getOpType() << "'";
+      op.emitError()
+          << "dynamic-rank CustomizeOp ABI is not supported yet for op '"
+          << op.getOpType() << "'";
       return;
     }
 
@@ -226,7 +286,8 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
 
     Value callOperand = operand;
     if (operand.getType() != canonicalType) {
-      callOperand = rewriter.create<memref::CastOp>(op.getLoc(), canonicalType, operand);
+      callOperand =
+          rewriter.create<memref::CastOp>(op.getLoc(), canonicalType, operand);
     }
     callOperands.push_back(callOperand);
     callOperandTypes.push_back(canonicalType);
@@ -242,9 +303,62 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     return;
   }
 
+  func::ReturnOp boundaryReturn;
+  if (isExecutionV2) {
+    auto schemaResults = readSchemaResults(metadata);
+    if (!schemaResults || schemaResults->size() != op.getNumResults()) {
+      op.emitError() << "CustomizeOp '" << op.getOpType()
+                     << "' result schema does not match its results";
+      return;
+    }
+    for (auto [result, schemaResult] :
+         llvm::zip(op->getResults(), *schemaResults)) {
+      auto shapeAndElement = getShapeAndElementType(result.getType());
+      if (!shapeAndElement || schemaResult.rank < 0 ||
+          static_cast<int64_t>(shapeAndElement->first.size()) !=
+              schemaResult.rank) {
+        op.emitError() << "CustomizeOp '" << op.getOpType() << "' result "
+                       << schemaResult.name << " expects rank "
+                       << schemaResult.rank << ", got " << result.getType();
+        return;
+      }
+      if (failed(bindOrCheckTypeVar(op, typeBindings, schemaResult.typeVar,
+                                    result.getType()))) {
+        return;
+      }
+      if (result.use_empty()) {
+        op.emitError() << "annc_execution_v2 result has no boundary return use";
+        return;
+      }
+      for (OpOperand &use : result.getUses()) {
+        auto returnOp = dyn_cast<func::ReturnOp>(use.getOwner());
+        if (!returnOp ||
+            returnOp->getParentOfType<func::FuncOp>() != parentFunc) {
+          op.emitError() << "annc_execution_v2 results may only be used by "
+                            "the parent function return";
+          return;
+        }
+        if (boundaryReturn && boundaryReturn != returnOp) {
+          op.emitError() << "annc_execution_v2 results must share one "
+                            "boundary return";
+          return;
+        }
+        boundaryReturn = returnOp;
+      }
+    }
+    if (!boundaryReturn ||
+        boundaryReturn.getNumOperands() != op.getNumResults() ||
+        !llvm::equal(boundaryReturn.getOperands(), op.getResults())) {
+      op.emitError() << "annc_execution_v2 return must contain exactly the "
+                        "ordered CustomizeOp results";
+      return;
+    }
+  }
+
   annc::kernels::KernelResolveRequest req;
   req.op_type = op.getOpType().str();
   req.type_constraints.assign(typeBindings.begin(), typeBindings.end());
+  req.abi = abi.str();
   if (auto rhsFormat = op->getAttrOfType<StringAttr>("rhs_format")) {
     req.rhs_format = rhsFormat.getValue().str();
   }
@@ -266,8 +380,8 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   // }
 
   auto statusType = rewriter.getI32Type();
-  auto funcType = rewriter.getFunctionType(callOperandTypes,
-                                           TypeRange{statusType});
+  auto funcType =
+      rewriter.getFunctionType(callOperandTypes, TypeRange{statusType});
 
   PatternRewriter::InsertionGuard guard(rewriter);
 
@@ -287,14 +401,20 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
 
   rewriter.setInsertionPoint(op);
 
-  auto callOp = rewriter.create<func::CallOp>(
-      op.getLoc(), kernelInfo->symbol_name, TypeRange{statusType},
-      callOperands);
+  auto callOp =
+      rewriter.create<func::CallOp>(op.getLoc(), kernelInfo->symbol_name,
+                                    TypeRange{statusType}, callOperands);
   Value status = callOp.getResult(0);
 
-  if (auto parentFunc = op->getParentOfType<func::FuncOp>();
-      parentFunc && parentFunc->hasAttr("annc.kernel") &&
-      parentFunc.getNumResults() == 0) {
+  if (isExecutionV2) {
+    parentFunc.setFunctionType(rewriter.getFunctionType(
+        parentFunc.getFunctionType().getInputs(), TypeRange{statusType}));
+    boundaryReturn->setOperands(status);
+    rewriter.eraseOp(op);
+    return;
+  }
+
+  if (parentFunc->hasAttr("annc.kernel") && parentFunc.getNumResults() == 0) {
     parentFunc.setFunctionType(rewriter.getFunctionType(
         parentFunc.getFunctionType().getInputs(), TypeRange{statusType}));
     if (auto returnOp =
@@ -313,4 +433,4 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
   rewriter.replaceOp(op, replacements);
 }
 
-} // namespace atir
+}  // namespace atir

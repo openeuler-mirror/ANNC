@@ -1,4 +1,8 @@
 file(GLOB _srcs *.cpp Patterns/*.cpp Patterns/CustomPatterns/*.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherMatch.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherRewrite.cpp)
+list(APPEND _srcs Patterns/FusionBoundaryUtils.cpp)
+list(REMOVE_DUPLICATES _srcs)
 
 add_mlir_library(AtirPasses
     ${_srcs}
@@ -18,6 +22,7 @@ add_mlir_library(AtirPasses
     MLIRSupport
     MLIRParser
     MLIRFuncDialect
+    MLIRLLVMDialect
     MLIRRewrite
     MLIRTransforms
     MLIRDialect
