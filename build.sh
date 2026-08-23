@@ -6,7 +6,7 @@ INSTALL_PREFIX="${PWD}/install"
 ENABLE_LIBCXX="OFF"
 ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
-ENABLE_KDNN_ADAPTOR="ON"
+ENABLE_KDNN_ADAPTOR="OFF"
 ENABLE_COVERAGE="OFF"
 KDNN_SOURCE="LOCAL"
 KDNN_DIR="${PWD}/third_party/KDNN"
@@ -107,7 +107,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --enable-libcxx               Enable libc++"
       echo "  --disable-assertions          Disable assertions"
       echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support (default: OFF)"
-      echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: ON)"
+      echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
       echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: LOCAL)"
       echo "  --kdnn-dir <path>             Local KDNN root, only valid with --kdnn-source LOCAL (default: ./third_party/KDNN)"
@@ -130,6 +130,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Resolve the selected interpreter before entering build/. Relative virtualenv
+# paths such as .venv/bin/python would otherwise stop resolving during CMake
+# configuration and let FindPython fall back to an unrelated system Python.
+PYTHON_COMMAND=$(command -v "${PYTHON}" 2>/dev/null || true)
+if [ -z "${PYTHON_COMMAND}" ]; then
+  echo "ERROR: Python interpreter '${PYTHON}' was not found." >&2
+  exit 1
+fi
+PYTHON_COMMAND_DIR=$(cd "$(dirname "${PYTHON_COMMAND}")" && pwd -P)
+PYTHON="${PYTHON_COMMAND_DIR}/$(basename "${PYTHON_COMMAND}")"
 
 if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" && "${KDNN_SOURCE}" != "RELEASE" ]]; then
   echo "ERROR: --kdnn-source must be LOCAL, REMOTE, or RELEASE, got '${KDNN_SOURCE}'" >&2
@@ -208,7 +219,7 @@ if command -v rpm >/dev/null 2>&1 && ! rpm -q protobuf-devel >/dev/null 2>&1; th
   exit 1
 fi
 
-if command -v dpkg-query >/dev/null 2>&1 && \
+if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
     ! dpkg-query -W -f='${Status}' libprotobuf-dev 2>/dev/null | grep -q "install ok installed"; then
   echo "ERROR: Required system package 'libprotobuf-dev' is not installed." >&2
   echo "       Install it on Debian/Ubuntu systems with:" >&2
@@ -225,7 +236,7 @@ if command -v rpm >/dev/null 2>&1 && ! rpm -q gtest-devel >/dev/null 2>&1; then
   exit 1
 fi
 
-if command -v dpkg-query >/dev/null 2>&1 && \
+if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
     ! dpkg-query -W -f='${Status}' libgtest-dev 2>/dev/null | grep -q "install ok installed"; then
   echo "ERROR: Required system package 'libgtest-dev' is not installed." >&2
   echo "       Install it on Debian/Ubuntu systems with:" >&2
@@ -464,6 +475,8 @@ check_cache_consistency() {
     "CMAKE_C_COMPILER:$(command -v ${C_COMPILER})"
     "CMAKE_CXX_COMPILER:$(command -v ${CXX_COMPILER})"
     "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
+    "Python_EXECUTABLE:$(command -v ${PYTHON})"
+    "Python3_EXECUTABLE:$(command -v ${PYTHON})"
     "LLVM_ENABLE_LIBCXX:${ENABLE_LIBCXX}"
     "LLVM_ENABLE_ASSERTIONS:${ENABLE_ASSERTIONS}"
     "ANNC_ENABLE_CONSTANT_FOLDING:${ENABLE_CONSTANT_FOLDING}"
@@ -611,6 +624,8 @@ else
     -DCMAKE_CXX_COMPILER="$(command -v ${CXX_COMPILER})" \
     -DCMAKE_CXX_FLAGS="-fPIC" \
     -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
+    -DPython_EXECUTABLE="$(command -v ${PYTHON})" \
+    -DPython3_EXECUTABLE="$(command -v ${PYTHON})" \
     -Dpybind11_DIR="${PYBIND11_DIR}" \
     -Dnanobind_DIR="${NANOBIND_DIR}"
 
@@ -629,4 +644,14 @@ if [ $? -ne 0 ]; then
 fi
 
 ninja install
+
+# LLVM keeps the build-tree llvm-lit path when LLVM_INSTALL_UTILS is disabled.
+# Rewrite that generated install config to use its relocatable tools directory
+# so the package does not expose the machine-local build path.
+LLVM_INSTALL_CONFIG="${INSTALL_PREFIX}/lib/cmake/llvm/LLVMConfig.cmake"
+if [ -f "${LLVM_INSTALL_CONFIG}" ]; then
+  sed -i 's|^set(LLVM_DEFAULT_EXTERNAL_LIT .*)$|set(LLVM_DEFAULT_EXTERNAL_LIT "${LLVM_TOOLS_BINARY_DIR}/llvm-lit")|' \
+    "${LLVM_INSTALL_CONFIG}"
+fi
+
 echo "Build and installation completed successfully"
