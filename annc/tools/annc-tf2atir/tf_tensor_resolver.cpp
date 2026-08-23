@@ -172,6 +172,10 @@ bool resolveDtype(const TfNode& node, int output_index,
     if (const auto type = typeAttr(source, "Tidx")) return setType(*type);
     return setType(tensorflow::DT_INT32);
   }
+  if (source.op() == "Unique" && output_index == 1) {
+    if (const auto type = typeAttr(source, "out_idx")) return setType(*type);
+    return setType(tensorflow::DT_INT32);
+  }
   if (isComparisonOp(source.op())) return setType(tensorflow::DT_BOOL);
   // Logical ops produce a boolean mask too, but carry no type attr at all
   // (e.g. LogicalAnd has neither T nor Tout), so generic inference would
@@ -303,10 +307,10 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       for (const TensorRef& out : node.outputs)
         if (out.output_index == index) return true;
       TensorDescriptor descriptor;
-      if (op == "Unique" || op == "Merge") {
-        // Unique idx / Merge value_index: fixed int32, no GraphDef type fact.
+      if (op == "Merge") {
+        // Merge value_index is fixed int32 and has no GraphDef type fact.
         descriptor.dtype = "int32";
-      } else if (op == "TopK" || op == "TopKV2") {
+      } else if (op == "TopK" || op == "TopKV2" || op == "Unique") {
         if (!resolveDtype(node, index, result.tensors, descriptor.dtype,
                           error))
           return false;

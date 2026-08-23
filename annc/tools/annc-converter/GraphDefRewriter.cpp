@@ -6,9 +6,10 @@
 #include <unordered_map>
 
 #include "ANNCFusedNodeBuilder.h"
+#include "FusionMetadata/TensorEndpoint.h"
+#include "google/protobuf/text_format.h"
 #include "llvm/Support/raw_ostream.h"
 #include "tensorflow/core/framework/graph.pb.h"
-#include "google/protobuf/text_format.h"
 
 namespace annc::fusion {
 namespace {
@@ -68,13 +69,31 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
     fusionInfos.front().kernelName = options.kernelNameOverride;
   }
 
-  std::unordered_map<std::string, const FusionInfo *> fusionByOutput;
+  ANNCFusedNodeBuilder::FusionOutputMap fusionByOutput;
   for (const auto &fusion : fusionInfos) {
     if (options.verbose) {
       llvm::outs() << "[annc-converter] Rewriting fusion node from ATIR: "
                    << fusion.name << " pattern=" << fusion.pattern << "\n";
     }
-    fusionByOutput[fusion.outputs.front().tfName] = &fusion;
+    for (size_t slot = 0; slot < fusion.outputs.size(); ++slot) {
+      auto endpoint = parseTensorEndpoint(fusion.outputs[slot].tfName);
+      if (!endpoint || endpoint->control) {
+        llvm::errs()
+            << "[annc-converter] Error: invalid fusion output endpoint: "
+            << fusion.outputs[slot].tfName << "\n";
+        return false;
+      }
+      auto [it, inserted] =
+          fusionByOutput.emplace(endpoint->canonicalDataName(),
+                                 ANNCFusedNodeBuilder::FusionOutputTarget{
+                                     &fusion, static_cast<int64_t>(slot)});
+      if (!inserted) {
+        llvm::errs()
+            << "[annc-converter] Error: duplicate fusion output endpoint: "
+            << endpoint->canonicalDataName() << "\n";
+        return false;
+      }
+    }
   }
 
   ANNCFusedNodeBuilder fusedNodeBuilder(graph, options.sharedLibPath,
@@ -83,6 +102,7 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
   tensorflow::GraphDef rewritten = graph;
   rewritten.clear_node();
   for (const auto &node : graph.node()) {
+    if (fusedNodeBuilder.replacesOutputNode(node.name())) continue;
     tensorflow::NodeDef *out = rewritten.add_node();
     *out = node;
 
@@ -94,6 +114,11 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
 
   for (const auto &fusion : fusionInfos) {
     fusedNodeBuilder.appendNode(rewritten, fusion);
+  }
+  std::string aliasError;
+  if (!fusedNodeBuilder.appendOutputAliases(rewritten, &aliasError)) {
+    llvm::errs() << "[annc-converter] Error: " << aliasError << "\n";
+    return false;
   }
 
   return writeBinaryGraphDef(rewritten, options.outputGraphPath);

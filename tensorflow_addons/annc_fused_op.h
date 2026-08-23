@@ -1,15 +1,17 @@
 #ifndef TENSORFLOW_ADDON_ANNC_FUSED_OP_H_
 #define TENSORFLOW_ADDON_ANNC_FUSED_OP_H_
 
+#include <dlfcn.h>
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "Kernel/ExecutionContext.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/mutex.h"
-
-#include <dlfcn.h>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
 namespace annc {
 namespace threadpool {
@@ -38,9 +40,11 @@ class ANNCFusedOp : public OpKernel {
   // Load the shared library produced by ANNCOptimizerPass.
   Status LoadLibrary(const std::string& so_path);
 
-  Status ExecuteMlirCifaceKernel(OpKernelContext* context,
-                                 bool profile_enabled,
+  Status ExecuteMlirCifaceKernel(OpKernelContext* context, bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample);
+  Status ExecuteExecutionV2Kernel(OpKernelContext* context,
+                                  bool profile_enabled,
+                                  AnncFusedProfileSample* profile_sample);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;
@@ -66,9 +70,11 @@ class ANNCFusedOp : public OpKernel {
   std::string fusion_pattern_;
   // Legacy homogeneous output dtype retained by the TensorFlow Op contract.
   DataType dtype_;
+  std::vector<DataType> output_types_;
   // Generated library containing _mlir_ciface_<kernel_name_>.
   std::string shared_lib_path_;
-  // Calling convention; currently only "mlir_ciface" is accepted.
+  // Calling convention: legacy "mlir_ciface" or context-based
+  // "annc_execution_v2".
   std::string abi_;
   // Whether runtime clears output tensors before calling the generated kernel.
   bool zero_initialize_outputs_;
