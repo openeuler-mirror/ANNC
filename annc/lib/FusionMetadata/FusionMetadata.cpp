@@ -7,6 +7,7 @@
 #include <system_error>
 #include <unordered_set>
 
+#include "FusionMetadata/TensorEndpoint.h"
 #include "llvm/Support/Error.h"
 
 using namespace mlir;
@@ -23,8 +24,7 @@ std::string stringAttr(DictionaryAttr dict, StringRef key) {
   return "";
 }
 
-int64_t intAttr(DictionaryAttr dict, StringRef key,
-                int64_t defaultValue = 0) {
+int64_t intAttr(DictionaryAttr dict, StringRef key, int64_t defaultValue = 0) {
   if (!dict) return defaultValue;
   Attribute raw = dict.get(key);
   if (auto attr = raw ? dyn_cast<IntegerAttr>(raw) : IntegerAttr()) {
@@ -74,12 +74,13 @@ std::vector<int64_t> intArrayAttr(DictionaryAttr dict, StringRef key) {
 }
 
 std::string trim(std::string value) {
-  auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
-    return std::isspace(c);
-  });
-  auto last = std::find_if_not(value.rbegin(), value.rend(),
-                              [](unsigned char c) { return std::isspace(c); })
-                  .base();
+  auto first =
+      std::find_if_not(value.begin(), value.end(),
+                       [](unsigned char c) { return std::isspace(c); });
+  auto last =
+      std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+        return std::isspace(c);
+      }).base();
   if (first >= last) return "";
   return std::string(first, last);
 }
@@ -294,7 +295,8 @@ FusionInfo fusionInfoFromMetadataEntries(
 }
 
 void populatePatternAttrs(FusionInfo &info, func::FuncOp func) {
-  if (auto numBuckets = func->getAttrOfType<IntegerAttr>("fusion.num_buckets")) {
+  if (auto numBuckets =
+          func->getAttrOfType<IntegerAttr>("fusion.num_buckets")) {
     info.patternAttrs["num_buckets"] = std::to_string(numBuckets.getInt());
   }
 }
@@ -313,30 +315,48 @@ llvm::Error validateFusionInfo(const FusionInfo &info) {
   if (info.kernelName.empty()) return missingFieldError("kernel_name");
   if (info.args.empty()) return missingFieldError("args");
   if (info.outputs.empty()) return missingFieldError("outputs");
+  if (info.abi != "mlir_ciface" && info.abi != "annc_execution_v2") {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "unsupported fusion ABI: %s",
+                                   info.abi.c_str());
+  }
+  if (info.abi == "annc_execution_v2" && !info.kernelArgOrder.empty()) {
+    return llvm::createStringError(
+        std::errc::invalid_argument,
+        "annc_execution_v2 must not persist output argument order");
+  }
 
   static const std::unordered_set<std::string> inputRoles = {
       "constant", "fixed", "dynamic"};
   for (const FusionArg &arg : info.args) {
     if (!inputRoles.count(arg.role)) {
-      return llvm::createStringError(
-          std::errc::invalid_argument,
-          "fusion input '%s' has invalid role '%s'", arg.tfName.c_str(),
-          arg.role.c_str());
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "fusion input '%s' has invalid role '%s'",
+                                     arg.tfName.c_str(), arg.role.c_str());
     }
     if (arg.tfName.empty()) return missingFieldError("args.tf_name");
     if (arg.rank < 0 || arg.rank != static_cast<int64_t>(arg.shape.size())) {
       return llvm::createStringError(
           std::errc::invalid_argument,
-          "fusion input '%s' rank does not match its shape", arg.tfName.c_str());
+          "fusion input '%s' rank does not match its shape",
+          arg.tfName.c_str());
     }
     if (arg.dtype.empty()) return missingFieldError("args.dtype");
+    auto endpoint = parseTensorEndpoint(arg.tfName);
+    if (!endpoint) return endpoint.takeError();
+    if (endpoint->control) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "fusion input '%s' is a control endpoint",
+                                     arg.tfName.c_str());
+    }
   }
+  std::unordered_set<std::string> seenOutputs;
   for (const FusionArg &output : info.outputs) {
     if (output.role != "output") {
-      return llvm::createStringError(
-          std::errc::invalid_argument,
-          "fusion output '%s' has invalid role '%s'", output.tfName.c_str(),
-          output.role.c_str());
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "fusion output '%s' has invalid role '%s'",
+                                     output.tfName.c_str(),
+                                     output.role.c_str());
     }
     if (output.tfName.empty()) return missingFieldError("outputs.tf_name");
     if (output.rank < 0 ||
@@ -347,6 +367,18 @@ llvm::Error validateFusionInfo(const FusionInfo &info) {
           output.tfName.c_str());
     }
     if (output.dtype.empty()) return missingFieldError("outputs.dtype");
+    auto endpoint = parseTensorEndpoint(output.tfName);
+    if (!endpoint) return endpoint.takeError();
+    if (endpoint->control) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "fusion output '%s' is a control endpoint",
+                                     output.tfName.c_str());
+    }
+    if (!seenOutputs.insert(endpoint->canonicalDataName()).second) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "duplicate fusion output endpoint '%s'",
+                                     endpoint->canonicalDataName().c_str());
+    }
   }
   return llvm::Error::success();
 }
@@ -408,8 +440,7 @@ llvm::Expected<std::vector<FusionInfo>> extractFusionInfosFromMlirText(
   std::ifstream in(path);
   if (!in.is_open()) {
     return llvm::createStringError(std::errc::io_error,
-                                   "cannot open ATIR file '%s'",
-                                   path.c_str());
+                                   "cannot open ATIR file '%s'", path.c_str());
   }
   std::stringstream buffer;
   buffer << in.rdbuf();

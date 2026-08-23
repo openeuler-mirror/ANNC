@@ -18,16 +18,19 @@ KernelRegistry& KernelRegistry::instance() {
 
 bool KernelRegistry::sameSignature(const KernelInfo& lhs, const KernelInfo& rhs) {
     return lhs.op_type == rhs.op_type && lhs.backend == rhs.backend &&
+           lhs.abi == rhs.abi &&
            lhs.type_constraints == rhs.type_constraints;
 }
 
 bool KernelRegistry::exactMatch(const KernelInfo& info, const KernelQuery& query) {
     return info.op_type == query.op_type && info.backend == query.backend &&
+           info.abi == query.abi &&
            info.type_constraints == query.type_constraints;
 }
 
 bool KernelRegistry::genericMatch(const KernelInfo& info, const KernelQuery& query) {
     if (info.op_type != query.op_type || info.backend != query.backend ||
+        info.abi != query.abi ||
         info.type_constraints.size() != query.type_constraints.size()) {
         return false;
     }
@@ -115,7 +118,7 @@ std::optional<KernelInfo> KernelRegistry::lookupKernel(const KernelQuery& query)
     }
 
     for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-        if (!it->info.isSpecialized()) {
+        if (!it->info.isSpecialized() && it->info.abi == query.abi) {
             return it->info;
         }
     }
@@ -124,8 +127,9 @@ std::optional<KernelInfo> KernelRegistry::lookupKernel(const KernelQuery& query)
 }
 
 std::optional<std::string> KernelRegistry::lookupKernelSymbol(const std::string& opType,
-                                                               const std::string& backend) const {
-    auto info = lookupKernel(KernelQuery{opType, backend, {}});
+                                                               const std::string& backend,
+                                                               const std::string& abi) const {
+    auto info = lookupKernel(KernelQuery{opType, backend, {}, abi});
     if (!info.has_value()) {
         return std::nullopt;
     }
@@ -141,8 +145,9 @@ std::optional<std::string> KernelRegistry::lookupKernelSymbol(const KernelQuery&
 }
 
 bool KernelRegistry::hasKernel(const std::string& opType,
-                               const std::string& backend) const {
-    return lookupKernel(KernelQuery{opType, backend, {}}).has_value();
+                               const std::string& backend,
+                               const std::string& abi) const {
+    return lookupKernel(KernelQuery{opType, backend, {}, abi}).has_value();
 }
 
 bool KernelRegistry::hasKernel(const KernelQuery& query) const {

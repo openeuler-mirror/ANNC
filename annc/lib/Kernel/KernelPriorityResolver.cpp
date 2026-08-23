@@ -7,11 +7,13 @@ namespace {
 
 std::optional<KernelInfo> lookupKernelForBackend(
     const std::string& opType, const std::string& backend,
-    const std::vector<TypeConstraintInfo>& typeConstraints) {
+    const std::vector<TypeConstraintInfo>& typeConstraints,
+    const std::string& abi) {
     KernelQuery query;
     query.op_type = opType;
     query.backend = backend;
     query.type_constraints = typeConstraints;
+    query.abi = abi;
     return KernelRegistry::instance().lookupKernel(query);
 }
 
@@ -24,12 +26,13 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
     if (enableKdnn && request.hasPackedRhsFormat()) {
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (!request.requiresSpecialization()) {
-            if (registry.hasKernel(request.op_type, "kdnn_packed")) return true;
+            if (registry.hasKernel(request.op_type, "kdnn_packed", request.abi)) return true;
         } else {
             KernelQuery q;
             q.op_type = request.op_type;
             q.backend = "kdnn_packed";
             q.type_constraints = request.type_constraints;
+            q.abi = request.abi;
             if (registry.hasKernel(q)) return true;
         }
 #endif
@@ -37,23 +40,25 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
 
     if (enableKdnn) {
         if (!request.requiresSpecialization()) {
-            if (registry.hasKernel(request.op_type, "kdnn")) return true;
+            if (registry.hasKernel(request.op_type, "kdnn", request.abi)) return true;
         } else {
             KernelQuery q;
             q.op_type = request.op_type;
             q.backend = "kdnn";
             q.type_constraints = request.type_constraints;
+            q.abi = request.abi;
             if (registry.hasKernel(q)) return true;
         }
     }
 
     if (!request.requiresSpecialization()) {
-        if (registry.hasKernel(request.op_type, "aarch64")) return true;
+        if (registry.hasKernel(request.op_type, "aarch64", request.abi)) return true;
     } else {
         KernelQuery q;
         q.op_type = request.op_type;
         q.backend = "aarch64";
         q.type_constraints = request.type_constraints;
+        q.abi = request.abi;
         if (registry.hasKernel(q)) return true;
     }
 
@@ -65,7 +70,8 @@ std::optional<KernelInfo> resolveBestKernelInfo(
     if (enableKdnn && request.hasPackedRhsFormat()) {
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (auto info = lookupKernelForBackend(request.op_type, "kdnn_packed",
-                                               request.type_constraints)) {
+                                               request.type_constraints,
+                                               request.abi)) {
             return info;
         }
 #endif
@@ -73,12 +79,14 @@ std::optional<KernelInfo> resolveBestKernelInfo(
 
     if (enableKdnn) {
         if (auto info = lookupKernelForBackend(request.op_type, "kdnn",
-                                               request.type_constraints)) {
+                                               request.type_constraints,
+                                               request.abi)) {
             return info;
         }
     }
     if (auto info = lookupKernelForBackend(request.op_type, "aarch64",
-                                           request.type_constraints)) {
+                                           request.type_constraints,
+                                           request.abi)) {
         return info;
     }
     return std::nullopt;
