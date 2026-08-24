@@ -4,8 +4,8 @@
 #include "Kernel/ExecutionContextUtils.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
-#include "Kernel/threadpool/Parallel.h"
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/Parallel.h"
+#include "Support/ThreadPool/ThreadPool.h"
 
 namespace {
 
@@ -69,7 +69,7 @@ annc::kernels::KernelStatus matmulAddReluWithAddOutputImpl(
   float* reluData = ANNC_MEMREF_DATA(*relu);
 
   try {
-    annc::kernels::parallel_for(
+    annc::threadpool::parallel_for(
         threadPool, rows, [&](int64_t begin, int64_t end) {
           for (int64_t row = begin; row < end; ++row) {
             for (int64_t column = 0; column < columns; ++column) {

@@ -4,8 +4,8 @@
 #include "Kernel/ExecutionContextUtils.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
-#include "Kernel/threadpool/Parallel.h"
-#include "Kernel/threadpool/ThreadPool.h"
+#include "Support/ThreadPool/Parallel.h"
+#include "Support/ThreadPool/ThreadPool.h"
 
 namespace {
 
@@ -126,7 +126,7 @@ annc::kernels::KernelStatus kpFusedGatherImpl(
   float *gatheredData = ANNC_MEMREF_DATA(*gathered);
   const float *dataData = ANNC_MEMREF_DATA(*data);
   try {
-    annc::kernels::parallel_for(
+    annc::threadpool::parallel_for(
         threadPool, uniqueCount, [&](int64_t first, int64_t last) {
           for (int64_t i = first; i < last; ++i) {
             const float *source = dataData + uniqueValues[i] * dataColumns;
