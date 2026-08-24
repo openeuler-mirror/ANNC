@@ -60,6 +60,25 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
     return false;
   }
 
+  const bool needsAotLibrary = std::any_of(
+      fusionInfos.begin(), fusionInfos.end(), [](const FusionInfo &fusion) {
+        return fusion.executionMode == "aot";
+      });
+  const bool needsJitTemplate = std::any_of(
+      fusionInfos.begin(), fusionInfos.end(), [](const FusionInfo &fusion) {
+        return fusion.executionMode == "jit";
+      });
+  if (needsAotLibrary && options.sharedLibPath.empty()) {
+    llvm::errs() << "[annc-converter] Error: AOT fusion metadata requires "
+                    "--shared_lib_path\n";
+    return false;
+  }
+  if (needsJitTemplate && options.atirModulePath.empty()) {
+    llvm::errs() << "[annc-converter] Error: JIT fusion metadata requires "
+                    "--atir_module_path\n";
+    return false;
+  }
+
   if (!options.kernelNameOverride.empty()) {
     if (fusionInfos.size() != 1) {
       llvm::errs() << "[annc-converter] Error: --kernel_name override is only "

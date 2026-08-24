@@ -307,8 +307,13 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   auto *attrs = fused->mutable_attr();
   (*attrs)["kernel_name"].set_s(fusion.kernelName);
   (*attrs)["template_fingerprint"].set_s(fusion.templateFingerprint);
-  (*attrs)["shared_lib_path"].set_s(sharedLibPath);
-  (*attrs)["atir_module_path"].set_s(atirModulePath);
+  if (fusion.executionMode == "jit") {
+    (*attrs)["shared_lib_path"].set_s("");
+    (*attrs)["atir_module_path"].set_s(atirModulePath);
+  } else {
+    (*attrs)["shared_lib_path"].set_s(sharedLibPath);
+    (*attrs)["atir_module_path"].set_s("");
+  }
   (*attrs)["abi"].set_s(fusion.abi);
   int64_t numOutputs = static_cast<int64_t>(outputs.size());
   (*attrs)["num_outputs"].set_i(numOutputs);

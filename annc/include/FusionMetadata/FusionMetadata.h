@@ -50,6 +50,10 @@ struct FusionInfo {
   // validate the function body and ABI before selecting a specialized kernel.
   std::string pattern;
 
+  // Per-fusion execution mode selected by the ATIR fusion pattern.  Older
+  // metadata without this field defaults to AOT.
+  std::string executionMode = "aot";
+
   // Exported kernel symbol. The runtime resolves _mlir_ciface_<kernelName>
   // from the generated shared library for either supported ABI.
   std::string kernelName;

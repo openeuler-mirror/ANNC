@@ -28,6 +28,21 @@ using namespace atir;
 
 namespace {
 
+constexpr StringLiteral kAotExecutionMode = "aot";
+constexpr StringLiteral kJitExecutionMode = "jit";
+
+static void setExecutionMode(func::FuncOp function,
+                             PatternRewriter &rewriter, StringRef mode) {
+  function->setAttr("annc.execution_mode", rewriter.getStringAttr(mode));
+}
+
+static void addExecutionModeMetadata(
+    SmallVectorImpl<NamedAttribute> &metadata, PatternRewriter &rewriter,
+    StringRef mode) {
+  metadata.push_back(rewriter.getNamedAttr("execution_mode",
+                                           rewriter.getStringAttr(mode)));
+}
+
 static std::string sanitizeName(std::string name) {
   for (char &c : name) {
     if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
@@ -759,16 +774,14 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
         match.embeddingWeight.getType(), match.outputBuffer.getType(),
         match.hashBucket.getNumBuckets(), match.kernelOps, match.dynamicInput,
         match.embeddingWeight, match.outputBuffer);
-    std::string templateFingerprint =
-        atir::computeAtirTemplateFingerprint(module, kernelFunc);
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr(
         "fusion.pattern", rewriter.getStringAttr("dnn_embedding_hash_bucket")));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "template_fingerprint", rewriter.getStringAttr(templateFingerprint)));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
     metadata.push_back(rewriter.getNamedAttr(
         "tf.name", rewriter.getStringAttr(clusterName)));
     SmallVector<FusionArgSpec> argSpecs;
@@ -868,9 +881,11 @@ struct FuseKPFusedGatherAsFuncCallPattern : public OpRewritePattern<GatherOp> {
                                     boundaryInputs, match->boundaryOutputs);
     kernelFunc->setAttr("fusion.pattern",
                         rewriter.getStringAttr("kp_fused_gather"));
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr(
         "fusion.pattern", rewriter.getStringAttr("kp_fused_gather")));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_name", rewriter.getStringAttr(kernelName)));
     metadata.push_back(rewriter.getNamedAttr(
@@ -1004,12 +1019,19 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         auto kernelFunc =
             createExecutionV2KernelFunc(module, rewriter, kernelName, fusedOps,
                                         boundaryInputs, boundaryOutputs);
+        setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
+        std::string templateFingerprint =
+            atir::computeAtirTemplateFingerprint(module, kernelFunc);
 
         SmallVector<NamedAttribute> metadata;
         metadata.push_back(rewriter.getNamedAttr(
             "fusion.pattern", rewriter.getStringAttr("matmul_add_relu")));
+        addExecutionModeMetadata(metadata, rewriter, kJitExecutionMode);
         metadata.push_back(rewriter.getNamedAttr(
             "kernel_name", rewriter.getStringAttr(kernelName)));
+        metadata.push_back(rewriter.getNamedAttr(
+            "template_fingerprint",
+            rewriter.getStringAttr(templateFingerprint)));
         metadata.push_back(rewriter.getNamedAttr(
             "tf.name", rewriter.getStringAttr(clusterName)));
 
@@ -1073,12 +1095,14 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         ? createMatMulPostOpKernelFunc(module, rewriter, kernelName, matmulOp,
                                        output, bias, pattern, customOpName)
         : createKernelFunc(module, rewriter, kernelName, matmulOp);
+    setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
     std::string templateFingerprint =
         atir::computeAtirTemplateFingerprint(module, kernelFunc);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr("fusion.pattern",
                                              rewriter.getStringAttr(pattern)));
+    addExecutionModeMetadata(metadata, rewriter, kJitExecutionMode);
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_name", rewriter.getStringAttr(kernelName)));
     metadata.push_back(rewriter.getNamedAttr(
