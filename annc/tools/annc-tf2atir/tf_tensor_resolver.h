@@ -13,6 +13,7 @@ namespace annc::tf2atir {
 struct TensorDescriptor {
   std::string dtype;
   std::vector<int64_t> shape;
+  bool rank_known = true;
 };
 
 struct ShapeOverridePolicy {

@@ -11,7 +11,7 @@ annc::OutputInfo makeOutput(const TensorRef& ref,
                             const TensorDescriptor& descriptor) {
   return annc::OutputInfo{
       ref.output_index == 0 ? ref.node : ref.canonicalName(), descriptor.dtype,
-      descriptor.shape};
+      descriptor.shape, descriptor.rank_known};
 }
 
 void copyComputeAttrs(const tensorflow::NodeDef& node, annc::NodeInfo& info) {
@@ -160,7 +160,8 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
     boundary.isOutputNode = true;
     boundary.inputs.push_back(builderTensorName(output));
     boundary.outputs.push_back(
-        {boundary.name, descriptor->dtype, descriptor->shape});
+        {boundary.name, descriptor->dtype, descriptor->shape,
+         descriptor->rank_known});
     boundary.tf_attrs["tf.output_tensor"] = output.canonicalName();
     result.push_back(std::move(boundary));
   }

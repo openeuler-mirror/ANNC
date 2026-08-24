@@ -10,6 +10,8 @@ namespace annc {
 // TF/ATIR element type, enum-encoded so constant and tensor type construction
 // stay in sync (replaces stringly-typed dtype plumbing).
 enum class DType {
+  Unknown,
+  Resource,
   F32,
   F64,
   F16,

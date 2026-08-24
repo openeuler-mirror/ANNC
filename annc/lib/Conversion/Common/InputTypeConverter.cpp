@@ -22,6 +22,9 @@ InputTypeConverter::InputTypeConverter()
     addConversion([](Type type) { return type; });
     addConversion([](atir::TensorType tensorType)
     {
+        if (!tensorType.hasKnownRank() ||
+            mlir::isa<atir::UnknownType>(tensorType.getElementType()))
+            return MemRefType();
         auto shape = tensorType.getShape();
         auto elemType = isStringTensor(tensorType)
                             ? mlir::IntegerType::get(tensorType.getContext(), 64)
@@ -34,6 +37,7 @@ InputTypeConverter::InputTypeConverter()
         }
         return MemRefType::get(shape, elemType, StridedLayoutAttr::get(tensorType.getContext(), offset, strides));
     });
+    addConversion([](atir::ResourceType) { return MemRefType(); });
 
     addTargetMaterialization(
     [](OpBuilder& builder, mlir::MemRefType memrefType, ValueRange inputs, Location loc){

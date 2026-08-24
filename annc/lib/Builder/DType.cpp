@@ -6,6 +6,10 @@ namespace annc {
 
 llvm::StringRef toString(DType dtype) {
   switch (dtype) {
+    case DType::Unknown:
+      return "unknown";
+    case DType::Resource:
+      return "resource";
     case DType::F32:
       return "float32";
     case DType::F64:
@@ -43,6 +47,8 @@ llvm::StringRef toString(DType dtype) {
 }
 
 std::optional<DType> parseDType(llvm::StringRef name) {
+  if (name == "unknown") return DType::Unknown;
+  if (name == "resource") return DType::Resource;
   if (name == "float32") return DType::F32;
   if (name == "float64") return DType::F64;
   if (name == "float16") return DType::F16;

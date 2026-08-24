@@ -20,9 +20,9 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
   // Rank: scalar int32 result, no buffer operand (same family as Shape/Size).
   specs.push_back(makeSpec({"Rank"}, "atir.Rank", 1, 1, 1, false));
   // Identity: also required by the frontend's per-output Identity boundary.
-  specs.push_back(
-      makeSpec({"Identity", "IdentityN", "ReadVariableOp", "StopGradient"},
-               "atir.Identity", 1, 1, 1, true));
+  specs.push_back(makeSpec({"Identity", "IdentityN", "StopGradient"},
+                           "atir.Identity", 1, 1, 1, true, {}, {},
+                           transformIdentity));
 
   // ---- elementwise / activation ----
   specs.push_back(makeSpec({"Mul"}, "atir.Mul", 2, 2, 1, true));
@@ -114,9 +114,10 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
                            1, true, {}, {}, transformBroadcast));
   specs.push_back(makeSpec({"Split"}, "atir.Split", 2, 2, kVariableOutputs,
                            false, {}, {}, transformSplit));
-  specs.push_back(makeSpec({"Variable", "VariableV2", "VarHandleOp"},
-                           "atir.variable", 0, 0, 1, false, {}, {},
-                           transformVariable));
+  specs.push_back(makeSpec({"Variable", "VariableV2"}, "atir.variable", 0,
+                           0, 1, false, {}, {}, transformVariable));
+  specs.push_back(makeSpec({"VarHandleOp"}, "atir.resource_variable", 0, 0,
+                           1, false, {}, {}, transformVariable));
   specs.push_back(
       makeSpec({"Sum"}, "atir.Sum", 1, 2, 1, true, {}, {}, transformSum));
   specs.push_back(

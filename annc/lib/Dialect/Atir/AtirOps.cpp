@@ -52,13 +52,19 @@ constexpr const char kTensorDeviceParl[] = "device";
 constexpr const char kTensorOnchipParl[] = "onchip";
 constexpr const char kTensorData[] = "data";
 constexpr const char kTensorStringData[] = "strings";
+constexpr const char kTensorRankKnown[] = "rank_known";
 
 Type TensorType::parse(AsmParser &odsParser) {
   if (odsParser.parseLess())
     PARSE_TENSOR_ERROR("Less")
   SmallVector<int64_t> shape;
-  if (odsParser.parseDimensionList(shape, true))
+  BoolAttr rankKnown;
+  if (succeeded(odsParser.parseOptionalStar())) {
+    rankKnown = BoolAttr::get(odsParser.getContext(), false);
+    if (odsParser.parseXInDimensionList()) PARSE_TENSOR_ERROR("shape")
+  } else if (odsParser.parseDimensionList(shape, true)) {
     PARSE_TENSOR_ERROR("shape")
+  }
   Type elementType;
   if (odsParser.parseType(elementType))
     PARSE_TENSOR_ERROR("element-type")
@@ -165,28 +171,40 @@ Type TensorType::parse(AsmParser &odsParser) {
         cacheData = *parsedCacheData;
       }
     }
+    if (!odsParser.parseOptionalKeyword(kTensorRankKnown)) {
+      if (odsParser.parseEqual()) PARSE_TENSOR_ERROR(kTensorRankKnown)
+      if (odsParser.parseAttribute(rankKnown))
+        PARSE_TENSOR_ERROR(kTensorRankKnown)
+    }
   }
   
   if (odsParser.parseGreater())
     PARSE_TENSOR_ERROR("Greater")
   auto tensor = TensorType::get(odsParser.getContext(), 
     shape, elementType, name, encoding, stride, layout, memType, 
-    address, device, onchip, cacheData);
+    address, device, onchip, cacheData, rankKnown);
   return tensor;
 }
 
 void TensorType::print(AsmPrinter &odsPrinter) const {
   odsPrinter << "<";
-  for (auto dim : getShape()) {
-    if (dim == mlir::ShapedType::kDynamic)
-      odsPrinter << "?x";
-    else
-      odsPrinter << dim << "x";
+  if (!hasKnownRank()) {
+    odsPrinter << "*x";
+  } else {
+    for (auto dim : getShape()) {
+      if (dim == mlir::ShapedType::kDynamic)
+        odsPrinter << "?x";
+      else
+        odsPrinter << dim << "x";
+    }
   }
   odsPrinter << getElementType();
 
   if (getEncoding()) {
     odsPrinter << ", " << kTensorEncoding << " = <" << getEncoding() << ">";
+  }
+  if (!hasKnownRank()) {
+    odsPrinter << ", " << kTensorRankKnown << " = false";
   }
   if (getName()) {
     odsPrinter << ", " << kTensorName << " = " << getName();
@@ -509,6 +527,9 @@ LogicalResult BatchMatMulOp::verify() {
   auto AType = llvm::dyn_cast<TensorType>(getA().getType());
   auto BType = llvm::dyn_cast<TensorType>(getB().getType());
   auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+
+  if (!AType || !BType || !outputType)
+    return emitOpError("expects TensorType operands and result");
   
   auto aElemType = AType.getElementType();
   auto bElemType = BType.getElementType();
@@ -523,11 +544,29 @@ LogicalResult BatchMatMulOp::verify() {
   auto aShape = AType.getShape();
   auto bShape = BType.getShape();
   auto outShape = outputType.getShape();
-  
-  if (aShape.size() < 2 || bShape.size() < 2) {
+
+  // An empty shape with rank_known=false means "rank is unknown", not a
+  // scalar.  Do not reject or index into such a shape: the missing rank and
+  // all matrix/batch dimensions must be checked later when they become known.
+  const bool aRankKnown = AType.hasKnownRank();
+  const bool bRankKnown = BType.hasKnownRank();
+  const bool outputRankKnown = outputType.hasKnownRank();
+  if (aRankKnown && aShape.size() < 2) {
     return emitOpError("inputs must have at least 2 dimensions");
   }
-  
+  if (bRankKnown && bShape.size() < 2) {
+    return emitOpError("inputs must have at least 2 dimensions");
+  }
+  if (outputRankKnown && outShape.size() < 2) {
+    return emitOpError("output must have at least 2 dimensions");
+  }
+
+  // Without both input ranks there are no valid indices for the trailing
+  // matrix dimensions.  The element type checks above are still meaningful;
+  // defer the shape checks until a later stage has rank information.
+  if (!aRankKnown || !bRankKnown)
+    return success();
+
   int64_t aRows = aShape[aShape.size() - 2];
   int64_t aCols = aShape[aShape.size() - 1];
   int64_t bRows = bShape[bShape.size() - 2];
@@ -536,16 +575,24 @@ LogicalResult BatchMatMulOp::verify() {
   if (getTransposeA()) std::swap(aRows, aCols);
   if (getTransposeB()) std::swap(bRows, bCols);
   
-  if (aCols != bRows) {
+  if (aCols != ShapedType::kDynamic && bRows != ShapedType::kDynamic &&
+      aCols != bRows) {
     return emitOpError("incompatible inner dimensions for matrix multiplication");
   }
-  
+
+  if (!outputRankKnown)
+    return success();
+
   if (outShape.size() != std::max(aShape.size(), bShape.size())) {
     return emitOpError("output rank mismatch");
   }
-  
-  if (outShape[outShape.size() - 2] != aRows || 
-      outShape[outShape.size() - 1] != bCols) {
+
+  const int64_t outRows = outShape[outShape.size() - 2];
+  const int64_t outCols = outShape[outShape.size() - 1];
+  if ((outRows != ShapedType::kDynamic && aRows != ShapedType::kDynamic &&
+       outRows != aRows) ||
+      (outCols != ShapedType::kDynamic && bCols != ShapedType::kDynamic &&
+       outCols != bCols)) {
     return emitOpError("output matrix dimensions incorrect");
   }
   

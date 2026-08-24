@@ -147,6 +147,21 @@ LogicalResult transformSwitch(const NodeInfo& node, ArrayRef<Type> outs,
   if (ins.empty())
     return ctx.emitError(node, "Switch requires data and pred inputs");
   Location loc = ctx.loc(node.name);
+  if (isa<atir::ResourceType>(ins[0].getType()) ||
+      (!outs.empty() && isa<atir::ResourceType>(outs[0]))) {
+    if (outs.size() < 2 ||
+        !isa<atir::ResourceType>(outs[0]) ||
+        !isa<atir::ResourceType>(outs[1]))
+      return ctx.emitError(node, "resource Switch must have two resource outputs");
+    if (!isa<atir::ResourceType>(ins[0].getType()))
+      return ctx.emitError(node, "resource Switch input is not a resource handle");
+    auto identity = b.create<atir::ResourceIdentityOp>(
+        loc, TypeRange{outs[0]}, ValueRange{ins[0]});
+    ctx.bindResult(node.outputs[0].name, identity.getResult());
+    if (node.outputs.size() >= 2)
+      ctx.bindResult(node.outputs[1].name, identity.getResult());
+    return success();
+  }
   auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
   auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
   auto identity = b.create<atir::IdentityOp>(loc, outs[0],
@@ -155,6 +170,32 @@ LogicalResult transformSwitch(const NodeInfo& node, ArrayRef<Type> outs,
     ctx.bindResult(node.outputs[0].name, identity.getResult());
   if (node.outputs.size() >= 2)
     ctx.bindResult(node.outputs[1].name, identity.getResult());
+  return success();
+}
+
+LogicalResult transformIdentity(const NodeInfo& node, ArrayRef<Type> outs,
+                                ArrayRef<Value> ins, OpContext& ctx) {
+  auto& b = ctx.builder();
+  if (ins.empty() || outs.empty())
+    return ctx.emitError(node, "requires one input and one output");
+  Location loc = ctx.loc(node.name);
+  if (isa<atir::ResourceType>(ins[0].getType())) {
+    if (!isa<atir::ResourceType>(outs[0]))
+      return ctx.emitError(node,
+                           "resource identity requires a resource output");
+    auto identity = b.create<atir::ResourceIdentityOp>(
+        loc, TypeRange{outs[0]}, ValueRange{ins[0]});
+    ctx.bindResult(node.outputs[0].name, identity.getResult());
+    return success();
+  }
+  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
+  if (!outputType || !isa<atir::TensorType>(ins[0].getType()))
+    return ctx.emitError(node, "identity requires matching tensor types");
+  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
+  auto identity = b.create<atir::IdentityOp>(loc, outs[0],
+                                              outputBuffer.getResult(),
+                                              ins[0]);
+  ctx.bindResult(node.outputs[0].name, identity.getResult());
   return success();
 }
 
@@ -344,6 +385,12 @@ LogicalResult transformVariable(const NodeInfo& node, ArrayRef<Type> outs,
   auto& b = ctx.builder();
   if (outs.empty()) return ctx.emitError(node, "requires one output type");
   Location loc = ctx.loc(node.name);
+  if (isa<atir::ResourceType>(outs[0])) {
+    auto op = b.create<atir::ResourceVariableOp>(
+        loc, b.getStringAttr(node.name), b.getStringAttr("public"));
+    ctx.bindResult(node.outputs[0].name, op.getHandle());
+    return success();
+  }
   auto op = b.create<atir::VariableOp>(loc, outs[0], b.getStringAttr(node.name),
                                        b.getStringAttr("public"));
   ctx.bindResult(node.outputs[0].name, op.getResult());

@@ -23,7 +23,8 @@ atir::TensorType cloneWithShape(atir::TensorType type,
   return atir::TensorType::get(
       shape, type.getElementType(), type.getName(), type.getEncoding(),
       type.getStride(), type.getLayout(), type.getMemType(), type.getAddress(),
-      type.getDeviceParallel(), type.getOnchipParallel(), type.getCacheData());
+      type.getDeviceParallel(), type.getOnchipParallel(), type.getCacheData(),
+      type.getRankKnown());
 }
 
 LogicalResult setSingleResultShape(Operation *op, llvm::ArrayRef<int64_t> shape) {

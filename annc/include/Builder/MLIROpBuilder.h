@@ -18,6 +18,7 @@ struct OutputInfo {
   std::string name;
   std::string dtype;
   std::vector<int64_t> shape;
+  bool rankKnown = true;
 };
 
 struct NodeInfo {
@@ -89,8 +90,8 @@ class MLIRBuilder {
   mlir::LogicalResult applyAttrMappings(Operation* op, const NodeInfo& node,
                                         const OpSpec& spec);
   void attachMetadata(Operation* op, const NodeInfo& node, const OpSpec& spec);
-  mlir::FailureOr<atir::TensorType> getTensorType(const NodeInfo& node,
-                                                  unsigned outIdx);
+  mlir::FailureOr<mlir::Type> getTensorType(const NodeInfo& node,
+                                            unsigned outIdx);
   // Resolves a name to a produced value; strips a ":0" output-index suffix.
   mlir::Value resolveValue(llvm::StringRef name) const;
   mlir::LogicalResult emitNodeError(const NodeInfo& node,

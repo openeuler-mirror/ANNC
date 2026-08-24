@@ -7,9 +7,13 @@ using namespace atir;
 AtirTypeToLinalgConverter::AtirTypeToLinalgConverter()
 {
     addConversion([](Type type) { return type; });
-    addConversion([](TensorType tensorType) {
+    addConversion([](TensorType tensorType) -> Type {
+        if (!tensorType.hasKnownRank() ||
+            mlir::isa<atir::UnknownType>(tensorType.getElementType()))
+            return Type();
         return RankedTensorType::get(tensorType.getShape(), tensorType.getElementType());
     });
+    addConversion([](atir::ResourceType) -> Type { return Type(); });
 
     addTargetMaterialization(
         [](OpBuilder& builder, mlir::TensorType tensorType, ValueRange inputs, Location loc) {

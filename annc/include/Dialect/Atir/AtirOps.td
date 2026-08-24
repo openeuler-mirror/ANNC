@@ -91,13 +91,32 @@ def Atir_OpaqueOp : Atir_Op<"opaque"> {
     if the op survives to code generation (no fusion matched), the
     lowering pass reports it there instead of silently dropping it.
   }];
-  let arguments = (ins Variadic<Atir_Tensor>:$inputs,
+  let arguments = (ins Variadic<AnyType>:$inputs,
                        StrAttr:$opType,
                        OptionalAttr<DictionaryAttr>:$metadata);
-  let results = (outs Variadic<Atir_Tensor>:$output);
+  let results = (outs Variadic<AnyType>:$output);
   let assemblyFormat = [{
     ( `(` $inputs^ `)` )?
     attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_ResourceIdentityOp : Atir_Op<"ResourceIdentity"> {
+  let summary = "forwards an opaque resource handle";
+  let arguments = (ins Atir_Resource:$input);
+  let results = (outs Atir_Resource:$result);
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($result)
+}];
+}
+
+def Atir_ResourceVariableOp : Atir_Op<"resource_variable"> {
+  let summary = "declares a runtime resource handle";
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$sym_visibility);
+  let results = (outs Atir_Resource:$handle);
+  let assemblyFormat = [{
+    ($sym_visibility^)? $sym_name `->` type($handle) attr-dict
   }];
 }
 

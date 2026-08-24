@@ -37,7 +37,8 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
     OptionalParameter<"::mlir::IntegerAttr">:$address,
     OptionalParameter<"::atir::TilingAttr">:$deviceParallel,
     OptionalParameter<"::atir::TilingAttr">:$onchipParallel,
-    OptionalParameter<"::mlir::DenseElementsAttr">:$cacheData
+    OptionalParameter<"::mlir::DenseElementsAttr">:$cacheData,
+    OptionalParameter<"::mlir::BoolAttr">:$rankKnown
   );
 
   let extraClassDeclaration = [{
@@ -48,6 +49,7 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
     TensorType cloneWithOnchipTiling(::atir::TilingAttr tiling);
     TensorType cloneWithCacheData(::mlir::DenseElementsAttr cacheData);
     TensorType cloneWithDynamicShape(std::vector<int64_t> dynIdx);
+    bool hasKnownRank() const;
     
     void setEncoding(::mlir::Attribute encoding);
     void setName(::mlir::StringAttr name);
@@ -69,7 +71,7 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
   }];
   let extraClassDefinition = [{
     TensorType TensorType::clone() {
-      return TensorType::get(getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData());
+      return TensorType::get(getContext(), getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData(), getRankKnown());
     }
     TensorType TensorType::cloneRawType() {
       ::mlir::Attribute encoding{};
@@ -81,26 +83,30 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
       ::atir::TilingAttr deviceParallel{};
       ::atir::TilingAttr onchipParallel{};
       ::mlir::DenseElementsAttr cacheData{};
-      return TensorType::get(getShape(), getElementType(), name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData);
+      return TensorType::get(getContext(), getShape(), getElementType(), name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData, getRankKnown());
     }
     TensorType TensorType::cloneWithName(::mlir::StringAttr name) {
-      return TensorType::get(getShape(), getElementType(), name, getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData());
+      return TensorType::get(getContext(), getShape(), getElementType(), name, getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData(), getRankKnown());
     }
     TensorType TensorType::cloneWithDeviceTiling(::atir::TilingAttr tiling) {
-      return TensorType::get(getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), tiling, getOnchipParallel(), getCacheData());
+      return TensorType::get(getContext(), getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), tiling, getOnchipParallel(), getCacheData(), getRankKnown());
     }
     TensorType TensorType::cloneWithOnchipTiling(::atir::TilingAttr tiling) {
-      return TensorType::get(getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), tiling, getCacheData());
+      return TensorType::get(getContext(), getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), tiling, getCacheData(), getRankKnown());
     }
     TensorType TensorType::cloneWithCacheData(::mlir::DenseElementsAttr cacheData) {
-      return TensorType::get(getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), cacheData);
+      return TensorType::get(getContext(), getShape(), getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), cacheData, getRankKnown());
     }
     TensorType TensorType::cloneWithDynamicShape(std::vector<int64_t> dynIdx) {
       std::vector<int64_t> shape = getShape();
       for (int64_t idx : dynIdx) {
         shape[idx] =  ShapedType::kDynamic;
       }
-      return TensorType::get(shape, getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData());
+      return TensorType::get(getContext(), shape, getElementType(), getName(), getEncoding(), getStride(), getLayout(), getMemType(), getAddress(), getDeviceParallel(), getOnchipParallel(), getCacheData(), getRankKnown());
+    }
+
+    bool TensorType::hasKnownRank() const {
+      return !getRankKnown() || getRankKnown().getValue();
     }
 
 
@@ -202,7 +208,8 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
       ::mlir::IntegerAttr address = {};
       ::atir::TilingAttr deviceParallel = {};
       ::atir::TilingAttr onchipParallel = {};
-      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData);
+      ::mlir::BoolAttr rankKnown = {};
+      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData, rankKnown);
     }]>,
     TypeBuilderWithInferredContext<(ins "::llvm::ArrayRef<int64_t>":$shape,
                                          "::mlir::Type":$elementType,
@@ -216,7 +223,8 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
       ::mlir::IntegerAttr address = {};
       ::atir::TilingAttr deviceParallel = {};
       ::atir::TilingAttr onchipParallel = {};
-      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData);
+      ::mlir::BoolAttr rankKnown = {};
+      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData, rankKnown);
     }]>,
     TypeBuilderWithInferredContext<(ins "::llvm::ArrayRef<int64_t>":$shape,
                                          "::mlir::Type":$elementType,
@@ -228,14 +236,24 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
                                          CArg<"::mlir::IntegerAttr", "{}">:$address,
                                          CArg<"::atir::TilingAttr", "{}">:$deviceParallel,
                                          CArg<"::atir::TilingAttr", "{}">:$onchipParallel,
-                                         CArg<"::mlir::DenseElementsAttr", "{}">:$cacheData),
+                                         CArg<"::mlir::DenseElementsAttr", "{}">:$cacheData,
+                                         CArg<"::mlir::BoolAttr", "{}">:$rankKnown),
     [{
-      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData);
+      return Base::get(elementType.getContext(), shape, elementType, name, encoding, stride, layout, memType, address, deviceParallel, onchipParallel, cacheData, rankKnown);
     }]>
   ];
 
   let hasCustomAssemblyFormat = 1;
 }
+
+def Atir_Unknown : Atir_TypeDef<"Unknown", "unknown"> {
+  let summary = "unknown element type preserved by opaque operations";
+}
+
+def Atir_Resource : Atir_TypeDef<"Resource", "resource"> {
+  let summary = "opaque handle to a runtime resource";
+}
+
 def Atir_TensorOrNone : AnyTypeOf<[Atir_Tensor, AnyStaticShapeMemRef, NoneType]>;
 
 #endif // ATIR_TYPES_TD
