@@ -75,7 +75,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **上下文** | Grappler 阶段无法为动态 shape 融合子图预先生成唯一的后端 kernel；运行时必须使用实际输入 shape 完成后端特化。 |
-| **决策** | `ANNCOptimizer` 在 `ANNC_JIT_ENABLE=1` 时让 pipeline 只保留 fusion-only ATIR，并将其路径写入 `ANNCFused`。`ANNCFusedOp::Compute` 提取实际 shape，同步调用 `annc-asm` 和 `annc`，加载生成的共享库并执行 kernel。本阶段不引入编译缓存、异步编译或运行时 fallback。 |
+| **决策** | `OpFusion` 按 fusion pattern 在 kernel func 上写入 `annc.execution_mode`。pipeline 只将 AOT func 编译进共享库，并保留完整 fusion-only ATIR；converter 按 fusion mode 将 AOT 节点连接到共享库、JIT 节点连接到 ATIR 模板。`ANNCFusedOp::Compute` 对 JIT 节点提取实际 shape，同步调用 `annc-asm` 和 `annc`，加载生成的共享库并执行 kernel。 |
 | **后果** | 动态 shape 的编译决策延后到运行时且边界清晰；首次调用包含编译开销，每次调用都可能重新生成共享库，缓存和并发控制留待后续独立提交。 |
 | **备选方案** | 在 Grappler 阶段按样例 shape 预编译——无法覆盖运行时动态 shape；异步 JIT——需要额外的请求排队和失败语义。 |
 

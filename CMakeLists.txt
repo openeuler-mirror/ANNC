@@ -127,6 +127,15 @@ include_directories(${CMAKE_BINARY_DIR}/annc/include)
 
 include_directories(${json_SOURCE_DIR}/include)
 
+# Keep ANNC-owned debug information relocatable in build/install artifacts.
+# This is deliberately added after the LLVM sub-build so third-party LLVM is
+# not rebuilt just to remap its own source paths.
+add_compile_options(
+  "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+  "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
+  "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=./build"
+)
+
 # Code coverage via gcov (--coverage, portable across gcc/clang). Set AFTER the
 # LLVM/MLIR sub-build so LLVM is neither recompiled nor relinked with --coverage;
 # the options apply only to directories processed afterwards (annc/, python/,

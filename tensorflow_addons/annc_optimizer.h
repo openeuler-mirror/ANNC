@@ -51,7 +51,6 @@ class ANNCOptimizer : public CustomGraphOptimizer {
   bool enabled_;
   bool keep_temp_files_;
   bool annc_verbose_;
-  bool jit_enabled_ = false;
   int64_t batch_size_ = -1;
 
   std::string GenerateTempFilename(const std::string& prefix);

@@ -100,6 +100,10 @@ def AtirBlockFusion : Pass<"atir-block-fusion", "ModuleOp"> {
 def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
   let summary = "prune func";
   let constructor = "createAtirPruneFuncPass()";
+  let options = [
+    Option<"executionMode", "execution-mode", "std::string", "",
+           "Keep only ANNC kernel functions with this execution mode">
+  ];
   let dependentDialects = [
     "AtirDialect"
   ];

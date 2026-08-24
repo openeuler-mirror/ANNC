@@ -82,6 +82,7 @@ std::string computeAtirTemplateFingerprint(mlir::ModuleOp module,
 
   clone.setName("__annc_kernel_template");
   clone->removeAttr("fusion.metadata");
+  clone->removeAttr("annc.execution_mode");
   removeSourceIdentity(clone);
   canonicalizeValueTypes(clone);
 

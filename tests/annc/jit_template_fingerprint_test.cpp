@@ -143,4 +143,13 @@ TEST_F(TemplateFingerprintTest, IncludesModuleIntraThreadCount) {
   EXPECT_EQ(Fingerprint(module), Fingerprint(module, 1));
 }
 
+TEST_F(TemplateFingerprintTest, IgnoresExecutionMode) {
+  const std::string module = BuildKernel("dense_a", "model/a", false, -1.0f);
+  const std::string jit = ReplaceAll(
+      module, "annc.kernel,", "annc.kernel, annc.execution_mode = \"jit\",");
+  const std::string aot = ReplaceAll(
+      module, "annc.kernel,", "annc.kernel, annc.execution_mode = \"aot\",");
+  EXPECT_EQ(Fingerprint(jit), Fingerprint(aot));
+}
+
 }  // namespace

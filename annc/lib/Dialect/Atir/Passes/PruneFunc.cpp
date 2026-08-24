@@ -20,6 +20,14 @@ namespace atir {
                     m.getOps<func::FuncOp>())) {
                 if (!func->hasAttr("fusion.pattern")) {
                     func.erase();
+                    continue;
+                }
+                if (!executionMode.empty()) {
+                    auto mode = func->getAttrOfType<StringAttr>(
+                        "annc.execution_mode");
+                    if (!mode || mode.getValue() != executionMode) {
+                        func.erase();
+                    }
                 }
             }
         }

@@ -270,6 +270,8 @@ FusionInfo fusionInfoFromMetadataEntries(
 
   info.name = stringValue("tf.name");
   info.pattern = stringValue("fusion.pattern");
+  info.executionMode = stringValue("execution_mode");
+  if (info.executionMode.empty()) info.executionMode = "aot";
   info.kernelName = stringValue("kernel_name");
   info.templateFingerprint = stringValue("template_fingerprint");
   info.args = fusionArgArrayFromMetadata(rawValue("args"));
@@ -313,6 +315,11 @@ llvm::Error missingFieldError(StringRef field) {
 llvm::Error validateFusionInfo(const FusionInfo &info) {
   if (info.name.empty()) return missingFieldError("name");
   if (info.pattern.empty()) return missingFieldError("pattern");
+  if (info.executionMode != "aot" && info.executionMode != "jit") {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "unsupported fusion execution mode: %s",
+                                   info.executionMode.c_str());
+  }
   if (info.kernelName.empty()) return missingFieldError("kernel_name");
   if (!info.templateFingerprint.empty()) {
     bool validFingerprint =
@@ -327,6 +334,9 @@ llvm::Error validateFusionInfo(const FusionInfo &info) {
           "fusion metadata template_fingerprint must be 64 lowercase hex "
           "characters");
     }
+  }
+  if (info.executionMode == "jit" && info.templateFingerprint.empty()) {
+    return missingFieldError("template_fingerprint for JIT fusion");
   }
   if (info.args.empty()) return missingFieldError("args");
   if (info.outputs.empty()) return missingFieldError("outputs");
@@ -413,6 +423,8 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   FusionInfo info;
   info.name = stringAttr(metadata, "tf.name");
   info.pattern = stringAttr(metadata, "fusion.pattern");
+  info.executionMode = stringAttr(metadata, "execution_mode");
+  if (info.executionMode.empty()) info.executionMode = "aot";
   info.kernelName = stringAttr(metadata, "kernel_name");
   info.templateFingerprint = stringAttr(metadata, "template_fingerprint");
   info.args = fusionArgArrayAttr(metadata, "args");

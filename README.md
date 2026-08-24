@@ -190,7 +190,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 ### 端到端 GraphDef 重写
 
-`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。传入 `--defer-codegen` 时，Grappler 阶段只保留 fusion-only ATIR，`annc-asm` 和 `annc` 延后到 `ANNCFusedOp::Compute`。默认由 converter 从融合后的 ATIR 提取 metadata；传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
 
 ```shell
 annc-tf-pipeline \
@@ -211,7 +211,6 @@ annc-tf-pipeline \
 | `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
-| `--defer-codegen` | 保留 fusion-only ATIR，由运行时同步 JIT 编译 |
 | `--intra_thread_count <n>` | 写入 ATIR module 的 GEMM intra 线程数；ANNCOptimizer 从 Grappler 配置透传 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
@@ -449,9 +448,9 @@ GraphDef 输出固定为二进制 protobuf。常用参数：
 
 Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 `annc_generated_kernel.so`。重写后的 GraphDef 会把该 `.so` 路径写入每个 `ANNCFused` 节点的 `shared_lib_path`，运行时 `ANNCFused` 需要通过 `dlopen` 加载它。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
 
-设置 `ANNC_JIT_ENABLE=1` 后启用同步 JIT：GraphDef 写入
-`atir_module_path` 和与名字无关的 `template_fingerprint`，运行时根据实际输入和输出
-shape 选择并特化当前 fusion func，再同步执行 `annc-asm` 和 `annc`。进程内缓存按
+GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和与名字无关的
+`template_fingerprint`，运行时根据实际输入和输出 shape 选择并特化当前 fusion func，
+再同步执行 `annc-asm` 和 `annc`。非 GEMM fusion 节点写入 AOT 共享库路径。进程内缓存按
 Grappler 生成的 `template_fingerprint`（包含影响 codegen 的 module 属性）和实际参数
 shape 复用 `.so`；工具链、GEMM 配置和 ABI 作为进程级固定上下文，不进入运行时 key，
 `kernel_name` 不进入 key。相同 key 的并发 miss 只编译一次，不同 key 可并行编译。
@@ -564,7 +563,6 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | pipeline 调用超时时间（参数名：`timeout_seconds`） |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
-| `ANNC_JIT_ENABLE` | `1`/`0`/`true`/`false` | `false` | 启用同步 JIT（参数名：`jit_enabled` / `defer_codegen`） |
 
 ### `ANNCFusedOp` 运行时
 

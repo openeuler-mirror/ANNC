@@ -16,6 +16,8 @@ extern "C" {
 #include "Conversion/AtirConversionPasses.capi.cpp.inc"
 #include "Target/aarch64/AArch64CodeGenPasses.capi.cpp.inc"
 
+void anncRegisterAllTargetPasses(void) { annc::registerAllTargetPasses(); }
+
 #ifdef __cplusplus
 }
 #endif

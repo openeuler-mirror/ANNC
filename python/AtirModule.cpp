@@ -1,8 +1,8 @@
 #include "Dialect/Atir/Passes/Passes.h"
+#include "Dialect-c/Passes.h"
 #include "Conversion/Passes.h"
 #include "Builder/Builder.h"
 #include "AtirModule.h"
-#include "Target/Passes.h"
 
 namespace py = pybind11;
 using namespace mlir::python::adaptors;
@@ -22,7 +22,7 @@ PYBIND11_MODULE(_annc, m) {
   atir::registerConvertAtirToAffinePass();
   atir::registerConvertAtirToLinalgPass();
   atir::registerAtirSelectLoweringStrategyPass();
-  annc::registerAllTargetPasses();
+  anncRegisterAllTargetPasses();
 
   auto atir_m = m.def_submodule("atir");
   atir_m.def(

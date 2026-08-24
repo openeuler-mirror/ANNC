@@ -8,7 +8,15 @@
 #include <string>
 #include <vector>
 
+#include "Dialect/Atir/AtirOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/Parser/Parser.h"
+
 namespace fs = std::filesystem;
+using namespace mlir;
 
 namespace {
 
@@ -23,7 +31,6 @@ struct PipelineOptions {
   int64_t intraThreadCount = -1;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
-  bool deferCodegen = false;
   bool verbose = false;
 };
 
@@ -34,7 +41,6 @@ static void printUsage() {
          "Options:\n"
          "  --work_dir <dir>          Intermediate artifact directory\n"
          "  --shared_lib_path <path>  AOT library path written to GraphDef\n"
-         "  --defer-codegen           Compile fusion kernels in ANNCFusedOp\n"
          "  --batch_size <n>          Override dynamic batch dimensions\n"
          "  --intra_thread_count <n>  Set module-level GEMM thread count\n"
          "  --output_tensor <name>    Preserve a named graph output\n"
@@ -56,14 +62,6 @@ static std::string takeValue(int argc, char **argv, const std::string &name,
     if (argv[i] == name) return argv[i + 1];
   }
   return defaultValue;
-}
-
-static bool envFlagEnabled(const char *name) {
-  const char *value = std::getenv(name);
-  if (!value) return false;
-  std::string flag(value);
-  return flag == "1" || flag == "true" || flag == "TRUE" ||
-         flag == "on" || flag == "ON" || flag == "yes" || flag == "YES";
 }
 
 static std::string shellQuote(const std::string &value) {
@@ -93,6 +91,28 @@ static bool runCommand(const std::vector<std::string> &args, bool verbose) {
   return true;
 }
 
+static bool containsAotKernel(const fs::path &path, bool &hasAotKernel) {
+  DialectRegistry registry;
+  registry.insert<func::FuncDialect, LLVM::LLVMDialect, atir::AtirDialect>();
+  MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  auto module = parseSourceFile<ModuleOp>(path.string(), &context);
+  if (!module) {
+    std::cerr << "[annc-tf-pipeline] failed to parse AOT ATIR: " << path
+              << "\n";
+    return false;
+  }
+
+  hasAotKernel = false;
+  module->walk([&](func::FuncOp function) {
+    if (!function->hasAttr("annc.kernel")) return;
+    auto mode = function->getAttrOfType<StringAttr>("annc.execution_mode");
+    if (mode && mode.getValue() == "aot") hasAotKernel = true;
+  });
+  return true;
+}
+
 static std::string executableSibling(const char *argv0, const std::string &name) {
   fs::path self(argv0);
   if (self.has_parent_path()) return (self.parent_path() / name).string();
@@ -118,7 +138,6 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
-  opts->deferCodegen = hasArg(argc, argv, "--defer-codegen");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
 
   for (int i = 1; i < argc; ++i) {
@@ -153,6 +172,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   fs::path work(opts.workDir);
   fs::path rawAtir = work / "model_raw_atir.mlir";
   fs::path fusedAtir = work / "model_fused_atir.mlir";
+  fs::path aotAtir = work / "model_aot_atir.mlir";
   fs::path fusionMetadata = work / "fusion_metadata.json";
   fs::path loweredMlir = work / "model_lowered.mlir";
   fs::path generatedSo = fs::absolute(work / "annc_generated_kernel.so");
@@ -172,13 +192,10 @@ static bool runGraphDefRewrite(int argc, char **argv) {
       "--input_graphdef", opts.inputGraphDef, "--output_graphdef",
       opts.outputGraphDef,
   };
-  if (opts.deferCodegen) {
-    converterArgs.push_back("--atir_module_path");
-    converterArgs.push_back(fs::absolute(fusedAtir).string());
-  } else {
-    converterArgs.push_back("--shared_lib_path");
-    converterArgs.push_back(runtimeSharedLibPath);
-  }
+  converterArgs.push_back("--shared_lib_path");
+  converterArgs.push_back(runtimeSharedLibPath);
+  converterArgs.push_back("--atir_module_path");
+  converterArgs.push_back(fs::absolute(fusedAtir).string());
   if (!opts.kernelName.empty()) {
     converterArgs.push_back("--kernel_name");
     converterArgs.push_back(opts.kernelName);
@@ -186,13 +203,9 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string fusionPass = "--atir-op-fusion";
-  std::string prunePass = "--atir-prune-func";
-
-  std::vector<std::string> asmArgs = {
-      anncAsm, fusedAtir.string(), "--atir-fast-codegen",
-      "--annc-aarch64-gemm-pipeline", "-o", loweredMlir.string()};
+  std::string fastCodegenPass = "--atir-fast-codegen";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  asmArgs[2] = "--atir-fast-codegen=enable-kdnn=true";
+  fastCodegenPass = "--atir-fast-codegen=enable-kdnn=true";
 #endif
 
   std::vector<std::string> tf2atirArgs = {
@@ -214,38 +227,44 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   bool ok =
       runCommand(tf2atirArgs, opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), identityCanonicalizePass,
-                  fusionPass, prunePass, "-o", fusedAtir.string()},
+                  fusionPass, "-o", fusedAtir.string()},
+                 opts.verbose) &&
+      runCommand({anncOpt, fusedAtir.string(),
+                  "--atir-prune-func=execution-mode=aot", "-o",
+                  aotAtir.string()},
                  opts.verbose);
   if (ok && opts.dumpFusionMetadata) {
     ok = runCommand({anncFusionMetadata, fusedAtir.string(), "-o",
                      fusionMetadata.string()},
                     opts.verbose);
   }
-  if (opts.deferCodegen) {
-    ok = ok && runCommand(converterArgs, opts.verbose);
-  } else {
+  bool hasAot = false;
+  if (ok) ok = containsAotKernel(aotAtir, hasAot);
+  if (hasAot) {
     ok = ok &&
-         runCommand(asmArgs, opts.verbose) &&
+         runCommand({anncAsm, aotAtir.string(), fastCodegenPass,
+                     "--annc-aarch64-gemm-pipeline", "-o",
+                     loweredMlir.string()},
+                    opts.verbose) &&
          runCommand({annc, loweredMlir.string(), "--shared", "-o",
                      generatedSo.string()},
-                    opts.verbose) &&
-         runCommand(converterArgs, opts.verbose);
+                    opts.verbose);
   }
+  ok = ok && runCommand(converterArgs, opts.verbose);
 
   if (!ok) return false;
 
   if (opts.verbose) {
-    if (opts.deferCodegen) {
-      std::cerr
-          << "[annc-tf-pipeline] runtime fusion template written to GraphDef: "
-          << fs::absolute(fusedAtir) << "\n";
-    } else {
+    if (hasAot) {
       std::cerr << "[annc-tf-pipeline] generated compiler kernel artifact: "
                 << generatedSo << "\n";
-      std::cerr
-          << "[annc-tf-pipeline] runtime shared_lib_path written to GraphDef: "
-          << runtimeSharedLibPath << "\n";
+    } else {
+      std::cerr << "[annc-tf-pipeline] no AOT fusion functions; shared library "
+                   "generation skipped\n";
     }
+    std::cerr
+        << "[annc-tf-pipeline] runtime fusion template written to GraphDef: "
+        << fs::absolute(fusedAtir) << "\n";
     if (opts.dumpFusionMetadata) {
       std::cerr << "[annc-tf-pipeline] fusion metadata dumped to: "
                 << fusionMetadata << "\n";
@@ -254,19 +273,15 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   if (!opts.keepTemps) {
     std::error_code ec;
-    if (opts.deferCodegen) {
-      for (const fs::path &temp : {rawAtir, loweredMlir, generatedSo}) {
-        fs::remove(temp, ec);
-        ec.clear();
-      }
-    } else if (opts.dumpFusionMetadata) {
-      for (const fs::path &temp :
-           {rawAtir, fusedAtir, loweredMlir, generatedSo}) {
-        fs::remove(temp, ec);
-        ec.clear();
-      }
-    } else {
-      fs::remove_all(work, ec);
+    // The generated shared library and full fusion template are referenced by
+    // the rewritten GraphDef, so retain them for runtime execution.
+    for (const fs::path &temp : {rawAtir, aotAtir, loweredMlir}) {
+      fs::remove(temp, ec);
+      ec.clear();
+    }
+    if (!opts.dumpFusionMetadata) {
+      fs::remove(fusionMetadata, ec);
+      ec.clear();
     }
   }
   return true;

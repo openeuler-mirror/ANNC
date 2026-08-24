@@ -19,6 +19,7 @@ nlohmann::json fusionInfoToJson(const FusionInfo &info) {
   nlohmann::json json;
   json["name"] = info.name;
   json["pattern"] = info.pattern;
+  json["execution_mode"] = info.executionMode;
   json["kernel_name"] = info.kernelName;
   json["template_fingerprint"] = info.templateFingerprint;
   json["args"] = nlohmann::json::array();
@@ -69,6 +70,7 @@ llvm::Expected<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
   try {
     info.name = json.value("name", "");
     info.pattern = json.value("pattern", "");
+    info.executionMode = json.value("execution_mode", "aot");
     info.kernelName = json.value("kernel_name", "");
     info.templateFingerprint = json.value("template_fingerprint", "");
     info.patternAttrs =
