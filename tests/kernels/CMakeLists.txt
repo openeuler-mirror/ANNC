@@ -105,6 +105,14 @@ annc_add_kernel_gtest(customcall_symbol_resolution_test
 )
 target_link_libraries(customcall_symbol_resolution_test PRIVATE ANNCKernel)
 
+if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+    annc_add_kernel_gtest(gemm_smallshape_microkernel_test
+        gemm_smallshape_microkernel_test.cpp
+    )
+    target_link_libraries(gemm_smallshape_microkernel_test
+        PRIVATE ANNC::AArch64GemmMicrokernels)
+endif()
+
 annc_add_kernel_gtest(builtin_shared_spec_test
     builtin_shared_spec_test.cpp
     "${ANNC_BUILTIN_KERNEL_WRAPPERS_GEN}"

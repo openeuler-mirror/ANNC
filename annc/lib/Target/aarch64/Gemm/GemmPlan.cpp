@@ -42,6 +42,7 @@ std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
 std::optional<RhsPacking> parseRhsPackingName(llvm::StringRef name) {
   if (name == "direct") return RhsPacking::kDirect;
   if (name == "packed") return RhsPacking::kPacked;
+  if (name == "row_major") return RhsPacking::kRowMajor;
   return std::nullopt;
 }
 
@@ -443,13 +444,15 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
     }
     rhsPackSource = *parsed;
   }
-  if ((rhsPacking == RhsPacking::kDirect &&
+  if ((rhsPacking != RhsPacking::kPacked &&
        rhsPackSource != RhsPackSource::kNone) ||
       (rhsPacking == RhsPacking::kPacked &&
        rhsPackSource == RhsPackSource::kNone) ||
       (executionKind == GemmExecutionKind::kGemvAB &&
        (rhsPacking != RhsPacking::kDirect ||
-        rhsPackSource != RhsPackSource::kNone))) {
+        rhsPackSource != RhsPackSource::kNone)) ||
+      (executionKind != GemmExecutionKind::kGemm &&
+       rhsPacking == RhsPacking::kRowMajor)) {
     op->emitOpError("has an invalid execution/RHS representation combination");
     return mlir::failure();
   }

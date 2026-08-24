@@ -16,7 +16,8 @@ FailureOr<int64_t> getStaticMicrokernelDimension(func::CallOp call,
   return value.getInt();
 }
 
-FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
+FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
+                                               bool isRowMajor) {
   FailureOr<int64_t> m =
       getStaticMicrokernelDimension(call, aarch64::gemm::kMicrokernelMAttrName);
   FailureOr<int64_t> n =
@@ -45,6 +46,8 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
     return failure();
   }
 
+  llvm::StringRef prefix = isRowMajor ? "annc_aarch64_sve_kernel_rm_mr"
+                                      : "annc_aarch64_sve_kernel_mr";
   if (plan->isa == aarch64::gemm::GemmIsa::kSve) {
     const int64_t vectorLanes =
         plan->vectorLengthBytes / static_cast<int64_t>(sizeof(float));
@@ -53,8 +56,8 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
       call.emitOpError("has an invalid SVE N-vector group count");
       return failure();
     }
-    return (llvm::Twine("annc_aarch64_sve_kernel_mr") + llvm::Twine(*m) +
-            "_n" + llvm::Twine(nGroups) + "vl" +
+    return (llvm::Twine(prefix) + llvm::Twine(*m) + "_n" +
+            llvm::Twine(nGroups) + "vl" +
             (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
         .str();
   }
@@ -86,8 +89,10 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call) {
             (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
         .str();
   }
-  return (llvm::Twine("annc_aarch64_neon_kernel_mr") + llvm::Twine(*m) +
-          "_n" + llvm::Twine(*n) + "_" + kVariant +
+  prefix = isRowMajor ? "annc_aarch64_neon_kernel_rm_mr"
+                      : "annc_aarch64_neon_kernel_mr";
+  return (llvm::Twine(prefix) + llvm::Twine(*m) + "_n" + llvm::Twine(*n) +
+          "_" + kVariant +
           (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
       .str();
 }
@@ -101,13 +106,17 @@ class AArch64GemmMicrokernelLowering
   void runOnOperation() override {
     Builder builder(&getContext());
     getOperation().walk([&](func::CallOp call) {
-      if (call.getCallee() != aarch64::gemm::kMicrokernelLeafName) return;
+      const bool isRowMajor =
+          call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName;
+      if (call.getCallee() != aarch64::gemm::kMicrokernelLeafName &&
+          !isRowMajor)
+        return;
       if (!aarch64::gemm::hasStage(call, aarch64::gemm::kPackedStage)) {
         call.emitOpError("requires the packed GEMM leaf stage");
         signalPassFailure();
         return;
       }
-      FailureOr<std::string> symbol = selectMicrokernelSymbol(call);
+      FailureOr<std::string> symbol = selectMicrokernelSymbol(call, isRowMajor);
       if (failed(symbol)) {
         signalPassFailure();
         return;

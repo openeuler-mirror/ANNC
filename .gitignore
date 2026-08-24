@@ -30,3 +30,4 @@ benchmark/
 tmp/
 /Testing/
 .worktrees/
+tools/

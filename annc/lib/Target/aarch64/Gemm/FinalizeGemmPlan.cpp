@@ -2,8 +2,15 @@
 #include "Target/aarch64/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace annc {
 namespace {
+
+// Conservative automatic gate.  Larger shapes remain on the established
+// packed path until target-specific benchmark data justifies widening it.
+constexpr int64_t kRowMajorOperationLimit = 4500;
 
 void appendI64(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
                int64_t value) {
@@ -68,9 +75,22 @@ LogicalResult finalizeGemmPlan(Operation *op) {
     }
     appendString(plan, builder, "pack_b_block_order", "pc-jc");
     appendString(plan, builder, "pack_b_execution", "full-then-compute");
-    appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "packed");
+    // Skip RHS packing for small B matrices.  The environment override is
+    // intentionally kept for benchmark/debug reproducibility.
+    bool useRowMajor = false;
+    const char *forcePacking = std::getenv("ANNC_GEMM_RHS_PACKING");
+    if (forcePacking && std::strcmp(forcePacking, "packed") == 0) {
+      useRowMajor = false;
+    } else if (forcePacking && std::strcmp(forcePacking, "row_major") == 0) {
+      useRowMajor = true;
+    } else {
+      useRowMajor = problem->m * problem->n * problem->k <=
+                    kRowMajorOperationLimit;
+    }
+    appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName,
+                 useRowMajor ? "row_major" : "packed");
     appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
-                 "generated");
+                 useRowMajor ? "none" : "generated");
   }
   appendI64(plan, builder, "thread_count", candidate->threadCount);
   appendString(plan, builder, "thread_partition", "static-2d");

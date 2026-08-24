@@ -23,6 +23,7 @@ class AArch64VerifyGemmSchedule
         StringRef callee = call.getCallee();
         if (callee == aarch64::gemm::kPackBLeafName ||
             callee == aarch64::gemm::kMicrokernelLeafName ||
+            callee == aarch64::gemm::kMicrokernelRmLeafName ||
             callee == aarch64::gemm::kSvePackedBElementsAsmSymbol ||
             callee == aarch64::gemm::kSvePackedBOffsetAsmSymbol) {
           call.emitOpError("target-private GEMM leaf escaped ABI lowering");

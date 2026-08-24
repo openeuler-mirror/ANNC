@@ -195,6 +195,18 @@ FailureOr<PackedBBlock> materializePackedBBlock(
             "(PC, JC) RHS subviews");
       }
 
+      if (plan.rhsPacking == aarch64::gemm::RhsPacking::kRowMajor) {
+        // The row-major kernel consumes B in its original KxN layout.  JR is
+        // an element offset in the cache block and therefore advances B by
+        // columns without allocating a packing workspace.
+        Value column = rhs->offset;
+        if (!isStaticZero(rhsTile.getMixedOffsets()[1]))
+          column = microBuilder.create<arith::AddIOp>(loc, column, jr);
+        return PackedBBlock{aarch64::gemm::castToUnrankedF32MemRef(
+                                microBuilder, loc, rhs->base),
+                            column};
+      }
+
       Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
       FailureOr<int64_t> staticK = getStaticDimension(rhsBlock, 0);
       FailureOr<int64_t> staticN = getStaticDimension(rhsBlock, 1);
@@ -223,6 +235,10 @@ FailureOr<PackedBBlock> materializePackedBBlock(
     return op->emitOpError(
         "requires identity-layout bases with statically strided RHS subviews");
   }
+  if (plan.rhsPacking == aarch64::gemm::RhsPacking::kRowMajor)
+    return PackedBBlock{aarch64::gemm::castToUnrankedF32MemRef(builder, loc,
+                                                               rhs->base),
+                        rhs->offset};
   Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
   FailureOr<int64_t> staticK = getStaticDimension(rhsInput, 0);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);
@@ -261,10 +277,12 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
         "requires identity-layout bases with statically strided subviews");
   }
 
-  Value rhsBase;
-  Value rhsOffset;
   const bool isDirectRhs =
       plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
+  const bool isRowMajor =
+      plan->rhsPacking == aarch64::gemm::RhsPacking::kRowMajor;
+  Value rhsBase;
+  Value rhsOffset;
   if (isDirectRhs) {
     FailureOr<aarch64::gemm::MemRefBaseAndOffset> rhs =
         aarch64::gemm::getMemRefBaseAndOffset(builder, loc, rhsInput);
@@ -303,6 +321,7 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
       aarch64::gemm::castToUnrankedF32MemRef(builder, loc, out->base);
 
   Value lda = builder.create<arith::ConstantIndexOp>(loc, plan->lda);
+  Value ldb = builder.create<arith::ConstantIndexOp>(loc, plan->ldb);
   Value ldc = builder.create<arith::ConstantIndexOp>(loc, plan->ldc);
   Value kSize = builder.create<arith::ConstantIndexOp>(loc, *staticK);
   Value familyArgument;
@@ -319,16 +338,18 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
       return op->emitOpError(
           "requires a valid NEON kernel ABI vector K unroll");
     familyArgument = builder.create<arith::ConstantIndexOp>(
-        loc, *staticK / *kScalarUnroll);
+        loc, isRowMajor ? *staticK : *staticK / *kScalarUnroll);
   }
 
   auto unranked = UnrankedMemRefType::get(builder.getF32Type(), 0);
   auto index = builder.getIndexType();
-  getOrCreateLeafDeclaration(
-      module, aarch64::gemm::kMicrokernelLeafName,
-      builder.getFunctionType({unranked, unranked, unranked, index, index,
-                               index, index, index, index, index},
-                              {}));
+  StringRef leafName = isRowMajor ? aarch64::gemm::kMicrokernelRmLeafName
+                                  : aarch64::gemm::kMicrokernelLeafName;
+  SmallVector<Type> leafTypes = {unranked, unranked, unranked};
+  for (int64_t i = 0, count = isRowMajor ? 8 : 7; i < count; ++i)
+    leafTypes.push_back(index);
+  getOrCreateLeafDeclaration(module, leafName,
+                             builder.getFunctionType(leafTypes, {}));
 
   auto kcMode = op->getAttrOfType<StringAttr>(aarch64::gemm::kKcModeAttrName);
   if (!kcMode ||
@@ -336,15 +357,22 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
     return op->emitOpError(
         "requires a valid KC mode before GEMM leaf materialization");
   }
-  auto kernelCall = builder.create<func::CallOp>(
-      loc, aarch64::gemm::kMicrokernelLeafName, TypeRange{},
-      ValueRange{lhsBase,
-                 isDirectRhs
-                     ? aarch64::gemm::castToUnrankedF32MemRef(builder, loc,
-                                                              rhsBase)
-                     : rhsBase,
-                 outBase, lhs->offset, rhsOffset,
-                 out->offset, lda, ldc, kSize, familyArgument});
+  SmallVector<Value> leafOperands = {
+      lhsBase,
+      isDirectRhs ? aarch64::gemm::castToUnrankedF32MemRef(builder, loc,
+                                                            rhsBase)
+                  : rhsBase,
+      outBase,
+      lhs->offset,
+      rhsOffset,
+      out->offset,
+      lda};
+  if (isRowMajor) leafOperands.push_back(ldb);
+  leafOperands.push_back(ldc);
+  leafOperands.push_back(kSize);
+  leafOperands.push_back(familyArgument);
+  auto kernelCall = builder.create<func::CallOp>(loc, leafName, TypeRange{},
+                                                 leafOperands);
   copyScheduleAttrs(op, kernelCall, builder);
   kernelCall->setDiscardableAttr(aarch64::gemm::kMicrokernelMAttrName,
                                  builder.getI64IntegerAttr(*staticM));
