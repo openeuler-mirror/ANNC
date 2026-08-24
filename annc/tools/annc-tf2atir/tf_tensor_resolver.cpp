@@ -186,6 +186,11 @@ bool resolveDtype(const TfNode& node, int output_index,
     return setType(tensorflow::DT_INT64);
   // Rank: scalar int32 by the TensorFlow op signature.
   if (source.op() == "Rank") return setType(tensorflow::DT_INT32);
+  // These index outputs are fixed by the TF op signature. Their shared T
+  // attribute describes output 0 and must never leak onto output 1.
+  if ((source.op() == "Merge" || source.op() == "RefMerge") &&
+      output_index == 1)
+    return setType(tensorflow::DT_INT32);
   if (source.op() == "StaticRegexReplace")
     return setType(tensorflow::DT_STRING);
   // StringSplit emits a sparse triplet with no type facts: indices [nnz, rank+1]
@@ -307,7 +312,7 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       for (const TensorRef& out : node.outputs)
         if (out.output_index == index) return true;
       TensorDescriptor descriptor;
-      if (op == "Merge") {
+      if (op == "Merge" || op == "RefMerge") {
         // Merge value_index is fixed int32 and has no GraphDef type fact.
         descriptor.dtype = "int32";
       } else if (op == "TopK" || op == "TopKV2" || op == "Unique") {
@@ -333,7 +338,8 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       node.outputs.push_back(output);
       return true;
     };
-    if (op == "TopK" || op == "TopKV2" || op == "Unique" || op == "Merge") {
+    if (op == "TopK" || op == "TopKV2" || op == "Unique" || op == "Merge" ||
+        op == "RefMerge") {
       if (!ensureOutput(1)) return false;
     } else if (op == "Split" || op == "DynamicPartition") {
       int64_t count = 0;
