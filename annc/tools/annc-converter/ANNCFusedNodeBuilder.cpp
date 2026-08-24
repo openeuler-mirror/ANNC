@@ -1,9 +1,12 @@
 #include "ANNCFusedNodeBuilder.h"
 
-#include <unordered_set>
+#include <algorithm>
+#include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "FusionMetadata/TensorEndpoint.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -18,12 +21,6 @@ std::string cleanTensorName(std::string name) {
   size_t colon = name.find(':');
   if (colon != std::string::npos) name = name.substr(0, colon);
   return name;
-}
-
-std::string tensorSuffix(const std::string &name) {
-  if (!name.empty() && name[0] == '^') return "";
-  size_t colon = name.find(':');
-  return colon == std::string::npos ? "" : name.substr(colon);
 }
 
 const tensorflow::NodeDef *findNode(const tensorflow::GraphDef &graph,
@@ -81,14 +78,11 @@ int64_t countArgsWithRole(llvm::ArrayRef<FusionArg> args,
   return count;
 }
 
-std::string formatRuntimeOutputShape(const FusionInfo &fusion,
-                                     llvm::ArrayRef<int64_t> outputShape) {
-  std::unordered_set<int64_t> dynamicDims(fusion.dynamicDims.begin(),
-                                          fusion.dynamicDims.end());
+std::string formatRuntimeOutputShape(llvm::ArrayRef<int64_t> outputShape) {
   std::string shape;
   for (size_t i = 0; i < outputShape.size(); ++i) {
     if (i > 0) shape += ",";
-    if (dynamicDims.count(static_cast<int64_t>(i)) > 0) {
+    if (outputShape[i] < 0) {
       shape += "?";
     } else {
       shape += std::to_string(outputShape[i]);
@@ -119,10 +113,50 @@ tensorflow::DataType fusionInputDType(const tensorflow::GraphDef &graph,
   return node ? nodeDType(*node) : tensorflow::DT_FLOAT;
 }
 
-tensorflow::DataType firstOrDefault(
-    llvm::ArrayRef<tensorflow::DataType> types,
-    tensorflow::DataType fallback = tensorflow::DT_FLOAT) {
-  return types.empty() ? fallback : types.front();
+tensorflow::DataType fusionDType(llvm::StringRef dtype) {
+  if (dtype == "f32" || dtype == "float32") return tensorflow::DT_FLOAT;
+  if (dtype == "f64" || dtype == "float64") return tensorflow::DT_DOUBLE;
+  if (dtype == "f16" || dtype == "float16") return tensorflow::DT_HALF;
+  if (dtype == "bf16" || dtype == "bfloat16") return tensorflow::DT_BFLOAT16;
+  if (dtype == "i8" || dtype == "int8") return tensorflow::DT_INT8;
+  if (dtype == "i16" || dtype == "int16") return tensorflow::DT_INT16;
+  if (dtype == "i32" || dtype == "int32") return tensorflow::DT_INT32;
+  if (dtype == "i64" || dtype == "si64" || dtype == "int64")
+    return tensorflow::DT_INT64;
+  if (dtype == "ui8" || dtype == "uint8") return tensorflow::DT_UINT8;
+  if (dtype == "ui16" || dtype == "uint16") return tensorflow::DT_UINT16;
+  if (dtype == "ui32" || dtype == "uint32") return tensorflow::DT_UINT32;
+  if (dtype == "ui64" || dtype == "uint64") return tensorflow::DT_UINT64;
+  if (dtype == "bool") return tensorflow::DT_BOOL;
+  if (dtype == "string") return tensorflow::DT_STRING;
+  return tensorflow::DT_INVALID;
+}
+
+void setTypeList(tensorflow::AttrValue *attr,
+                 llvm::ArrayRef<tensorflow::DataType> types) {
+  auto *list = attr->mutable_list();
+  for (tensorflow::DataType type : types) list->add_type(type);
+}
+
+int declaredOutputCount(const tensorflow::NodeDef &node) {
+  auto shapes = node.attr().find("_output_shapes");
+  if (shapes == node.attr().end()) return -1;
+  return shapes->second.list().shape_size();
+}
+
+bool hasConsumers(const tensorflow::GraphDef &graph,
+                  const std::string &nodeName) {
+  for (const tensorflow::NodeDef &node : graph.node()) {
+    for (const std::string &input : node.input()) {
+      auto endpoint = parseTensorEndpoint(input);
+      if (!endpoint) {
+        llvm::consumeError(endpoint.takeError());
+        continue;
+      }
+      if (!endpoint->control && endpoint->node == nodeName) return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -136,11 +170,117 @@ ANNCFusedNodeBuilder::ANNCFusedNodeBuilder(
 
 std::string ANNCFusedNodeBuilder::rewriteDataInput(
     const std::string &input) const {
-  if (!input.empty() && input[0] == '^') return input;
-  std::string src = cleanTensorName(input);
-  auto fusedIt = fusionByOutput.find(src);
+  auto endpoint = parseTensorEndpoint(input);
+  if (!endpoint || endpoint->control) return input;
+  auto fusedIt = fusionByOutput.find(endpoint->canonicalDataName());
   if (fusedIt == fusionByOutput.end()) return input;
-  return fusedIt->second->name + tensorSuffix(input);
+  return fusedIt->second.fusion->name + ":" +
+         std::to_string(fusedIt->second.slot);
+}
+
+bool ANNCFusedNodeBuilder::replacesOutputNode(
+    const std::string &nodeName) const {
+  for (const auto &[name, target] : fusionByOutput) {
+    (void)target;
+    auto endpoint = parseTensorEndpoint(name);
+    if (!endpoint) {
+      llvm::consumeError(endpoint.takeError());
+      continue;
+    }
+    if (!endpoint->control && endpoint->node == nodeName) return true;
+  }
+  return false;
+}
+
+bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
+                                               std::string *error) const {
+  using AliasTarget = std::pair<int64_t, const FusionOutputTarget *>;
+  for (const tensorflow::NodeDef &originalNode : original.node()) {
+    std::vector<AliasTarget> targets;
+    for (const auto &[name, target] : fusionByOutput) {
+      auto endpoint = parseTensorEndpoint(name);
+      if (!endpoint) {
+        llvm::consumeError(endpoint.takeError());
+        continue;
+      }
+      if (!endpoint->control && endpoint->node == originalNode.name()) {
+        targets.emplace_back(endpoint->port, &target);
+      }
+    }
+    if (targets.empty()) continue;
+    if (hasConsumers(original, originalNode.name())) continue;
+    std::sort(targets.begin(), targets.end(),
+              [](const AliasTarget &lhs, const AliasTarget &rhs) {
+                return lhs.first < rhs.first;
+              });
+
+    const int outputCount = declaredOutputCount(originalNode);
+    const int requiredCount =
+        outputCount >= 0 ? outputCount : static_cast<int>(targets.size());
+    if (requiredCount != static_cast<int>(targets.size())) {
+      if (error) {
+        *error = "output node '" + originalNode.name() + "' must replace all " +
+                 std::to_string(requiredCount) + " output slots";
+      }
+      return false;
+    }
+    for (int port = 0; port < requiredCount; ++port) {
+      if (targets[port].first != port) {
+        if (error) {
+          *error = "output node '" + originalNode.name() +
+                   "' must replace contiguous output slots starting at 0";
+        }
+        return false;
+      }
+    }
+
+    tensorflow::NodeDef *alias = graph.add_node();
+    alias->set_name(originalNode.name());
+    alias->set_op(requiredCount == 1 ? "Identity" : "IdentityN");
+    alias->set_device(originalNode.device());
+    llvm::SmallVector<tensorflow::DataType> types;
+    for (const auto &[port, target] : targets) {
+      (void)port;
+      if (!target->fusion || target->slot < 0 ||
+          target->slot >=
+              static_cast<int64_t>(target->fusion->outputs.size())) {
+        if (error) {
+          *error = "output node '" + originalNode.name() +
+                   "' has an invalid fusion output slot";
+        }
+        return false;
+      }
+      if (target->fusion->name == originalNode.name()) {
+        if (error) {
+          *error = "fusion node name conflicts with output alias '" +
+                   originalNode.name() + "'";
+        }
+        return false;
+      }
+      alias->add_input(target->fusion->name + ":" +
+                       std::to_string(target->slot));
+      tensorflow::DataType type =
+          fusionDType(target->fusion->outputs[target->slot].dtype);
+      if (type == tensorflow::DT_INVALID) {
+        if (error) {
+          *error = "output node '" + originalNode.name() +
+                   "' has an unsupported dtype";
+        }
+        return false;
+      }
+      types.push_back(type);
+    }
+    if (requiredCount == 1) {
+      (*alias->mutable_attr())["T"].set_type(types.front());
+    } else {
+      setTypeList(&(*alias->mutable_attr())["T"], types);
+    }
+    auto shapes = originalNode.attr().find("_output_shapes");
+    if (shapes != originalNode.attr().end()) {
+      (*alias->mutable_attr())["_output_shapes"] = shapes->second;
+    }
+  }
+  return true;
 }
 
 tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
@@ -149,10 +289,10 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   llvm::ArrayRef<FusionArg> outputs = fusion.outputs;
   const std::string &outputName = outputs.front().tfName;
 
-  const tensorflow::NodeDef *reluNode = findNode(original, outputName);
+  const tensorflow::NodeDef *reluNode =
+      findNode(original, cleanTensorName(outputName));
   int rank = reluNode ? outputRank(*reluNode) : 2;
-  tensorflow::DataType dtype =
-      reluNode ? nodeDType(*reluNode) : tensorflow::DT_FLOAT;
+  constexpr tensorflow::DataType legacyType = tensorflow::DT_FLOAT;
 
   tensorflow::NodeDef *fused = graph.add_node();
   fused->set_name(fusion.name);
@@ -168,7 +308,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   (*attrs)["abi"].set_s(fusion.abi);
   int64_t numOutputs = static_cast<int64_t>(outputs.size());
   (*attrs)["num_outputs"].set_i(numOutputs);
-  (*attrs)["T"].set_type(dtype);
+  (*attrs)["T"].set_type(legacyType);
 
   llvm::SmallVector<tensorflow::DataType> inputTypes;
   inputTypes.reserve(args.size());
@@ -180,23 +320,28 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   llvm::SmallVector<tensorflow::DataType> fixedTypes;
   llvm::SmallVector<tensorflow::DataType> dynamicTypes;
   for (size_t i = 0; i < args.size() && i < inputTypes.size(); ++i) {
+    tensorflow::DataType type = fusionDType(args[i].dtype);
+    if (type == tensorflow::DT_INVALID) type = inputTypes[i];
     if (args[i].role == "constant") {
-      constantTypes.push_back(inputTypes[i]);
+      constantTypes.push_back(type);
     } else if (args[i].role == "fixed") {
-      fixedTypes.push_back(inputTypes[i]);
+      fixedTypes.push_back(type);
     } else if (args[i].role == "dynamic") {
-      dynamicTypes.push_back(inputTypes[i]);
+      dynamicTypes.push_back(type);
     }
   }
 
   llvm::SmallVector<tensorflow::DataType> outputTypes;
-  for (int64_t i = 0; i < numOutputs; ++i) {
-    outputTypes.push_back(dtype);
+  outputTypes.reserve(outputs.size());
+  for (const FusionArg &output : outputs) {
+    tensorflow::DataType outputType = fusionDType(output.dtype);
+    if (outputType == tensorflow::DT_INVALID) outputType = legacyType;
+    outputTypes.push_back(outputType);
   }
-  (*attrs)["Tconstants"].set_type(firstOrDefault(constantTypes));
-  (*attrs)["Tfixed"].set_type(firstOrDefault(fixedTypes));
-  (*attrs)["Tdynamic"].set_type(firstOrDefault(dynamicTypes));
-  (*attrs)["Toutputs"].set_type(firstOrDefault(outputTypes, dtype));
+  setTypeList(&(*attrs)["Tconstants"], constantTypes);
+  setTypeList(&(*attrs)["Tfixed"], fixedTypes);
+  setTypeList(&(*attrs)["Tdynamic"], dynamicTypes);
+  setTypeList(&(*attrs)["Toutputs"], outputTypes);
 
   auto *rankList = (*attrs)["output_ranks"].mutable_list();
   for (const FusionArg &output : outputs) {
@@ -208,7 +353,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   }
   auto *outputShapes = (*attrs)["output_shapes"].mutable_list();
   for (const FusionArg &output : outputs) {
-    outputShapes->add_s(formatRuntimeOutputShape(fusion, output.shape));
+    outputShapes->add_s(formatRuntimeOutputShape(output.shape));
   }
   auto *kernelArgOrder = (*attrs)["kernel_arg_order"].mutable_list();
   for (int64_t value : fusion.kernelArgOrder) kernelArgOrder->add_i(value);
