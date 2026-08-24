@@ -39,6 +39,12 @@ class ANNCFusedOp : public OpKernel {
  private:
   // Load the shared library produced by ANNCOptimizerPass.
   Status LoadLibrary(const std::string& so_path);
+  Status LoadJitLibrary(const std::string& so_path);
+  Status ResolveLibrarySymbols(const std::string& so_path);
+  void UnloadJitLibrary();
+
+  Status CompileJitKernel(OpKernelContext* context, std::string* work_dir,
+                          std::string* so_path);
 
   Status ExecuteMlirCifaceKernel(OpKernelContext* context, bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample);
@@ -73,6 +79,8 @@ class ANNCFusedOp : public OpKernel {
   std::vector<DataType> output_types_;
   // Generated library containing _mlir_ciface_<kernel_name_>.
   std::string shared_lib_path_;
+  // Fusion-only ATIR module consumed by runtime JIT compilation.
+  std::string atir_module_path_;
   // Calling convention: legacy "mlir_ciface" or context-based
   // "annc_execution_v2".
   std::string abi_;
@@ -91,6 +99,10 @@ class ANNCFusedOp : public OpKernel {
   annc::threadpool::AnncThreadPool* (*annc_get_current_threadpool_)();
   // True after the current shared library and kernel symbol are resolved.
   bool loaded_;
+
+  // The uncached phase-one JIT reuses per-op loader state, so concurrent
+  // Compute calls for the same node are serialized until the kernel returns.
+  mutex jit_mu_;
 
   // Process-wide cache prevents repeated dlopen calls for the same library.
   static mutex lib_cache_mu_;

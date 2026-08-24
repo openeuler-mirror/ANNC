@@ -71,7 +71,8 @@ def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
            "Kernels with a KDNN implementation will use it; "
            "others fall back to aarch64.">,
     ListOption<"enabledCustomOps", "enable-custom-ops", "std::string",
-               "Only rewrite the listed custom op types. Empty means all types.">,
+               "Only rewrite the listed custom op types. Empty enables all "
+               "types except MatMul, MatMulAdd, and MatMulAddRelu.">,
     ListOption<"disabledCustomOps", "disable-custom-ops", "std::string",
                "Do not rewrite the listed custom op types. Takes precedence over enable-custom-ops.">
   ];
@@ -102,6 +103,28 @@ def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
   let dependentDialects = [
     "AtirDialect"
   ];
+}
+
+/* Select one fused kernel from a fusion-only runtime template. */
+def AtirSelectKernel : Pass<"atir-select-kernel", "ModuleOp"> {
+  let summary = "select one fused kernel function for runtime compilation";
+  let constructor = "createAtirSelectKernelPass()";
+  let options = [
+    Option<"kernelName", "kernel-name", "std::string", "",
+           "Symbol name of the fused kernel to retain">
+  ];
+  let dependentDialects = ["AtirDialect"];
+}
+
+/* Bind runtime argument shapes before lowering. */
+def AtirSpecializeShapes : Pass<"atir-specialize-shapes", "ModuleOp"> {
+  let summary = "specialize fused kernel arguments with runtime shapes";
+  let constructor = "createAtirSpecializeShapesPass()";
+  let options = [
+    Option<"shapeSpec", "shape-spec", "std::string", "",
+           "Path to the runtime shape specification JSON">
+  ];
+  let dependentDialects = ["AtirDialect"];
 }
 
 /* unroll pass */

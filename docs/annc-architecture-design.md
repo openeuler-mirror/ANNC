@@ -325,14 +325,15 @@ flowchart LR
 
 > **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。
 
-> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-identity-canonicalize --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
+> **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-identity-canonicalize --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。启用 `--defer-codegen` 时，pipeline 在 fusion 后执行 `--atir-prune-func`，将 fusion-only ATIR 和运行时 metadata 交给 `annc-converter`，后端 lowering 延后到 `ANNCFusedOp::Compute`，由实际输入 shape 驱动同步 JIT。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
 
 #### 4.1.3 编译时与运行时边界
 
 | 阶段      | 触发时机                 | 执行主体                   | 主要工作                                         | 失败行为             |
 | ------- | -------------------- | ---------------------- | -------------------------------------------- | ---------------- |
 | **编译时** | TF Session 创建 / 离线调用 | `ANNCOptimizer` 子进程    | 框架对接（格式转换）、前端图优化（切分决策）、后端优化（代码生成）、图重写（注册回框架） | 返回原始 GraphDef    |
-| **运行时** | 每次推理请求               | `ANNCFusedOp::Compute` | `dlopen` `.so`、构造 MemRef、调用 kernel           | 报错（当前无 fallback） |
+| **运行时 AOT** | 每次推理请求               | `ANNCFusedOp::Compute` | `dlopen` 已生成 `.so`、构造 MemRef、调用 kernel | 报错（当前无 fallback） |
+| **运行时 JIT** | 首次/每次请求（无缓存阶段） | `ANNCFusedOp::Compute` | 提取实际 shape、同步执行 `annc-asm`/`annc`、加载 `.so`、构造 MemRef、调用 kernel | 报错（当前无 fallback） |
 
 关键设计：**编译时尽可能多做，运行时只做最小必要的事**。
 
@@ -350,6 +351,7 @@ flowchart LR
 - ADR-003：两层选择算子接入策略
 - ADR-004：fork/exec 进程隔离
 - ADR-005：运行时无 fallback 决策
+- ADR-007：TensorFlow 无缓存同步 JIT
 
 #### 4.1.5 关键接口契约
 

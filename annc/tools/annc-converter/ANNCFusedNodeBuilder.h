@@ -19,6 +19,7 @@ class ANNCFusedNodeBuilder {
 
   ANNCFusedNodeBuilder(const tensorflow::GraphDef &original,
                        std::string sharedLibPath,
+                       std::string atirModulePath,
                        const FusionOutputMap &fusionByOutput);
 
   std::string rewriteDataInput(const std::string &input) const;
@@ -31,6 +32,7 @@ class ANNCFusedNodeBuilder {
  private:
   const tensorflow::GraphDef &original;
   std::string sharedLibPath;
+  std::string atirModulePath;
   const FusionOutputMap &fusionByOutput;
 };
 

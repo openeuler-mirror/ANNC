@@ -163,9 +163,11 @@ bool hasConsumers(const tensorflow::GraphDef &graph,
 
 ANNCFusedNodeBuilder::ANNCFusedNodeBuilder(
     const tensorflow::GraphDef &original, std::string sharedLibPath,
+    std::string atirModulePath,
     const FusionOutputMap &fusionByOutput)
     : original(original),
       sharedLibPath(std::move(sharedLibPath)),
+      atirModulePath(std::move(atirModulePath)),
       fusionByOutput(fusionByOutput) {}
 
 std::string ANNCFusedNodeBuilder::rewriteDataInput(
@@ -305,6 +307,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   auto *attrs = fused->mutable_attr();
   (*attrs)["kernel_name"].set_s(fusion.kernelName);
   (*attrs)["shared_lib_path"].set_s(sharedLibPath);
+  (*attrs)["atir_module_path"].set_s(atirModulePath);
   (*attrs)["abi"].set_s(fusion.abi);
   int64_t numOutputs = static_cast<int64_t>(outputs.size());
   (*attrs)["num_outputs"].set_i(numOutputs);

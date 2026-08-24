@@ -190,7 +190,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 ### 端到端 GraphDef 重写
 
-`annc-tf-pipeline` 会自动编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。默认由 converter 从融合后的 ATIR 提取 metadata；传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。传入 `--defer-codegen` 时，Grappler 阶段只保留 fusion-only ATIR，`annc-asm` 和 `annc` 延后到 `ANNCFusedOp::Compute`。默认由 converter 从融合后的 ATIR 提取 metadata；传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
 
 ```shell
 annc-tf-pipeline \
@@ -211,6 +211,7 @@ annc-tf-pipeline \
 | `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
+| `--defer-codegen` | 保留 fusion-only ATIR，由运行时同步 JIT 编译 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
 ### 分步编译命令
@@ -354,9 +355,11 @@ annc-asm output.bin \
   -o asm.mlir
 ```
 
-`--atir-fast-codegen` 默认允许所有已注册的自定义算子类型。可以按最终生成的
-`custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist
-优先级更高：
+`--atir-fast-codegen` 默认允许非 GEMM 的已注册自定义算子类型；`MatMul`、
+`MatMulAdd` 和 `MatMulAddRelu` 默认禁用，以便交给
+`--annc-aarch64-gemm-pipeline`。可以按最终生成的 `custom.op_name` 使用 allowlist
+或 denylist 控制改写；名称区分大小写，显式 allowlist 可重新启用 GEMM pattern，
+denylist 优先级更高：
 
 ```shell
 # 只允许 MatMulAdd，其他自定义算子保持原 ATIR
@@ -428,6 +431,7 @@ GraphDef 输出固定为二进制 protobuf。常用参数：
 | `--input_graphdef <path>` | GraphDef 重写模式输入 |
 | `--output_graphdef <path>` | GraphDef 重写模式输出 |
 | `--shared_lib_path <path>` | `ANNCFused` 运行时共享库路径 |
+| `--atir_module_path <path>` | JIT 模式下 fusion-only ATIR 的绝对路径 |
 | `--metadata_json <path>` | 可选的 `annc-fusion-metadata` 输出；省略时需提供融合后的 ATIR 位置参数 |
 | `--kernel_name <name>` | 覆盖融合 kernel 名称 |
 
@@ -443,6 +447,11 @@ GraphDef 输出固定为二进制 protobuf。常用参数：
 | `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
 
 Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 `annc_generated_kernel.so`。重写后的 GraphDef 会把该 `.so` 路径写入每个 `ANNCFused` 节点的 `shared_lib_path`，运行时 `ANNCFused` 需要通过 `dlopen` 加载它。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
+
+设置 `ANNC_JIT_ENABLE=1` 后启用第一阶段同步 JIT：GraphDef 写入
+`atir_module_path`，运行时根据实际输入和输出 shape 选择并特化当前 fusion func，再同步执行
+`annc-asm` 和 `annc`。当前未实现编译缓存，每次调用都会生成并加载独立 `.so`；同一
+`ANNCFused` 节点的并发调用会串行编译和执行。
 
 多 fusion 的 GraphDef 重写会为每个 fusion 生成一个独立的 `ANNCFused` 节点。`fusion_metadata.json` 中如果某个 fusion 带有 `dynamic_dims`，`annc-converter` 写入 `ANNCFused.output_shapes` 时会把这些维度保留为 `?`，由 `ANNCFused` 在运行时根据动态输入的实际维度推导输出形状，避免 Serving 请求 batch 与编译样例 batch 不一致时按固定维度分配输出。
 
@@ -529,11 +538,13 @@ ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 allowlist；非空时仅改写列出的类型 |
+| `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 allowlist；非空时仅改写列出的类型，并可显式启用默认禁用的 GEMM 类型 |
 | `ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 denylist；始终优先于 allowlist |
+| `ANNC_GEMM_CONFIG` | JSON 文件路径 | 空 | AArch64 GEMM 调优配置；AOT 与 JIT 的 GEMM pipeline 均要求提供 |
 
 环境变量是默认策略。`--atir-fast-codegen=enable-custom-ops=...` 非空时覆盖环境
-allowlist；命令行和环境的 denylist 会合并。
+allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`MatMul`、
+`MatMulAdd` 和 `MatMulAddRelu` 仍默认禁用。
 
 ### `ANNCOptimizer`（Grappler 插件）
 
@@ -542,13 +553,14 @@ allowlist；命令行和环境的 denylist 会合并。
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
 | `ANNC_ENABLE` | `1`/`0`/`true`/`false`/`yes`/`no` | `false` | 是否启用 ANNC 图改写 |
-| `ANNC_PIPELINE_PATH` | 路径 | `/usr/local/bin/annc-tf-pipeline` | `annc-tf-pipeline` 可执行文件路径（参数名：`pipeline_path` / `annc_pipeline_path`） |
-| `ANNC_WORK_DIR` | 目录路径 | 临时目录 | 编译产物工作目录（参数名：`work_dir` / `annc_work_dir`） |
+| `ANNC_PIPELINE_PATH` | 路径 | `/usr/local/bin/annc-tf-pipeline` | `annc-tf-pipeline` 可执行文件路径；JIT 从其同目录查找 `annc-asm` 和 `annc`（参数名：`pipeline_path` / `annc_pipeline_path`） |
+| `ANNC_WORK_DIR` | 目录路径 | 临时目录 | Grappler pipeline 与运行时 JIT 的编译产物工作目录（参数名：`work_dir` / `annc_work_dir`） |
 | `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`） |
 | `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | pipeline 调用超时时间（参数名：`timeout_seconds`） |
-| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留临时文件（参数名：`keep_temp_files`） |
+| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
+| `ANNC_JIT_ENABLE` | `1`/`0`/`true`/`false` | `false` | 启用同步 JIT（参数名：`jit_enabled` / `defer_codegen`） |
 
 ### `ANNCFusedOp` 运行时
 

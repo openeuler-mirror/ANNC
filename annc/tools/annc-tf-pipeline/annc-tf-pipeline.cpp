@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -20,8 +22,24 @@ struct PipelineOptions {
   int64_t batchSize = -1;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
+  bool deferCodegen = false;
   bool verbose = false;
 };
+
+static void printUsage() {
+  std::cout
+      << "Usage: annc-tf-pipeline --input_graphdef <path> "
+         "--output_graphdef <path> [options]\n"
+         "Options:\n"
+         "  --work_dir <dir>          Intermediate artifact directory\n"
+         "  --shared_lib_path <path>  AOT library path written to GraphDef\n"
+         "  --defer-codegen           Compile fusion kernels in ANNCFusedOp\n"
+         "  --batch_size <n>          Override dynamic batch dimensions\n"
+         "  --output_tensor <name>    Preserve a named graph output\n"
+         "  --keep_temps              Keep intermediate artifacts\n"
+         "  --dump-fusion-metadata    Write fusion_metadata.json\n"
+         "  --verbose                 Print invoked commands\n";
+}
 
 static bool hasArg(int argc, char **argv, const std::string &name) {
   for (int i = 1; i < argc; ++i) {
@@ -81,7 +99,9 @@ static std::string executableSibling(const char *argv0, const std::string &name)
 
 static std::string defaultWorkDir() {
   fs::path base = fs::temp_directory_path();
-  return (base / ("annc_tf_rewrite_" + std::to_string(std::time(nullptr)))).string();
+  return (base / ("annc_tf_rewrite_" + std::to_string(std::time(nullptr)) +
+                  "_" + std::to_string(getpid())))
+      .string();
 }
 
 static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
@@ -94,6 +114,7 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
+  opts->deferCodegen = hasArg(argc, argv, "--defer-codegen");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
 
   for (int i = 1; i < argc; ++i) {
@@ -141,8 +162,15 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::vector<std::string> converterArgs = {
       anncConverter, fusedAtir.string(), "--tf-graphdef-rewrite",
       "--input_graphdef", opts.inputGraphDef, "--output_graphdef",
-      opts.outputGraphDef, "--shared_lib_path", runtimeSharedLibPath,
+      opts.outputGraphDef,
   };
+  if (opts.deferCodegen) {
+    converterArgs.push_back("--atir_module_path");
+    converterArgs.push_back(fs::absolute(fusedAtir).string());
+  } else {
+    converterArgs.push_back("--shared_lib_path");
+    converterArgs.push_back(runtimeSharedLibPath);
+  }
   if (!opts.kernelName.empty()) {
     converterArgs.push_back("--kernel_name");
     converterArgs.push_back(opts.kernelName);
@@ -150,13 +178,13 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string fusionPass = "--atir-op-fusion";
+  std::string prunePass = "--atir-prune-func";
 
   std::vector<std::string> asmArgs = {
-      anncAsm, fusedAtir.string(), "--atir-prune-func",
-      "--atir-fast-codegen",
-      "--convert-atir-to-linalg", "-o", loweredMlir.string()};
+      anncAsm, fusedAtir.string(), "--atir-fast-codegen",
+      "--annc-aarch64-gemm-pipeline", "-o", loweredMlir.string()};
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  asmArgs[3] = "--atir-fast-codegen=enable-kdnn=true";
+  asmArgs[2] = "--atir-fast-codegen=enable-kdnn=true";
 #endif
 
   std::vector<std::string> tf2atirArgs = {
@@ -174,28 +202,38 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   bool ok =
       runCommand(tf2atirArgs, opts.verbose) &&
       runCommand({anncOpt, rawAtir.string(), identityCanonicalizePass,
-                  fusionPass, "-o",
-                  fusedAtir.string()},
+                  fusionPass, prunePass, "-o", fusedAtir.string()},
                  opts.verbose);
   if (ok && opts.dumpFusionMetadata) {
     ok = runCommand({anncFusionMetadata, fusedAtir.string(), "-o",
                      fusionMetadata.string()},
                     opts.verbose);
   }
-  ok = ok &&
-      runCommand(asmArgs, opts.verbose) &&
-      runCommand({annc, loweredMlir.string(), "--shared", "-o",
-                  generatedSo.string()},
-                 opts.verbose) &&
-      runCommand(converterArgs, opts.verbose);
+  if (opts.deferCodegen) {
+    ok = ok && runCommand(converterArgs, opts.verbose);
+  } else {
+    ok = ok &&
+         runCommand(asmArgs, opts.verbose) &&
+         runCommand({annc, loweredMlir.string(), "--shared", "-o",
+                     generatedSo.string()},
+                    opts.verbose) &&
+         runCommand(converterArgs, opts.verbose);
+  }
 
   if (!ok) return false;
 
   if (opts.verbose) {
-    std::cerr << "[annc-tf-pipeline] generated compiler kernel artifact: "
-              << generatedSo << "\n";
-    std::cerr << "[annc-tf-pipeline] runtime shared_lib_path written to GraphDef: "
-              << runtimeSharedLibPath << "\n";
+    if (opts.deferCodegen) {
+      std::cerr
+          << "[annc-tf-pipeline] runtime fusion template written to GraphDef: "
+          << fs::absolute(fusedAtir) << "\n";
+    } else {
+      std::cerr << "[annc-tf-pipeline] generated compiler kernel artifact: "
+                << generatedSo << "\n";
+      std::cerr
+          << "[annc-tf-pipeline] runtime shared_lib_path written to GraphDef: "
+          << runtimeSharedLibPath << "\n";
+    }
     if (opts.dumpFusionMetadata) {
       std::cerr << "[annc-tf-pipeline] fusion metadata dumped to: "
                 << fusionMetadata << "\n";
@@ -204,7 +242,12 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   if (!opts.keepTemps) {
     std::error_code ec;
-    if (opts.dumpFusionMetadata) {
+    if (opts.deferCodegen) {
+      for (const fs::path &temp : {rawAtir, loweredMlir, generatedSo}) {
+        fs::remove(temp, ec);
+        ec.clear();
+      }
+    } else if (opts.dumpFusionMetadata) {
       for (const fs::path &temp :
            {rawAtir, fusedAtir, loweredMlir, generatedSo}) {
         fs::remove(temp, ec);
@@ -220,6 +263,10 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 }  // namespace
 
 int main(int argc, char **argv) {
+  if (hasArg(argc, argv, "--help") || hasArg(argc, argv, "-h")) {
+    printUsage();
+    return 0;
+  }
   if (hasArg(argc, argv, "--tf-graphdef-rewrite")) {
     std::cerr << "[annc-tf-pipeline] warning: --tf-graphdef-rewrite is "
               << "deprecated on pipeline entry and will be ignored\n";

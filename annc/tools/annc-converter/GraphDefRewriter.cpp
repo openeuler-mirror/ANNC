@@ -97,7 +97,7 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
   }
 
   ANNCFusedNodeBuilder fusedNodeBuilder(graph, options.sharedLibPath,
-                                        fusionByOutput);
+                                        options.atirModulePath, fusionByOutput);
   // Preserve graph-level metadata, including versions, expected by Grappler.
   tensorflow::GraphDef rewritten = graph;
   rewritten.clear_node();
