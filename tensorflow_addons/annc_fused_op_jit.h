@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "annc_jit_cache.h"
 #include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {
@@ -15,9 +16,9 @@ struct AnncJitCompileRequest {
   std::vector<std::vector<int64_t>> argument_shapes;
 };
 
-Status CompileAnncJitKernel(const AnncJitCompileRequest& request,
-                            std::string* work_dir, std::string* so_path);
-void CleanupAnncJitWorkDir(const std::string& work_dir);
+Status CompileAnncJitKernel(
+    const AnncJitCompileRequest& request,
+    std::shared_ptr<annc::jit::JitExecutable>* executable);
 
 }  // namespace tensorflow
 

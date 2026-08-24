@@ -1,11 +1,11 @@
 # ANNC 架构设计文档
 
 > **文档编号**：ANNC-ARCH-001\
-> **文档版本**：v3.3\
+> **文档版本**：v3.4\
 > **发布日期**：2026-07-17\
 > **目标受众**：架构评审、产品经理、开发工程师、测试工程师、运维工程师\
 > **文档密级**：公开\
-> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状。
+> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，影响 codegen 的 module 属性在 Grappler 阶段进入 template fingerprint。
 
 ***
 
@@ -323,7 +323,9 @@ flowchart LR
     O --> N
 ```
 
-> **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。
+> **路径说明**：GEMM 类算子（MatMul+Add+ReLU）走 `annc-opt → Distribute → Tiling → FastCodegen → AArch64` 特化路径；Embedding Lookup 聚合等非 GEMM 融合子图走 `annc-opt → 通用 MLIR Lowering → Affine/Linalg → AArch64` 标准路径。两条路径在 `annc-asm` 阶段汇合，后续流程一致。启用同步 JIT 时，fusion-only ATIR 在运行时按实际 shape 编译；进程内缓存按 Grappler 生成的 template fingerprint 和实际 shape 复用已加载产物，工具链、GEMM 配置和 ABI 固定于进程上下文。
+
+`ANNCOptimizer` 将 `GrapplerItem::optimization_options().intra_op_parallelism_threads` 透传为 `--intra_thread_count`。`annc-tf2atir` 据此写入 `annc.intra_thread_count` module 属性，后续 fingerprint 和 AArch64 GEMM lowering 共用该编译期信息；直接调用工具时省略参数则使用后端的串行默认值。
 
 > **现状注**：当前 `annc-tf-pipeline` 默认流水线实际走 `annc-tf2atir [--batch_size N] -> annc-opt --atir-identity-canonicalize --atir-op-fusion -> annc-asm --atir-prune-func --atir-fast-codegen --convert-atir-to-affine -> annc --shared -> annc-converter`。启用 `--defer-codegen` 时，pipeline 在 fusion 后执行 `--atir-prune-func`，将 fusion-only ATIR 和运行时 metadata 交给 `annc-converter`，后端 lowering 延后到 `ANNCFusedOp::Compute`，由实际输入 shape 驱动同步 JIT。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。`Distribute`/`Tiling` 与 AArch64 多级 tiling pass 尚未纳入默认编排（pipeline 编排开发中），上述特化路径为设计目标。
 
@@ -333,7 +335,7 @@ flowchart LR
 | ------- | -------------------- | ---------------------- | -------------------------------------------- | ---------------- |
 | **编译时** | TF Session 创建 / 离线调用 | `ANNCOptimizer` 子进程    | 框架对接（格式转换）、前端图优化（切分决策）、后端优化（代码生成）、图重写（注册回框架） | 返回原始 GraphDef    |
 | **运行时 AOT** | 每次推理请求               | `ANNCFusedOp::Compute` | `dlopen` 已生成 `.so`、构造 MemRef、调用 kernel | 报错（当前无 fallback） |
-| **运行时 JIT** | 首次/每次请求（无缓存阶段） | `ANNCFusedOp::Compute` | 提取实际 shape、同步执行 `annc-asm`/`annc`、加载 `.so`、构造 MemRef、调用 kernel | 报错（当前无 fallback） |
+| **运行时 JIT** | 首次请求/缓存命中 | `ANNCFusedOp::Compute` | 获取实际 shape、按缓存 key 查询；miss 时同步执行 `annc-asm`/`annc` 并加载 `.so`，随后构造 MemRef、调用 kernel | 报错（当前无 fallback） |
 
 关键设计：**编译时尽可能多做，运行时只做最小必要的事**。
 
@@ -352,6 +354,7 @@ flowchart LR
 - ADR-004：fork/exec 进程隔离
 - ADR-005：运行时无 fallback 决策
 - ADR-007：TensorFlow 无缓存同步 JIT
+- ADR-008：TensorFlow 进程内 JIT 编译缓存
 
 #### 4.1.5 关键接口契约
 
@@ -554,7 +557,7 @@ sequenceDiagram
 
 | 模块                                | 职责                            | 对外接口                                        | 所属层        | 稳定性 |
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
-| `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N]`（未指定时保留动态 shape） | ANNC 框架对接层 | 稳定  |
+| `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N] [--intra_thread_count N]`（未指定时保留动态 shape；线程数写入 module 属性） | ANNC 框架对接层 | 稳定  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |

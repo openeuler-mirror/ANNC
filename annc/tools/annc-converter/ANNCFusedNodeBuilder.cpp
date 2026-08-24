@@ -306,6 +306,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
 
   auto *attrs = fused->mutable_attr();
   (*attrs)["kernel_name"].set_s(fusion.kernelName);
+  (*attrs)["template_fingerprint"].set_s(fusion.templateFingerprint);
   (*attrs)["shared_lib_path"].set_s(sharedLibPath);
   (*attrs)["atir_module_path"].set_s(atirModulePath);
   (*attrs)["abi"].set_s(fusion.abi);

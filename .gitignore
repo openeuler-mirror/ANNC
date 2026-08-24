@@ -27,5 +27,6 @@ tensorflow_addons/build
 docs/codex/
 docs/superpowers/
 benchmark/
+tmp/
 /Testing/
 .worktrees/

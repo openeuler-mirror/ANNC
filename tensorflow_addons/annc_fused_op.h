@@ -13,6 +13,8 @@
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/mutex.h"
 
+#include "annc_jit_cache.h"
+
 namespace annc {
 namespace threadpool {
 class AnncThreadPool;
@@ -39,16 +41,17 @@ class ANNCFusedOp : public OpKernel {
  private:
   // Load the shared library produced by ANNCOptimizerPass.
   Status LoadLibrary(const std::string& so_path);
-  Status LoadJitLibrary(const std::string& so_path);
   Status ResolveLibrarySymbols(const std::string& so_path);
-  void UnloadJitLibrary();
 
-  Status CompileJitKernel(OpKernelContext* context, std::string* work_dir,
-                          std::string* so_path);
+  annc::jit::JitCompileResult CompileJitKernel(
+      const std::vector<annc::jit::JitArgumentSignature>& arguments);
 
-  Status ExecuteMlirCifaceKernel(OpKernelContext* context, bool profile_enabled,
+  Status ExecuteMlirCifaceKernel(OpKernelContext* context,
+                                 void* kernel_function,
+                                 bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample);
   Status ExecuteExecutionV2Kernel(OpKernelContext* context,
+                                  void* kernel_function,
                                   bool profile_enabled,
                                   AnncFusedProfileSample* profile_sample);
 
@@ -59,6 +62,8 @@ class ANNCFusedOp : public OpKernel {
 
   // Core runtime attributes copied from or derived from fusion metadata.
   std::string kernel_name_;
+  // Name-independent identity of the fusion function used by the JIT cache.
+  std::string template_fingerprint_;
   int num_outputs_;
   // One entry per output; used to build ranked output memref descriptors.
   std::vector<int> output_ranks_;
@@ -99,10 +104,6 @@ class ANNCFusedOp : public OpKernel {
   annc::threadpool::AnncThreadPool* (*annc_get_current_threadpool_)();
   // True after the current shared library and kernel symbol are resolved.
   bool loaded_;
-
-  // The uncached phase-one JIT reuses per-op loader state, so concurrent
-  // Compute calls for the same node are serialized until the kernel returns.
-  mutex jit_mu_;
 
   // Process-wide cache prevents repeated dlopen calls for the same library.
   static mutex lib_cache_mu_;

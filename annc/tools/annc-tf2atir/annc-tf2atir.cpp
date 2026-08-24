@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
   if (argc < 2) {
     llvm::errs() << "Usage: " << argv[0]
                  << " <model_path> [--batch_size N] "
+                    "[--intra_thread_count N] "
                     "[--output_tensor <name>]... "
                     "[mlir-opt options]\n";
     return 1;
@@ -40,12 +41,17 @@ int main(int argc, char **argv) {
   // Extract --batch_size before MlirOptMain consumes argv
   // -1 means "not specified": keep dynamic shapes as-is
   int64_t batch_size = -1;
+  int64_t intra_thread_count = -1;
   std::vector<std::string> output_tensors;
   std::vector<char *> filtered_argv;
   filtered_argv.push_back(argv[0]);
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--batch_size" && i + 1 < argc) {
       batch_size = std::stoll(argv[i + 1]);
+      ++i;
+    } else if (std::string(argv[i]) == "--intra_thread_count" &&
+               i + 1 < argc) {
+      intra_thread_count = std::stoll(argv[i + 1]);
       ++i;
     } else if (std::string(argv[i]) == "--output_tensor") {
       if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
@@ -58,6 +64,10 @@ int main(int argc, char **argv) {
     } else {
       filtered_argv.push_back(argv[i]);
     }
+  }
+  if (intra_thread_count == 0 || intra_thread_count < -1) {
+    llvm::errs() << "Error: --intra_thread_count must be positive.\n";
+    return 1;
   }
   int filtered_argc = static_cast<int>(filtered_argv.size());
 
@@ -120,6 +130,11 @@ int main(int argc, char **argv) {
   if (!module) {
     llvm::errs() << "Error: Failed to build MLIR module from nodes.\n";
     return 1;
+  }
+  if (intra_thread_count > 0) {
+    module->setAttr(
+        "annc.intra_thread_count",
+        IntegerAttr::get(IntegerType::get(&context, 64), intra_thread_count));
   }
 
   std::string temp_bin = "temp_output.bin";

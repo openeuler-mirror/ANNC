@@ -78,3 +78,14 @@
 | **决策** | `ANNCOptimizer` 在 `ANNC_JIT_ENABLE=1` 时让 pipeline 只保留 fusion-only ATIR，并将其路径写入 `ANNCFused`。`ANNCFusedOp::Compute` 提取实际 shape，同步调用 `annc-asm` 和 `annc`，加载生成的共享库并执行 kernel。本阶段不引入编译缓存、异步编译或运行时 fallback。 |
 | **后果** | 动态 shape 的编译决策延后到运行时且边界清晰；首次调用包含编译开销，每次调用都可能重新生成共享库，缓存和并发控制留待后续独立提交。 |
 | **备选方案** | 在 Grappler 阶段按样例 shape 预编译——无法覆盖运行时动态 shape；异步 JIT——需要额外的请求排队和失败语义。 |
+
+<a id="adr-008"></a>
+
+## ADR-008：TensorFlow 进程内 JIT 编译缓存
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | ADR-007 的同步 JIT 能将请求实际 shape 交给后端，但每次调用都重新执行 `annc-asm`、`annc` 和 `dlopen`。直接按 `kernel_name` 缓存会阻止语义相同但来源名称不同的 fusion func 复用。工具链、GEMM 配置和 ABI 是进程级固定上下文，不需要在每次推理时重新探测。 |
+| **决策** | 在 `ANNCFusedOp` 进程内增加有界编译缓存。key 由 cache schema version、与名字无关的 canonical ATIR template fingerprint 和按 kernel 参数顺序排列的实际 shape 构成；Grappler 阶段将影响 codegen 的 module 属性（包括 `annc.intra_thread_count`）纳入 template fingerprint。`kernel_name` 和 MLIR func 名称不进入 key，只在 miss 时选择 func 和解析首次生成的符号。相同 key 使用 single-flight，同步等待同一编译结果；不同 key 可并行编译。成功 entry 以 `shared_ptr` 管理 `dlopen` handle 和工作目录并按 LRU 淘汰，默认上限 64，`ANNC_JIT_CACHE_MAX_ENTRIES=0` 可关闭缓存。失败结果从表中移除，后续请求重新编译。运行时 shape JSON 只携带参数索引和实际 shape，dtype 由 ATIR 模板和 TensorFlow Op dtype contract 共同约束。 |
+| **后果** | 相同语义和 shape 在进程内只编译一次；工具链、GEMM 配置和 ABI 变化属于不支持的进程级上下文切换，需要重启进程；正在执行的产物在淘汰后仍存活到最后一个引用释放。首次请求仍承担同步编译延迟，缓存仅限当前进程。 |
+| **备选方案** | (a) 每个 Op 仅缓存最后一个 shape——无法跨节点复用且 shape 切换会重复编译；(b) 使用 `kernel_name` 作为 key——把来源身份误当成代码生成语义；(c) 跨进程磁盘缓存——需要额外的原子发布、完整版本校验和不可信 `.so` 安全边界，本阶段不采用。 |
