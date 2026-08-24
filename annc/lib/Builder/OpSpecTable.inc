@@ -169,13 +169,6 @@ static void populateOpSpecTable(llvm::SmallVectorImpl<OpSpec>& specs) {
                            transformUnique));
   specs.push_back(makeSpec({"TopK", "TopKV2"}, "atir.TopK", 2, 2, 2, false, {},
                            {}, transformTopK));
-  specs.push_back(makeSpec({"Merge"}, "atir.Merge", 1, kUnbounded, 2, false, {},
-                           {}, transformMerge));
-  // Switch: control-flow routing (data, pred) -> (false_out, true_out). Both
-  // branches carry the same data, so C0 maps them to a single atir.Identity
-  // (numerically lossless for static inference graphs).
-  specs.push_back(makeSpec({"Switch"}, "atir.Identity", 2, 2, 2, false, {}, {},
-                           transformSwitch));
   specs.push_back(makeSpec({"DynamicPartition"}, "atir.DynamicPartition", 2, 2,
                            kVariableOutputs, false, {}, {},
                            transformDynamicPartition));

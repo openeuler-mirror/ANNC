@@ -14,7 +14,6 @@ void registerAllAtirPasses() {
     atir::registerAtirBlockFusionPass();
     atir::registerAtirUnrollPass();
     atir::registerAtirEltwiseFusionPass();
-    atir::registerAtirLLMCodeGenPass();
     atir::registerAtirPruneFuncPass();
     atir::registerAtirSelectLoweringStrategyPass();
 }

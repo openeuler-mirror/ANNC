@@ -322,6 +322,32 @@ def Atir_IfOp : Atir_Op<"if"> {
   // let hasCustomAssemblyFormat = 1;
 }
 
+def Atir_TensorToIndexOp : Atir_Op<"tensor_to_index"> {
+  let summary = "extract a scalar integer tensor as an index";
+  let description = [{
+    Extracts the sole element of a rank-0 integer tensor and casts it to the
+    builtin index type. TensorFlow boolean predicates use the ATIR integer
+    carrier with encoding="bool" and are accepted by this operation.
+  }];
+  let arguments = (ins Atir_Tensor:$input);
+  let results = (outs Index:$result);
+  let assemblyFormat = [{ $input attr-dict `:` type($input) }];
+  let hasVerifier = 1;
+}
+
+def Atir_IndexToTensorOp : Atir_Op<"index_to_tensor"> {
+  let summary = "materialize an index as a scalar integer tensor";
+  let description = [{
+    Casts an index value to the element type of a rank-0 ATIR integer tensor.
+    This is used for TensorFlow control-flow results such as
+    Merge.value_index.
+  }];
+  let arguments = (ins Index:$input);
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{ $input attr-dict `:` type($result) }];
+  let hasVerifier = 1;
+}
+
 def Atir_SwitchCaseOp : Atir_Op<"switch", [SingleBlockImplicitTerminator<"atir::ReturnOp">]> {
   let summary = "switch-case operation on an index argument";
   let arguments = (ins Index:$arg, DenseI64ArrayAttr:$cases);
@@ -345,6 +371,7 @@ def Atir_SwitchCaseOp : Atir_Op<"switch", [SingleBlockImplicitTerminator<"atir::
     /// Get the body of a case region.
     ::mlir::Block &getCaseBlock(unsigned idx);
   }];
+  let hasVerifier = 1;
   // let builders = [
   //   OpBuilder<(ins CArg<"::mlir::Value">:$arg,
   //     CArg<"::llvm::SmallVector<int64_t>", "{}">:$cases,

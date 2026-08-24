@@ -4,6 +4,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -400,7 +401,7 @@ ParseResult parseSwitchCases(OpAsmParser &p, DenseI64ArrayAttr &cases,
                  SmallVectorImpl<std::unique_ptr<Region>> &caseRegions) {
   SmallVector<int64_t> caseValues;
   while (succeeded(p.parseOptionalKeyword("case"))) {
-    int64_t value;
+    int64_t value = 0;
     Region &region = *caseRegions.emplace_back(std::make_unique<Region>());
     if (p.parseInteger(value) || p.parseRegion(region, /*arguments=*/{}))
       return failure();
@@ -429,6 +430,93 @@ Block &SwitchCaseOp::getDefaultBlock() {
 Block &SwitchCaseOp::getCaseBlock(unsigned idx) {
   assert(idx < getNumCases() && "case index out-of-bounds");
   return getCaseRegions()[idx].front();
+}
+
+LogicalResult TensorToIndexOp::verify() {
+  auto inputType = dyn_cast<TensorType>(getInput().getType());
+  if (!inputType)
+    return emitOpError("input must be an atir tensor");
+  if (!inputType.getShape().empty())
+    return emitOpError("input must be a rank-0 tensor");
+  if (!inputType.getElementType().isIntOrIndex())
+    return emitOpError("input element type must be integer or index");
+  return success();
+}
+
+LogicalResult IndexToTensorOp::verify() {
+  TensorType resultType = getResult().getType();
+  if (!resultType.getShape().empty())
+    return emitOpError("result must be a rank-0 tensor");
+  if (!resultType.getElementType().isIntOrIndex())
+    return emitOpError("result element type must be integer or index");
+  return success();
+}
+
+static bool areSwitchTypesCompatible(Type resultType, Type yieldedType) {
+  if (resultType == yieldedType) return true;
+  auto resultTensor = dyn_cast<TensorType>(resultType);
+  auto yieldedTensor = dyn_cast<TensorType>(yieldedType);
+  if (!resultTensor || !yieldedTensor) return false;
+
+  // Tensor name and cached constant data are provenance, not runtime type.
+  // Branch-local producers naturally carry different names from the Merge
+  // result, while their actual storage representation must still agree.
+  return resultTensor.getShape() == yieldedTensor.getShape() &&
+         resultTensor.getElementType() == yieldedTensor.getElementType() &&
+         resultTensor.getEncoding() == yieldedTensor.getEncoding() &&
+         resultTensor.getStride() == yieldedTensor.getStride() &&
+         resultTensor.getLayout() == yieldedTensor.getLayout() &&
+         resultTensor.getMemType() == yieldedTensor.getMemType() &&
+         resultTensor.getAddress() == yieldedTensor.getAddress() &&
+         resultTensor.getDeviceParallel() ==
+             yieldedTensor.getDeviceParallel() &&
+         resultTensor.getOnchipParallel() == yieldedTensor.getOnchipParallel();
+}
+
+LogicalResult SwitchCaseOp::verify() {
+  if (getCases().size() != getCaseRegions().size()) {
+    return emitOpError("has ")
+           << getCaseRegions().size() << " case regions but "
+           << getCases().size() << " case values";
+  }
+
+  llvm::DenseSet<int64_t> seenCases;
+  for (int64_t value : getCases())
+    if (!seenCases.insert(value).second)
+      return emitOpError("has duplicate case value: ") << value;
+
+  auto verifyRegion = [&](Region &region, const Twine &name) -> LogicalResult {
+    if (region.empty() || region.front().empty())
+      return emitOpError() << name << " must contain one non-empty block";
+    auto returnOp = dyn_cast<ReturnOp>(region.front().back());
+    if (!returnOp) {
+      return emitOpError("expected ")
+             << name << " to end with atir.return, but got "
+             << region.front().back().getName();
+    }
+    if (returnOp.getNumOperands() != getNumResults()) {
+      return emitOpError("expected each region to return ")
+             << getNumResults() << " values, but " << name << " returns "
+             << returnOp.getNumOperands();
+    }
+    for (auto [index, resultType, operand] :
+         llvm::enumerate(getResultTypes(), returnOp.getOperands())) {
+      if (!areSwitchTypesCompatible(resultType, operand.getType())) {
+        return emitOpError("expected result #")
+               << index << " of each region to be " << resultType << ", but "
+               << name << " returns " << operand.getType();
+      }
+    }
+    return success();
+  };
+
+  if (failed(verifyRegion(getDefaultRegion(), "default region")))
+    return failure();
+  for (auto [index, caseRegion] : llvm::enumerate(getCaseRegions()))
+    if (failed(verifyRegion(caseRegion,
+                            "case region #" + Twine(index))))
+      return failure();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

@@ -118,61 +118,6 @@ LogicalResult transformProd(const NodeInfo& node, ArrayRef<Type> outs,
   return success();
 }
 
-// atir.Merge: two results (output value, value index).
-LogicalResult transformMerge(const NodeInfo& node, ArrayRef<Type> outs,
-                             ArrayRef<Value> ins, OpContext& ctx) {
-  auto& b = ctx.builder();
-  if (ins.empty() || outs.size() < 2)
-    return ctx.emitError(node, "requires inputs and two output types");
-  Location loc = ctx.loc(node.name);
-  auto mergeOp = b.create<atir::MergeOp>(loc, TypeRange{outs[0], outs[1]}, ins);
-  if (node.outputs.size() >= 2) {
-    ctx.bindResult(node.outputs[0].name, mergeOp.getOutput());
-    ctx.bindResult(node.outputs[1].name, mergeOp.getValueIndex());
-  } else if (node.outputs.size() == 1) {
-    ctx.bindResult(node.outputs[0].name, mergeOp.getOutput());
-  }
-  return success();
-}
-
-// atir.Identity alias for TF Switch: Switch(data, pred) routes data to its
-// false/true outputs without changing the value. In a static inference graph
-// both branches are evaluated and carry identical data, so C0 maps both
-// outputs onto a single Identity of `data` — numerically lossless. The
-// pred (ins[1]) is intentionally unused; its routing semantics only matter
-// for dynamic control flow, which ATIR's static interpreter cannot express.
-LogicalResult transformSwitch(const NodeInfo& node, ArrayRef<Type> outs,
-                              ArrayRef<Value> ins, OpContext& ctx) {
-  auto& b = ctx.builder();
-  if (ins.empty())
-    return ctx.emitError(node, "Switch requires data and pred inputs");
-  Location loc = ctx.loc(node.name);
-  if (isa<atir::ResourceType>(ins[0].getType()) ||
-      (!outs.empty() && isa<atir::ResourceType>(outs[0]))) {
-    if (outs.size() < 2 ||
-        !isa<atir::ResourceType>(outs[0]) ||
-        !isa<atir::ResourceType>(outs[1]))
-      return ctx.emitError(node, "resource Switch must have two resource outputs");
-    if (!isa<atir::ResourceType>(ins[0].getType()))
-      return ctx.emitError(node, "resource Switch input is not a resource handle");
-    auto identity = b.create<atir::ResourceIdentityOp>(
-        loc, TypeRange{outs[0]}, ValueRange{ins[0]});
-    ctx.bindResult(node.outputs[0].name, identity.getResult());
-    if (node.outputs.size() >= 2)
-      ctx.bindResult(node.outputs[1].name, identity.getResult());
-    return success();
-  }
-  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
-  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
-  auto identity = b.create<atir::IdentityOp>(loc, outs[0],
-                                             outputBuffer.getResult(), ins[0]);
-  if (node.outputs.size() >= 1)
-    ctx.bindResult(node.outputs[0].name, identity.getResult());
-  if (node.outputs.size() >= 2)
-    ctx.bindResult(node.outputs[1].name, identity.getResult());
-  return success();
-}
-
 LogicalResult transformIdentity(const NodeInfo& node, ArrayRef<Type> outs,
                                 ArrayRef<Value> ins, OpContext& ctx) {
   auto& b = ctx.builder();

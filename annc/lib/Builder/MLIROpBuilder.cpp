@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <complex>
 #include <cstdint>
+#include <functional>
 #include <sstream>
 
 #include "llvm/ADT/StringMap.h"
@@ -253,7 +254,14 @@ bool MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
 
   // Name -> NodeInfo lookup so transformers can resolve constant inputs.
   nodesByName_.clear();
-  for (const auto& node : nodes) nodesByName_[node.name] = &node;
+  std::function<void(const NodeInfo&)> indexNode = [&](const NodeInfo& node) {
+    nodesByName_[node.name] = &node;
+    for (const NodeInfo& branchNode : node.switch_false_nodes)
+      indexNode(branchNode);
+    for (const NodeInfo& branchNode : node.switch_true_nodes)
+      indexNode(branchNode);
+  };
+  for (const auto& node : nodes) indexNode(node);
   std::vector<NodeInfo> inputNodes;
   std::vector<NodeInfo> outputNodes;
   std::vector<NodeInfo> computeNodes;
@@ -364,6 +372,14 @@ LogicalResult MLIRBuilder::emitNodeError(const NodeInfo& node,
 LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   const std::string& type = node.op_type;
 
+  if (type == "ANNCStructuredSwitch")
+    return buildStructuredSwitchNode(node);
+  if (type == "Switch" || type == "RefSwitch" || type == "Merge" ||
+      type == "RefMerge")
+    return emitNodeError(
+        node, "must be reconstructed as structured control flow before "
+              "ATIR construction");
+
   const OpSpec* spec = lookupSpec(type);
   if (spec == nullptr) return buildOpaqueOp(node);
 
@@ -421,6 +437,107 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
     if (failed(applyAttrMappings(createdOp, node, *spec))) return failure();
     attachMetadata(createdOp, node, *spec);
   }
+  return success();
+}
+
+LogicalResult MLIRBuilder::buildStructuredSwitchNode(const NodeInfo& node) {
+  if (node.switch_data_inputs.size() != 1 ||
+      node.switch_data_inputs.size() != node.switch_false_aliases.size() ||
+      node.switch_data_inputs.size() != node.switch_true_aliases.size() ||
+      node.switch_predicate_input.empty() || node.outputs.size() != 2) {
+    return emitNodeError(node, "invalid structured Switch description");
+  }
+
+  SmallVector<Value> dataValues;
+  dataValues.reserve(node.switch_data_inputs.size());
+  for (const std::string& input : node.switch_data_inputs) {
+    Value value = resolveValue(input);
+    if (!value)
+      return emitNodeError(node, "unknown Switch data input '" + input + "'");
+    dataValues.push_back(value);
+  }
+  Value predicate = resolveValue(node.switch_predicate_input);
+  if (!predicate)
+    return emitNodeError(node, "unknown Switch predicate input '" +
+                                   node.switch_predicate_input + "'");
+  auto predicateType = dyn_cast<atir::TensorType>(predicate.getType());
+  auto predicateEncoding =
+      predicateType
+          ? dyn_cast_or_null<StringAttr>(predicateType.getEncoding())
+          : StringAttr();
+  if (!predicateType || !predicateType.getShape().empty() ||
+      !predicateEncoding || predicateEncoding.getValue() != "bool")
+    return emitNodeError(node,
+                         "Switch predicate must be a scalar bool tensor");
+
+  auto valueType = getTensorType(node, 0);
+  auto indexType = getTensorType(node, 1);
+  if (failed(valueType) || failed(indexType)) return failure();
+
+  Location loc = annc::getLoc(builder_.getContext(), node.name);
+  auto selector = builder_.create<atir::TensorToIndexOp>(
+      loc, builder_.getIndexType(), predicate);
+  auto switchOp = builder_.create<atir::SwitchCaseOp>(
+      loc, TypeRange{*valueType, builder_.getIndexType()}, selector.getResult(),
+      builder_.getDenseI64ArrayAttr({1}), 1);
+
+  auto buildBranch = [&](Region& region, ArrayRef<NodeInfo> branchNodes,
+                         ArrayRef<std::string> aliases,
+                         StringRef yieldName) -> LogicalResult {
+    if (region.empty()) region.emplaceBlock();
+    Block& block = region.front();
+    if (!block.empty()) block.clear();
+
+    OpBuilder::InsertionGuard guard(builder_);
+    builder_.setInsertionPointToStart(&block);
+    auto savedValues = tensorValues_;
+    for (auto [alias, value] : llvm::zip(aliases, dataValues))
+      tensorValues_[alias] = value;
+
+    for (const NodeInfo& branchNode : branchNodes)
+      if (failed(addNode(branchNode))) {
+        tensorValues_ = std::move(savedValues);
+        return failure();
+      }
+
+    Value yielded = resolveValue(yieldName);
+    if (!yielded) {
+      tensorValues_ = std::move(savedValues);
+      return emitNodeError(node, "unknown branch yield '" + yieldName.str() +
+                                     "'");
+    }
+    const int64_t branchIndex =
+        &region == &switchOp.getDefaultRegion() ? node.switch_false_index
+                                                : node.switch_true_index;
+    Value selectedIndex = builder_.create<arith::ConstantIndexOp>(
+        loc, branchIndex);
+    builder_.create<atir::ReturnOp>(loc,
+                                    ValueRange{yielded, selectedIndex});
+    tensorValues_ = std::move(savedValues);
+    return success();
+  };
+
+  if (failed(buildBranch(switchOp.getDefaultRegion(), node.switch_false_nodes,
+                         node.switch_false_aliases,
+                         node.switch_false_yield)) ||
+      failed(buildBranch(switchOp.getCaseRegions().front(),
+                         node.switch_true_nodes, node.switch_true_aliases,
+                         node.switch_true_yield))) {
+    switchOp.erase();
+    return failure();
+  }
+
+  builder_.setInsertionPointAfter(switchOp);
+  auto valueIndex = builder_.create<atir::IndexToTensorOp>(
+      loc, *indexType, switchOp.getResult(1));
+  tensorValues_[node.outputs[0].name] = switchOp.getResult(0);
+  tensorValues_[node.outputs[1].name] = valueIndex.getResult();
+
+  SmallVector<NamedAttribute> metadata{
+      builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)),
+      builder_.getNamedAttr("tf.op", builder_.getStringAttr("SwitchMerge"))};
+  switchOp->setAttr("metadata",
+                    DictionaryAttr::get(builder_.getContext(), metadata));
   return success();
 }
 
