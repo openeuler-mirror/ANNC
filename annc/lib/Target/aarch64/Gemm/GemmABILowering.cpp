@@ -88,7 +88,11 @@ LogicalResult lowerPackBCall(ModuleOp module, func::CallOp call) {
 }
 
 LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
-  if (call.getNumOperands() != 10)
+  const bool isRowMajor =
+      call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName;
+  // Packed leaves have seven index operands; row-major leaves add ldb.
+  const int64_t expectedOperands = isRowMajor ? 11 : 10;
+  if (call.getNumOperands() != expectedOperands)
     return call.emitOpError("has an invalid microkernel leaf signature");
   if (!aarch64::gemm::hasStage(call, aarch64::gemm::kMicrokernelLoweredStage)) {
     return call.emitOpError("was not selected by microkernel lowering");
@@ -98,11 +102,11 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
   Location loc = call.getLoc();
   FailureOr<Value> lhs = createElementPointer(builder, loc, call.getOperand(0),
                                               call.getOperand(3));
-  FailureOr<Value> packed = createElementPointer(
-      builder, loc, call.getOperand(1), call.getOperand(4));
+  FailureOr<Value> rhs = createElementPointer(builder, loc, call.getOperand(1),
+                                              call.getOperand(4));
   FailureOr<Value> out = createElementPointer(builder, loc, call.getOperand(2),
                                               call.getOperand(5));
-  if (failed(lhs) || failed(packed) || failed(out))
+  if (failed(lhs) || failed(rhs) || failed(out))
     return call.emitOpError("cannot materialize microkernel raw pointers");
 
   auto symbol =
@@ -110,13 +114,14 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
   if (!symbol)
     return call.emitOpError("has no statically selected microkernel symbol");
 
-  SmallVector<Value> arguments = {*lhs, *packed, *out};
+  SmallVector<Value> arguments = {*lhs, *rhs, *out};
   for (unsigned index = 6; index < call.getNumOperands(); ++index)
     arguments.push_back(toI32(builder, loc, call.getOperand(index)));
 
   Type ptr = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   SmallVector<Type> inputTypes = {ptr, ptr, ptr, i32, i32, i32, i32};
+  if (isRowMajor) inputTypes.push_back(i32);
   LLVM::LLVMFuncOp declaration = getOrCreateAssemblyDeclaration(
       module, symbol.getValue(), inputTypes,
       LLVM::LLVMVoidType::get(module.getContext()));
@@ -170,6 +175,7 @@ class AArch64GemmABILowering
     module.walk([&](func::CallOp call) {
       if (call.getCallee() == aarch64::gemm::kPackBLeafName ||
           call.getCallee() == aarch64::gemm::kMicrokernelLeafName ||
+          call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName ||
           isSvePackedBHelper(call.getCallee())) {
         calls.push_back(call);
       }
@@ -178,7 +184,8 @@ class AArch64GemmABILowering
       LogicalResult result =
           call.getCallee() == aarch64::gemm::kPackBLeafName
               ? lowerPackBCall(module, call)
-          : call.getCallee() == aarch64::gemm::kMicrokernelLeafName
+          : call.getCallee() == aarch64::gemm::kMicrokernelLeafName ||
+                  call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName
               ? lowerMicrokernelCall(module, call)
               : lowerSvePackedBHelperCall(module, call);
       if (failed(result)) {
@@ -189,6 +196,7 @@ class AArch64GemmABILowering
 
     for (StringRef name :
          {aarch64::gemm::kPackBLeafName, aarch64::gemm::kMicrokernelLeafName,
+          aarch64::gemm::kMicrokernelRmLeafName,
           aarch64::gemm::kSvePackedBElementsAsmSymbol,
           aarch64::gemm::kSvePackedBOffsetAsmSymbol}) {
       if (auto declaration = module.lookupSymbol<func::FuncOp>(name);

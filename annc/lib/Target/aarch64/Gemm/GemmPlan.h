@@ -47,6 +47,10 @@ inline constexpr llvm::StringLiteral kPackBLeafName =
     "__annc_aarch64_gemm_pack_b_leaf";
 inline constexpr llvm::StringLiteral kMicrokernelLeafName =
     "__annc_aarch64_gemm_microkernel_leaf";
+// Row-major RHS leaf used by the small-shape no-pack path.  Its ABI carries
+// the RHS leading dimension in addition to the packed-family arguments.
+inline constexpr llvm::StringLiteral kMicrokernelRmLeafName =
+    "__annc_aarch64_gemm_microkernel_rm_leaf";
 inline constexpr llvm::StringLiteral kNeonPackBAsmSymbol =
     "annc_aarch64_neon_packb_f32";
 inline constexpr llvm::StringLiteral kSvePackBAsmSymbol =
@@ -125,7 +129,7 @@ struct GemmCandidate {
 };
 
 enum class KcMode { kOverwrite, kAccumulate };
-enum class RhsPacking { kDirect, kPacked };
+enum class RhsPacking { kDirect, kPacked, kRowMajor };
 enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 struct GemmTilingPlan {
