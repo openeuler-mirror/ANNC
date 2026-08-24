@@ -107,6 +107,9 @@ mlir::LogicalResult transformMerge(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
                                    llvm::ArrayRef<mlir::Value>, OpContext&);
 mlir::LogicalResult transformSwitch(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
                                     llvm::ArrayRef<mlir::Value>, OpContext&);
+mlir::LogicalResult transformIdentity(const NodeInfo&,
+                                      llvm::ArrayRef<mlir::Type>,
+                                      llvm::ArrayRef<mlir::Value>, OpContext&);
 mlir::LogicalResult transformDynamicPartition(const NodeInfo&,
                                               llvm::ArrayRef<mlir::Type>,
                                               llvm::ArrayRef<mlir::Value>,

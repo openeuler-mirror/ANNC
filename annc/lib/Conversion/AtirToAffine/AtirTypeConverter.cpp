@@ -18,6 +18,9 @@ AtirTypeToAffineConverter::AtirTypeToAffineConverter()
     addConversion([](Type type) { return type; });
     addConversion([](atir::TensorType tensorType)
     {
+        if (!tensorType.hasKnownRank() ||
+            mlir::isa<atir::UnknownType>(tensorType.getElementType()))
+            return MemRefType();
         // return RankedTensorType::get(tensorType.getShape(), tensorType.getElementType());
         auto shape = tensorType.getShape();
         auto elemType = isStringTensor(tensorType)
@@ -28,4 +31,5 @@ AtirTypeToAffineConverter::AtirTypeToAffineConverter()
         // return MemRefType::get(shape, tensorType.getElementType(), StridedLayoutAttr::get(tensorType.getContext(), offset, dynStrides));
         return MemRefType::get(shape, elemType);
     });
+    addConversion([](atir::ResourceType) { return MemRefType(); });
 }

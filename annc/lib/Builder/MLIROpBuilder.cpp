@@ -311,6 +311,12 @@ std::vector<Value> MLIRBuilder::addGraphInputs(
       failed_ = true;
       continue;
     }
+    if (!*type) {
+      mlir::emitError(annc::getLoc(builder_.getContext(), name))
+          << "failed to construct a non-null input type";
+      failed_ = true;
+      continue;
+    }
     Block* entryBlock = &mainFunc_.getBody().back();
     auto argVal = entryBlock->addArgument(
         *type, annc::getLoc(builder_.getContext(), name));
@@ -383,6 +389,8 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   for (unsigned i = 0; i < node.outputs.size(); ++i) {
     auto type = getTensorType(node, i);
     if (failed(type)) return failure();
+    if (!*type)
+      return emitNodeError(node, "type resolver returned a null output type");
     outs.push_back(*type);
   }
 
@@ -452,6 +460,8 @@ LogicalResult MLIRBuilder::buildOpaqueOp(const NodeInfo& node) {
   for (unsigned i = 0; i < node.outputs.size(); ++i) {
     auto type = getTensorType(node, i);
     if (failed(type)) return failure();
+    if (!*type)
+      return emitNodeError(node, "type resolver returned a null opaque output type");
     outs.push_back(*type);
   }
 
@@ -590,8 +600,8 @@ void MLIRBuilder::attachMetadata(Operation* op, const NodeInfo& node,
   op->setAttr("metadata", DictionaryAttr::get(builder_.getContext(), attrs));
 }
 
-FailureOr<atir::TensorType> MLIRBuilder::getTensorType(const NodeInfo& node,
-                                                       unsigned outIdx) {
+FailureOr<mlir::Type> MLIRBuilder::getTensorType(const NodeInfo& node,
+                                                 unsigned outIdx) {
   const OutputInfo& out = node.outputs[outIdx];
   std::vector<int64_t> tensorShape = out.shape;
   for (size_t i = 0; i < tensorShape.size(); ++i)
@@ -605,60 +615,54 @@ FailureOr<atir::TensorType> MLIRBuilder::getTensorType(const NodeInfo& node,
   }
   auto name = builder_.getStringAttr(out.name);
   mlir::Attribute encoding;
+  mlir::BoolAttr rankKnown;
+  if (!out.rankKnown) rankKnown = builder_.getBoolAttr(false);
+  auto makeType = [&](mlir::Type elementType) {
+    return atir::TensorType::get(
+        builder_.getContext(), tensorShape, elementType, name, encoding, {},
+        {}, {}, {}, {}, {}, {}, rankKnown);
+  };
   switch (*dtype) {
+    case DType::Unknown:
+      return makeType(atir::UnknownType::get(builder_.getContext()));
+    case DType::Resource:
+      return atir::ResourceType::get(builder_.getContext());
     case DType::F32:
-      return atir::TensorType::get(tensorShape, builder_.getF32Type(), name,
-                                   encoding);
+      return makeType(builder_.getF32Type());
     case DType::F64:
-      return atir::TensorType::get(tensorShape, builder_.getF64Type(), name,
-                                   encoding);
+      return makeType(builder_.getF64Type());
     case DType::F16:
-      return atir::TensorType::get(tensorShape, builder_.getF16Type(), name,
-                                   encoding);
+      return makeType(builder_.getF16Type());
     case DType::BF16:
-      return atir::TensorType::get(tensorShape,
-                                   BFloat16Type::get(builder_.getContext()),
-                                   name, encoding);
+      return makeType(BFloat16Type::get(builder_.getContext()));
     case DType::U8:
-      return atir::TensorType::get(tensorShape, builder_.getIntegerType(8),
-                                   name, encoding);
+      return makeType(builder_.getIntegerType(8));
     case DType::U16:
-      return atir::TensorType::get(tensorShape, builder_.getIntegerType(16),
-                                   name, encoding);
+      return makeType(builder_.getIntegerType(16));
     case DType::U32:
-      return atir::TensorType::get(tensorShape, builder_.getIntegerType(32),
-                                   name, encoding);
+      return makeType(builder_.getIntegerType(32));
     case DType::U64:
-      return atir::TensorType::get(tensorShape, builder_.getIntegerType(64),
-                                   name, encoding);
+      return makeType(builder_.getIntegerType(64));
     case DType::I8:
-      return atir::TensorType::get(tensorShape, builder_.getI8Type(), name,
-                                   encoding);
+      return makeType(builder_.getI8Type());
     case DType::I16:
-      return atir::TensorType::get(tensorShape, builder_.getI16Type(), name,
-                                   encoding);
+      return makeType(builder_.getI16Type());
     case DType::I32:
-      return atir::TensorType::get(tensorShape, builder_.getI32Type(), name,
-                                   encoding);
+      return makeType(builder_.getI32Type());
     case DType::I64:
-      return atir::TensorType::get(tensorShape, builder_.getI64Type(), name,
-                                   encoding);
+      return makeType(builder_.getI64Type());
     case DType::Bool:
       encoding = builder_.getStringAttr("bool");
-      return atir::TensorType::get(tensorShape, builder_.getI32Type(), name,
-                                   encoding);
+      return makeType(builder_.getI32Type());
     case DType::String:
       // No native string type: carry real values in ComplexType<f32> with an
       // encoding="string" marker (consistent with constants and the printer).
-      return atir::TensorType::get(tensorShape,
-                                   ComplexType::get(builder_.getF32Type()),
-                                   name, builder_.getStringAttr("string"));
+      encoding = builder_.getStringAttr("string");
+      return makeType(ComplexType::get(builder_.getF32Type()));
     case DType::Complex64:
-      return atir::TensorType::get(
-          tensorShape, ComplexType::get(builder_.getF32Type()), name, encoding);
+      return makeType(ComplexType::get(builder_.getF32Type()));
     case DType::Complex128:
-      return atir::TensorType::get(
-          tensorShape, ComplexType::get(builder_.getF64Type()), name, encoding);
+      return makeType(ComplexType::get(builder_.getF64Type()));
   }
   llvm_unreachable("unhandled DType");
 }
@@ -702,6 +706,10 @@ LogicalResult MLIRBuilder::buildConstantNode(const NodeInfo& node) {
   auto d = parseDType(dtype);
   if (!d) return emitNodeError(node, "unsupported dtype '" + dtype + "'");
   switch (*d) {
+    case DType::Unknown:
+      return emitNodeError(node, "constant cannot have unknown dtype");
+    case DType::Resource:
+      return emitNodeError(node, "resource constants are not supported");
     case DType::F32: {
       if (failed(requireBytes(sizeof(float)))) return failure();
       const float* data = reinterpret_cast<const float*>(decoded.data());

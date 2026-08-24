@@ -48,17 +48,22 @@ std::optional<std::string> dtypeName(DataType dtype) {
       return "complex64";
     case tensorflow::DT_COMPLEX128:
       return "complex128";
+    case tensorflow::DT_RESOURCE:
+      return "resource";
     default:
       return std::nullopt;
   }
 }
 
 bool shapeFromProto(const TensorShapeProto& source, std::vector<int64_t>& shape,
-                    std::string& error, const std::string& context) {
+                    bool& rank_known, std::string& error,
+                    const std::string& context) {
   if (source.unknown_rank()) {
-    error = context + " has unknown rank, which ATIR cannot represent";
-    return false;
+    shape.clear();
+    rank_known = false;
+    return true;
   }
+  rank_known = true;
   shape.clear();
   shape.reserve(static_cast<std::size_t>(source.dim_size()));
   for (const auto& dim : source.dim()) shape.push_back(dim.size());
@@ -159,12 +164,9 @@ bool resolveDtype(const TfNode& node, int output_index,
     return false;
   }
   if (source.op() == "VarHandleOp") {
-    // ATIR represents an inference-only resource handle as the value of its
-    // persistent VariableOp. ReadVariableOp then preserves that tensor value.
-    const auto type = typeAttr(source, "dtype");
-    if (type) return setType(*type);
-    error = "VarHandleOp node '" + node.name + "' has no dtype attribute";
-    return false;
+    // VarHandleOp's output is DT_RESOURCE. Its dtype attribute describes the
+    // value stored behind the handle, not the handle's own TensorFlow dtype.
+    return setType(tensorflow::DT_RESOURCE);
   }
   // Range's output dtype comes from Tidx (int32/int64), which carries no
   // Tout/T/dtype fact; TF defaults it to int32.
@@ -177,13 +179,12 @@ bool resolveDtype(const TfNode& node, int output_index,
     return setType(tensorflow::DT_INT32);
   }
   if (isComparisonOp(source.op())) return setType(tensorflow::DT_BOOL);
-  // Logical ops produce a boolean mask too, but carry no type attr at all
-  // (e.g. LogicalAnd has neither T nor Tout), so generic inference would
-  // fall back to float32 unless forced.
+  // Logical ops produce a boolean mask even though they carry no type attr
+  // (e.g. LogicalAnd has neither T nor Tout).
   if (source.op() == "LogicalAnd") return setType(tensorflow::DT_BOOL);
   if (source.op() == "StringToHashBucketFast")
     return setType(tensorflow::DT_INT64);
-  // Rank: scalar int32 by TF signature (no out_type attr to infer from).
+  // Rank: scalar int32 by the TensorFlow op signature.
   if (source.op() == "Rank") return setType(tensorflow::DT_INT32);
   if (source.op() == "StaticRegexReplace")
     return setType(tensorflow::DT_STRING);
@@ -236,10 +237,8 @@ bool resolveDtype(const TfNode& node, int output_index,
   for (const char* key : {"Tout", "T", "Tparams", "dtype"}) {
     if (const auto type = typeAttr(source, key)) return setType(*type);
   }
-  error = "cannot determine TensorFlow dtype for node '" + node.name +
-          "' output " + std::to_string(output_index) +
-          ": no GraphDef fact or local op signature rule";
-  return false;
+  dtype = "unknown";
+  return true;
 }
 
 }  // namespace
@@ -269,7 +268,7 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       }
       TensorDescriptor descriptor;
       if (!shapeFromProto(value->second.tensor().tensor_shape(),
-                          descriptor.shape, error,
+                          descriptor.shape, descriptor.rank_known, error,
                           "Const node '" + node.name + "'"))
         return false;
       if (!resolveDtype(node, 0, result.tensors, descriptor.dtype, error))
@@ -287,7 +286,8 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       TensorDescriptor descriptor;
       const std::string context =
           "node '" + node.name + "' output " + std::to_string(index);
-      if (!shapeFromProto(*shapes[index], descriptor.shape, error, context))
+      if (!shapeFromProto(*shapes[index], descriptor.shape,
+                          descriptor.rank_known, error, context))
         return false;
       if (!resolveDtype(node, static_cast<int>(index), result.tensors,
                         descriptor.dtype, error))
@@ -351,7 +351,7 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
   if (shape_policy.batch_size > 0) {
     for (auto& entry : result.tensors) {
       std::vector<int64_t>& shape = entry.second.shape;
-      if (!shape.empty() && shape.front() == -1)
+      if (entry.second.rank_known && !shape.empty() && shape.front() == -1)
         shape.front() = shape_policy.batch_size;
     }
   }

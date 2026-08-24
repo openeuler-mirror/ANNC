@@ -68,6 +68,15 @@ class EliminateIdentity final : public OpRewritePattern<IdentityOp> {
       return failure();
     }
 
+    // A block argument's type is duplicated in the enclosing function
+    // signature.  Changing either side in place can leave func.func with two
+    // different types for the same parameter (or for a returned value).
+    // Keep this boundary Identity intact; tensor names are metadata, but the
+    // function signature is an externally visible contract.
+    if (isa<BlockArgument>(input)) {
+      return failure();
+    }
+
     preserveOutputEndpoint(identity, input, rewriter);
 
     // Tensor names participate in TensorType identity. Preserve the Identity
