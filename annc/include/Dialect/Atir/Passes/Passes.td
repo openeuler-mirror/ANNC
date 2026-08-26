@@ -56,6 +56,24 @@ def AtirOpFusion : Pass<"atir-op-fusion", "ModuleOp"> {
   ];
 }
 
+/* Configurable Fusion */
+def AtirConfigFusion : Pass<"atir-config-fusion", "ModuleOp"> {
+  let summary = "configurable operator fusion";
+  let constructor = "createAtirConfigFusionPass()";
+  let dependentDialects = [
+    "AtirDialect"
+  ];
+  let options = [
+    Option<"config", "config", "std::string", "",
+           "Path to external fusion pattern JSON config.">,
+    Option<"runBuiltinAfter", "run-builtin-after", "bool", "true",
+           "Run builtin fusion after user patterns.">,
+    Option<"report", "report", "std::string", "",
+           "Optional path for the config fusion JSON report.">,
+    Option<"warnLimit", "warn-limit", "int", "10",
+           "Maximum skip warning samples per pattern; 0 disables samples.">
+  ];
+}
 
 /* matmul add relu Fusion */
 def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
