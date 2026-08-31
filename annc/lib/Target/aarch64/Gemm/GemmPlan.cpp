@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "mlir/IR/Diagnostics.h"
 
 namespace annc::aarch64::gemm {
@@ -35,7 +36,8 @@ std::optional<GemmDataType> parseDataTypeName(llvm::StringRef name) {
 
 std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
   if (name == "gemm") return GemmExecutionKind::kGemm;
-  if (name == "gemv-ab") return GemmExecutionKind::kGemvAB;
+  if (name == "matrix-vector") return GemmExecutionKind::kMatrixVector;
+  if (name == "vector-matrix") return GemmExecutionKind::kVectorMatrix;
   return std::nullopt;
 }
 
@@ -189,11 +191,16 @@ const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
   (void)dataType;
   static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 1};
   static const GemmKernelABI sve{"annc-sve-f32-v1", 32, 6, 4, 0};
-  static const GemmKernelABI gemv{"annc-neon-gemv-ab-f32-v1", 16, 4, 1,
-                                  4};
-  if (executionKind == GemmExecutionKind::kGemvAB &&
+  static const GemmKernelABI matrixVector{"annc-neon-matvec-f32-v1", 16, 4,
+                                          1, 4};
+  static const GemmKernelABI vectorMatrix{"annc-neon-vecmat-f32-v1", 16, 1,
+                                          4, 2};
+  if (executionKind == GemmExecutionKind::kMatrixVector &&
       isa == GemmIsa::kNeon)
-    return gemv;
+    return matrixVector;
+  if (executionKind == GemmExecutionKind::kVectorMatrix &&
+      isa == GemmIsa::kNeon)
+    return vectorMatrix;
   return isa == GemmIsa::kSve ? sve : neon;
 }
 
@@ -219,7 +226,7 @@ llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
   if (elementBytes == 0 || vectorLengthBytes <= 0 ||
       vectorLengthBytes % elementBytes != 0 || kernelTile.panelLanes <= 0)
     return mlir::failure();
-  if (executionKind == GemmExecutionKind::kGemvAB) {
+  if (executionKind == GemmExecutionKind::kMatrixVector) {
     if (kernelTile.panelLanes != 1) return mlir::failure();
     return int64_t{1};
   }
@@ -367,8 +374,12 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
       kernelTile.panelLanes > abi.maxPanelLanes ||
       mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType,
                              executionKind)) ||
-      (executionKind == GemmExecutionKind::kGemvAB &&
-       (kernelTile.mr != 4 || kernelTile.panelLanes != 1))) {
+      (executionKind == GemmExecutionKind::kMatrixVector &&
+       (kernelTile.mr != 4 || kernelTile.panelLanes != 1 ||
+        *isa != GemmIsa::kNeon)) ||
+      (executionKind == GemmExecutionKind::kVectorMatrix &&
+       (kernelTile.mr != 1 || kernelTile.panelLanes != 4 ||
+        *isa != GemmIsa::kNeon))) {
     op->emitOpError("has a candidate unsupported by the selected target and ISA");
     return mlir::failure();
   }
@@ -448,7 +459,10 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
        rhsPackSource != RhsPackSource::kNone) ||
       (rhsPacking == RhsPacking::kPacked &&
        rhsPackSource == RhsPackSource::kNone) ||
-      (executionKind == GemmExecutionKind::kGemvAB &&
+      (executionKind == GemmExecutionKind::kMatrixVector &&
+       (rhsPacking != RhsPacking::kDirect ||
+        rhsPackSource != RhsPackSource::kNone)) ||
+      (executionKind == GemmExecutionKind::kVectorMatrix &&
        (rhsPacking != RhsPacking::kDirect ||
         rhsPackSource != RhsPackSource::kNone)) ||
       (executionKind != GemmExecutionKind::kGemm &&
@@ -504,10 +518,17 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
   }
   if (mlir::failed(requireString(op, plan, "kernel_family", abi.family)))
     return mlir::failure();
-  if (tiling->executionKind == GemmExecutionKind::kGemvAB &&
+  if (tiling->executionKind == GemmExecutionKind::kMatrixVector &&
       (tiling->kernelTile.mr != 4 || tiling->kernelTile.panelLanes != 1 ||
        *isa != GemmIsa::kNeon)) {
-    op->emitOpError("has an invalid GEMV-AB kernel tile or ISA");
+    op->emitOpError("has an invalid matrix-vector kernel tile or ISA");
+    return mlir::failure();
+  }
+  if (tiling->executionKind == GemmExecutionKind::kVectorMatrix &&
+      (tiling->m != 1 || tiling->kernelTile.mr != 1 ||
+       tiling->kernelTile.panelLanes != 4 || *isa != GemmIsa::kNeon)) {
+    op->emitOpError(
+        "has an invalid vector-matrix problem, kernel tile, or ISA");
     return mlir::failure();
   }
   return GemmPlan{*tiling, *target, *isa};
@@ -522,7 +543,15 @@ llvm::StringRef getGemmIsaName(GemmIsa isa) {
 }
 
 llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind) {
-  return kind == GemmExecutionKind::kGemvAB ? "gemv-ab" : "gemm";
+  switch (kind) {
+    case GemmExecutionKind::kMatrixVector:
+      return "matrix-vector";
+    case GemmExecutionKind::kVectorMatrix:
+      return "vector-matrix";
+    case GemmExecutionKind::kGemm:
+      return "gemm";
+  }
+  llvm_unreachable("unknown GEMM execution kind");
 }
 
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa) {
