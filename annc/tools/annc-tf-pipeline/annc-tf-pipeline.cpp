@@ -201,6 +201,8 @@ static bool runGraphDefRewrite(int argc, char **argv) {
     converterArgs.push_back(opts.kernelName);
   }
 
+  std::string foldBatchNormPass = "--atir-fold-batch-norm";
+  std::string rankInferencePass = "--atir-rank-inference";
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string fusionPass = "--atir-op-fusion";
   std::string fastCodegenPass = "--atir-fast-codegen";
@@ -226,8 +228,9 @@ static bool runGraphDefRewrite(int argc, char **argv) {
 
   bool ok =
       runCommand(tf2atirArgs, opts.verbose) &&
-      runCommand({anncOpt, rawAtir.string(), identityCanonicalizePass,
-                  fusionPass, "-o", fusedAtir.string()},
+      runCommand({anncOpt, rawAtir.string(), rankInferencePass,
+                  identityCanonicalizePass, fusionPass, "-o",
+                  fusedAtir.string()},
                  opts.verbose) &&
       runCommand({anncOpt, fusedAtir.string(),
                   "--atir-prune-func=execution-mode=aot", "-o",

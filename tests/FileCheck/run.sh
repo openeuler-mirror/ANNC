@@ -11,11 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ANNCOPT="${ANNCOPT:-$REPO_ROOT/build/bin/annc-opt}"
 ANNASM="${ANNASM:-$REPO_ROOT/build/bin/annc-asm}"
+ANNCFUSIONMETADATA="${ANNCFUSIONMETADATA:-$REPO_ROOT/build/bin/annc-fusion-metadata}"
 MLIROPT="${MLIROPT:-$REPO_ROOT/build/_deps/llvm-build/bin/mlir-opt}"
 FILECHECK="${FILECHECK:-$REPO_ROOT/build/_deps/llvm-build/bin/FileCheck}"
 FILTER='grep -vE "^\[ANNC |^this is |^Registered kernel|^ANNC: Registering|^ANNC: Populating|^outputValues"'
 
-for t in "$ANNCOPT" "$ANNASM" "$MLIROPT" "$FILECHECK"; do
+for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK"; do
     [ -x "$t" ] || { echo "ERROR: $t 不存在或不可执行" >&2; exit 1; }
 done
 
@@ -46,6 +47,7 @@ for f in $FILES; do
     for run in "${runs[@]}"; do
         run="${run//annc-opt/$ANNCOPT}"
         run="${run//annc-asm/$ANNASM}"
+        run="${run//annc-fusion-metadata/$ANNCFUSIONMETADATA}"
         run="${run//mlir-opt/$MLIROPT}"
         run="${run// | FileCheck / | $FILTER | FileCheck }"
         run="${run//FileCheck/$FILECHECK}"

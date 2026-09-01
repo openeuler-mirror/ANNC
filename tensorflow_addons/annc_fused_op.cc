@@ -1094,6 +1094,10 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
     current_so_path_ = shared_lib_path_;
     library_loaded_this_call = true;
   }
+  // kernel_function was captured before the AOT branch above; refresh it from
+  // the member LoadLibrary just resolved, or the first invocation of a kernel
+  // always sees a null pointer.
+  if (!jit_mode) kernel_function = mlir_ciface_func_;
   if (profile_enabled && library_loaded_this_call) {
     profile_sample.load_library_us = ElapsedUs(t_load_start);
   }

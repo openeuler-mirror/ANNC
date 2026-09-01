@@ -70,6 +70,42 @@ typedef struct {
     int64_t  strides[2];
 } AnncMemRef2DI64;
 
+// 以下类型为 812 融合移植所需(A 侧独有,0-D 布局与 MLIR C interface
+// memref<...> 一致:{allocated, aligned, offset},无 sizes/strides 数组)。
+typedef struct {
+    float*   allocated;
+    float*   aligned;
+    int64_t  offset;
+    int64_t  sizes[3];
+    int64_t  strides[3];
+} AnncMemRef3DF32;
+
+typedef struct {
+    int32_t* allocated;
+    int32_t* aligned;
+    int64_t  offset;
+    int64_t  sizes[2];
+    int64_t  strides[2];
+} AnncMemRef2DI32;
+
+typedef struct {
+    int32_t* allocated;
+    int32_t* aligned;
+    int64_t  offset;
+} AnncMemRef0DI32;
+
+typedef struct {
+    float*   allocated;
+    float*   aligned;
+    int64_t  offset;
+} AnncMemRef0DF32;
+
+typedef struct {
+    int64_t* allocated;
+    int64_t* aligned;
+    int64_t  offset;
+} AnncMemRef0DI64;
+
 #define ANNC_MEMREF_DATA(memref) ((memref).aligned + (memref).offset)
 
 #define ANNC_MEMREF_SIZE_1D(memref) ((memref).sizes[0])

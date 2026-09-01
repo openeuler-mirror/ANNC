@@ -17,6 +17,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createAtirConfigFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirIdentityCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirGemmEpilogueFusionPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAtirFoldBatchNormPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAtirRankInferencePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirDistributePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirBlockFusionPass();

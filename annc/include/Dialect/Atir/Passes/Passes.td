@@ -38,6 +38,24 @@ def AtirGemmEpilogueFusion
   let dependentDialects = ["AtirDialect"];
 }
 
+/* BatchNorm fold */
+def AtirFoldBatchNorm : Pass<"atir-fold-batch-norm", "ModuleOp"> {
+  let summary = "fold inference BatchNorm primitive chains into MatMul weights";
+  let constructor = "createAtirFoldBatchNormPass()";
+  let dependentDialects = [
+    "AtirDialect"
+  ];
+}
+
+/* Rank inference */
+def AtirRankInference : Pass<"atir-rank-inference", "ModuleOp"> {
+  let summary = "infer tensor ranks for rank_known=false values from TF op semantics";
+  let constructor = "createAtirRankInferencePass()";
+  let dependentDialects = [
+    "AtirDialect"
+  ];
+}
+
 /* Select Lowering Strategy */
 def AtirSelectLoweringStrategy : Pass<"atir-select-lowering-strategy", "ModuleOp"> {
   let summary = "select lowering strategy";
