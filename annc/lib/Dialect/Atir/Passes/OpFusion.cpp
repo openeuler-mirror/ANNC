@@ -1,7 +1,6 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
-#include "Dialect/Atir/Passes/Patterns/CustomPatterns/KPFusedGatherMatch.h"
 #include "Dialect/Atir/Passes/Patterns/FusionBoundaryUtils.h"
 #include "Dialect/Atir/TemplateFingerprint.h"
 #include "Helper.h"
@@ -823,111 +822,6 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
   }
 };
 
-struct FuseKPFusedGatherAsFuncCallPattern : public OpRewritePattern<GatherOp> {
-  using OpRewritePattern<GatherOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(GatherOp outerGather,
-                                PatternRewriter &rewriter) const override {
-    if (outerGather->hasAttr("annc.fusion_materialized")) return failure();
-    auto match = matchKPFusedGather(outerGather);
-    if (failed(match)) return failure();
-    ModuleOp module = outerGather->getParentOfType<ModuleOp>();
-    if (!module) return failure();
-
-    SmallVector<Value, 3> boundaryInputs = {match->data, match->keys,
-                                            match->begin};
-    SmallVector<Operation *> fusedOps;
-    SmallPtrSet<Operation *, 32> visited;
-    for (Value output : match->boundaryOutputs) {
-      collectDefiningOpsPostOrder(output.getDefiningOp(), boundaryInputs,
-                                  visited, fusedOps);
-    }
-    if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
-      return failure();
-
-    auto schema = CustomOpSchema::get("KPFusedGather")
-                      .TypeVar("T")
-                      .TypeVar("Tkeys")
-                      .TypeVar("Tbegin")
-                      .TypeVar("Tindices")
-                      .MemRefArg("data", 2, "T")
-                      .MemRefArg("keys", 2, "Tkeys")
-                      .MemRefArg("begin", 1, "Tbegin")
-                      .Result("unique_values", 1, "Tkeys")
-                      .Result("unique_indices", 1, "Tindices")
-                      .Result("gathered", 2, "T");
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : match->boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = "KPFusedGather";
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName("kp_fused_gather", "execution_v2"));
-    auto kernelFunc =
-        createExecutionV2KernelFunc(module, rewriter, kernelName, fusedOps,
-                                    boundaryInputs, match->boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_fused_gather"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_fused_gather")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr("kp_fused_gather")));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output",
-                       outputName(match->firstUnique.getY(), "first_unique:0"),
-                       match->firstUnique.getY().getType()});
-    outputs.push_back(
-        {"output", outputName(match->firstUnique.getIdx(), "first_unique:1"),
-         match->firstUnique.getIdx().getType()});
-    outputs.push_back(
-        {"output", outputName(match->outerGather.getResult(), "outer_gather:0"),
-         match->outerGather.getResult().getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    outerGather->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
-  }
-};
-
 struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
   using OpRewritePattern<MatMulOp>::OpRewritePattern;
 
@@ -1195,6 +1089,12 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 }  // namespace
 
 namespace atir {
+void populateAtirOpFusionPatterns(RewritePatternSet &patterns) {
+  MLIRContext *ctx = patterns.getContext();
+  patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(ctx);
+  patterns.add<FuseMatMulAsFuncCallPattern>(ctx);
+}
+
 class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
  public:
   AtirOpFusionPass() = default;
@@ -1210,7 +1110,6 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
 
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
-    patterns.add<FuseKPFusedGatherAsFuncCallPattern>(&getContext());
     patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
 
     if (failed(applyPatternsAndFoldGreedily(mainFunc, std::move(patterns)))) {

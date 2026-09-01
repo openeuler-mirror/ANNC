@@ -951,4 +951,506 @@ std::vector<std::string> inferInputs(const PatternRule &rule,
                                   state.externalOrder.end());
 }
 
+// Resolve configured input/output aliases to real SSA values. Failure indicates
+// an inconsistency between the pattern declaration and matched subgraph.
+static std::vector<Value> buildInputValues(const std::vector<std::string> &inputs,
+                                           const MatchState &state) {
+  std::vector<Value> values;
+  values.reserve(inputs.size());
+  for (const std::string &name : inputs) {
+    auto it = state.externalValues.find(name);
+    if (it == state.externalValues.end()) return {};
+    values.push_back(it->second);
+  }
+  return values;
+}
+
+static std::vector<Value> buildOutputValues(const std::vector<std::string> &outputs,
+                                            const MatchState &state) {
+  std::vector<Value> values;
+  values.reserve(outputs.size());
+  for (const std::string &name : outputs) {
+    auto it = state.aliasValues.find(name);
+    if (it == state.aliasValues.end()) return {};
+    values.push_back(it->second);
+  }
+  return values;
+}
+
+// Prevent internal results omitted from outputs from escaping the subgraph;
+// erasing the original ops would otherwise leave invalid or incorrect uses.
+bool hasUnlistedEscapingOutput(const PatternRule &rule,
+                               const std::vector<std::string> &outputs,
+                               const MatchState &state) {
+  SmallPtrSet<Operation *, 32> matchedOps(state.matchedSet.begin(),
+                                          state.matchedSet.end());
+  std::set<std::string> outputSet(outputs.begin(), outputs.end());
+  for (const auto &entry : state.aliasValues) {
+    if (rule.aliasToStmt.find(entry.first) == rule.aliasToStmt.end()) continue;
+    if (outputSet.count(entry.first) != 0) continue;
+    for (Operation *user : entry.second.getUsers()) {
+      if (matchedOps.contains(user)) continue;
+      if (isa<BufferOp>(user) || isa<ConstantOp>(user)) continue;
+      if (isa<func::ReturnOp>(user) || isa<CastOp>(user)) {
+        debugLog([&](raw_ostream &os) {
+          os << "ignore implicit escape for alias '" << entry.first
+             << "' via user ";
+          user->print(os, OpPrintingFlags().skipRegions());
+        });
+        continue;
+      }
+      debugLog([&](raw_ostream &os) {
+        os << "unlisted alias '" << entry.first << "' escapes through user ";
+        user->print(os, OpPrintingFlags().skipRegions());
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
+static void appendUniqueValue(std::vector<Value> &values, Value value) {
+  if (!value || llvm::is_contained(values, value)) return;
+  values.push_back(value);
+}
+
+// The outlined kernel parameters combine declared inputs with all real boundary
+// operands, including implementation-level output buffers and block arguments.
+static std::vector<Value> collectBoundaryValues(
+    ArrayRef<Operation *> orderedOps, const MatchState &state,
+    ArrayRef<Value> userInputValues) {
+  std::vector<Value> values;
+  for (Value value : userInputValues) appendUniqueValue(values, value);
+
+  for (Operation *op : orderedOps) {
+    for (Value operand : op->getOperands()) {
+      if (isImplicitOperand(operand)) continue;
+      Operation *def = operand.getDefiningOp();
+      if (!def || state.matchedSet.count(def) == 0) {
+        appendUniqueValue(values, operand);
+      }
+    }
+  }
+  return values;
+}
+
+// Replace only uses outside the matched subgraph; internal uses disappear with
+// the erased operations.
+static void replaceExternalUses(Value oldValue, Value newValue,
+                                const MatchState &state) {
+  SmallVector<OpOperand *> uses;
+  for (OpOperand &use : oldValue.getUses()) {
+    if (state.matchedSet.count(use.getOwner()) == 0) uses.push_back(&use);
+  }
+  for (OpOperand *use : uses) use->set(newValue);
+}
+
+static bool allResultsUnused(Operation *op) {
+  for (Value result : op->getResults()) {
+    if (!result.use_empty()) return false;
+  }
+  return true;
+}
+
+// Outline the matched subgraph into a private kernel func and insert a call in
+// main to replace the original outputs. Clone the body with IRMapping and copy
+// metadata to the generated function.
+func::FuncOp materializePattern(
+    ModuleOp module, PatternRule rule, const MatchState &state,
+    const std::vector<std::string> &inputs,
+    const std::vector<std::string> &outputs,
+    const std::map<std::string, std::string> &patternAttrs) {
+  std::vector<Value> inputValues = buildInputValues(inputs, state);
+  std::vector<Value> outputValues = buildOutputValues(outputs, state);
+  if (inputValues.size() != inputs.size() || outputValues.size() != outputs.size()) {
+    debugLog([&](raw_ostream &os) {
+      os << "materialization binding mismatch for rule '" << rule.name << "'";
+      os << ", inputs=" << inputs.size() << " resolved=" << inputValues.size();
+      os << ", outputs=" << outputs.size() << " resolved=" << outputValues.size();
+    });
+    return nullptr;
+  }
+
+  std::vector<Operation *> orderedOps;
+  if (state.matchedOrder.empty()) return nullptr;
+  Block *parentBlock = state.matchedOrder.front()->getBlock();
+  for (Operation *op : state.matchedOrder) {
+    if (op->getBlock() != parentBlock) return nullptr;
+  }
+  for (Operation &op : *parentBlock) {
+    if (state.matchedSet.count(&op) != 0) orderedOps.push_back(&op);
+  }
+  if (orderedOps.empty()) return nullptr;
+
+  std::vector<Value> boundaryValues =
+      collectBoundaryValues(orderedOps, state, inputValues);
+  debugLog([&](raw_ostream &os) {
+    os << "materialize rule '" << rule.name << "'";
+    os << ", boundary values=" << boundaryValues.size();
+    os << ", input values=" << inputValues.size();
+    os << ", output values=" << outputValues.size();
+  });
+
+  std::string hash = stableHash(rule.pattern, rule.kernel, inputs, outputs,
+                                orderedOps);
+  std::string kernelName = uniquifySymbolName(module, sanitizeName(rule.kernel) +
+                                                           "_" + hash);
+
+  OpBuilder builder(module.getContext());
+  builder.setInsertionPointToStart(module.getBody());
+
+  SmallVector<mlir::Type> inputTypes;
+  if (rule.abi == "annc_execution_v2") {
+    inputTypes.push_back(LLVM::LLVMPointerType::get(module.getContext()));
+  }
+  for (Value value : boundaryValues) inputTypes.push_back(value.getType());
+  SmallVector<mlir::Type> resultTypes;
+  for (Value value : outputValues) resultTypes.push_back(value.getType());
+
+  auto funcType = builder.getFunctionType(inputTypes, resultTypes);
+  auto func = builder.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
+  func.setPrivate();
+  func->setAttr("fusion.pattern",
+                builder.getStringAttr(rule.pattern.empty() ? rule.name
+                                                           : rule.pattern));
+  func->setAttr("llvm.emit_c_interface", UnitAttr::get(builder.getContext()));
+  func->setAttr("annc.kernel", UnitAttr::get(builder.getContext()));
+
+  MatchState clonedState = state;
+  Block *entry = func.addEntryBlock();
+  builder.setInsertionPointToStart(entry);
+  IRMapping mapper;
+  unsigned argOffset = rule.abi == "annc_execution_v2" ? 1 : 0;
+  for (auto [boundaryValue, arg] : llvm::zip(
+           boundaryValues, entry->getArguments().drop_front(argOffset))) {
+    mapper.map(boundaryValue, arg);
+  }
+
+  for (Operation *op : orderedOps) {
+    // Implicit operands such as constants/buffers are not DSL inputs, but cloned
+    // ops still need their definitions; populate the mapper before cloning.
+    for (Value operand : op->getOperands()) {
+      if (!isImplicitOperand(operand) || mapper.contains(operand)) continue;
+      Operation *def = operand.getDefiningOp();
+      if (!def) continue;
+      Operation *clonedImplicit = builder.clone(*def, mapper);
+      for (auto [orig, cloneResult] :
+           llvm::zip(def->getResults(), clonedImplicit->getResults())) {
+        mapper.map(orig, cloneResult);
+      }
+    }
+    Operation *cloned = builder.clone(*op, mapper);
+    for (auto [orig, cloneResult] : llvm::zip(op->getResults(), cloned->getResults())) {
+      for (auto it = clonedState.aliasValues.begin(); it != clonedState.aliasValues.end(); ++it) {
+        if (it->second == orig) it->second = cloneResult;
+      }
+      mapper.map(orig, cloneResult);
+    }
+  }
+
+  SmallVector<Value> returns;
+  for (const std::string &name : outputs) {
+    auto it = clonedState.aliasValues.find(name);
+    if (it == clonedState.aliasValues.end()) return nullptr;
+    returns.push_back(it->second);
+  }
+  builder.setInsertionPointToEnd(entry);
+  builder.create<func::ReturnOp>(func.getLoc(), returns);
+
+  annc::fusion::FusionInfo info;
+  info.name = rule.abi == "annc_execution_v2"
+                  ? (rule.pattern.empty() ? rule.name : rule.pattern)
+                  : kernelName;
+  info.pattern = rule.pattern.empty() ? rule.name : rule.pattern;
+  info.kernelName = kernelName;
+  info.abi = rule.abi;
+  for (const std::string &name : inputs) {
+    auto it = state.externalValues.find(name);
+    if (it == state.externalValues.end()) return nullptr;
+    Value value = it->second;
+    annc::fusion::FusionArg arg;
+    arg.role = inferInputRole(value);
+    arg.tfName = getValueName(value);
+    arg.shape = getShape(value.getType());
+    arg.rank = getRank(value.getType());
+    arg.dtype = getTensorDType(value.getType());
+    info.args.push_back(std::move(arg));
+  }
+  for (const std::string &name : outputs) {
+    auto it = state.aliasValues.find(name);
+    if (it == state.aliasValues.end()) return nullptr;
+    Value value = it->second;
+    annc::fusion::FusionArg out;
+    out.role = "output";
+    out.tfName = getFusionOutputName(value);
+    out.shape = getShape(value.getType());
+    out.rank = getRank(value.getType());
+    out.dtype = getTensorDType(value.getType());
+    info.outputs.push_back(std::move(out));
+  }
+  info.patternAttrs = patternAttrs;
+
+  // Metadata is the sole contract used by fusion-metadata/converter/runtime to
+  // identify the kernel, so write it completely before replacing the IR.
+  func->setAttr("fusion.metadata", buildFusionMetadata(module.getContext(),
+                                                        info, patternAttrs));
+
+  // Execution-v2 fused functions are consumed by the existing FastCodegen
+  // custom-pattern path.  Keep the original main graph untouched; prune-func
+  // will retain this private fusion function and FastCodegen will rewrite its
+  // body to the appropriate CustomizeOp.  Generic outlines keep the legacy
+  // main-level call replacement behavior.
+  if (rule.abi == "mlir_ciface") {
+    builder.setInsertionPoint(orderedOps.front());
+    auto call = builder.create<func::CallOp>(
+        orderedOps.front()->getLoc(), kernelName, TypeRange(resultTypes),
+        ValueRange(boundaryValues));
+    for (auto [oldValue, newValue] :
+         llvm::zip(outputValues, call.getResults())) {
+      replaceExternalUses(oldValue, newValue, state);
+    }
+
+    for (Operation *op : llvm::reverse(orderedOps)) {
+      if (allResultsUnused(op)) {
+        op->erase();
+      }
+    }
+  } else {
+    // The execution-v2 path intentionally leaves the main graph in place for
+    // the later FastCodegen pass.  Mark the captured region so the config
+    // rewrite loop and optional builtin fusion do not consume it again.
+    for (Operation *op : orderedOps) {
+      op->setAttr("annc.fusion_materialized",
+                  UnitAttr::get(module.getContext()));
+    }
+  }
+
+  return func;
+}
+
+// Try matching and materializing one rule once. On success, the caller rescans
+// IR because operation and use relationships in main have changed.
+bool tryMatchRule(ModuleOp module, func::FuncOp mainFunc,
+                  const PatternRule &rule, PatternReport *report,
+                  int64_t warnLimit) {
+  debugLog([&](raw_ostream &os) {
+    os << "try rule '" << rule.name << "' with " << rule.stmts.size()
+       << " graph stmts";
+  });
+  Block &block = mainFunc.front();
+  llvm::StringMap<SmallVector<Operation *, 4>> opsByName;
+  for (Operation &op : block.getOperations()) {
+    if (isa<func::ReturnOp>(op)) continue;
+    if (op.hasAttr("annc.fusion_materialized")) continue;
+    opsByName[simpleOpName(&op)].push_back(&op);
+  }
+
+  std::vector<std::string> outputs = inferOutputs(rule);
+  if (outputs.empty()) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' has no outputs";
+    });
+    return false;
+  }
+  debugLog([&](raw_ostream &os) {
+    os << "rule '" << rule.name << "' inferred outputs:";
+    for (const std::string &output : outputs) os << " " << output;
+  });
+
+  for (unsigned stmtIndex = 0; stmtIndex < rule.stmts.size(); ++stmtIndex) {
+    const PatternStmt &stmt = rule.stmts[stmtIndex];
+    auto maxInputs = getMaxConfiguredInputs(stmt.opName);
+    if (!maxInputs || stmt.args.size() <= *maxInputs) continue;
+    std::string message =
+        (Twine("configuration statement '") + formatPatternStmt(stmt) +
+         "' declares " + Twine(stmt.args.size()) +
+         " logical input(s), but op " + stmt.opName + " defines at most " +
+         Twine(*maxInputs) + "; possible extra config argument '")
+            .str();
+    message += stmt.args[*maxInputs];
+    message += "'";
+    if (report) {
+      report->recordSkip(SkipReason::ConfigurationError, nullptr, message,
+                         warnLimit, formatPatternStmt(stmt));
+    }
+    debugLog([&](raw_ostream &os) { os << message; });
+    return false;
+  }
+
+  if (auto disconnected = findDisconnectedGraphStmt(rule, outputs)) {
+    std::string message =
+        (Twine("configured alias '") + disconnected->alias +
+         "' is disconnected from the outputs and is not consumed by any "
+         "graph statement")
+            .str();
+    if (disconnected->suggestedConsumer) {
+      message += "; possible missing argument in '";
+      message += formatPatternStmt(
+          rule.stmts[*disconnected->suggestedConsumer]);
+      message += "'";
+    }
+    debugLog([&](raw_ostream &os) { os << message; });
+
+    if (report) {
+      report->recordSkip(
+          SkipReason::ConfigurationError, nullptr, message, warnLimit,
+          formatPatternStmt(rule.stmts[disconnected->stmtIndex]));
+    }
+    return false;
+  }
+
+  if (report) {
+    auto outputStmt = rule.aliasToStmt.find(outputs.front());
+    if (outputStmt != rule.aliasToStmt.end()) {
+      auto candidates = opsByName.find(rule.stmts[outputStmt->second].opName);
+      if (candidates != opsByName.end()) {
+        for (Operation *candidate : candidates->second) {
+          report->recordAnchor(candidate);
+        }
+      }
+    }
+  }
+
+  MatchState state;
+  MatchState matchedState;
+  StructureMatchFailure matchingFailure;
+  if (!matchOutputAliases(rule, opsByName, outputs, 0, state, &matchedState,
+                          nullptr, 0, &matchingFailure)) {
+    if (report && matchingFailure.valid &&
+        matchingFailure.stmtIndex < rule.stmts.size()) {
+      const PatternStmt &stmt = rule.stmts[matchingFailure.stmtIndex];
+      std::string message =
+          (Twine("configured statement '") + formatPatternStmt(stmt) +
+           "' failed: " + matchingFailure.message)
+              .str();
+      report->recordSkip(matchingFailure.reason, matchingFailure.operation,
+                         message, warnLimit, formatPatternStmt(stmt));
+    }
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' failed during output alias matching";
+    });
+    return false;
+  }
+  state = std::move(matchedState);
+  Operation *anchor = nullptr;
+  auto anchorIt = state.aliasValues.find(outputs.front());
+  if (anchorIt != state.aliasValues.end()) {
+    anchor = anchorIt->second.getDefiningOp();
+  }
+  debugLog([&](raw_ostream &os) {
+    os << "rule '" << rule.name << "' matched aliases:";
+    for (const auto &entry : state.aliasValues) {
+      os << " " << entry.first << "=";
+      entry.second.print(os);
+    }
+    os << "; external values:";
+    for (const auto &entry : state.externalValues) {
+      os << " " << entry.first << "=";
+      entry.second.print(os);
+    }
+  });
+  if (state.stmtOps.size() != rule.stmts.size()) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' matched " << state.stmtOps.size()
+         << " stmts, expected " << rule.stmts.size();
+    });
+    if (report) {
+      report->recordSkip(SkipReason::StructureMismatch, anchor,
+                         "not all configured graph statements were matched",
+                         warnLimit);
+    }
+    return false;
+  }
+
+  std::string failedExpression;
+  if (!checkWhereClauses(rule, state, &failedExpression)) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' failed where clauses";
+    });
+    if (report) {
+      report->recordSkip(
+          SkipReason::ConstraintMismatch, anchor,
+          (Twine("constraint is not satisfied: ") + failedExpression).str(),
+          warnLimit);
+    }
+    return false;
+  }
+
+  std::map<std::string, std::string> patternAttrs;
+  if (!collectPatternAttrs(rule, state, &patternAttrs)) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' failed attr capture";
+    });
+    if (report) {
+      report->recordSkip(SkipReason::CaptureFailure, anchor,
+                         "configured attributes could not be captured",
+                         warnLimit);
+    }
+    return false;
+  }
+
+  std::vector<std::string> inputs = inferInputs(rule, state);
+  debugLog([&](raw_ostream &os) {
+    os << "rule '" << rule.name << "' inferred inputs:";
+    for (const std::string &input : inputs) os << " " << input;
+  });
+  if (!rule.inputs.empty()) {
+    std::unordered_set<std::string> expected(rule.inputs.begin(), rule.inputs.end());
+    for (const std::string &name : inputs) expected.erase(name);
+    if (!expected.empty()) {
+      debugLog([&](raw_ostream &os) {
+        os << "rule '" << rule.name << "' missing configured inputs:";
+        for (const std::string &name : expected) os << " " << name;
+      });
+      if (report) {
+        report->recordSkip(SkipReason::InputMismatch, anchor,
+                           "one or more configured inputs are not bound",
+                           warnLimit);
+      }
+      return false;
+    }
+  }
+
+  if (hasUnlistedEscapingOutput(rule, outputs, state)) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' has unlisted escaping output";
+    });
+    if (report) {
+      report->recordSkip(
+          SkipReason::BoundaryEscape, anchor,
+          "an internal result escapes the fusion boundary but is not listed "
+          "as an output",
+          warnLimit);
+    }
+    return false;
+  }
+  auto func = materializePattern(module, rule, state, inputs, outputs,
+                                 patternAttrs);
+  if (!func) {
+    debugLog([&](raw_ostream &os) {
+      os << "rule '" << rule.name << "' failed materialization";
+    });
+    if (report) {
+      report->recordSkip(SkipReason::MaterializationFailure, anchor,
+                         "matched graph could not be outlined", warnLimit);
+    }
+    return false;
+  }
+  if (report) {
+    ++report->matches;
+    report->outlined.push_back(func.getName().str());
+    for (const std::string &input : inputs) {
+      auto valueIt = state.externalValues.find(input);
+      if (valueIt != state.externalValues.end()) {
+        report->inferredRoles[input] = inferInputRole(valueIt->second);
+      }
+    }
+  }
+  debugLog([&](raw_ostream &os) {
+    os << "rule '" << rule.name << "' matched and materialized";
+  });
+  return func != nullptr;
+}
+
+
 }  // namespace atir::config_fusion

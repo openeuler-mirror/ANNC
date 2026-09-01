@@ -10,6 +10,7 @@ void registerAllAtirPasses() {
     atir::registerAtirIdentityCanonicalizePass();
     atir::registerAtirGemmEpilogueFusionPass();
     atir::registerAtirOpFusionPass();
+    atir::registerAtirConfigFusionPass();
     atir::registerAtirFastCodegenPass();
     atir::registerAtirBlockFusionPass();
     atir::registerAtirUnrollPass();
