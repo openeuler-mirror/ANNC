@@ -35,6 +35,9 @@ ANNC 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统与 AA
 # 一键构建（推荐）— LLVM + nlohmann/json 自动从 third_party/ 编译
 ./build.sh --install-prefix /opt/ANNC --build-type Debug
 
+# 只以调试模式编译 ANNC（-g3 -O0 -UNDEBUG），third_party（LLVM/json）保持原构建类型、不重编
+./build.sh --annc-debug
+
 # 手动构建
 mkdir build && cd build
 cmake -G Ninja .. \
@@ -44,7 +47,7 @@ ninja -j$(nproc)
 ninja install
 ```
 
-> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source LOCAL`（本地 `third_party/KDNN`）。`--kdnn-source` 可选 `LOCAL` / `REMOTE` / `RELEASE` 三值：`REMOTE` 从 git 仓库 FetchContent（启用 constant folding 时经 `ApplyPatchIfNeeded.cmake` 自动应用 `patches/kdnn_rhs_packed` 补丁）；`RELEASE` 自动从 release zip 下载并集成，可搭配 `--kdnn-lib-variant sve-threadpool` 等变体。详见 `README.md` 的 CMake / 构建选项参考章节。
+> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source RELEASE`（自动从 release zip 下载并集成，可搭配 `--kdnn-lib-variant sve-threadpool` 等变体）。`--kdnn-source` 可选 `LOCAL` / `REMOTE` / `RELEASE` 三值：`LOCAL` 使用本地 `third_party/KDNN`；`REMOTE` 从 git 仓库 FetchContent（启用 constant folding 时经 `ApplyPatchIfNeeded.cmake` 自动应用 `patches/kdnn_rhs_packed` 补丁）。详见 `README.md` 的 CMake / 构建选项参考章节。
 
 ## 5. 运行测试
 
@@ -218,6 +221,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 ## 10. 常见陷阱
 
 - **LLVM 首次编译**：耗时 30-60 分钟，约需 50GB 磁盘空间。若空间不足，可清理 `build/` 后使用 `ninja -j4` 降低并行度。
+- **只调试 ANNC**：`--build-type Debug` 会把 third_party（LLVM/json）一起重编；只需调试 ANNC 代码时改用 `./build.sh --annc-debug`（ANNC 作用域追加 `-g3 -O0 -UNDEBUG`，第三方保持原构建类型、不重编）。
 - **TensorFlow 版本**：CMake 在 configure 时会自动检测当前 Python 环境下的 TF。若切换 Python 环境或 TF 版本，需重新运行 CMake。
 - **`annc` driver 链接失败**：构建时自动检测 `CMAKE_C_COMPILER`，运行时可通过 `ANNC_CLANG` 环境变量指定 clang 路径（详见 `README.md` 环境变量参考章节）。
 - **Python 绑定导入失败**：确认已安装 `pybind11` 和 `nanobind`，且构建时使用了正确的 Python 解释器（`PYTHON_EXECUTABLE`）。

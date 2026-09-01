@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
 option(ANNC_ENABLE_COVERAGE "Enable source-based code coverage (clang only)" OFF)
+option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG); third-party build type unchanged" OFF)
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 
 # set(ABSL_PROPAGATE_CXX_STD ON)
@@ -148,6 +149,18 @@ if(ANNC_ENABLE_COVERAGE)
   add_compile_options(--coverage)
   add_link_options(--coverage)
   message(STATUS "ANNC code coverage enabled (--coverage / gcov).")
+endif()
+
+# ANNC-scoped debug mode (--annc-debug). Set AFTER the LLVM/MLIR sub-build, for
+# the same reason as coverage above: directory-level compile options apply only
+# to targets defined afterwards (annc/, python/, tensorflow_addons/, tests/),
+# so third-party LLVM/json compile commands are untouched and ninja does not
+# rebuild them. The flags are appended at the end of the compile command, so
+# -O0 overrides the Release -O3 and -UNDEBUG re-enables assert() in ANNC code
+# even when CMAKE_BUILD_TYPE=Release.
+if(ANNC_DEBUG)
+  add_compile_options(-g3 -O0 -fno-omit-frame-pointer -UNDEBUG)
+  message(STATUS "ANNC debug mode enabled: ANNC-only -g3 -O0 -UNDEBUG; third-party build type unchanged.")
 endif()
 
 include(CTest)

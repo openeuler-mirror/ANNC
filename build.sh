@@ -8,7 +8,8 @@ ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="OFF"
 ENABLE_COVERAGE="OFF"
-KDNN_SOURCE="LOCAL"
+ANNC_DEBUG="OFF"
+KDNN_SOURCE="RELEASE"
 KDNN_DIR="${PWD}/third_party/KDNN"
 KDNN_LIB_VARIANT="sve-threadpool"
 C_COMPILER="${CC:-gcc}"
@@ -99,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       ENABLE_COVERAGE="ON"
       shift
       ;;
+    --annc-debug)
+      ANNC_DEBUG="ON"
+      shift
+      ;;
     -h|--help)
       echo "Usage: $0 [options]"
       echo "Options:"
@@ -116,6 +121,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
+      echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
+      echo "                                third_party (LLVM/json) build type is unchanged"
       echo "  TensorFlow addon env vars:"
       echo "    ANNC_TENSORFLOW_PRELOAD=ON|OFF        TF addon preload mode (default: ON)"
       echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
@@ -197,6 +204,12 @@ fi
 if [ "${ENABLE_COVERAGE}" == "ON" ] && [ "${BUILD_TYPE}" == "Release" ]; then
   echo "NOTE: --coverage with Release build: line coverage accurate, branch coverage approximate."
   echo "      For precise branch coverage use a clean Debug build: rm -rf build && ./build.sh --coverage --build-type Debug"
+fi
+
+# --annc-debug is redundant with a full Debug build: --build-type Debug already
+# compiles everything (ANNC and third-party) with debug flags.
+if [ "${ANNC_DEBUG}" == "ON" ] && [ "${BUILD_TYPE}" == "Debug" ]; then
+  echo "NOTE: --build-type Debug already debug-builds ANNC (and third_party); --annc-debug is redundant."
 fi
 
 # Check for ninja early so we fail with a clear message before CMake runs.
@@ -557,6 +570,22 @@ check_source_glob_changes() {
   mv -f "${tmp}" "${snapshot}"
 }
 
+# --annc-debug 只影响 ANNC 自有代码的编译选项（在 CMakeLists.txt 中位于
+# add_subdirectory(llvm) 之后），因此切换它不需要 --clean：删除 CMakeCache.txt
+# 触发就地重新配置即可，build/ 与 _deps 中的第三方构建产物原样保留，LLVM/json
+# 的编译命令不变、不会被 ninja 重编。cache 中缺失该键视为 OFF（旧构建）。
+check_annc_debug_toggle() {
+  [ -f "CMakeCache.txt" ] || return 0
+  local cached
+  cached=$(get_cache_value "ANNC_DEBUG")
+  cached="${cached:-OFF}"
+  if [ "${cached}" != "${ANNC_DEBUG}" ]; then
+    echo "ANNC_DEBUG changed (cache='${cached}' -> requested='${ANNC_DEBUG}');"
+    echo "reconfiguring in place (third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  fi
+}
+
 # 增量构建: 若 build/CMakeCache.txt 已存在且参数一致, 跳过 cmake 重新配置,
 # 直接复用既有 cache。避免对已存在 cache 重复传 -D 触发的 cache 变量时序问题
 # (如 CMAKE_BUILD_TYPE / pybind11_DIR 在 LLVM add_subdirectory 作用域不可见)。
@@ -571,6 +600,7 @@ if [ -f "CMakeCache.txt" ]; then
     rm -f CMakeCache.txt
     check_source_glob_changes
   else
+    check_annc_debug_toggle
     check_cache_consistency
     check_source_glob_changes
     [ -f "CMakeCache.txt" ] && SKIP_CMAKE="YES"
@@ -592,6 +622,7 @@ else
   echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
   echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
   echo "  Coverage: ${ENABLE_COVERAGE}"
+  echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
   echo "  KDNN Source: ${KDNN_SOURCE}"
   if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
     echo "  KDNN Dir: ${KDNN_DIR}"
@@ -611,6 +642,7 @@ else
     -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
+    -DANNC_DEBUG="${ANNC_DEBUG}" \
     -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \

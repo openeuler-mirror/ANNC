@@ -19,6 +19,8 @@ __pycache__
 *.whl
 install/
 tf_protos_minimal/
+*.log
+*.bak
 third_party/*
 tensorflow_addons/logs
 tensorflow_addons/build
