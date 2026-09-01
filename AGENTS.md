@@ -47,7 +47,7 @@ ninja -j$(nproc)
 ninja install
 ```
 
-> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source LOCAL`（本地 `third_party/KDNN`）。`--kdnn-source` 可选 `LOCAL` / `REMOTE` / `RELEASE` 三值：`REMOTE` 从 git 仓库 FetchContent（启用 constant folding 时经 `ApplyPatchIfNeeded.cmake` 自动应用 `patches/kdnn_rhs_packed` 补丁）；`RELEASE` 自动从 release zip 下载并集成，可搭配 `--kdnn-lib-variant sve-threadpool` 等变体。详见 `README.md` 的 CMake / 构建选项参考章节。
+> **KDNN 来源：** `build.sh` 默认使用 `--kdnn-source RELEASE`（自动从 release zip 下载并集成，可搭配 `--kdnn-lib-variant sve-threadpool` 等变体）。`--kdnn-source` 可选 `LOCAL` / `REMOTE` / `RELEASE` 三值：`LOCAL` 使用本地 `third_party/KDNN`；`REMOTE` 从 git 仓库 FetchContent（启用 constant folding 时经 `ApplyPatchIfNeeded.cmake` 自动应用 `patches/kdnn_rhs_packed` 补丁）。详见 `README.md` 的 CMake / 构建选项参考章节。
 
 ## 5. 运行测试
 

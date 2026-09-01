@@ -60,7 +60,7 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--enable-libcxx`：启用 libc++
 > - `--clean`：清理构建目录后重新构建
 > - `--no-install-deps`：跳过 pybind11/nanobind 自动安装
-> - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：选择 KDNN 来源（默认 LOCAL）
+> - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：选择 KDNN 来源（默认 RELEASE）
 > - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
 > - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party（LLVM/json）保持原构建类型、不重编
 
@@ -522,7 +522,7 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | CMake 选项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
-| `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `LOCAL` | KDNN 来源模式 |
+| `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |
 | `ANNC_KDNN_RELEASE_URL` | URL | `https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip` | RELEASE 模式 zip 包下载地址 |
