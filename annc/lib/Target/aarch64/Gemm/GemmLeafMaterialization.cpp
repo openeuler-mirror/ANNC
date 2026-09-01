@@ -281,9 +281,6 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
       plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
   const bool isRowMajor =
       plan->rhsPacking == aarch64::gemm::RhsPacking::kRowMajor;
-  const bool usesLdbAbi =
-      isRowMajor ||
-      plan->executionKind == aarch64::gemm::GemmExecutionKind::kVectorMatrix;
   Value rhsBase;
   Value rhsOffset;
   if (isDirectRhs) {
@@ -340,19 +337,16 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
     if (failed(kScalarUnroll))
       return op->emitOpError(
           "requires a valid NEON kernel ABI vector K unroll");
-    const bool passesScalarK =
-        isRowMajor &&
-        plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
     familyArgument = builder.create<arith::ConstantIndexOp>(
-        loc, passesScalarK ? *staticK : *staticK / *kScalarUnroll);
+        loc, isRowMajor ? *staticK : *staticK / *kScalarUnroll);
   }
 
   auto unranked = UnrankedMemRefType::get(builder.getF32Type(), 0);
   auto index = builder.getIndexType();
-  StringRef leafName = usesLdbAbi ? aarch64::gemm::kMicrokernelRmLeafName
+  StringRef leafName = isRowMajor ? aarch64::gemm::kMicrokernelRmLeafName
                                   : aarch64::gemm::kMicrokernelLeafName;
   SmallVector<Type> leafTypes = {unranked, unranked, unranked};
-  for (int64_t i = 0, count = usesLdbAbi ? 8 : 7; i < count; ++i)
+  for (int64_t i = 0, count = isRowMajor ? 8 : 7; i < count; ++i)
     leafTypes.push_back(index);
   getOrCreateLeafDeclaration(module, leafName,
                              builder.getFunctionType(leafTypes, {}));
@@ -373,7 +367,7 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
       rhsOffset,
       out->offset,
       lda};
-  if (usesLdbAbi) leafOperands.push_back(ldb);
+  if (isRowMajor) leafOperands.push_back(ldb);
   leafOperands.push_back(ldc);
   leafOperands.push_back(kSize);
   leafOperands.push_back(familyArgument);
