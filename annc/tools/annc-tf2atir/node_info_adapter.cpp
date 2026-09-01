@@ -69,23 +69,16 @@ bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
   for (std::size_t switchIndex = 0; switchIndex < nodes.size(); ++switchIndex) {
     const annc::NodeInfo& sw = nodes[switchIndex];
     if (sw.op_type != "Switch" && sw.op_type != "RefSwitch") continue;
-    // Best-effort reconstruction: a Switch that cannot be rebuilt as a clean
-    // linear diamond is left untouched.  Its raw "Switch" node then reaches
-    // the builder's opaque fallback (no OpSpec row), which is exactly how
-    // these graphs converted before the diamond reconstruction existed.
-    // Skipping must not fail the conversion: real serving graphs (e.g. the
-    // presort family) contain dead Switch outputs, fan-out branches, and
-    // other shapes that are not reconstructible diamonds.
     if (sw.inputs.size() != 2 || sw.outputs.size() != 2) {
       error = "Switch node '" + sw.name +
               "' must have exactly two inputs and two outputs";
-      continue;
+      return false;
     }
     const std::string& falseAlias = sw.outputs[0].name;
     const std::string& trueAlias = sw.outputs[1].name;
     if (falseAlias == trueAlias) {
       error = "Switch node '" + sw.name + "' has identical branch outputs";
-      continue;
+      return false;
     }
 
     annc::NodeInfo structured;
@@ -97,23 +90,23 @@ bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
                           structured.switch_false_nodes, consumed, error) ||
         !findLinearBranch(trueAlias, users, nodes, trueMergeIndex, trueEnd,
                           structured.switch_true_nodes, consumed, error))
-      continue;
+      return false;
     if (falseMergeIndex != trueMergeIndex) {
       error = "Switch node '" + sw.name +
               "' branches reach different Merge nodes";
-      continue;
+      return false;
     }
     if (falseEnd == trueEnd) {
       error = "Switch node '" + sw.name +
               "' branches converge before the Merge node";
-      continue;
+      return false;
     }
     const std::size_t mergeIndex = falseMergeIndex;
     const annc::NodeInfo& merge = nodes[mergeIndex];
     if (merge.inputs.size() != 2 || merge.outputs.size() < 2) {
       error = "Merge node '" + merge.name +
               "' must have two inputs and at least two outputs";
-      continue;
+      return false;
     }
     const bool falseFirst =
         merge.inputs[0] == falseEnd && merge.inputs[1] == trueEnd;
@@ -122,7 +115,7 @@ bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
     if (!falseFirst && !trueFirst) {
       error = "Merge node '" + merge.name +
               "' does not join the reconstructed Switch branches";
-      continue;
+      return false;
     }
     std::unordered_set<std::string> falseValues{falseAlias};
     std::unordered_set<std::string> trueValues{trueAlias};
@@ -150,23 +143,19 @@ bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
                             offendingNode)) {
       error = "Switch branch node '" + offendingNode +
               "' depends on a value from the other branch";
-      continue;
+      return false;
     }
     // Keep the structured op at the Merge position. All external values used
     // inside either branch are guaranteed to dominate that point in the
     // topologically sorted graph, but need not dominate the original Switch.
     consumed.insert(merge.name);
-    bool overlapsExisting = false;
     for (const std::string& name : consumed) {
-      if (consumedNodes.count(name)) {
+      if (!consumedNodes.insert(name).second) {
         error = "overlapping Switch diamonds are not supported (node '" +
                 name + "')";
-        overlapsExisting = true;
-        break;
+        return false;
       }
     }
-    if (overlapsExisting) continue;
-    consumedNodes.insert(consumed.begin(), consumed.end());
 
     structured.name = merge.name;
     structured.op_type = "ANNCStructuredSwitch";
@@ -183,7 +172,7 @@ bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
     if (replacements.find(mergeIndex) != replacements.end()) {
       error = "multiple Switch nodes reconstruct the same Merge node '" +
               merge.name + "'";
-      continue;
+      return false;
     }
     replacements.emplace(mergeIndex, std::move(structured));
   }

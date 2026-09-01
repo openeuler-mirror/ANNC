@@ -87,29 +87,17 @@ inline llvm::Expected<size_t> checkedByteCount(AnncElementType type,
   return elements * *size;
 }
 
-// Trait: whether the memref layout carries sizes/strides arrays.  0-D memrefs
-// (AnncMemRef0DI32/0DF32/0DI64) match the MLIR C interface for memref<...> and
-// only have {allocated, aligned, offset}, so the loop bodies are skipped via
-// if constexpr.
-template <typename MemRef, typename = void>
-struct HasSizes : std::false_type {};
-template <typename MemRef>
-struct HasSizes<MemRef, std::void_t<decltype(std::declval<MemRef>().sizes)>>
-    : std::true_type {};
-
 template <typename MemRef>
 inline MemRef makeMemRef(void* data, uint32_t rank, const int64_t* dims) {
   MemRef result{};
   result.allocated = static_cast<decltype(result.allocated)>(data);
   result.aligned = static_cast<decltype(result.aligned)>(data);
   result.offset = 0;
-  if constexpr (HasSizes<MemRef>::value) {
-    for (uint32_t i = 0; i < rank; ++i) result.sizes[i] = dims[i];
-    if (rank > 0) {
-      result.strides[rank - 1] = 1;
-      for (uint32_t i = rank - 1; i > 0; --i)
-        result.strides[i - 1] = result.strides[i] * result.sizes[i];
-    }
+  for (uint32_t i = 0; i < rank; ++i) result.sizes[i] = dims[i];
+  if (rank > 0) {
+    result.strides[rank - 1] = 1;
+    for (uint32_t i = rank - 1; i > 0; --i)
+      result.strides[i - 1] = result.strides[i] * result.sizes[i];
   }
   return result;
 }
@@ -178,13 +166,6 @@ inline Expected<AnncMemRef2DF32> allocateOutput2DF32(
   return allocate<AnncMemRef2DF32>(context, slot, ANNC_ELEMENT_TYPE_F32, 2, dims,
                                    flags);
 }
-inline Expected<AnncMemRef2DI32> allocateOutput2DI32(
-    const AnncExecutionContext* context, uint32_t slot, int64_t dim0,
-    int64_t dim1, AnncAllocationFlags flags) {
-  const int64_t dims[] = {dim0, dim1};
-  return allocate<AnncMemRef2DI32>(context, slot, ANNC_ELEMENT_TYPE_I32, 2,
-                                   dims, flags);
-}
 inline Expected<AnncMemRef1DI32> allocateOutput1DI32(
     const AnncExecutionContext* context, uint32_t slot, int64_t dim0,
     AnncAllocationFlags flags) {
@@ -203,15 +184,6 @@ inline Expected<AnncMemRef2DI64> allocateOutput2DI64(
   const int64_t dims[] = {dim0, dim1};
   return allocate<AnncMemRef2DI64>(context, slot, ANNC_ELEMENT_TYPE_I64, 2, dims,
                                    flags);
-}
-inline Expected<AnncMemRef0DI32> allocateOutput0DI32(
-    const AnncExecutionContext* context, uint32_t slot,
-    AnncAllocationFlags flags) {
-  // rank-0: dims is never read (checkedByteCount loops zero times), but the
-  // pointer must stay non-null.
-  const int64_t dims[] = {0};
-  return allocate<AnncMemRef0DI32>(context, slot, ANNC_ELEMENT_TYPE_I32, 0,
-                                   dims, flags);
 }
 inline Expected<AnncMemRef2DF32> allocateTemp2DF32(
     const AnncExecutionContext* context, int64_t dim0, int64_t dim1,

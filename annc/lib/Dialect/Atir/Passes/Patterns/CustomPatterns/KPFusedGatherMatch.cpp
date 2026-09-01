@@ -67,10 +67,8 @@ mlir::FailureOr<KPFusedGatherMatch> matchKPFusedGather(GatherOp outerGather) {
   match.keys = match.slice.getInput();
   match.begin = match.slice.getBegin();
   match.data = match.innerGather.getParams();
-  // end 值不查: end_mask=1 时 TF 语义忽略 end, kernel 也不用 (实测 hmv_930
-  // 的 ss.end=[0,1] 与 pattern 原要求的 [0,0] 语义等价)。strides 值检查
-  // 保留——无 mask, 决定列提取语义。
-  if (!constantInts(match.slice.getStrides(), {1, 1}) ||
+  if (!constantInts(match.slice.getEnd(), {0, 0}) ||
+      !constantInts(match.slice.getStrides(), {1, 1}) ||
       match.slice.getBeginMask() != 1 || match.slice.getEndMask() != 1 ||
       match.slice.getShrinkAxisMask() != 2 ||
       match.slice.getEllipsisMask() != 0 || match.slice.getNewAxisMask() != 0)

@@ -82,7 +82,6 @@ add_mlir_python_modules(ANNCPythonModules
     MLIRPythonSources
   COMMON_CAPI_LINK_LIBS
     ANNCPythonCAPI
-    AArch64Codegen
   )
 
 # The ANNC python modules targets symlink generated MLIR Python files (like

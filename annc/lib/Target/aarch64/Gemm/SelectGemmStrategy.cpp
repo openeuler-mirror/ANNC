@@ -40,10 +40,13 @@ LogicalResult selectGemmStrategy(
   NamedAttrList candidate;
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
-  const auto executionKind =
-      (problem->n == 1 && config.isa == aarch64::gemm::GemmIsa::kNeon)
-          ? aarch64::gemm::GemmExecutionKind::kGemvAB
-          : aarch64::gemm::GemmExecutionKind::kGemm;
+  auto executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
+  if (config.isa == aarch64::gemm::GemmIsa::kNeon) {
+    if (problem->n == 1)
+      executionKind = aarch64::gemm::GemmExecutionKind::kMatrixVector;
+    else if (problem->m == 1)
+      executionKind = aarch64::gemm::GemmExecutionKind::kVectorMatrix;
+  }
   const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
       config.target, config.isa, config.dataType, executionKind);
   candidate.append(
@@ -58,10 +61,11 @@ LogicalResult selectGemmStrategy(
   candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
   candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
   candidate.append("kc", builder.getI64IntegerAttr(config.cacheTile.kc));
-  const aarch64::gemm::GemmKernelTile kernelTile =
-      executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB
-          ? aarch64::gemm::GemmKernelTile{4, 1}
-          : config.kernelTile;
+  aarch64::gemm::GemmKernelTile kernelTile = config.kernelTile;
+  if (executionKind == aarch64::gemm::GemmExecutionKind::kMatrixVector)
+    kernelTile = {4, 1};
+  else if (executionKind == aarch64::gemm::GemmExecutionKind::kVectorMatrix)
+    kernelTile = {1, 4};
   candidate.append("mr", builder.getI64IntegerAttr(kernelTile.mr));
   candidate.append("panel_lanes",
                    builder.getI64IntegerAttr(kernelTile.panelLanes));

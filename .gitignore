@@ -9,7 +9,6 @@ logs/
 bazel-*
 output
 build
-.worktrees/
 
 github
 
@@ -31,4 +30,4 @@ benchmark/
 tmp/
 /Testing/
 .worktrees/
-/tools/
+tools/

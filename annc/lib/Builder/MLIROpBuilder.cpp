@@ -374,13 +374,11 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
 
   if (type == "ANNCStructuredSwitch")
     return buildStructuredSwitchNode(node);
-  // A raw Switch/Merge reaching the builder means the adapter's diamond
-  // reconstruction skipped it (non-linear branches, dead outputs, ...).
-  // Fall back to the opaque placeholder instead of failing: this matches how
-  // such graphs converted before structured control flow existed.
   if (type == "Switch" || type == "RefSwitch" || type == "Merge" ||
       type == "RefMerge")
-    return buildOpaqueOp(node);
+    return emitNodeError(
+        node, "must be reconstructed as structured control flow before "
+              "ATIR construction");
 
   const OpSpec* spec = lookupSpec(type);
   if (spec == nullptr) return buildOpaqueOp(node);

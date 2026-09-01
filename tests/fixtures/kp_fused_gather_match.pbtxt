@@ -1,0 +1,171 @@
+node {
+  name: "data"
+  op: "Placeholder"
+  attr { key: "dtype" value { type: DT_FLOAT } }
+  attr {
+    key: "shape"
+    value { shape { dim { size: 2 } dim { size: 4 } } }
+  }
+}
+node {
+  name: "keys"
+  op: "Placeholder"
+  attr { key: "dtype" value { type: DT_INT64 } }
+  attr {
+    key: "shape"
+    value { shape { dim { size: 4 } dim { size: 3 } } }
+  }
+}
+node {
+  name: "begin"
+  op: "Placeholder"
+  attr { key: "dtype" value { type: DT_INT32 } }
+  attr { key: "shape" value { shape { dim { size: 2 } } } }
+}
+node {
+  name: "end"
+  op: "Const"
+  attr { key: "dtype" value { type: DT_INT32 } }
+  attr {
+    key: "value"
+    value {
+      tensor {
+        dtype: DT_INT32
+        tensor_shape { dim { size: 2 } }
+        int_val: 0
+        int_val: 0
+      }
+    }
+  }
+}
+node {
+  name: "strides"
+  op: "Const"
+  attr { key: "dtype" value { type: DT_INT32 } }
+  attr {
+    key: "value"
+    value {
+      tensor {
+        dtype: DT_INT32
+        tensor_shape { dim { size: 2 } }
+        int_val: 1
+        int_val: 1
+      }
+    }
+  }
+}
+node {
+  name: "select_key_column"
+  op: "StridedSlice"
+  input: "keys"
+  input: "begin"
+  input: "end"
+  input: "strides"
+  attr { key: "T" value { type: DT_INT64 } }
+  attr { key: "Index" value { type: DT_INT32 } }
+  attr { key: "begin_mask" value { i: 1 } }
+  attr { key: "ellipsis_mask" value { i: 0 } }
+  attr { key: "end_mask" value { i: 1 } }
+  attr { key: "new_axis_mask" value { i: 0 } }
+  attr { key: "shrink_axis_mask" value { i: 2 } }
+  attr {
+    key: "_output_shapes"
+    value { list { shape { dim { size: 4 } } } }
+  }
+}
+node {
+  name: "first_unique"
+  op: "Unique"
+  input: "select_key_column"
+  attr { key: "T" value { type: DT_INT64 } }
+  attr { key: "out_idx" value { type: DT_INT32 } }
+  attr {
+    key: "_output_shapes"
+    value {
+      list {
+        shape { dim { size: -1 } }
+        shape { dim { size: 4 } }
+      }
+    }
+  }
+}
+node {
+  name: "second_unique"
+  op: "Unique"
+  input: "first_unique"
+  attr { key: "T" value { type: DT_INT64 } }
+  attr { key: "out_idx" value { type: DT_INT32 } }
+  attr {
+    key: "_output_shapes"
+    value {
+      list {
+        shape { dim { size: -1 } }
+        shape { dim { size: -1 } }
+      }
+    }
+  }
+}
+node {
+  name: "axis"
+  op: "Const"
+  attr { key: "dtype" value { type: DT_INT32 } }
+  attr {
+    key: "value"
+    value { tensor { dtype: DT_INT32 tensor_shape {} int_val: 0 } }
+  }
+}
+node {
+  name: "inner_gather"
+  op: "GatherV2"
+  input: "data"
+  input: "second_unique"
+  input: "axis"
+  attr { key: "Taxis" value { type: DT_INT32 } }
+  attr { key: "Tindices" value { type: DT_INT64 } }
+  attr { key: "Tparams" value { type: DT_FLOAT } }
+  attr { key: "batch_dims" value { i: 0 } }
+  attr {
+    key: "_output_shapes"
+    value { list { shape { dim { size: -1 } dim { size: 4 } } } }
+  }
+}
+node {
+  name: "outer_gather"
+  op: "GatherV2"
+  input: "inner_gather"
+  input: "second_unique:1"
+  input: "axis"
+  attr { key: "Taxis" value { type: DT_INT32 } }
+  attr { key: "Tindices" value { type: DT_INT32 } }
+  attr { key: "Tparams" value { type: DT_FLOAT } }
+  attr { key: "batch_dims" value { i: 0 } }
+  attr {
+    key: "_output_shapes"
+    value { list { shape { dim { size: -1 } dim { size: 4 } } } }
+  }
+}
+node {
+  name: "restore_first_unique"
+  op: "GatherV2"
+  input: "first_unique"
+  input: "first_unique:1"
+  input: "axis"
+  attr { key: "Taxis" value { type: DT_INT32 } }
+  attr { key: "Tindices" value { type: DT_INT32 } }
+  attr { key: "Tparams" value { type: DT_INT64 } }
+  attr { key: "batch_dims" value { i: 0 } }
+  attr {
+    key: "_output_shapes"
+    value { list { shape { dim { size: 4 } } } }
+  }
+}
+node {
+  name: "post_outer_gather"
+  op: "Relu"
+  input: "outer_gather"
+  attr { key: "T" value { type: DT_FLOAT } }
+  attr {
+    key: "_output_shapes"
+    value { list { shape { dim { size: -1 } dim { size: 4 } } } }
+  }
+}
