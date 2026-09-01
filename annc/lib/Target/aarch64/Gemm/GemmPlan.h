@@ -65,7 +65,7 @@ inline constexpr int64_t kPlanVersion = 1;
 enum class GemmTarget { kHip12, kHip09 };
 enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
-enum class GemmExecutionKind { kGemm, kMatrixVector, kVectorMatrix };
+enum class GemmExecutionKind { kGemm, kGemvAB };
 
 struct GemmCacheTile {
   int64_t mc;

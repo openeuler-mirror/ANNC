@@ -79,24 +79,12 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
   } else {
     kVariant = (llvm::Twine("kg_r") + llvm::Twine(residue)).str();
   }
-  if (plan->executionKind ==
-      aarch64::gemm::GemmExecutionKind::kMatrixVector) {
+  if (plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB) {
     if (*n != 1 || *m > 4 || abi.kVectorUnroll != 4) {
-      call.emitOpError("has an invalid matrix-vector microtile");
+      call.emitOpError("has an invalid GEMV-AB microtile");
       return failure();
     }
-    return (llvm::Twine("annc_aarch64_neon_matvec_mr") + llvm::Twine(*m) +
-            "_" + kVariant +
-            (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
-        .str();
-  }
-  if (plan->executionKind ==
-      aarch64::gemm::GemmExecutionKind::kVectorMatrix) {
-    if (!isRowMajor || *m != 1 || *n > 16 || abi.kVectorUnroll != 2) {
-      call.emitOpError("has an invalid vector-matrix microtile");
-      return failure();
-    }
-    return (llvm::Twine("annc_aarch64_neon_vecmat_n") + llvm::Twine(*n) +
+    return (llvm::Twine("annc_aarch64_neon_gemv_ab_mr") + llvm::Twine(*m) +
             "_" + kVariant +
             (kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32"))
         .str();

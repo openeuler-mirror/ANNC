@@ -63,10 +63,7 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendI64(plan, builder, "panel_lanes", candidate->kernelTile.panelLanes);
   appendString(plan, builder, "macro_order", "mkn");
   appendString(plan, builder, "micro_order", "mn");
-  if (candidate->executionKind ==
-          aarch64::gemm::GemmExecutionKind::kMatrixVector ||
-      candidate->executionKind ==
-          aarch64::gemm::GemmExecutionKind::kVectorMatrix) {
+  if (candidate->executionKind == aarch64::gemm::GemmExecutionKind::kGemvAB) {
     appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "direct");
     appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
                  "none");
