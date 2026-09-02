@@ -1,6 +1,6 @@
 #include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
 
-#include "llvm/Support/Debug.h"
+#include "Support/Log.h"
 
 namespace atir {
 
@@ -14,12 +14,13 @@ bool PatternRegistry::addCreator(llvm::StringRef name, PatternCreator creator) {
   std::string nameStr = name.str();
 
   if (registeredNames.count(nameStr)) {
-    llvm::dbgs() << "ANNC Warning: Pattern '" << name
-                 << "' already registered. Skipping.\n";
+    ANNC_LOG_WARN("fusion-pattern")
+        << "Pattern '" << name.str() << "' already registered. Skipping.\n";
     return false;
   }
 
-  llvm::dbgs() << "ANNC: Registering custom fusion pattern: " << name << "\n";
+  ANNC_LOG_INFO("fusion-pattern")
+      << "Registering custom fusion pattern: " << name.str() << "\n";
   creators.push_back(std::move(creator));
   registeredNames.insert(std::move(nameStr));
   return true;
@@ -28,8 +29,8 @@ bool PatternRegistry::addCreator(llvm::StringRef name, PatternCreator creator) {
 void PatternRegistry::populatePatterns(mlir::RewritePatternSet &patterns,
                                        const CustomOpTypeFilter &filter) const {
   std::lock_guard<std::mutex> lock(mutex);
-  llvm::dbgs() << "ANNC: Populating " << creators.size()
-               << " custom fusion patterns\n";
+  ANNC_LOG_INFO("fusion-pattern")
+      << "Populating " << creators.size() << " custom fusion patterns\n";
   for (const auto &creator : creators) {
     creator(patterns, filter);
   }

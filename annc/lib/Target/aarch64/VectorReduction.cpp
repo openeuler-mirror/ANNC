@@ -8,6 +8,7 @@
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 
 #include "Target/aarch64/Passes.h"
+#include "Support/Log.h"
 
 namespace annc
 {
@@ -17,7 +18,7 @@ class VectorReduction : public VectorReductionBase<VectorReduction>
 
   void runOnOperation() override
   {
-    llvm::dbgs() << "this is VectorReduction\n";
+    ANNC_LOG_DEBUG("vector-reduction") << "this is VectorReduction\n";
 
     ModuleOp module = getOperation();
     auto ctx = module->getContext();
@@ -34,7 +35,7 @@ class VectorReduction : public VectorReductionBase<VectorReduction>
   }
 
   LogicalResult matmulVectorReduction(linalg::MatmulOp matmulOp) {
-    llvm::dbgs() << "VectorReduction 1\n";
+    ANNC_LOG_DEBUG("vector-reduction") << "VectorReduction 1\n";
     constexpr StringLiteral kConfigAttrName = "lowering_config";
     auto attr = matmulOp->getAttr(kConfigAttrName);
     auto lowering_config_attr = llvm::dyn_cast<atir::LoweringConfigAttr>(attr);
@@ -195,7 +196,7 @@ class VectorReduction : public VectorReductionBase<VectorReduction>
 
 std::unique_ptr<mlir::Pass> createVectorReduction()
 {
-  llvm::dbgs() << "this is createVectorReduction\n";
+  ANNC_LOG_DEBUG("vector-reduction") << "this is createVectorReduction\n";
   return std::make_unique<VectorReduction>();
 }
 }

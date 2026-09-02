@@ -6,6 +6,7 @@
 #include "Dialect/Atir/Passes/Patterns/FusionBoundaryUtils.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
 #include "Kernel/KernelPriorityResolver.h"
+#include "Support/Log.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -85,8 +86,8 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
 
     auto customOpName = getCustomOpName(anchor, fusedOps);
     if (!customOpFilter.isEnabled(customOpName)) {
-      llvm::dbgs()
-          << "ANNC: Custom op type '" << customOpName
+      ANNC_LOG_WARN("fusion-pattern")
+          << "Custom op type '" << customOpName
           << "' filtered by FastCodegen type policy, skipping rewrite\n";
       return failure();
     }
@@ -178,8 +179,9 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
         metadata, TypeRange(inputTypes), schemaResultTypes);
     if (!inferredTypes) {
       llvm::consumeError(inferredTypes.takeError());
-      llvm::dbgs() << "ANNC: Invalid type bindings for '" << customOpName
-                   << "', skipping CustomizeOp rewrite\n";
+      ANNC_LOG_WARN("fusion-pattern")
+          << "Invalid type bindings for '" << customOpName
+          << "', skipping CustomizeOp rewrite\n";
       return failure();
     }
     req.type_constraints = std::move(*inferredTypes);
@@ -188,8 +190,9 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
       req.rhs_format = rhsFormat.getValue().str();
     }
     if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
-      llvm::dbgs() << "ANNC: No builtin kernel available for '" << customOpName
-                   << "', skipping CustomizeOp rewrite\n";
+      ANNC_LOG_WARN("fusion-pattern")
+          << "No builtin kernel available for '" << customOpName
+          << "', skipping CustomizeOp rewrite\n";
       return failure();
     }
 

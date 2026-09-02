@@ -1,5 +1,7 @@
 #include "Dialect/Atir/AtirOps.h"
 
+#include "Support/Log.h"
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -360,7 +362,7 @@ ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
         parser.parseKeyword("step") || parser.parseAttribute(step))
       return failure();
     regionArgs.push_back(inductionVariable);
-    printf("TODO: need check parse for op with start end step\n");
+    ANNC_LOG_WARN("atir-parse") << "TODO: need check parse for op with start end step\n";
   }
 
   if (succeeded(parser.parseOptionalKeyword("iter_args"))) {

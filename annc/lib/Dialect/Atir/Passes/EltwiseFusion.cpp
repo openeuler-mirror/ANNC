@@ -2,7 +2,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
-#include "iostream"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -13,7 +13,7 @@ namespace atir {
         AtirEltwiseFusionPass() = default;
 
         void runOnOperation() override {
-            std::cout << "this is AtirEltwiseFusionPass" << std::endl;
+            ANNC_LOG_DEBUG("eltwise-fusion") << "this is AtirEltwiseFusionPass\n";
             //todo ,addrelu
             //todo
             // 1.loweringaffineaddrelufunc
@@ -26,7 +26,7 @@ namespace atir {
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirEltwiseFusionPass() {
-        std::cout << "this is createAtirEltwiseFusionPass" << std::endl;
+        ANNC_LOG_DEBUG("eltwise-fusion") << "this is createAtirEltwiseFusionPass\n";
         return std::make_unique<AtirEltwiseFusionPass>();
     }
 }  // namespace atir

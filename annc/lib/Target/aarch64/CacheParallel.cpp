@@ -7,6 +7,7 @@
 #include "mlir/Dialect/Linalg/TransformOps/LinalgTransformOps.h"
 
 #include "Target/aarch64/Passes.h"
+#include "Support/Log.h"
 
 namespace annc
 {
@@ -16,7 +17,7 @@ struct CacheParallelMatmulTilingPattern : public OpRewritePattern<linalg::Matmul
  public:
   LogicalResult matchAndRewrite(linalg::MatmulOp matmulOp,
                                 PatternRewriter& rewriter) const override {
-    llvm::dbgs() << "this is CacheParallelMatmulTilingPattern \n";
+    ANNC_LOG_DEBUG("cache-parallel") << "this is CacheParallelMatmulTilingPattern \n";
     constexpr StringLiteral kConfigAttrName = "lowering_config";
     auto attr = matmulOp->getAttr(kConfigAttrName);
     attr.dump();
@@ -30,7 +31,7 @@ class CacheParallel : public CacheParallelBase<CacheParallel>
 
   void runOnOperation() override
   {
-    llvm::dbgs() << "this is CacheParallel\n";
+    ANNC_LOG_DEBUG("cache-parallel") << "this is CacheParallel\n";
     ModuleOp module = getOperation();
     module.walk([&](linalg::MatmulOp op) {
       //                if (failed(matmulCacheParallel(op))) {
@@ -311,8 +312,10 @@ class CacheParallel : public CacheParallelBase<CacheParallel>
     new_matmul->setAttr(kConfigAttrName, attr);
 
     matmulOp.erase();
-    llvm::dbgs() << "start dump parallelOp\n";
-    parallelOp->getParentOp()->dump();
+    if (::annc::log::levelEnabled(::annc::log::Level::Debug)) {
+      ANNC_LOG_DEBUG("cache-parallel") << "start dump parallelOp\n";
+      parallelOp->getParentOp()->dump();
+    }
 
     return success();
   }
@@ -321,7 +324,7 @@ class CacheParallel : public CacheParallelBase<CacheParallel>
 
 std::unique_ptr<mlir::Pass> createCacheParallel()
 {
-  llvm::dbgs() << "this is createCacheParallel\n";
+  ANNC_LOG_DEBUG("cache-parallel") << "this is createCacheParallel\n";
   return std::make_unique<CacheParallel>();
 }
 }

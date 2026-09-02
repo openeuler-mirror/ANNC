@@ -1,7 +1,9 @@
 #include "Kernel/KernelRegistry.h"
 
-#include <iostream>
 #include <sstream>
+#include <string>
+
+#include "Support/Log.h"
 
 namespace annc {
 namespace kernels {
@@ -60,30 +62,40 @@ void KernelRegistry::registerKernel(KernelInfo info) {
             continue;
         }
 
-        std::cerr << "[ANNC Kernel] Warning: Overwriting existing kernel '"
-                  << info.op_type << "' for backend '" << info.backend << "'";
-        if (info.isSpecialized()) {
-            std::cerr << " with " << info.type_constraints.size() << " type constraint(s)";
-        }
-        std::cerr << "\n"
-                  << "  Previous: " << entry.info.source_file << ":" << entry.info.line << "\n"
-                  << "  New: " << info.source_file << ":" << info.line << "\n";
+        // 单行输出：多行消息在日志聚合时会被前缀规则拆散。
+        ANNC_LOG_WARN("kernel")
+                << "Overwriting existing kernel '" << info.op_type
+                << "' for backend '" << info.backend << "'"
+                << (info.isSpecialized()
+                            ? " with " +
+                                      std::to_string(info.type_constraints.size()) +
+                                      " type constraint(s)"
+                            : "")
+                << "; previous: " << entry.info.source_file << ":"
+                << entry.info.line << ", new: " << info.source_file << ":"
+                << info.line << "\n";
         entry.info = std::move(info);
         return;
     }
 
-    std::cout << "[ANNC Kernel] Registered kernel: " << info.op_type
-              << " (backend: " << info.backend << ", symbol: " << info.symbol_name;
+    std::string specializations;
     if (info.isSpecialized()) {
-        std::cout << ", specializations: ";
         for (size_t i = 0; i < info.type_constraints.size(); ++i) {
             if (i != 0) {
-                std::cout << ", ";
+                specializations += ", ";
             }
-            std::cout << info.type_constraints[i].name << "=" << info.type_constraints[i].cpp_type_name;
+            specializations += info.type_constraints[i].name + "=" +
+                               info.type_constraints[i].cpp_type_name;
         }
     }
-    std::cout << ")\n";
+
+    ANNC_LOG_INFO("kernel")
+            << "Registered kernel: " << info.op_type
+            << " (backend: " << info.backend << ", symbol: " << info.symbol_name
+            << (specializations.empty()
+                        ? ""
+                        : ", specializations: " + specializations)
+            << ")\n";
 
     entries.push_back(KernelEntry{std::move(info)});
 }

@@ -6,12 +6,13 @@
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
-#include <iostream>
 #include <sstream>
 #include <string>
 #include <typeinfo>
 #include <algorithm>
 #include <unordered_map>
+
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -26,7 +27,8 @@ namespace atir {
         std::string readFile(const std::string& filename) {
             std::ifstream file(filename);
             if (!file.is_open()) {
-                std::cerr << "Cannot Read from File: " << filename << std::endl;
+                ANNC_LOG_ERROR("llm-codegen")
+                        << "Cannot Read from File: " << filename << "\n";
                 return "";
             }
 
@@ -38,7 +40,8 @@ namespace atir {
         bool writeFile(const std::string& filename, const std::string& content) {
             std::ofstream file(filename);
             if (!file.is_open()) {
-                std::cerr << "Cannot Write into File: " << filename << std::endl;
+                ANNC_LOG_ERROR("llm-codegen")
+                        << "Cannot Write into File: " << filename << "\n";
                 return false;
             }
 
@@ -54,7 +57,8 @@ namespace atir {
             FILE* originalStderr = stderr;
             FILE* file = freopen(filename.c_str(), "w", stderr);
             if (!file) {
-                std::cerr << "Failed to open file: " << filename << std::endl;
+                ANNC_LOG_ERROR("llm-codegen")
+                        << "Failed to open file: " << filename << "\n";
                 return false;
             }
             op->dump();
@@ -205,7 +209,8 @@ namespace atir {
 
             std::string outputPath = path + "/prompts/tfs_prompt.txt";
             if (!writeFile(outputPath, promptTemplate)) {
-                std::cout << "Failed to Write into TFS Prompt" << std::endl;
+                ANNC_LOG_ERROR("llm-codegen")
+                        << "Failed to Write into TFS Prompt\n";
             }
         }
 
@@ -221,11 +226,12 @@ namespace atir {
             //     return
             // }
 
-            std::cout << "If Generation Fails Refer to llm/cert_setup.txt" << std::endl;
+            ANNC_LOG_INFO("llm-codegen")
+                    << "If Generation Fails Refer to llm/cert_setup.txt\n";
 
             std::string patternName = getModuleName();
 
-            std::cout << "=== AtirLLMCodeGenPass Starting ===" << std::endl;
+            ANNC_LOG_INFO("llm-codegen") << "=== AtirLLMCodeGenPass Starting ===\n";
 
             // empty generated files from run
             system(("bash " + path + "/scripts/clean.sh").c_str());
@@ -236,65 +242,70 @@ namespace atir {
             // indicates whether the code generation succeeds or not
             bool valid = false;
             for (int iter = 1; iter <= numIter; iter++) {
-                std::cout << "=== Iteration " << iter << " Started ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen")
+                        << "=== Iteration " << iter << " Started ===\n";
 
                 // call llmcodegen.py to generate code
-                std::cout << "=== Start Generation ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Start Generation ===\n";
                 int status = system(("python3 " + path + "/llm/src/llmcodegen.py \"" + path + "\" \"" + std::to_string(iter) + patternName + "\"").c_str());
                 // if llmcodegen.py exits with error, something is wrong with llm, should halt further attempts
                 if (status != 0) {
-                    std::cerr << "=== Generation Failed ===" << std::endl;
-                    std::cout << "=== Iteration " << iter << " Ended ===" << std::endl;
+                    ANNC_LOG_ERROR("llm-codegen") << "=== Generation Failed ===\n";
+                    ANNC_LOG_INFO("llm-codegen")
+                            << "=== Iteration " << iter << " Ended ===\n";
                     break;
                 }
-                std::cout << "=== Generation Complete ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Generation Complete ===\n";
 
-                std::cout << "=== Start Compilation ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Start Compilation ===\n";
                 system(("bash " + path + "/scripts/compile.sh " + patternName + " " + std::to_string(iter)).c_str());
-                std::cout << "=== Compilation Complete ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Compilation Complete ===\n";
 
-                std::cout << "=== Printing Compilation Result ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Printing Compilation Result ===\n";
                 std::string compileError = getCompileError(iter, patternName);
-                std::cout << compileError << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << compileError << "\n";
                 // if (compileError.find("Build completed successfully") == std::string::npos) {
                 if (!compileError.empty()) {
                     buildTFSPrompt(iter, false);
-                    std::cout << "=== Compilation Failed ===" << std::endl;
-                    std::cout << "=== Iteration " << iter << " Finished ===" << std::endl;
+                    ANNC_LOG_WARN("llm-codegen") << "=== Compilation Failed ===\n";
+                    ANNC_LOG_INFO("llm-codegen")
+                            << "=== Iteration " << iter << " Finished ===\n";
                     continue;
                 }
-                
-                std::cout << "=== Start Testing ===" << std::endl;
+
+                ANNC_LOG_INFO("llm-codegen") << "=== Start Testing ===\n";
                 system(("bash " + path + "/scripts/test.sh " + patternName + " " + std::to_string(iter)).c_str());
-                std::cout << "=== Testing Complete ===" << std::endl;
-                
-                std::cout << "=== Printing Test Result ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== Testing Complete ===\n";
+
+                ANNC_LOG_INFO("llm-codegen") << "=== Printing Test Result ===\n";
                 std::string testError = getTestError(iter, patternName);
-                std::cout << testError << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << testError << "\n";
                 if (testError.find("TEST COMPLETED") == std::string::npos) {
                     buildTFSPrompt(iter, true);
-                    std::cout << "=== Test Failed ===" << std::endl;
-                    std::cout << "=== Iteration " << iter << " Ended ===" << std::endl;
+                    ANNC_LOG_WARN("llm-codegen") << "=== Test Failed ===\n";
+                    ANNC_LOG_INFO("llm-codegen")
+                            << "=== Iteration " << iter << " Ended ===\n";
                     continue;
                 }
-                
+
                 valid = true;
-                std::cout << "=== Iteration " << iter << " Finished ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen")
+                        << "=== Iteration " << iter << " Finished ===\n";
                 break;
             }
 
             if (valid) {
-                std::cout << "=== GENERATION SUCEEDED ===" << std::endl;
+                ANNC_LOG_INFO("llm-codegen") << "=== GENERATION SUCEEDED ===\n";
             } else {
-                std::cout << "=== GENERATION FAILED ===" << std::endl;
+                ANNC_LOG_ERROR("llm-codegen") << "=== GENERATION FAILED ===\n";
             }
 
-            std::cout << "=== AtirLLMCodeGenPass FINISHED ===" << std::endl;
+            ANNC_LOG_INFO("llm-codegen") << "=== AtirLLMCodeGenPass FINISHED ===\n";
         }
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirLLMCodeGenPass() {
-        std::cout << "this is createAtirLLMCodeGenPass" << std::endl;
+        ANNC_LOG_DEBUG("llm-codegen") << "this is createAtirLLMCodeGenPass\n";
         return std::make_unique<AtirLLMCodeGenPass>();
     }
 }  // namespace atir

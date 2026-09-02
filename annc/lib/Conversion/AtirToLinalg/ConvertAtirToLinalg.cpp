@@ -1,4 +1,3 @@
-#include <iostream>
 #include <Conversion/Common/InputTypeConverter.h>
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -8,6 +7,7 @@
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "Conversion/Passes.h"
 #include "Conversion/AtirToLinalg/OpLowering.h"
+#include "Support/Log.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -21,7 +21,7 @@ namespace atir {
         ConvertAtirToLinalg() = default;
 
         void runOnOperation() override {
-            std::cout << "this is ConvertAtirToLinalg" << std::endl;
+            ANNC_LOG_DEBUG("atir-to-linalg") << "this is ConvertAtirToLinalg\n";
             ConversionTarget target(getContext());
             target.addLegalDialect<linalg::LinalgDialect,
                                    arith::ArithDialect,
@@ -45,7 +45,7 @@ namespace atir {
      }
  };
      std::unique_ptr<mlir::Pass> createConvertAtirToLinalg() {
-         std::cout << "this is createConvertAtirToLinalgPass" << std::endl;
+         ANNC_LOG_DEBUG("atir-to-linalg") << "this is createConvertAtirToLinalgPass\n";
          return std::make_unique<ConvertAtirToLinalg>();
      }
 

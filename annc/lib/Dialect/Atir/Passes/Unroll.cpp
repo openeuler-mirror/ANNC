@@ -2,7 +2,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
-#include "iostream"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -59,7 +59,7 @@ namespace atir {
                                         bool right_transpose, bool left_transpose, bool output_transpose, bool do_relu, float relu_limit,
                                         int64_t MStart, int64_t NStart, int64_t KStart,
                                         int64_t MSize, int64_t NSize, int64_t KSize) {
-        std::cout << "this is createBlockMatMulWithAttrs1" << std::endl;
+        ANNC_LOG_DEBUG("unroll") << "this is createBlockMatMulWithAttrs1\n";
         mlir::Attribute encoding;
         auto outputType = atir::TensorType::get(ArrayRef<int64_t>{MSize, NSize}, builder.getF32Type(),
                               builder.getStringAttr("matmul_out"), encoding);
@@ -183,7 +183,8 @@ namespace atir {
                 if (i < results2D.size() && j < results2D[i].size()) {
                     rowBlocks.push_back(results2D[i][j]);
                 } else {
-                    std::cerr << "Error: Index out of bounds in create2DConcat" << std::endl;
+                    ANNC_LOG_ERROR("unroll")
+                            << "Index out of bounds in create2DConcat\n";
                     return nullptr;
                 }
             }
@@ -305,7 +306,7 @@ namespace atir {
         AtirUnrollPass() = default;
 
         void runOnOperation() override {
-            std::cout << "this is AtirUnrollPass" << std::endl;
+            ANNC_LOG_DEBUG("unroll") << "this is AtirUnrollPass\n";
 
             auto module = getOperation();
 
@@ -332,7 +333,7 @@ namespace atir {
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirUnrollPass() {
-        std::cout << "this is createAtirUnrollPass" << std::endl;
+        ANNC_LOG_DEBUG("unroll") << "this is createAtirUnrollPass\n";
         return std::make_unique<AtirUnrollPass>();
     }
 }  // namespace atir

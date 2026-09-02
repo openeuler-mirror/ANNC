@@ -7,13 +7,14 @@
 #include "mlir/Dialect/Linalg/TransformOps/LinalgTransformOps.h"
 
 #include "Target/aarch64/Passes.h"
+#include "Support/Log.h"
 
 namespace annc {
 class MatmulPackAffine : public MatmulPackAffineBase<MatmulPackAffine> {
   using Base::Base;
 
   void runOnOperation() override {
-    llvm::dbgs() << "this is MatmulPackAffine\n";
+    ANNC_LOG_DEBUG("matmul-pack-affine") << "this is MatmulPackAffine\n";
     ModuleOp module = getOperation();
     module.walk([&](linalg::MatmulOp op) {
       if (failed(matmulPackAffine(op))) {
@@ -332,7 +333,7 @@ class MatmulPackAffine : public MatmulPackAffineBase<MatmulPackAffine> {
 };
 
 std::unique_ptr<mlir::Pass> createMatmulPackAffine() {
-  llvm::dbgs() << "this is createMatmulPackAffine\n";
+  ANNC_LOG_DEBUG("matmul-pack-affine") << "this is createMatmulPackAffine\n";
   return std::make_unique<MatmulPackAffine>();
 }
 } // namespace annc
