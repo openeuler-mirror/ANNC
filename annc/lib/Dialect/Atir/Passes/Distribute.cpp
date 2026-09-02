@@ -2,7 +2,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
-#include "iostream"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -51,8 +51,9 @@ namespace atir {
                     if (auto addOp = findFollowingAddOp(matmulOp)) {
                         // find relu
                         if (auto reluOp = findFollowingReluOp(addOp)) {
-                            foundPattern = true; // 
-                            std::cout << "found matmul add relu pattern" << std::endl;
+                            foundPattern = true; //
+                            ANNC_LOG_DEBUG("distribute")
+                                    << "found matmul add relu pattern\n";
                             return WalkResult::interrupt();
                         }
                     }
@@ -74,14 +75,14 @@ namespace atir {
         AtirDistributePass() = default;
 
         void runOnOperation() override {
-            std::cout << "this is AtirDistributePass start" << std::endl;
+            ANNC_LOG_DEBUG("distribute") << "this is AtirDistributePass start\n";
             auto m = getOperation();
 
-            //todo 
+            //todo
 
             if (isSupportKPGemm(m))
             {
-                std::cout << "start KPGemm" << std::endl;
+                ANNC_LOG_INFO("distribute") << "start KPGemm\n";
                 mlir::PassManager pm(m.getContext(),PassManager::getAnyOpAnchorName(),mlir::OpPassManager::Nesting::Implicit);
                 pm.addPass(createAtirTilingPass());
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
@@ -117,14 +118,14 @@ namespace atir {
                 return;
             }
 
-            std::cout << "this is AtirDistributePass end" << std::endl;
+            ANNC_LOG_DEBUG("distribute") << "this is AtirDistributePass end\n";
 
             return;
         }
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirDistributePass() {
-        std::cout << "this is createAtirDistributePass" << std::endl;
+        ANNC_LOG_DEBUG("distribute") << "this is createAtirDistributePass\n";
         return std::make_unique<AtirDistributePass>();
     }
 }  // namespace atir

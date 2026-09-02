@@ -4,6 +4,7 @@
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "Helper.h"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -20,7 +21,7 @@ struct SelectLoweringStrategyRewrite : public OpRewritePattern<MatMulOp> {
   LogicalResult matchAndRewrite(MatMulOp op,
                                 PatternRewriter& rewriter) const override {
     //todo autotune
-    llvm::dbgs() << "this is SelectLoweringStrategyRewrite\n";
+    ANNC_LOG_DEBUG("select-lowering-strategy") << "this is SelectLoweringStrategyRewrite\n";
 
     auto lowering_config = op->getAttr(kConfigAttrName);
 
@@ -83,7 +84,7 @@ class AtirSelectLoweringStrategyPass : public AtirSelectLoweringStrategyBase<Ati
 };
 
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectLoweringStrategyPass() {
-  llvm::dbgs() << "this is createAtirSelectLoweringStrategyPass\n";
+  ANNC_LOG_DEBUG("select-lowering-strategy") << "this is createAtirSelectLoweringStrategyPass\n";
   return std::make_unique<AtirSelectLoweringStrategyPass>();
 }
 }  // namespace pimp

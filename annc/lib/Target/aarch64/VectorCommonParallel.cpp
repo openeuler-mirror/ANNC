@@ -7,6 +7,7 @@
 #include "mlir/Dialect/Linalg/TransformOps/LinalgTransformOps.h"
 
 #include "Target/aarch64/Passes.h"
+#include "Support/Log.h"
 
 namespace annc
 {
@@ -16,7 +17,7 @@ class VectorCommonParallel : public VectorCommonParallelBase<VectorCommonParalle
 
   void runOnOperation() override
   {
-    llvm::dbgs() << "this is VectorCommonParallel\n";
+    ANNC_LOG_DEBUG("vector-common-parallel") << "this is VectorCommonParallel\n";
 
     ModuleOp module = getOperation();
     module.walk([&](linalg::MatmulOp matmulOp) {
@@ -259,7 +260,7 @@ class VectorCommonParallel : public VectorCommonParallelBase<VectorCommonParalle
 
 std::unique_ptr<mlir::Pass> createVectorCommonParallel()
 {
-  llvm::dbgs() << "this is createVectorCommonParallel\n";
+  ANNC_LOG_DEBUG("vector-common-parallel") << "this is createVectorCommonParallel\n";
   return std::make_unique<VectorCommonParallel>();
 }
 }

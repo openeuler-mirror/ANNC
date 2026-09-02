@@ -538,6 +538,12 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 
 ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面向用户/运维的变量。CMake / 构建脚本内部变量（如 `ANNC_PATCH_FILE`）和已废弃变量未包含在内。
 
+### 通用（所有 ANNC 工具与插件）
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANNC_LOG_LEVEL` | `off` / `error` / `warn` / `info` / `debug`（大小写不敏感） | `error` | ANNC 内部分级日志级别（`annc/include/Support/Log.h`），输出统一走 stderr；例如 `ANNC_LOG_LEVEL=info` 可查看内置 kernel 注册明细，`off` 可完全静默；无法识别的取值回退 `error` 并向 stderr 输出一次性提示 |
+
 ### `annc` driver
 
 | 变量 | 取值 | 默认值 | 说明 |

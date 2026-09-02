@@ -3,7 +3,7 @@
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "Helper.h"
-#include "iostream"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -16,9 +16,7 @@ struct TilingMatMulRewrite : public OpRewritePattern<MatMulOp> {
 public:
     LogicalResult matchAndRewrite(MatMulOp op,
                                   PatternRewriter& rewriter) const override {
-
-        //
-        std::cout << "this is AtirTilingPass MatMulRewrite" << std::endl;
+        ANNC_LOG_DEBUG("tiling") << "this is AtirTilingPass MatMulRewrite\n";
 
         //todo tilingmatch
         auto lhsTilingAttr = op.getLhs().getType().getOnchipParallel();
@@ -128,7 +126,7 @@ public:
   AtirTilingPass() = default;
 
   void runOnOperation() override {
-      std::cout << "this is AtirTilingPass" << std::endl;
+      ANNC_LOG_DEBUG("tiling") << "this is AtirTilingPass\n";
       auto m = getOperation();
       auto ctx = m.getContext();
 //      m.dump();
@@ -142,7 +140,7 @@ public:
 };
 
 std::unique_ptr<OperationPass<ModuleOp>> createAtirTilingPass() {
-    std::cout << "this is createAtirTilingPass" << std::endl;
+    ANNC_LOG_DEBUG("tiling") << "this is createAtirTilingPass\n";
   return std::make_unique<AtirTilingPass>();
 }
 }  // namespace atir

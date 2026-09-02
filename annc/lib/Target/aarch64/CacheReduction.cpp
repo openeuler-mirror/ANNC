@@ -8,6 +8,7 @@
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 
 #include "Target/aarch64/Passes.h"
+#include "Support/Log.h"
 
 namespace annc
 {
@@ -17,7 +18,7 @@ struct CacheReductionMatmulTilingPattern : public OpRewritePattern<linalg::Matmu
  public:
   LogicalResult matchAndRewrite(linalg::MatmulOp op,
                                 PatternRewriter& rewriter) const override {
-    llvm::dbgs() << "this is CacheReductionMatmulTilingPattern \n";
+    ANNC_LOG_DEBUG("cache-reduction") << "this is CacheReductionMatmulTilingPattern \n";
     constexpr StringLiteral kConfigAttrName = "lowering_config";
     auto attr = op->getAttr(kConfigAttrName);
     attr.dump();
@@ -31,7 +32,7 @@ class CacheReduction : public CacheReductionBase<CacheReduction>
 
   void runOnOperation() override
   {
-    llvm::dbgs() << "this is CacheReduction\n";
+    ANNC_LOG_DEBUG("cache-reduction") << "this is CacheReduction\n";
 
     ModuleOp module = getOperation();
     auto ctx = module->getContext();
@@ -235,7 +236,7 @@ class CacheReduction : public CacheReductionBase<CacheReduction>
 
 std::unique_ptr<mlir::Pass> createCacheReduction()
 {
-  llvm::dbgs() << "this is createCacheReduction\n";
+  ANNC_LOG_DEBUG("cache-reduction") << "this is createCacheReduction\n";
   return std::make_unique<CacheReduction>();
 }
 }

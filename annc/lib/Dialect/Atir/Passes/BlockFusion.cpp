@@ -4,7 +4,7 @@
 #include "Dialect/Atir/Passes/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "Helper.h"
-#include "iostream"
+#include "Support/Log.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -20,7 +20,7 @@ namespace atir {
     public:
         LogicalResult matchAndRewrite(ReluOp op,
                                       PatternRewriter& rewriter) const override {
-            std::cout << "this is FuseReluRewrite" << std::endl;
+            ANNC_LOG_DEBUG("block-fusion") << "this is FuseReluRewrite\n";
             auto reluSourceOp = op.getInput().getDefiningOp();
             if (!reluSourceOp->getResult(0).hasOneUse()) {
                 return failure();
@@ -85,8 +85,7 @@ namespace atir {
     public:
         LogicalResult matchAndRewrite(MatMulOp op,
                                       PatternRewriter& rewriter) const override {
-
-            std::cout << "this is MatmulWithBiasRewrite" << std::endl;
+            ANNC_LOG_DEBUG("block-fusion") << "this is MatmulWithBiasRewrite\n";
             if (op.getBias() != nullptr) {
                 return failure();
             }
@@ -96,10 +95,10 @@ namespace atir {
                     // New AddOp structure: Add(output, input1, input2, ...)
                     // For matmul+bias fusion: Add(output, matmul_result, bias)
                     CHECK_LOGICAL_SUCCESS(addOp->getOperands().size() == 3);
-                    
+
                     // Get bias from the third operand (index 2)
                     Value bias = addOp.getOperand(2);
-                    
+
                     std::vector<NamedAttribute> attrs;
                     attrs.push_back(NamedAttribute(rewriter.getStringAttr("withBias"),
                                                    rewriter.getBoolAttr(true)));
@@ -136,11 +135,11 @@ namespace atir {
                     ins.push_back(op.getRhs());
                     ins.push_back(op.getC());
                     ins.push_back(bias);
-                    
+
                     // Build outputs
                     std::vector<Type> outs;
                     outs.push_back(addOp.getResult().getType());
-                    
+
                     // Move bias constant before matmul if needed
                     if (bias.getDefiningOp() != nullptr
                         && llvm::isa<atir::ConstantOp>(bias.getDefiningOp())) {
@@ -164,7 +163,7 @@ namespace atir {
         AtirBlockFusionPass() = default;
 
         void runOnOperation() override {
-            std::cout << "this is AtirBlockFusionPass" << std::endl;
+            ANNC_LOG_DEBUG("block-fusion") << "this is AtirBlockFusionPass\n";
 
             auto m = getOperation();
             auto ctx = m.getContext();
@@ -175,13 +174,13 @@ namespace atir {
             patterns.add<FuseReluRewrite>(ctx);
             patterns.add<MatmulWithBiasRewrite>(ctx);
             (void)applyPatternsGreedily(m, std::move(patterns), config);
-            std::cout << "Block fusion analysis completed" << std::endl;
+            ANNC_LOG_DEBUG("block-fusion") << "Block fusion analysis completed\n";
 
         }
     };
 
     std::unique_ptr<OperationPass<ModuleOp>> createAtirBlockFusionPass() {
-        std::cout << "this is createAtirBlockFusionPass" << std::endl;
+        ANNC_LOG_DEBUG("block-fusion") << "this is createAtirBlockFusionPass\n";
         return std::make_unique<AtirBlockFusionPass>();
     }
 }  // namespace atir
