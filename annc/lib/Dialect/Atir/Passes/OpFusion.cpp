@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/Passes.h"
@@ -29,6 +31,20 @@ namespace {
 
 constexpr StringLiteral kAotExecutionMode = "aot";
 constexpr StringLiteral kJitExecutionMode = "jit";
+constexpr char kGemmEnv[] = "ANNC_GEMM";
+
+// Reads ANNC_GEMM to control MatMul fusion on the generic path:
+//   unset / "0" — disabled, matmul stays on the generic path
+//   "1"         — enabled, but skip MatMul+Add fusion (plain MatMul only)
+//   "2"         — enabled, allow MatMul+Add fusion
+static int getGemmFusionLevel() {
+  const char *value = std::getenv(kGemmEnv);
+  if (!value) return 0;
+  StringRef trimmed = StringRef(value).trim();
+  if (trimmed == "1") return 1;
+  if (trimmed == "2") return 2;
+  return 0;
+}
 
 static void setExecutionMode(func::FuncOp function,
                              PatternRewriter &rewriter, StringRef mode) {
@@ -1435,6 +1451,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
+    const int gemmLevel = getGemmFusionLevel();
+    if (gemmLevel == 0) return failure();
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
     if (!matmulOp.getRhsFormat()) return failure();
 #endif
@@ -1448,7 +1466,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     bool hasBiasPostOp = false;
     bool hasReluPostOp = false;
 
-    addOp = findCompatibleMatMulAddUser(matmulOp, bias);
+    if (gemmLevel == 2) addOp = findCompatibleMatMulAddUser(matmulOp, bias);
     if (addOp) {
       hasBiasPostOp = true;
       reluOp = findCompatibleAddReluUser(addOp);

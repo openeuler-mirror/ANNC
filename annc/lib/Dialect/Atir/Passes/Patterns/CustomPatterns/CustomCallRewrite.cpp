@@ -70,13 +70,16 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
       bool ambiguous = false;
       AddOp add = findUniqueUser<AddOp>(anchor.getResult(), ambiguous);
       if (ambiguous) return failure();
-      if (!add) return success();
-
-      ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
-      if (ambiguous) return failure();
-      if (relu && isExecutionV2BuiltinCompatible(anchor, add, relu)) {
-        fusedOps.push_back(add);
-        fusedOps.push_back(relu);
+      if (add) {
+        ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
+        if (ambiguous) return failure();
+        if (relu && isExecutionV2BuiltinCompatible(anchor, add, relu)) {
+          fusedOps.push_back(add);
+          fusedOps.push_back(relu);
+          // The multi-output add+relu contract is owned by
+          // MatMulAddReluWithAddOutputRewrite; let it handle that case.
+          if (hasAddAndReluBoundary(fusedOps)) return failure();
+        }
       }
       return success();
     }
@@ -104,10 +107,6 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   std::string getCustomOpName(
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    if (getFusionAbi(anchor) == "annc_execution_v2" &&
-        hasAddAndReluBoundary(fusedOps)) {
-      return "MatMulAddReluWithAddOutput";
-    }
     if (fusedOps.size() == 3) {
       return "MatMulAddRelu";
     }
@@ -125,15 +124,6 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
       MatMulOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
     if (getFusionAbi(anchor) == "annc_execution_v2") {
-      if (hasAddAndReluBoundary(fusedOps)) {
-        return CustomOpSchema::get("MatMulAddReluWithAddOutput")
-            .TypeVar("T")
-            .MemRefArg("lhs", 2, "T")
-            .MemRefArg("rhs", 2, "T")
-            .MemRefArg("bias", 1, "T")
-            .Result("add", 2, "T")
-            .Result("relu", 2, "T");
-      }
       if (fusedOps.size() == 3) {
         return CustomOpSchema::get("MatMulAddRelu")
             .TypeVar("T")
@@ -181,7 +171,65 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
   }
 };
 
+// Rewrites the annc_execution_v2 MatMul+Add+Relu multi-output contract into
+// the aarch64 "MatMulAddReluWithAddOutput" builtin. This is aarch64-native,
+// so it is registered unconditionally (unlike the KDNN-only MatMul* patterns).
+struct MatMulAddReluWithAddOutputRewrite
+    : public CustomFusionPatternBase<MatMulOp> {
+  MatMulAddReluWithAddOutputRewrite(MLIRContext *context,
+                                    const CustomOpTypeFilter &customOpFilter,
+                                    PatternBenefit benefit = 9)
+      : CustomFusionPatternBase<MatMulOp>(context, customOpFilter, benefit) {}
+
+  mlir::LogicalResult matchFusion(
+      MatMulOp anchor,
+      llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    if (getFusionAbi(anchor) != "annc_execution_v2") return failure();
+    fusedOps.push_back(anchor);
+
+    bool ambiguous = false;
+    AddOp add = findUniqueUser<AddOp>(anchor.getResult(), ambiguous);
+    if (ambiguous || !add) return failure();
+
+    ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
+    if (ambiguous || !relu) return failure();
+    if (!isExecutionV2BuiltinCompatible(anchor, add, relu)) return failure();
+
+    fusedOps.push_back(add);
+    fusedOps.push_back(relu);
+    if (!hasAddAndReluBoundary(fusedOps)) return failure();
+    return success();
+  }
+
+  std::string getCustomOpName(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    return "MatMulAddReluWithAddOutput";
+  }
+
+  CustomOpSchema getCustomOpSchema(
+      MatMulOp anchor,
+      llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
+    return CustomOpSchema::get("MatMulAddReluWithAddOutput")
+        .TypeVar("T")
+        .MemRefArg("lhs", 2, "T")
+        .MemRefArg("rhs", 2, "T")
+        .MemRefArg("bias", 1, "T")
+        .Result("add", 2, "T")
+        .Result("relu", 2, "T");
+  }
+};
+
+REGISTER_CUSTOM_PATTERN(MatMulAddReluWithAddOutputRewrite);
+
+// MatMul/MatMulAdd/MatMulAddRelu fusion is a KDNN-only path: aarch64 only
+// registers a plain MatMul kernel, so MatMulAdd/MatMulAddRelu exist only in
+// the kdnn backend. Gate registration on the KDNN adaptor so that, with KDNN
+// disabled, these ops fall through to the generic lowering path.
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
 REGISTER_CUSTOM_PATTERN(MatmulToCustomCallRewrite);
+#endif
 
 // ---------------------------------------------------------------------------
 // Patterns for ops that only exist in external kernel libraries.
