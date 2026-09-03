@@ -549,7 +549,12 @@ ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
 | `ANNC_CLANG` | clang 可执行文件路径 | `clang` | 链接阶段使用的 clang 路径 |
+| `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_PREFIX}/lib` | 覆盖内置 kernel、线程池和 LLVM 静态库的搜索目录 |
 | `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | **内部使用**，动态测试编译时由 driver 自动设置，测试 driver 据此加载共享库 |
+
+也可以对单次编译使用命令行参数 `--kernel-lib-path <dir>`。命令行参数优先于
+`ANNC_KERNEL_LIB_PATH`；未指定时使用构建时配置的安装路径。移动 ANNC 安装目录后，需要通过
+命令行参数或环境变量指定新的 `lib` 目录。
 
 ### `annc-asm` / FastCodegen
 

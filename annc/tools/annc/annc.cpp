@@ -17,6 +17,10 @@ using namespace std;
 static const char* KERNEL_LIB_PATH = ANNC_KERNEL_LIB_PATH;
 
 string getKernelLibPath() {
+    const char* envPath = getenv("ANNC_KERNEL_LIB_PATH");
+    if (envPath && envPath[0] != '\0') {
+        return envPath;
+    }
     return KERNEL_LIB_PATH;
 }
 
@@ -63,6 +67,7 @@ public:
     string inputFile;
     string outputFile;
     string testFile;
+    string kernelLibPath;
     bool verbose = false;
     bool sharedLibrary = false;
     vector<string> extraArgs;
@@ -84,6 +89,10 @@ public:
                 if (i + 1 < argc) {
                     testFile = argv[++i];
                 }
+            } else if (arg == "--kernel-lib-path") {
+                if (i + 1 < argc) {
+                    kernelLibPath = argv[++i];
+                }
             } else if (arg == "--shared" || arg == "-shared") {
                 sharedLibrary = true;
             } else if (arg.find("--") == 0) {
@@ -96,7 +105,15 @@ public:
         if (inputFile.empty()) {
             throw runtime_error("Input file not specified");
         }
-        
+
+        if (kernelLibPath.empty()) {
+            kernelLibPath = getKernelLibPath();
+        }
+        if (!fs::is_directory(kernelLibPath)) {
+            throw runtime_error("Kernel library directory does not exist: " +
+                                kernelLibPath);
+        }
+
         if (outputFile.empty()) {
             if (sharedLibrary) {
                 outputFile = fs::path(inputFile).stem().string() + ".so";
@@ -510,13 +527,13 @@ private:
         
         string command = getClangPath() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
         command += " \"" + config.testFile + "\"";
-        command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
-        command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
+        command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
 #endif
-        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+        command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
-        command += " -L" + getKernelLibPath() +
+        command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
@@ -543,13 +560,13 @@ private:
                                    : config.outputFile;
         
         string command = getClangPath() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
-        command += " -L" + getKernelLibPath() + " -lANNCBuiltinKernels";
+        command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
-        command += " -L" + getKernelLibPath() + " -lannc_gemm_microkernels";
+        command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
 #endif
-        command += " -Wl,--whole-archive -L" + getKernelLibPath() +
+        command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
-        command += " -L" + getKernelLibPath() +
+        command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
@@ -602,6 +619,7 @@ void printUsage() {
     cout << "Options:" << endl;
     cout << "  -o <file>              Output file (default: a.out or input.so)" << endl;
     cout << "  -t <file>              Test C file (default: test.c)" << endl;
+    cout << "  --kernel-lib-path <dir> Kernel library directory (default: env ANNC_KERNEL_LIB_PATH or install prefix)" << endl;
     cout << "  -v, --verbose          Verbose output" << endl;
     cout << "  --shared, -shared      Generate shared library (.so) instead of executable" << endl;
     cout << "  --help                 Show this help message" << endl;
