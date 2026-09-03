@@ -36,9 +36,11 @@ func.func @vecmat(%c: memref<1x400xf32>, %a: memref<1x400xf32>,
   return
 }
 
-func.func @matvec_priority(%c: memref<1x1xf32>, %a: memref<1x17xf32>,
-                            %b: memref<17x1xf32>) {
-  linalg.matmul ins(%a, %b : memref<1x17xf32>, memref<17x1xf32>)
+// Large M*N*K problem with N==1 and M==1: the matrix-vector family wins over
+// the vector-matrix family once the problem exceeds the small-shape limit.
+func.func @matvec_priority(%c: memref<1x1xf32>, %a: memref<1x5000xf32>,
+                            %b: memref<5000x1xf32>) {
+  linalg.matmul ins(%a, %b : memref<1x5000xf32>, memref<5000x1xf32>)
     outs(%c : memref<1x1xf32>)
   return
 }

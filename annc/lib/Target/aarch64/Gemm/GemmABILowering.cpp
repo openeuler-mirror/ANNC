@@ -88,8 +88,15 @@ LogicalResult lowerPackBCall(ModuleOp module, func::CallOp call) {
 }
 
 LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
+  FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(call);
+  if (failed(plan)) return failure();
   const bool isRowMajor =
+      aarch64::gemm::getGemmLeafAbi(plan->executionKind, plan->rhsPacking) ==
+      aarch64::gemm::GemmLeafAbi::kRowMajor;
+  const bool hasRowMajorCallee =
       call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName;
+  if (isRowMajor != hasRowMajorCallee)
+    return call.emitOpError("microkernel leaf does not match the GEMM plan");
   // Packed leaves have seven index operands; row-major leaves add ldb.
   const int64_t expectedOperands = isRowMajor ? 11 : 10;
   if (call.getNumOperands() != expectedOperands)

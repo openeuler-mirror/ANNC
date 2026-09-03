@@ -44,7 +44,6 @@ std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
 std::optional<RhsPacking> parseRhsPackingName(llvm::StringRef name) {
   if (name == "direct") return RhsPacking::kDirect;
   if (name == "packed") return RhsPacking::kPacked;
-  if (name == "row_major") return RhsPacking::kRowMajor;
   return std::nullopt;
 }
 
@@ -369,6 +368,20 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
                                           /*allowLegacySerial=*/false))) {
     return mlir::failure();
   }
+  RhsPacking rhsPacking = RhsPacking::kPacked;
+  if (auto value = candidate.getAs<mlir::StringAttr>(kRhsPackingAttrName)) {
+    auto parsed = parseRhsPackingName(value.getValue());
+    if (!parsed) {
+      op->emitOpError() << "has unsupported rhs_packing " << value.getValue();
+      return mlir::failure();
+    }
+    rhsPacking = *parsed;
+  }
+  if (executionKind != GemmExecutionKind::kGemm &&
+      rhsPacking != RhsPacking::kDirect) {
+    op->emitOpError("non-GEMM execution requires direct RHS");
+    return mlir::failure();
+  }
   GemmKernelTile kernelTile{values[4], values[5]};
   if (kernelTile.mr > abi.maxMr ||
       kernelTile.panelLanes > abi.maxPanelLanes ||
@@ -390,7 +403,8 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
                        GemmCacheTile{values[1], values[2], values[3]},
                        kernelTile,
                        values[6],
-                       executionKind};
+                       executionKind,
+                       rhsPacking};
 }
 
 mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
@@ -464,9 +478,7 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
         rhsPackSource != RhsPackSource::kNone)) ||
       (executionKind == GemmExecutionKind::kVectorMatrix &&
        (rhsPacking != RhsPacking::kDirect ||
-        rhsPackSource != RhsPackSource::kNone)) ||
-      (executionKind != GemmExecutionKind::kGemm &&
-       rhsPacking == RhsPacking::kRowMajor)) {
+        rhsPackSource != RhsPackSource::kNone))) {
     op->emitOpError("has an invalid execution/RHS representation combination");
     return mlir::failure();
   }
@@ -552,6 +564,27 @@ llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind) {
       return "gemm";
   }
   llvm_unreachable("unknown GEMM execution kind");
+}
+
+GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
+                                 int64_t k) {
+  if (m * n * k <= kRowMajorOperationLimit)
+    return {GemmExecutionKind::kGemm, RhsPacking::kDirect};
+  if (isa == GemmIsa::kNeon && n == 1)
+    return {GemmExecutionKind::kMatrixVector, RhsPacking::kDirect};
+  if (isa == GemmIsa::kNeon && m == 1)
+    return {GemmExecutionKind::kVectorMatrix, RhsPacking::kDirect};
+  return {GemmExecutionKind::kGemm, RhsPacking::kPacked};
+}
+
+GemmLeafAbi getGemmLeafAbi(GemmExecutionKind executionKind,
+                           RhsPacking rhsPacking) {
+  if (executionKind == GemmExecutionKind::kMatrixVector)
+    return GemmLeafAbi::kPackedFamily;
+  if (executionKind == GemmExecutionKind::kVectorMatrix)
+    return GemmLeafAbi::kRowMajor;
+  return rhsPacking == RhsPacking::kDirect ? GemmLeafAbi::kRowMajor
+                                           : GemmLeafAbi::kPackedFamily;
 }
 
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa) {

@@ -3,6 +3,8 @@
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=HIP09_CANDIDATE
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=HIP09_PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=LARGE_CANDIDATE
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=LARGE_PLAN
 
 // PROBLEM-LABEL: func.func @external_destination(
 // PROBLEM: linalg.matmul {
@@ -26,6 +28,7 @@
 // CANDIDATE-SAME: mr = 3 : i64
 // CANDIDATE-SAME: nc = 16 : i64
 // CANDIDATE-SAME: panel_lanes = 2 : i64
+// CANDIDATE-SAME: rhs_packing = "direct"
 // CANDIDATE-SAME: target_arch = "hip12"
 // CANDIDATE-SAME: thread_count = 1 : i64
 // CANDIDATE-SAME: thread_partition = "static-2d"
@@ -42,6 +45,7 @@
 // HIP09_CANDIDATE-SAME: mr = 3 : i64
 // HIP09_CANDIDATE-SAME: nc = 16 : i64
 // HIP09_CANDIDATE-SAME: panel_lanes = 2 : i64
+// HIP09_CANDIDATE-SAME: rhs_packing = "direct"
 // HIP09_CANDIDATE-SAME: target_arch = "hip09"
 
 // HIP09_PLAN-LABEL: func.func @external_destination(
@@ -51,8 +55,9 @@
 // HIP09_PLAN-SAME: isa = "neon"
 // HIP09_PLAN-SAME: kernel_family = "annc-neon-f32-v1"
 // HIP09_PLAN-SAME: mr = 3 : i64
-// HIP09_PLAN-SAME: pack_b_schema = "annc-neon-packed-b-v1"
 // HIP09_PLAN-SAME: panel_lanes = 2 : i64
+// HIP09_PLAN-SAME: rhs_pack_source = "none"
+// HIP09_PLAN-SAME: rhs_packing = "direct"
 // HIP09_PLAN-SAME: target_arch = "hip09"
 // HIP09_PLAN-SAME: vector_length_bytes = 16 : i64
 
@@ -75,21 +80,42 @@
 // PLAN-SAME: n = 20 : i64
 // PLAN-SAME: nc = 16 : i64
 // PLAN-SAME: next_kc_mode = "accumulate"
-// PLAN-SAME: pack_b_execution = "full-then-compute"
-// PLAN-SAME: pack_b_schema = "annc-sve-packed-b-v2"
 // PLAN-SAME: panel_lanes = 2 : i64
-// PLAN-SAME: rhs_packing = "packed"
+// PLAN-SAME: rhs_pack_source = "none"
+// PLAN-SAME: rhs_packing = "direct"
 // PLAN-SAME: target_arch = "hip12"
 // PLAN-SAME: thread_count = 1 : i64
 // PLAN-SAME: thread_partition = "static-2d"
 // PLAN-SAME: vector_length_bytes = 32 : i64
 // PLAN-SAME: version = 1 : i64
+
+// LARGE_CANDIDATE-LABEL: func.func @packed_destination(
+// LARGE_CANDIDATE: linalg.matmul {
+// LARGE_CANDIDATE-SAME: execution_kind = "gemm"
+// LARGE_CANDIDATE-SAME: rhs_packing = "packed"
+
+// LARGE_PLAN-LABEL: func.func @packed_destination(
+// LARGE_PLAN: linalg.matmul {
+// LARGE_PLAN-SAME: pack_b_execution = "full-then-compute"
+// LARGE_PLAN-SAME: pack_b_schema = "annc-sve-packed-b-v2"
+// LARGE_PLAN-SAME: rhs_packing = "packed"
+
 func.func @external_destination(
     %c: memref<12x20xf32>,
     %a: memref<12x8xf32>,
     %b: memref<8x20xf32>) {
   linalg.matmul
       ins(%a, %b : memref<12x8xf32>, memref<8x20xf32>)
+      outs(%c : memref<12x20xf32>)
+  return
+}
+
+func.func @packed_destination(
+    %c: memref<12x20xf32>,
+    %a: memref<12x20xf32>,
+    %b: memref<20x20xf32>) {
+  linalg.matmul
+      ins(%a, %b : memref<12x20xf32>, memref<20x20xf32>)
       outs(%c : memref<12x20xf32>)
   return
 }

@@ -40,13 +40,9 @@ LogicalResult selectGemmStrategy(
   NamedAttrList candidate;
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
-  auto executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
-  if (config.isa == aarch64::gemm::GemmIsa::kNeon) {
-    if (problem->n == 1)
-      executionKind = aarch64::gemm::GemmExecutionKind::kMatrixVector;
-    else if (problem->m == 1)
-      executionKind = aarch64::gemm::GemmExecutionKind::kVectorMatrix;
-  }
+  const auto selection = aarch64::gemm::selectGemmPath(
+      config.isa, problem->m, problem->n, problem->k);
+  const auto executionKind = selection.executionKind;
   const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
       config.target, config.isa, config.dataType, executionKind);
   candidate.append(
@@ -75,6 +71,12 @@ LogicalResult selectGemmStrategy(
       aarch64::gemm::kExecutionKindAttrName,
       builder.getStringAttr(
           aarch64::gemm::getGemmExecutionKindName(executionKind)));
+  candidate.append(
+      aarch64::gemm::kRhsPackingAttrName,
+      builder.getStringAttr(selection.rhsPacking ==
+                                    aarch64::gemm::RhsPacking::kDirect
+                                ? "direct"
+                                : "packed"));
   op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
                          candidate.getDictionary(op->getContext()));
   return success();
