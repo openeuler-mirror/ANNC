@@ -120,7 +120,10 @@ struct GemmProblem {
   int64_t ldc;
 };
 
-enum class RhsPacking;
+// Whether the RHS is read in its original layout or materialized by pack_b.
+enum class RhsPacking { kDirect, kPacked };
+enum class KcMode { kOverwrite, kAccumulate };
+enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 struct GemmCandidate {
   int64_t version;
@@ -133,11 +136,6 @@ struct GemmCandidate {
   GemmExecutionKind executionKind;
   RhsPacking rhsPacking;
 };
-
-enum class KcMode { kOverwrite, kAccumulate };
-// Whether the RHS is read in its original layout or materialized by pack_b.
-enum class RhsPacking { kDirect, kPacked };
-enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 struct GemmTilingPlan {
   int64_t version;
@@ -185,13 +183,25 @@ struct GemmPathSelection {
 GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
                                  int64_t k);
 
-// The microkernel leaf ABI consumed by a plan: the packed family reads the
-// packed RHS with seven index operands; the row-major leaf reads the RHS in
-// its original layout and adds ldb as an eighth index operand.
-enum class GemmLeafAbi { kPackedFamily, kRowMajor };
+// The microkernel leaf family selected for a plan, corresponding one-to-one
+// with selectGemmPath: the matrix-vector (N==1) and vector-matrix (M==1)
+// leaves, the row-major small-shape GEMM leaf, and the packed GEMM leaf.
+// The argument signature follows: kMatvec and kPacked use seven index
+// operands (no RHS leading dimension); kVecmat and kRowMajor add ldb as an
+// eighth index operand.
+enum class GemmLeafKind {
+  kMatvec,
+  kVecmat,
+  kRowMajor,
+  kPacked,
+};
 
-GemmLeafAbi getGemmLeafAbi(GemmExecutionKind executionKind,
-                           RhsPacking rhsPacking);
+GemmLeafKind getGemmLeafKind(GemmExecutionKind executionKind,
+                             RhsPacking rhsPacking);
+
+// Whether the leaf signature carries the RHS leading dimension (kVecmat and
+// kRowMajor use the row-major ldb ABI with eight index operands).
+bool usesLdbAbi(GemmLeafKind kind);
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa);
 llvm::StringRef getKcModeName(KcMode mode);
 mlir::LogicalResult requireStage(mlir::Operation *op, llvm::StringRef expected);

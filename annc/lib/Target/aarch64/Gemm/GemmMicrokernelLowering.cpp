@@ -27,9 +27,8 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
   if (failed(m) || failed(n) || failed(k)) return failure();
   FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(call);
   if (failed(plan)) return failure();
-  const bool isRowMajor =
-      aarch64::gemm::getGemmLeafAbi(plan->executionKind, plan->rhsPacking) ==
-      aarch64::gemm::GemmLeafAbi::kRowMajor;
+  const bool isRowMajor = aarch64::gemm::usesLdbAbi(
+    aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
   if (isRowMajor != hasRowMajorCallee) {
     call.emitOpError("microkernel leaf does not match the GEMM plan");
     return failure();

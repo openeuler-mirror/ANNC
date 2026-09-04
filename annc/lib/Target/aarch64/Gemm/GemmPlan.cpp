@@ -577,14 +577,18 @@ GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
   return {GemmExecutionKind::kGemm, RhsPacking::kPacked};
 }
 
-GemmLeafAbi getGemmLeafAbi(GemmExecutionKind executionKind,
-                           RhsPacking rhsPacking) {
+GemmLeafKind getGemmLeafKind(GemmExecutionKind executionKind,
+                             RhsPacking rhsPacking) {
   if (executionKind == GemmExecutionKind::kMatrixVector)
-    return GemmLeafAbi::kPackedFamily;
+    return GemmLeafKind::kMatvec;
   if (executionKind == GemmExecutionKind::kVectorMatrix)
-    return GemmLeafAbi::kRowMajor;
-  return rhsPacking == RhsPacking::kDirect ? GemmLeafAbi::kRowMajor
-                                           : GemmLeafAbi::kPackedFamily;
+    return GemmLeafKind::kVecmat;
+  return rhsPacking == RhsPacking::kDirect ? GemmLeafKind::kRowMajor
+                                           : GemmLeafKind::kPacked;
+}
+
+bool usesLdbAbi(GemmLeafKind kind) {
+  return kind == GemmLeafKind::kRowMajor || kind == GemmLeafKind::kVecmat;
 }
 
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa) {

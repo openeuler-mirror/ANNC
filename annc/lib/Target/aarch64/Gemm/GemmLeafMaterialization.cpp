@@ -263,9 +263,8 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
 
   const bool isDirectRhs =
       plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
-  const bool usesLdbAbi =
-      aarch64::gemm::getGemmLeafAbi(plan->executionKind, plan->rhsPacking) ==
-      aarch64::gemm::GemmLeafAbi::kRowMajor;
+  const bool usesLdbAbi = aarch64::gemm::usesLdbAbi(
+    aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
   const bool scalarK =
       usesLdbAbi &&
       plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
