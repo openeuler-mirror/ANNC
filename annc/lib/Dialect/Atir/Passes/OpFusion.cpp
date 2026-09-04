@@ -1453,9 +1453,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                                 PatternRewriter &rewriter) const override {
     const int gemmLevel = getGemmFusionLevel();
     if (gemmLevel == 0) return failure();
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-    if (!matmulOp.getRhsFormat()) return failure();
-#endif
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
