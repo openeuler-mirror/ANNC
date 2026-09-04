@@ -459,7 +459,7 @@ flowchart LR
 - `Distribute` Pass 是编译策略层的入口，检测算子模式后选择对应编译流水线（GEMM / 通用 MLIR Lowering / LLM / XLA）；当前仅 GEMM 分支实际可用，LLM/XLA 为 stub。kernel 实现层的选择发生在编译流水线内部的 Lowering 阶段，两者职责分离。
 - GEMM MLIR 优化路径的 Lowering 策略（Affine/Linalg）按算子特性选择，当前尚未收敛为单一主力路径，待验证后逐步收敛。
 - AArch64 后端采用六级 tiling 抽象：distribution、cache\_parallel、cache\_reduction、vector\_common\_parallel、vector\_reduction、vector\_inner\_parallel。当前 Target/aarch64 共注册 6 个 pass：对应六级抽象的 cache-parallel、cache-reduction、vector-common-parallel、vector-reduction（distribution/vector_inner_parallel 仅为配置字段，尚无专属 pass），另有 matmul-pack-affine（数据打包）与 annc-one-shot-bufferize（bufferize）两个辅助 pass。各 Pass 通过 `annc-asm` 命令行参数组合调用，pipeline 编排尚在开发中（`buildAArch64CodegenPipeline()` 当前为空实现）。
-- Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
+- Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
 - 新编译策略可增量接入（如 XLA），不影响已有策略的稳定性。
 
 ### 4.3 Use Case 实现

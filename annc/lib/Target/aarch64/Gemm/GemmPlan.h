@@ -61,6 +61,9 @@ inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
     "annc_aarch64_sve_packed_b_offset_f32";
 
 inline constexpr int64_t kPlanVersion = 1;
+// Problems up to this many FMAs keep the RHS in its original row-major layout
+// instead of paying the runtime pack_b call.
+inline constexpr int64_t kRowMajorOperationLimit = 4500;
 
 enum class GemmTarget { kHip12, kHip09 };
 enum class GemmIsa { kNeon, kSve };
@@ -117,6 +120,11 @@ struct GemmProblem {
   int64_t ldc;
 };
 
+// Whether the RHS is read in its original layout or materialized by pack_b.
+enum class RhsPacking { kDirect, kPacked };
+enum class KcMode { kOverwrite, kAccumulate };
+enum class RhsPackSource { kNone, kGenerated, kPrepacked };
+
 struct GemmCandidate {
   int64_t version;
   GemmTarget target;
@@ -126,11 +134,8 @@ struct GemmCandidate {
   GemmKernelTile kernelTile;
   int64_t threadCount;
   GemmExecutionKind executionKind;
+  RhsPacking rhsPacking;
 };
-
-enum class KcMode { kOverwrite, kAccumulate };
-enum class RhsPacking { kDirect, kPacked, kRowMajor };
-enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 struct GemmTilingPlan {
   int64_t version;
@@ -167,6 +172,36 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op);
 llvm::StringRef getGemmTargetName(GemmTarget target);
 llvm::StringRef getGemmIsaName(GemmIsa isa);
 llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind);
+
+struct GemmPathSelection {
+  GemmExecutionKind executionKind;
+  RhsPacking rhsPacking;
+};
+
+// Small generic GEMM problems take the direct-RHS path before skinny GEMV
+// selection. Larger NEON N==1/M==1 problems then use the GEMV families.
+GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
+                                 int64_t k);
+
+// The microkernel leaf family selected for a plan, corresponding one-to-one
+// with selectGemmPath: the matrix-vector (N==1) and vector-matrix (M==1)
+// leaves, the row-major small-shape GEMM leaf, and the packed GEMM leaf.
+// The argument signature follows: kMatvec and kPacked use seven index
+// operands (no RHS leading dimension); kVecmat and kRowMajor add ldb as an
+// eighth index operand.
+enum class GemmLeafKind {
+  kMatvec,
+  kVecmat,
+  kRowMajor,
+  kPacked,
+};
+
+GemmLeafKind getGemmLeafKind(GemmExecutionKind executionKind,
+                             RhsPacking rhsPacking);
+
+// Whether the leaf signature carries the RHS leading dimension (kVecmat and
+// kRowMajor use the row-major ldb ABI with eight index operands).
+bool usesLdbAbi(GemmLeafKind kind);
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa);
 llvm::StringRef getKcModeName(KcMode mode);
 mlir::LogicalResult requireStage(mlir::Operation *op, llvm::StringRef expected);

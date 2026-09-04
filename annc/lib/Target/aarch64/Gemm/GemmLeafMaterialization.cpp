@@ -195,18 +195,6 @@ FailureOr<PackedBBlock> materializePackedBBlock(
             "(PC, JC) RHS subviews");
       }
 
-      if (plan.rhsPacking == aarch64::gemm::RhsPacking::kRowMajor) {
-        // The row-major kernel consumes B in its original KxN layout.  JR is
-        // an element offset in the cache block and therefore advances B by
-        // columns without allocating a packing workspace.
-        Value column = rhs->offset;
-        if (!isStaticZero(rhsTile.getMixedOffsets()[1]))
-          column = microBuilder.create<arith::AddIOp>(loc, column, jr);
-        return PackedBBlock{aarch64::gemm::castToUnrankedF32MemRef(
-                                microBuilder, loc, rhs->base),
-                            column};
-      }
-
       Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
       FailureOr<int64_t> staticK = getStaticDimension(rhsBlock, 0);
       FailureOr<int64_t> staticN = getStaticDimension(rhsBlock, 1);
@@ -235,10 +223,6 @@ FailureOr<PackedBBlock> materializePackedBBlock(
     return op->emitOpError(
         "requires identity-layout bases with statically strided RHS subviews");
   }
-  if (plan.rhsPacking == aarch64::gemm::RhsPacking::kRowMajor)
-    return PackedBBlock{aarch64::gemm::castToUnrankedF32MemRef(builder, loc,
-                                                               rhs->base),
-                        rhs->offset};
   Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
   FailureOr<int64_t> staticK = getStaticDimension(rhsInput, 0);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);
@@ -279,11 +263,11 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
 
   const bool isDirectRhs =
       plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
-  const bool isRowMajor =
-      plan->rhsPacking == aarch64::gemm::RhsPacking::kRowMajor;
-  const bool usesLdbAbi =
-      isRowMajor ||
-      plan->executionKind == aarch64::gemm::GemmExecutionKind::kVectorMatrix;
+  const bool usesLdbAbi = aarch64::gemm::usesLdbAbi(
+    aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
+  const bool scalarK =
+      usesLdbAbi &&
+      plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
   Value rhsBase;
   Value rhsOffset;
   if (isDirectRhs) {
@@ -340,11 +324,8 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
     if (failed(kScalarUnroll))
       return op->emitOpError(
           "requires a valid NEON kernel ABI vector K unroll");
-    const bool passesScalarK =
-        isRowMajor &&
-        plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
     familyArgument = builder.create<arith::ConstantIndexOp>(
-        loc, passesScalarK ? *staticK : *staticK / *kScalarUnroll);
+        loc, scalarK ? *staticK : *staticK / *kScalarUnroll);
   }
 
   auto unranked = UnrankedMemRefType::get(builder.getF32Type(), 0);

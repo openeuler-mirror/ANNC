@@ -17,7 +17,7 @@ FailureOr<int64_t> getStaticMicrokernelDimension(func::CallOp call,
 }
 
 FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
-                                               bool isRowMajor) {
+                                               bool hasRowMajorCallee) {
   FailureOr<int64_t> m =
       getStaticMicrokernelDimension(call, aarch64::gemm::kMicrokernelMAttrName);
   FailureOr<int64_t> n =
@@ -27,6 +27,12 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
   if (failed(m) || failed(n) || failed(k)) return failure();
   FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(call);
   if (failed(plan)) return failure();
+  const bool isRowMajor = aarch64::gemm::usesLdbAbi(
+    aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
+  if (isRowMajor != hasRowMajorCallee) {
+    call.emitOpError("microkernel leaf does not match the GEMM plan");
+    return failure();
+  }
   FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
       plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
       plan->executionKind);

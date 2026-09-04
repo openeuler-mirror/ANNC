@@ -2,15 +2,8 @@
 #include "Target/aarch64/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
-#include <cstdlib>
-#include <cstring>
-
 namespace annc {
 namespace {
-
-// Conservative automatic gate.  Larger shapes remain on the established
-// packed path until target-specific benchmark data justifies widening it.
-constexpr int64_t kRowMajorOperationLimit = 4500;
 
 void appendI64(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
                int64_t value) {
@@ -63,10 +56,7 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendI64(plan, builder, "panel_lanes", candidate->kernelTile.panelLanes);
   appendString(plan, builder, "macro_order", "mkn");
   appendString(plan, builder, "micro_order", "mn");
-  if (candidate->executionKind ==
-          aarch64::gemm::GemmExecutionKind::kMatrixVector ||
-      candidate->executionKind ==
-          aarch64::gemm::GemmExecutionKind::kVectorMatrix) {
+  if (candidate->rhsPacking == aarch64::gemm::RhsPacking::kDirect) {
     appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "direct");
     appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
                  "none");
@@ -78,22 +68,10 @@ LogicalResult finalizeGemmPlan(Operation *op) {
     }
     appendString(plan, builder, "pack_b_block_order", "pc-jc");
     appendString(plan, builder, "pack_b_execution", "full-then-compute");
-    // Skip RHS packing for small B matrices.  The environment override is
-    // intentionally kept for benchmark/debug reproducibility.
-    bool useRowMajor = false;
-    const char *forcePacking = std::getenv("ANNC_GEMM_RHS_PACKING");
-    if (forcePacking && std::strcmp(forcePacking, "packed") == 0) {
-      useRowMajor = false;
-    } else if (forcePacking && std::strcmp(forcePacking, "row_major") == 0) {
-      useRowMajor = true;
-    } else {
-      useRowMajor = problem->m * problem->n * problem->k <=
-                    kRowMajorOperationLimit;
-    }
     appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName,
-                 useRowMajor ? "row_major" : "packed");
+                 "packed");
     appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
-                 useRowMajor ? "none" : "generated");
+                 "generated");
   }
   appendI64(plan, builder, "thread_count", candidate->threadCount);
   appendString(plan, builder, "thread_partition", "static-2d");
