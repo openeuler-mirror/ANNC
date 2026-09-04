@@ -287,8 +287,47 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
 
 tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
     tensorflow::GraphDef &graph, const FusionInfo &fusion) const {
-  llvm::ArrayRef<FusionArg> args = fusion.args;
   llvm::ArrayRef<FusionArg> outputs = fusion.outputs;
+  // ANNCFused's TensorFlow signature groups inputs by role, while fusion
+  // metadata preserves the pattern's logical/boundary order. Keep the latter
+  // for matching, but materialize the former for runtime ABI compatibility.
+  std::vector<FusionArg> orderedArgs;
+  orderedArgs.reserve(fusion.args.size());
+  if (fusion.abi == "mlir_ciface" || fusion.abi == "annc_execution_v2") {
+    for (const char *role : {"constant", "fixed", "dynamic"}) {
+      for (const FusionArg &arg : fusion.args) {
+        if (arg.role == role) orderedArgs.push_back(arg);
+      }
+    }
+  } else {
+    orderedArgs.assign(fusion.args.begin(), fusion.args.end());
+  }
+  llvm::ArrayRef<FusionArg> args(orderedArgs);
+  std::vector<int64_t> resolvedKernelArgOrder = fusion.kernelArgOrder;
+  if ((fusion.abi == "mlir_ciface" || fusion.abi == "annc_execution_v2") &&
+      resolvedKernelArgOrder.empty() &&
+      orderedArgs.size() == fusion.args.size()) {
+    // The outlined function uses the pattern input order. Runtime inputs are
+    // grouped by role, so permute the C-interface arguments back to that
+    // outlined order and append output buffers after all inputs.
+    resolvedKernelArgOrder.reserve(orderedArgs.size() + outputs.size());
+    for (const FusionArg &originalArg : fusion.args) {
+      auto it = std::find_if(
+          orderedArgs.begin(), orderedArgs.end(),
+          [&](const FusionArg &arg) { return arg.tfName == originalArg.tfName; });
+      if (it == orderedArgs.end()) {
+        resolvedKernelArgOrder.clear();
+        break;
+      }
+      resolvedKernelArgOrder.push_back(
+          static_cast<int64_t>(std::distance(orderedArgs.begin(), it)));
+    }
+    if (!resolvedKernelArgOrder.empty()) {
+      for (size_t i = 0; i < outputs.size(); ++i)
+        resolvedKernelArgOrder.push_back(
+            static_cast<int64_t>(orderedArgs.size() + i));
+    }
+  }
   const std::string &outputName = outputs.front().tfName;
 
   const tensorflow::NodeDef *reluNode =
@@ -364,8 +403,9 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   for (const FusionArg &output : outputs) {
     outputShapes->add_s(formatRuntimeOutputShape(output.shape));
   }
-  auto *kernelArgOrder = (*attrs)["kernel_arg_order"].mutable_list();
-  for (int64_t value : fusion.kernelArgOrder) kernelArgOrder->add_i(value);
+  auto *kernelArgOrderAttr = (*attrs)["kernel_arg_order"].mutable_list();
+  for (int64_t value : resolvedKernelArgOrder)
+    kernelArgOrderAttr->add_i(value);
   auto *dynamicDims = (*attrs)["dynamic_dims"].mutable_list();
   for (int64_t value : fusion.dynamicDims) dynamicDims->add_i(value);
   (*attrs)["symbolic_signature"].set_s(fusion.symbolicSignature);

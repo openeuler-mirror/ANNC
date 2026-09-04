@@ -168,6 +168,7 @@ static bool hasLeadingOutputOperand(StringRef opName) {
       .Case("Where", true)
       .Case("StridedSlice", true)
       .Case("Pack", true)
+      .Case("ParallelDynamicStitch", true)
       .Case("GatherNd", true)
       .Case("StringToHashBucketFast", true)
       .Case("Slice", true)
@@ -215,13 +216,14 @@ static bool isVariadicConfigOp(StringRef opName) {
       .Case("ConcatV2", true)
       .Case("Where", true)
       .Case("Pack", true)
+      .Case("ParallelDynamicStitch", true)
       .Default(false);
 }
 
 static bool isImplicitOperand(Value value) {
   Operation *defOp = value.getDefiningOp();
-  // Pattern JSON only models dataflow operands. ATIR buffer placeholders and
-  // literal constants are implementation details and may be skipped.
+  // Pattern JSON normally omits ATIR buffer placeholders and literal
+  // constants; an explicitly constrained constant is handled by matchStmt.
   if (!defOp) return false;
   return isa<BufferOp>(defOp) || isa<ConstantOp>(defOp) ||
          simpleOpName(defOp) == "buffer" || simpleOpName(defOp) == "constant";
@@ -247,7 +249,12 @@ static std::string formatPatternStmt(const PatternStmt &stmt) {
     os << ")";
   }
   os << " = " << stmt.opName << "(";
-  llvm::interleaveComma(stmt.args, os);
+  for (size_t i = 0; i < stmt.args.size(); ++i) {
+    if (i) os << ", ";
+    os << stmt.args[i];
+    auto it = stmt.constantArgs.find(stmt.args[i]);
+    if (it != stmt.constantArgs.end()) os << "=" << it->second;
+  }
   os << ")";
   return os.str();
 }
@@ -422,12 +429,70 @@ static std::optional<unsigned> getLogicalOperandStart(Operation *op,
   return operandCount < argCount ? std::nullopt : std::optional<unsigned>(0);
 }
 
-static unsigned countNonImplicitDataOperands(Operation *op) {
+static bool shouldBindConstantOperand(const PatternRule &rule,
+                                      const PatternStmt &stmt,
+                                      unsigned configuredArgIndex,
+                                      Value operand) {
+  if (!operand.getDefiningOp<ConstantOp>() ||
+      configuredArgIndex >= stmt.args.size()) {
+    return false;
+  }
+  const std::string &arg = stmt.args[configuredArgIndex];
+  if (stmt.constantArgs.count(arg) != 0) return true;
+  return rule.aliasToStmt.count(arg) == 0 &&
+         llvm::is_contained(rule.inputs, arg);
+}
+
+// Compare a configured scalar literal with an ATIR ConstantOp. Constant
+// payloads are stored on the result TensorType as DenseElementsAttr.
+static bool matchConstantLiteral(Value operand, StringRef expected) {
+  if (!operand.getDefiningOp<ConstantOp>()) return false;
+  auto tensorType = dyn_cast<atir::TensorType>(operand.getType());
+  if (!tensorType) return false;
+  DenseElementsAttr data = tensorType.getCacheData();
+  if (!data || data.getNumElements() != 1) return false;
+
+  mlir::Type elementType = data.getElementType();
+  if (elementType.isIntOrIndex()) {
+    int64_t value = 0;
+    if (expected.getAsInteger(10, value)) {
+      if (expected == "true")
+        value = 1;
+      else if (expected == "false")
+        value = 0;
+      else
+        return false;
+    }
+    return data.getValues<APInt>()[0].getSExtValue() == value;
+  }
+  if (isa<FloatType>(elementType)) {
+    double expectedValue = 0.0;
+    if (expected.getAsDouble(expectedValue)) return false;
+    return data.getValues<APFloat>()[0].convertToDouble() == expectedValue;
+  }
+  if (auto stringData = dyn_cast<DenseStringElementsAttr>(data)) {
+    std::string text = parseQuotedString(expected);
+    if (text.empty() && expected != "\"\"") text = expected.str();
+    return *stringData.getValues<StringRef>().begin() == text;
+  }
+  return false;
+}
+
+static unsigned countConfiguredDataOperands(Operation *op,
+                                            const PatternRule &rule,
+                                            const PatternStmt &stmt) {
   unsigned start = hasLeadingOutputOperand(simpleOpName(op)) ? 1 : 0;
   if (op->getNumOperands() < start) return 0;
   unsigned count = 0;
   for (unsigned i = start; i < op->getNumOperands(); ++i) {
-    if (!isImplicitOperand(op->getOperand(i))) ++count;
+    Value operand = op->getOperand(i);
+    Operation *def = operand.getDefiningOp();
+    if (def && isa<BufferOp>(def)) continue;
+    if (def && isa<ConstantOp>(def) &&
+        !shouldBindConstantOperand(rule, stmt, count, operand)) {
+      continue;
+    }
+    ++count;
   }
   return count;
 }
@@ -472,7 +537,8 @@ static bool matchStmt(const PatternRule &rule, unsigned stmtIndex,
     return false;
   }
 
-  unsigned actualDataOperands = countNonImplicitDataOperands(op);
+  unsigned actualDataOperands =
+      countConfiguredDataOperands(op, rule, stmt);
   if (!isVariadicConfigOp(opName) && actualDataOperands != stmt.args.size()) {
     std::string message =
         (Twine("configuration statement '") + formatPatternStmt(stmt) +
@@ -553,7 +619,9 @@ static bool matchStmt(const PatternRule &rule, unsigned stmtIndex,
     bool matched = false;
     while (operandIndex < op->getNumOperands()) {
       Value operand = op->getOperand(operandIndex);
-      if (isImplicitOperand(operand)) {
+      if (isImplicitOperand(operand) &&
+          !shouldBindConstantOperand(rule, stmt, configuredArgIndex,
+                                     operand)) {
         debugLog([&](raw_ostream &os) {
           os << "skip implicit operand #" << operandIndex << " for "
              << stmt.opName << ": ";
@@ -561,6 +629,22 @@ static bool matchStmt(const PatternRule &rule, unsigned stmtIndex,
         });
         ++operandIndex;
         continue;
+      }
+      auto constantIt = stmt.constantArgs.find(arg);
+      if (constantIt != stmt.constantArgs.end()) {
+        if (!matchConstantLiteral(operand, constantIt->second)) {
+          recordStructureFailure(
+              failure, depth, stmtIndex,
+              Twine("constant argument '") + arg + "=" +
+                  constantIt->second + "' does not match " +
+                  describeOperand(operand),
+              operand.getDefiningOp() ? operand.getDefiningOp() : op);
+          if (failure) failure->reason = SkipReason::ConstraintMismatch;
+          return false;
+        }
+        matched = true;
+        ++operandIndex;
+        break;
       }
       if (matchConfiguredOperand(rule, arg, operand, state, failure, stmtIndex,
                                  depth + 1)) {
@@ -1014,6 +1098,19 @@ static void appendUniqueValue(std::vector<Value> &values, Value value) {
   values.push_back(value);
 }
 
+static std::vector<Value> collectOutputBuffers(ArrayRef<Value> outputValues) {
+  std::vector<Value> buffers;
+  for (Value output : outputValues) {
+    Operation *def = output.getDefiningOp();
+    if (!def || def->getNumOperands() == 0) return {};
+    Value buffer = def->getOperand(0);
+    Operation *bufferDef = buffer.getDefiningOp();
+    if (!bufferDef || !isa<BufferOp>(bufferDef)) return {};
+    appendUniqueValue(buffers, buffer);
+  }
+  return buffers;
+}
+
 // The outlined kernel parameters combine declared inputs with all real boundary
 // operands, including implementation-level output buffers and block arguments.
 static std::vector<Value> collectBoundaryValues(
@@ -1084,6 +1181,18 @@ func::FuncOp materializePattern(
 
   std::vector<Value> boundaryValues =
       collectBoundaryValues(orderedOps, state, inputValues);
+  std::vector<Value> outputBuffers;
+  if (rule.bufferOutputs) {
+    outputBuffers = collectOutputBuffers(outputValues);
+    if (outputBuffers.size() != outputValues.size()) {
+      debugLog([&](raw_ostream &os) {
+        os << "rule '" << rule.name
+           << "' requires one ATIR buffer operand per output";
+      });
+      return nullptr;
+    }
+    for (Value buffer : outputBuffers) appendUniqueValue(boundaryValues, buffer);
+  }
   debugLog([&](raw_ostream &os) {
     os << "materialize rule '" << rule.name << "'";
     os << ", boundary values=" << boundaryValues.size();
@@ -1105,7 +1214,9 @@ func::FuncOp materializePattern(
   }
   for (Value value : boundaryValues) inputTypes.push_back(value.getType());
   SmallVector<mlir::Type> resultTypes;
-  for (Value value : outputValues) resultTypes.push_back(value.getType());
+  if (!rule.bufferOutputs) {
+    for (Value value : outputValues) resultTypes.push_back(value.getType());
+  }
 
   auto funcType = builder.getFunctionType(inputTypes, resultTypes);
   auto func = builder.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
@@ -1149,10 +1260,12 @@ func::FuncOp materializePattern(
   }
 
   SmallVector<Value> returns;
-  for (const std::string &name : outputs) {
-    auto it = clonedState.aliasValues.find(name);
-    if (it == clonedState.aliasValues.end()) return nullptr;
-    returns.push_back(it->second);
+  if (!rule.bufferOutputs) {
+    for (const std::string &name : outputs) {
+      auto it = clonedState.aliasValues.find(name);
+      if (it == clonedState.aliasValues.end()) return nullptr;
+      returns.push_back(it->second);
+    }
   }
   builder.setInsertionPointToEnd(entry);
   builder.create<func::ReturnOp>(func.getLoc(), returns);
@@ -1194,13 +1307,18 @@ func::FuncOp materializePattern(
   // identify the kernel, so write it completely before replacing the IR.
   func->setAttr("fusion.metadata", buildFusionMetadata(module.getContext(),
                                                         info, patternAttrs));
+  // Config materialization produces the same AOT-capable private outline as
+  // the built-in OpFusion path.  The pipeline prunes by this attribute before
+  // annc-asm, so leave the mode explicit for config-driven fusions as well.
+  func->setAttr("annc.execution_mode",
+                builder.getStringAttr("aot"));
 
   // Execution-v2 fused functions are consumed by the existing FastCodegen
   // custom-pattern path.  Keep the original main graph untouched; prune-func
   // will retain this private fusion function and FastCodegen will rewrite its
   // body to the appropriate CustomizeOp.  Generic outlines keep the legacy
   // main-level call replacement behavior.
-  if (rule.abi == "mlir_ciface") {
+  if (rule.abi == "mlir_ciface" && !rule.bufferOutputs) {
     builder.setInsertionPoint(orderedOps.front());
     auto call = builder.create<func::CallOp>(
         orderedOps.front()->getLoc(), kernelName, TypeRange(resultTypes),
@@ -1260,14 +1378,22 @@ bool tryMatchRule(ModuleOp module, func::FuncOp mainFunc,
   for (unsigned stmtIndex = 0; stmtIndex < rule.stmts.size(); ++stmtIndex) {
     const PatternStmt &stmt = rule.stmts[stmtIndex];
     auto maxInputs = getMaxConfiguredInputs(stmt.opName);
-    if (!maxInputs || stmt.args.size() <= *maxInputs) continue;
+    // Explicit constant constraints occupy an operand position but are not
+    // external data inputs, so they must not consume the ODS data-input cap.
+    size_t configuredDataInputs = stmt.args.size() - stmt.constantArgs.size();
+    if (!maxInputs || configuredDataInputs <= *maxInputs) continue;
     std::string message =
         (Twine("configuration statement '") + formatPatternStmt(stmt) +
-         "' declares " + Twine(stmt.args.size()) +
+         "' declares " + Twine(configuredDataInputs) +
          " logical input(s), but op " + stmt.opName + " defines at most " +
          Twine(*maxInputs) + "; possible extra config argument '")
             .str();
-    message += stmt.args[*maxInputs];
+    unsigned extraIndex = static_cast<unsigned>(*maxInputs);
+    while (extraIndex < stmt.args.size() &&
+           stmt.constantArgs.count(stmt.args[extraIndex]) != 0)
+      ++extraIndex;
+    if (extraIndex >= stmt.args.size()) extraIndex = *maxInputs;
+    message += stmt.args[extraIndex];
     message += "'";
     if (report) {
       report->recordSkip(SkipReason::ConfigurationError, nullptr, message,

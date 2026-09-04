@@ -25,6 +25,7 @@ struct PipelineOptions {
   std::string outputGraphDef;
   std::string kernelName;
   std::string sharedLibPath;
+  std::string fusionConfig;
   std::string workDir;
   std::vector<std::string> outputTensors;
   int64_t batchSize = -1;
@@ -42,6 +43,7 @@ static void printUsage() {
          "  --shared_lib_path <path>  AOT library path written to GraphDef\n"
          "  --batch_size <n>          Override dynamic batch dimensions\n"
          "  --output_tensor <name>    Preserve a named graph output\n"
+         "  --fusion-config <path>    External fusion pattern JSON\n"
          "  --keep_temps              Keep intermediate artifacts\n"
          "  --dump-fusion-metadata    Write fusion_metadata.json\n"
          "  --verbose                 Print invoked commands\n";
@@ -129,6 +131,7 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->outputGraphDef = takeValue(argc, argv, "--output_graphdef");
   opts->kernelName = takeValue(argc, argv, "--kernel_name", opts->kernelName);
   opts->sharedLibPath = takeValue(argc, argv, "--shared_lib_path");
+  opts->fusionConfig = takeValue(argc, argv, "--fusion-config");
   opts->workDir = takeValue(argc, argv, "--work_dir", defaultWorkDir());
   opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "-1"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
@@ -199,6 +202,16 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string fusionPass = "--atir-op-fusion";
   std::string fastCodegenPass = "--atir-fast-codegen";
+  if (!opts.fusionConfig.empty()) {
+    std::error_code ec;
+    if (!fs::is_regular_file(opts.fusionConfig, ec)) {
+      std::cerr << "[annc-tf-pipeline] fusion config is not a regular file: "
+                << opts.fusionConfig << "\n";
+      return false;
+    }
+    fusionPass = "--atir-config-fusion=config=" + opts.fusionConfig +
+                 " run-builtin-after=true";
+  }
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
   fastCodegenPass = "--atir-fast-codegen=enable-kdnn=true";
 #endif

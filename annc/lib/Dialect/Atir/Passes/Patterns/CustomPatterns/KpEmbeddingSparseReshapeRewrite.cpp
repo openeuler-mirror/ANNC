@@ -84,6 +84,8 @@ LogicalResult matchSparseReshapeChain(SparseReshapeOp anchor,
   if (!concat) return failure();
   chain.concat = concat;
   if (concat.getValues().size() != 2) return failure();
+  // Keep the original PR contract: concatenate the two index columns along
+  // the last dimension using the negative axis spelling.
   if (!checkConstantIntForChain(concat.getAxis(), -1)) return failure();
 
   // 分支 A: Cast(Reshape(Range(0, limit, 1), {-1,1})).
