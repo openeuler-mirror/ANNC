@@ -155,6 +155,7 @@ Status CompileAnncJitKernel(
   fs::path work(work_dir);
   const std::string shape_spec = (work / "runtime_shapes.json").string();
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
+  const std::string packed_rhs_c = (work / "kernel_packed_rhs.c").string();
   const std::string so_path = (work / "kernel.so").string();
   Status status = WriteRuntimeShapeSpec(shape_spec, request.kernel_name,
                                         request.argument_shapes);
@@ -176,14 +177,22 @@ Status CompileAnncJitKernel(
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
   asm_args[4] = "--atir-fast-codegen=enable-kdnn=true";
 #endif
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  asm_args[5] = "--annc-aarch64-gemm-pipeline=packed-c=" + packed_rhs_c;
+#endif
   status = RunJitTool(asm_args, "annc-asm");
   if (!status.ok()) {
     CleanupAnncJitWorkDir(work_dir);
     return status;
   }
 
-  status = RunJitTool(
-      {AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path}, "annc");
+  std::vector<std::string> link_args = {
+      AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path};
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  link_args.push_back("--packed-rhs-c");
+  link_args.push_back(packed_rhs_c);
+#endif
+  status = RunJitTool(link_args, "annc");
   if (!status.ok()) {
     CleanupAnncJitWorkDir(work_dir);
     return status;

@@ -1,5 +1,6 @@
 #include "GemmPlan.h"
 
+#include <algorithm>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -44,6 +45,7 @@ std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
 std::optional<RhsPacking> parseRhsPackingName(llvm::StringRef name) {
   if (name == "direct") return RhsPacking::kDirect;
   if (name == "packed") return RhsPacking::kPacked;
+  if (name == "prepacked") return RhsPacking::kPrepacked;
   return std::nullopt;
 }
 
@@ -459,7 +461,9 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
   }
   RhsPackSource rhsPackSource = rhsPacking == RhsPacking::kPacked
                                     ? RhsPackSource::kGenerated
-                                    : RhsPackSource::kNone;
+                                    : rhsPacking == RhsPacking::kPrepacked
+                                          ? RhsPackSource::kPrepacked
+                                          : RhsPackSource::kNone;
   if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackSourceAttrName)) {
     auto parsed = parseRhsPackSourceName(value.getValue());
     if (!parsed) {
@@ -469,16 +473,16 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
     }
     rhsPackSource = *parsed;
   }
-  if ((rhsPacking != RhsPacking::kPacked &&
-       rhsPackSource != RhsPackSource::kNone) ||
-      (rhsPacking == RhsPacking::kPacked &&
+  const bool sourceMatches =
+      (rhsPacking == RhsPacking::kDirect &&
        rhsPackSource == RhsPackSource::kNone) ||
-      (executionKind == GemmExecutionKind::kMatrixVector &&
-       (rhsPacking != RhsPacking::kDirect ||
-        rhsPackSource != RhsPackSource::kNone)) ||
-      (executionKind == GemmExecutionKind::kVectorMatrix &&
-       (rhsPacking != RhsPacking::kDirect ||
-        rhsPackSource != RhsPackSource::kNone))) {
+      (rhsPacking == RhsPacking::kPacked &&
+       rhsPackSource == RhsPackSource::kGenerated) ||
+      (rhsPacking == RhsPacking::kPrepacked &&
+       rhsPackSource == RhsPackSource::kPrepacked);
+  if (!sourceMatches ||
+      (executionKind != GemmExecutionKind::kGemm &&
+       rhsPacking != RhsPacking::kDirect)) {
     op->emitOpError("has an invalid execution/RHS representation combination");
     return mlir::failure();
   }
@@ -530,6 +534,20 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
   }
   if (mlir::failed(requireString(op, plan, "kernel_family", abi.family)))
     return mlir::failure();
+  std::string prepackedSymbol;
+  int64_t prepackedElements = 0;
+  if (tiling->rhsPacking == RhsPacking::kPrepacked) {
+    auto symbol = plan.getAs<mlir::StringAttr>("rhs_data_symbol");
+    auto elements = plan.getAs<mlir::IntegerAttr>("rhs_data_elements");
+    if (!symbol || symbol.getValue().empty() || !elements ||
+        elements.getInt() <= 0) {
+      op->emitOpError(
+          "prepacked RHS requires rhs_data_symbol and rhs_data_elements");
+      return mlir::failure();
+    }
+    prepackedSymbol = symbol.getValue().str();
+    prepackedElements = elements.getInt();
+  }
   if (tiling->executionKind == GemmExecutionKind::kMatrixVector &&
       (tiling->kernelTile.mr != 4 || tiling->kernelTile.panelLanes != 1 ||
        *isa != GemmIsa::kNeon)) {
@@ -543,7 +561,8 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
         "has an invalid vector-matrix problem, kernel tile, or ISA");
     return mlir::failure();
   }
-  return GemmPlan{*tiling, *target, *isa};
+  return GemmPlan{*tiling, *target, *isa, std::move(prepackedSymbol),
+                  prepackedElements};
 }
 
 llvm::StringRef getGemmTargetName(GemmTarget target) {
@@ -567,13 +586,17 @@ llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind) {
 }
 
 GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
-                                 int64_t k) {
+                                 int64_t k, bool enablePrepack,
+                                 bool hasPrepackableRhs) {
   if (m * n * k <= kRowMajorOperationLimit)
     return {GemmExecutionKind::kGemm, RhsPacking::kDirect};
   if (isa == GemmIsa::kNeon && n == 1)
     return {GemmExecutionKind::kMatrixVector, RhsPacking::kDirect};
   if (isa == GemmIsa::kNeon && m == 1)
     return {GemmExecutionKind::kVectorMatrix, RhsPacking::kDirect};
+  if (enablePrepack && hasPrepackableRhs &&
+      k * n >= kMinPrepackedRhsElements)
+    return {GemmExecutionKind::kGemm, RhsPacking::kPrepacked};
   return {GemmExecutionKind::kGemm, RhsPacking::kPacked};
 }
 
@@ -589,6 +612,33 @@ GemmLeafKind getGemmLeafKind(GemmExecutionKind executionKind,
 
 bool usesLdbAbi(GemmLeafKind kind) {
   return kind == GemmLeafKind::kRowMajor || kind == GemmLeafKind::kVecmat;
+}
+
+llvm::StringRef getGemmPackedBSchema(GemmIsa isa) {
+  return isa == GemmIsa::kSve ? "annc-sve-packed-b-v2"
+                              : "annc-neon-packed-b-v1";
+}
+
+std::vector<CacheBlock2D> partitionCache2D(int64_t k, int64_t n, int64_t kc,
+                                           int64_t nc) {
+  std::vector<CacheBlock2D> blocks;
+  if (k <= 0 || n <= 0) return blocks;
+  kc = std::max<int64_t>(kc, 1);
+  nc = std::max<int64_t>(nc, 1);
+  const int64_t fullN = n / nc * nc;
+  const auto appendJc = [&](int64_t kStart, int64_t kSize) {
+    for (int64_t nStart = 0; nStart < fullN; nStart += nc)
+      blocks.push_back({kStart, kSize, nStart, nc});
+    if (fullN < n) blocks.push_back({kStart, kSize, fullN, n - fullN});
+  };
+  const int64_t firstK = std::min(k, kc);
+  appendJc(0, firstK);
+  const int64_t remaining = k - firstK;
+  for (int64_t i = 0; i < remaining / kc; ++i)
+    appendJc(firstK + i * kc, kc);
+  if (remaining % kc != 0)
+    appendJc(firstK + remaining / kc * kc, remaining % kc);
+  return blocks;
 }
 
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa) {

@@ -14,6 +14,17 @@ def KPGemmOneShotBufferize : Pass<"annc-one-shot-bufferize", "ModuleOp"> {
   ];
 }
 
+/* Prepack immutable MatMul RHS values for the AArch64 GEMM consumer. */
+def AArch64GemmPrepackRhs
+    : Pass<"aarch64-gemm-prepack-rhs", "ModuleOp"> {
+  let summary = "prepack immutable AArch64 GEMM RHS operands";
+  let constructor = "createAArch64GemmPrepackRhs()";
+  let options = [
+    Option<"packedCPath", "packed-c", "std::string", "",
+           "Path for the generated packed RHS C source">
+  ];
+}
+
 /* Normalize an eligible AArch64 GEMM problem before target tuning. */
 def AArch64ResolveGemmPlan
     : Pass<"aarch64-resolve-gemm-plan", "ModuleOp"> {
@@ -32,7 +43,9 @@ def AArch64SelectGemmStrategy
   let constructor = "createAArch64SelectGemmStrategy()";
   let options = [
     Option<"configPath", "config-path", "std::string", "",
-           "Path to the external AArch64 GEMM tuning configuration">
+           "Path to the external AArch64 GEMM tuning configuration">,
+    Option<"enablePrepack", "enable-prepack", "bool", "false",
+           "Allow compile-time RHS prepacking">
   ];
   let dependentDialects = [
     "mlir::linalg::LinalgDialect"

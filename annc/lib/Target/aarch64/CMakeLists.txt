@@ -2,6 +2,8 @@ file(GLOB _srcs *.cpp)
 
 set(_gemm_srcs
         Gemm/GemmPlan.cpp
+        Gemm/ConstantFolding/GemmPrepackRhs.cpp
+        Gemm/ConstantFolding/CheckpointReader.cpp
         Gemm/ResolveGemmPlan.cpp
         Gemm/SelectGemmStrategy.cpp
         Gemm/GemmAutotune.cpp
@@ -43,3 +45,7 @@ add_mlir_library(AArch64Codegen
         MLIRLinalgTransforms
         MLIRLLVMDialect
 )
+
+if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+  target_link_libraries(AArch64Codegen PUBLIC ANNC::AArch64GemmMicrokernels)
+endif()

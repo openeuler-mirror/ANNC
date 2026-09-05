@@ -256,6 +256,17 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
         }
         auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
             loc, c.getType(), ValueRange{lhs, rhs}, c, op->getAttrs());
+        // Preserve the checkpoint variable name of a constant RHS for the
+        // post-strategy prepack pass.  TensorType metadata is not available
+        // after bufferization; the name must match GemmPlan.h
+        // kRhsNameAttrName.
+        if (auto rhsType =
+                llvm::dyn_cast<atir::TensorType>(op.getRhs().getType())) {
+            if (auto name = rhsType.getName();
+                name && !name.getValue().empty())
+                linalgMatmul->setDiscardableAttr("annc.aarch64.rhs_name",
+                                                 name);
+        }
         rewriter.replaceOp(op, linalgMatmul.getResult(0));
     }
 }

@@ -67,6 +67,7 @@ public:
     string inputFile;
     string outputFile;
     string testFile;
+    string packedRhsC;
     string kernelLibPath;
     bool verbose = false;
     bool sharedLibrary = false;
@@ -92,6 +93,10 @@ public:
             } else if (arg == "--kernel-lib-path") {
                 if (i + 1 < argc) {
                     kernelLibPath = argv[++i];
+                }
+            } else if (arg == "--packed-rhs-c") {
+                if (i + 1 < argc) {
+                    packedRhsC = argv[++i];
                 }
             } else if (arg == "--shared" || arg == "-shared") {
                 sharedLibrary = true;
@@ -191,7 +196,12 @@ private:
         return false;
 #endif
     }
-    
+
+    void appendPrepackedSource(string& command) {
+        if (!config.packedRhsC.empty() && fs::exists(config.packedRhsC))
+            command += " \"" + config.packedRhsC + "\"";
+    }
+
 public:
     CompilationPipeline(const CompilationConfig& cfg) : config(cfg) {
         createTempDir();
@@ -526,6 +536,7 @@ private:
         }
         
         string command = getClangPath() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
+        appendPrepackedSource(command);
         command += " \"" + config.testFile + "\"";
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
@@ -560,6 +571,7 @@ private:
                                    : config.outputFile;
         
         string command = getClangPath() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
+        appendPrepackedSource(command);
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
         command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
@@ -620,6 +632,7 @@ void printUsage() {
     cout << "  -o <file>              Output file (default: a.out or input.so)" << endl;
     cout << "  -t <file>              Test C file (default: test.c)" << endl;
     cout << "  --kernel-lib-path <dir> Kernel library directory (default: env ANNC_KERNEL_LIB_PATH or install prefix)" << endl;
+    cout << "  --packed-rhs-c <file>  Link generated GEMM packed RHS C source" << endl;
     cout << "  -v, --verbose          Verbose output" << endl;
     cout << "  --shared, -shared      Generate shared library (.so) instead of executable" << endl;
     cout << "  --help                 Show this help message" << endl;

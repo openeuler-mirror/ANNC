@@ -10,6 +10,12 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
 
+// Weak reference to the host-side SVE packed-B sizing helper; resolved when
+// the microkernel archive is linked in.
+extern "C" int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k,
+                                                          int64_t n)
+    __attribute__((weak));
+
 namespace annc {
 namespace {
 
@@ -26,6 +32,57 @@ func::FuncOp getOrCreateLeafDeclaration(ModuleOp module, StringRef name,
 }
 
 using WorkspaceMap = llvm::DenseMap<Operation *, Value>;
+
+int64_t packedBElements(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n) {
+  return isa == aarch64::gemm::GemmIsa::kSve
+             ? annc_aarch64_sve_packed_b_elements_f32(k, n)
+             : k * ((n + 3) / 4) * 4;
+}
+
+// Elements covered by the first `count` column blocks of one KC row.
+int64_t columnPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
+                     int64_t nc, int64_t count) {
+  int64_t total = 0;
+  for (int64_t jc = 0; jc < count; ++jc)
+    total += packedBElements(isa, k, std::min(nc, n - jc * nc));
+  return total;
+}
+
+// Elements before the pcIndex-th KC row of the whole packed RHS.
+int64_t rowPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
+                  const aarch64::gemm::GemmCacheTile &tile, int64_t pcIndex) {
+  int64_t total = 0;
+  for (int64_t pc = 0; pc < pcIndex; ++pc)
+    total += columnPrefix(isa, std::min(tile.kc, k - pc * tile.kc), n,
+                          tile.nc, (n + tile.nc - 1) / tile.nc);
+  return total;
+}
+
+FailureOr<Value> getPrepackedRhsGlobal(ModuleOp module, Operation *op,
+                                       const aarch64::gemm::GemmPlan &plan,
+                                       OpBuilder &builder, Location loc) {
+  if (plan.prepackedRhsSymbol.empty() || plan.prepackedRhsElements <= 0)
+    return op->emitOpError("has no valid prepacked RHS global reference");
+  MemRefType type =
+      MemRefType::get({plan.prepackedRhsElements}, builder.getF32Type());
+  Operation *existing = module.lookupSymbol(plan.prepackedRhsSymbol);
+  if (existing) {
+    auto global = llvm::dyn_cast<memref::GlobalOp>(existing);
+    if (!global || global.getType() != type || !global.isExternal())
+      return op->emitOpError()
+             << "prepacked RHS symbol '" << plan.prepackedRhsSymbol
+             << "' conflicts with an incompatible module symbol";
+  } else {
+    OpBuilder moduleBuilder(module.getContext());
+    moduleBuilder.setInsertionPointToStart(module.getBody());
+    moduleBuilder.create<memref::GlobalOp>(
+        loc, plan.prepackedRhsSymbol, StringAttr(), type, Attribute(), false,
+        builder.getI64IntegerAttr(64));
+  }
+  return builder.create<memref::GetGlobalOp>(loc, type,
+                                             plan.prepackedRhsSymbol)
+      .getResult();
+}
 
 FailureOr<int64_t> getStaticDimension(Value value, unsigned dimension) {
   auto type = llvm::dyn_cast<MemRefType>(value.getType());
@@ -154,6 +211,103 @@ struct PackedBWorkspace {
 
 using PackedBBlockMap = llvm::DenseMap<Value, PackedBWorkspace>;
 
+// Materialize the (PC, JC) offset for the pc-major / jc-minor packed RHS.
+Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
+                                      const aarch64::gemm::GemmPlan &plan,
+                                      int64_t kSize, Value pc, Value jc) {
+  const int64_t kc = plan.cacheTile.kc;
+  const int64_t nc = plan.cacheTile.nc;
+  const int64_t kRows = (plan.k + kc - 1) / kc;
+  const int64_t nCols = (plan.n + nc - 1) / nc;
+  Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value rowIndex = builder.create<arith::DivUIOp>(
+      loc, pc, builder.create<arith::ConstantIndexOp>(loc, kc));
+  Value colIndex = builder.create<arith::DivUIOp>(
+      loc, jc, builder.create<arith::ConstantIndexOp>(loc, nc));
+  Value offset = zero;
+  auto addContribution = [&](Value index, int64_t bound, int64_t width) {
+    Value beyond = builder.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::sgt, index,
+        builder.create<arith::ConstantIndexOp>(loc, bound));
+    Value contribution = builder.create<arith::SelectOp>(
+        loc, beyond, builder.create<arith::ConstantIndexOp>(loc, width), zero);
+    offset = builder.create<arith::AddIOp>(loc, offset, contribution);
+  };
+  // Full rows before the current K row cover every N column.
+  for (int64_t r = 0; r < kRows; ++r) {
+    const int64_t kr = std::min(kc, plan.k - r * kc);
+    int64_t rowWidth = 0;
+    for (int64_t c = 0; c < nCols; ++c) {
+      const int64_t blockN = std::min(nc, plan.n - c * nc);
+      rowWidth += packedBElements(plan.isa, kr, blockN);
+    }
+    addContribution(rowIndex, r, rowWidth);
+  }
+  // Columns before JC inside the current K row.
+  for (int64_t c = 0; c < nCols; ++c) {
+    const int64_t blockN = std::min(nc, plan.n - c * nc);
+    addContribution(colIndex, c, packedBElements(plan.isa, kSize, blockN));
+  }
+  return offset;
+}
+
+FailureOr<PackedBBlock> materializePrepackedBBlock(
+    ModuleOp module, Operation *op, const aarch64::gemm::GemmPlan &plan,
+    OpBuilder &builder, Value rhsBlock, Value jr) {
+  auto rhsSubview = rhsBlock.getDefiningOp<memref::SubViewOp>();
+  if (!rhsSubview || rhsSubview.getMixedOffsets().size() != 2)
+    return op->emitOpError(
+        "prepacked RHS requires cache-blocked RHS subviews");
+  FailureOr<int64_t> kSize = getStaticDimension(rhsBlock, 0);
+  if (failed(kSize))
+    return op->emitOpError("prepacked RHS requires static cache K blocks");
+
+  OpBuilder &microBuilder = builder;
+  Location loc = op->getLoc();
+  Value pc = materializeIndex(microBuilder, loc,
+                              rhsSubview.getMixedOffsets()[0]);
+  Value jc = materializeIndex(microBuilder, loc,
+                              rhsSubview.getMixedOffsets()[1]);
+  // packed offset = cache-block prefix (pc row + jc column) + panel offset.
+  Value offset;
+  auto pcConstant = pc.getDefiningOp<arith::ConstantIndexOp>();
+  auto jcConstant = jc.getDefiningOp<arith::ConstantIndexOp>();
+  if (pcConstant && jcConstant) {
+    offset = microBuilder.create<arith::ConstantIndexOp>(
+        loc, rowPrefix(plan.isa, plan.k, plan.n, plan.cacheTile,
+                       pcConstant.value() / plan.cacheTile.kc) +
+                 columnPrefix(plan.isa, *kSize, plan.n, plan.cacheTile.nc,
+                              jcConstant.value() / plan.cacheTile.nc));
+  } else {
+    offset = materializePrepackedCacheOffset(microBuilder, loc, plan, *kSize,
+                                             pc, jc);
+  }
+  if (plan.isa == aarch64::gemm::GemmIsa::kSve) {
+    Value blockK = microBuilder.create<arith::ConstantIndexOp>(loc, *kSize);
+    Value panel = callSvePackedBHelper(
+        module, microBuilder, loc, aarch64::gemm::kSvePackedBOffsetAsmSymbol,
+        blockK, jr);
+    offset = microBuilder.create<arith::AddIOp>(loc, offset, panel);
+  } else {
+    Value group = microBuilder.create<arith::DivUIOp>(
+        loc, jr, microBuilder.create<arith::ConstantIndexOp>(loc, 4));
+    Value groupOffset = microBuilder.create<arith::MulIOp>(
+        loc, group,
+        microBuilder.create<arith::ConstantIndexOp>(loc, *kSize * 4));
+    Value lane = microBuilder.create<arith::AndIOp>(
+        loc, jr, microBuilder.create<arith::ConstantIndexOp>(loc, 3));
+    offset = microBuilder.create<arith::AddIOp>(
+        loc, offset, microBuilder.create<arith::AddIOp>(loc, groupOffset, lane));
+  }
+
+  FailureOr<Value> global =
+      getPrepackedRhsGlobal(module, op, plan, microBuilder, loc);
+  if (failed(global)) return failure();
+  return PackedBBlock{
+      aarch64::gemm::castToUnrankedF32MemRef(microBuilder, loc, *global),
+      offset};
+}
+
 FailureOr<PackedBBlock> materializePackedBBlock(
     ModuleOp module, Operation *op, const aarch64::gemm::GemmPlan &plan,
     WorkspaceMap &workspaces, PackedBBlockMap &packedBlocks) {
@@ -185,6 +339,10 @@ FailureOr<PackedBBlock> materializePackedBBlock(
                                                    existing->second.kSize);
         return PackedBBlock{existing->second.base, packedOffset};
       }
+
+      if (plan.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
+        return materializePrepackedBBlock(module, op, plan, microBuilder,
+                                          rhsBlock, jr);
 
       OpBuilder packBuilder(hoistPoint);
       FailureOr<aarch64::gemm::MemRefBaseAndOffset> rhs =
@@ -223,6 +381,9 @@ FailureOr<PackedBBlock> materializePackedBBlock(
     return op->emitOpError(
         "requires identity-layout bases with statically strided RHS subviews");
   }
+  if (plan.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
+    return op->emitOpError(
+        "prepacked RHS requires cache-blocked GEMM structure");
   Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
   FailureOr<int64_t> staticK = getStaticDimension(rhsInput, 0);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);

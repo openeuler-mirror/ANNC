@@ -26,7 +26,7 @@ FailureOr<int64_t> getIntraThreadCount(ModuleOp module) {
 
 LogicalResult selectGemmStrategy(
     Operation *op, int64_t intraThreadCount,
-    const aarch64::gemm::GemmTuningConfig &config) {
+    const aarch64::gemm::GemmTuningConfig &config, bool enablePrepack) {
   if (!op->hasAttr(aarch64::gemm::kProblemAttrName)) return success();
   if (op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
       op->hasAttr(aarch64::gemm::kPlanAttrName)) {
@@ -41,7 +41,8 @@ LogicalResult selectGemmStrategy(
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
   const auto selection = aarch64::gemm::selectGemmPath(
-      config.isa, problem->m, problem->n, problem->k);
+      config.isa, problem->m, problem->n, problem->k, enablePrepack,
+      op->hasAttr(aarch64::gemm::kRhsNameAttrName));
   const auto executionKind = selection.executionKind;
   const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
       config.target, config.isa, config.dataType, executionKind);
@@ -71,12 +72,12 @@ LogicalResult selectGemmStrategy(
       aarch64::gemm::kExecutionKindAttrName,
       builder.getStringAttr(
           aarch64::gemm::getGemmExecutionKindName(executionKind)));
-  candidate.append(
-      aarch64::gemm::kRhsPackingAttrName,
-      builder.getStringAttr(selection.rhsPacking ==
-                                    aarch64::gemm::RhsPacking::kDirect
-                                ? "direct"
-                                : "packed"));
+  const char* rhsPackingName =
+      selection.rhsPacking == aarch64::gemm::RhsPacking::kDirect   ? "direct"
+      : selection.rhsPacking == aarch64::gemm::RhsPacking::kPacked ? "packed"
+                                                                   : "prepacked";
+  candidate.append(aarch64::gemm::kRhsPackingAttrName,
+                   builder.getStringAttr(rhsPackingName));
   op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
                          candidate.getDictionary(op->getContext()));
   return success();
@@ -87,8 +88,9 @@ class AArch64SelectGemmStrategy
  public:
   using Base::Base;
 
-  explicit AArch64SelectGemmStrategy(StringRef path) {
+  explicit AArch64SelectGemmStrategy(StringRef path, bool allowPrepack) {
     configPath = path.str();
+    enablePrepack = allowPrepack;
   }
 
   void runOnOperation() override {
@@ -120,7 +122,8 @@ class AArch64SelectGemmStrategy
         }
         config = *loaded;
       }
-      return failed(selectGemmStrategy(op, *intraThreadCount, *config))
+      return failed(selectGemmStrategy(op, *intraThreadCount, *config,
+                                       enablePrepack))
                  ? WalkResult::interrupt()
                  : WalkResult::advance();
     });
@@ -135,8 +138,8 @@ std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy() {
 }
 
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
-    llvm::StringRef configPath) {
-  return std::make_unique<AArch64SelectGemmStrategy>(configPath);
+    llvm::StringRef configPath, bool enablePrepack) {
+  return std::make_unique<AArch64SelectGemmStrategy>(configPath, enablePrepack);
 }
 
 }  // namespace annc

@@ -460,6 +460,8 @@ flowchart LR
 - GEMM MLIR 优化路径的 Lowering 策略（Affine/Linalg）按算子特性选择，当前尚未收敛为单一主力路径，待验证后逐步收敛。
 - AArch64 后端采用六级 tiling 抽象：distribution、cache\_parallel、cache\_reduction、vector\_common\_parallel、vector\_reduction、vector\_inner\_parallel。当前 Target/aarch64 共注册 6 个 pass：对应六级抽象的 cache-parallel、cache-reduction、vector-common-parallel、vector-reduction（distribution/vector_inner_parallel 仅为配置字段，尚无专属 pass），另有 matmul-pack-affine（数据打包）与 annc-one-shot-bufferize（bufferize）两个辅助 pass。各 Pass 通过 `annc-asm` 命令行参数组合调用，pipeline 编排尚在开发中（`buildAArch64CodegenPipeline()` 当前为空实现）。
 - Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
+- GEMM 常量折叠由 `ANNC_ENABLE_CONSTANT_FOLDING` 编译期开关控制（默认 OFF，`build.sh --enable-constant-folding` 开启）。开启后，若 AArch64 GEMM pipeline 收到非空 `packed-c` 路径且 MatMul 的常量 RHS 携带 checkpoint 变量名（`annc.aarch64.rhs_name`）并满足 `K*N >= 300`，策略在 `Autotune` 与 `Finalize` 之间插入 `aarch64-gemm-prepack-rhs`：从 checkpoint 读取 RHS，按 tuning 配置的 cache tile 调用 `pack_b` 生成 packed C 源文件，并把契约写入 `annc.aarch64.prepacked_rhs`；lowering 将其物化为外部 `memref.global`，由 `annc --packed-rhs-c` 链接进最终 `.so`，运行时不再执行 `pack_b`。关闭开关时即使传入 `packed-c` 也会被忽略，保持 runtime packed/direct 路线；该接线同时覆盖 AOT（`annc-tf-pipeline`）与 JIT（`ANNCFusedOp`）路径。
+
 - 新编译策略可增量接入（如 XLA），不影响已有策略的稳定性。
 
 ### 4.3 Use Case 实现
