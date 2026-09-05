@@ -1,206 +1,11 @@
 #include "node_info_adapter.h"
 
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 #include "tensor_proto_decoder.h"
 
 namespace annc::tf2atir {
 namespace {
-
-bool findLinearBranch(
-    const std::string& start,
-    const std::unordered_map<std::string, std::vector<std::size_t>>& users,
-    const std::vector<annc::NodeInfo>& nodes, std::size_t& mergeIndex,
-    std::string& end, std::vector<annc::NodeInfo>& body,
-    std::unordered_set<std::string>& consumed, std::string& error) {
-  std::string value = start;
-  std::unordered_set<std::string> seen;
-  while (true) {
-    if (!seen.insert(value).second) {
-      error = "Switch branch contains a cycle at '" + value + "'";
-      return false;
-    }
-    auto usersIt = users.find(value);
-    if (usersIt == users.end() || usersIt->second.empty()) {
-      error = "Switch branch from '" + start + "' does not reach a Merge";
-      return false;
-    }
-    if (usersIt->second.size() != 1) {
-      error = "Switch branch from '" + start +
-              "' has fan-out; only linear branches are currently supported";
-      return false;
-    }
-    const annc::NodeInfo& user = nodes[usersIt->second.front()];
-    if (user.op_type == "Merge" || user.op_type == "RefMerge") {
-      mergeIndex = usersIt->second.front();
-      end = value;
-      return true;
-    }
-    if (consumed.count(user.name)) {
-      error = "Switch branches overlap at node '" + user.name + "'";
-      return false;
-    }
-    if (user.outputs.size() != 1) {
-      error = "Switch branch node '" + user.name +
-              "' must have exactly one output";
-      return false;
-    }
-    body.push_back(user);
-    consumed.insert(user.name);
-    value = user.outputs.front().name;
-  }
-}
-
-bool buildSwitchDiamonds(std::vector<annc::NodeInfo>& nodes,
-                         std::string& error) {
-  std::unordered_map<std::string, std::vector<std::size_t>> users;
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    for (const std::string& input : nodes[i].inputs) {
-      auto& inputUsers = users[input];
-      if (inputUsers.empty() || inputUsers.back() != i)
-        inputUsers.push_back(i);
-    }
-  }
-
-  std::unordered_map<std::size_t, annc::NodeInfo> replacements;
-  std::unordered_set<std::string> consumedNodes;
-  for (std::size_t switchIndex = 0; switchIndex < nodes.size(); ++switchIndex) {
-    const annc::NodeInfo& sw = nodes[switchIndex];
-    if (sw.op_type != "Switch" && sw.op_type != "RefSwitch") continue;
-    // Best-effort reconstruction: a Switch that cannot be rebuilt as a clean
-    // linear diamond is left untouched.  Its raw "Switch" node then reaches
-    // the builder's opaque fallback (no OpSpec row), which is exactly how
-    // these graphs converted before the diamond reconstruction existed.
-    // Skipping must not fail the conversion: real serving graphs (e.g. the
-    // presort family) contain dead Switch outputs, fan-out branches, and
-    // other shapes that are not reconstructible diamonds.
-    if (sw.inputs.size() != 2 || sw.outputs.size() != 2) {
-      error = "Switch node '" + sw.name +
-              "' must have exactly two inputs and two outputs";
-      continue;
-    }
-    const std::string& falseAlias = sw.outputs[0].name;
-    const std::string& trueAlias = sw.outputs[1].name;
-    if (falseAlias == trueAlias) {
-      error = "Switch node '" + sw.name + "' has identical branch outputs";
-      continue;
-    }
-
-    annc::NodeInfo structured;
-    std::unordered_set<std::string> consumed{sw.name};
-    std::size_t falseMergeIndex = 0;
-    std::size_t trueMergeIndex = 0;
-    std::string falseEnd, trueEnd;
-    if (!findLinearBranch(falseAlias, users, nodes, falseMergeIndex, falseEnd,
-                          structured.switch_false_nodes, consumed, error) ||
-        !findLinearBranch(trueAlias, users, nodes, trueMergeIndex, trueEnd,
-                          structured.switch_true_nodes, consumed, error))
-      continue;
-    if (falseMergeIndex != trueMergeIndex) {
-      error = "Switch node '" + sw.name +
-              "' branches reach different Merge nodes";
-      continue;
-    }
-    if (falseEnd == trueEnd) {
-      error = "Switch node '" + sw.name +
-              "' branches converge before the Merge node";
-      continue;
-    }
-    const std::size_t mergeIndex = falseMergeIndex;
-    const annc::NodeInfo& merge = nodes[mergeIndex];
-    if (merge.inputs.size() != 2 || merge.outputs.size() < 2) {
-      error = "Merge node '" + merge.name +
-              "' must have two inputs and at least two outputs";
-      continue;
-    }
-    const bool falseFirst =
-        merge.inputs[0] == falseEnd && merge.inputs[1] == trueEnd;
-    const bool trueFirst =
-        merge.inputs[0] == trueEnd && merge.inputs[1] == falseEnd;
-    if (!falseFirst && !trueFirst) {
-      error = "Merge node '" + merge.name +
-              "' does not join the reconstructed Switch branches";
-      continue;
-    }
-    std::unordered_set<std::string> falseValues{falseAlias};
-    std::unordered_set<std::string> trueValues{trueAlias};
-    for (const annc::NodeInfo& branchNode : structured.switch_false_nodes)
-      for (const annc::OutputInfo& output : branchNode.outputs)
-        falseValues.insert(output.name);
-    for (const annc::NodeInfo& branchNode : structured.switch_true_nodes)
-      for (const annc::OutputInfo& output : branchNode.outputs)
-        trueValues.insert(output.name);
-    auto hasCrossBranchInput = [](const std::vector<annc::NodeInfo>& body,
-                                  const std::unordered_set<std::string>& other,
-                                  std::string& offendingNode) {
-      for (const annc::NodeInfo& branchNode : body)
-        for (const std::string& input : branchNode.inputs)
-          if (other.count(input)) {
-            offendingNode = branchNode.name;
-            return true;
-          }
-      return false;
-    };
-    std::string offendingNode;
-    if (hasCrossBranchInput(structured.switch_false_nodes, trueValues,
-                            offendingNode) ||
-        hasCrossBranchInput(structured.switch_true_nodes, falseValues,
-                            offendingNode)) {
-      error = "Switch branch node '" + offendingNode +
-              "' depends on a value from the other branch";
-      continue;
-    }
-    // Keep the structured op at the Merge position. All external values used
-    // inside either branch are guaranteed to dominate that point in the
-    // topologically sorted graph, but need not dominate the original Switch.
-    consumed.insert(merge.name);
-    bool overlapsExisting = false;
-    for (const std::string& name : consumed) {
-      if (consumedNodes.count(name)) {
-        error = "overlapping Switch diamonds are not supported (node '" +
-                name + "')";
-        overlapsExisting = true;
-        break;
-      }
-    }
-    if (overlapsExisting) continue;
-    consumedNodes.insert(consumed.begin(), consumed.end());
-
-    structured.name = merge.name;
-    structured.op_type = "ANNCStructuredSwitch";
-    structured.inputs = {sw.inputs[0], sw.inputs[1]};
-    structured.outputs = merge.outputs;
-    structured.switch_data_inputs = {sw.inputs[0]};
-    structured.switch_predicate_input = sw.inputs[1];
-    structured.switch_false_aliases = {falseAlias};
-    structured.switch_true_aliases = {trueAlias};
-    structured.switch_false_yield = falseEnd;
-    structured.switch_true_yield = trueEnd;
-    structured.switch_false_index = falseFirst ? 0 : 1;
-    structured.switch_true_index = falseFirst ? 1 : 0;
-    if (replacements.find(mergeIndex) != replacements.end()) {
-      error = "multiple Switch nodes reconstruct the same Merge node '" +
-              merge.name + "'";
-      continue;
-    }
-    replacements.emplace(mergeIndex, std::move(structured));
-  }
-
-  if (replacements.empty()) return true;
-  std::vector<annc::NodeInfo> rewritten;
-  rewritten.reserve(nodes.size());
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    auto replacement = replacements.find(i);
-    if (replacement != replacements.end())
-      rewritten.push_back(std::move(replacement->second));
-    if (!consumedNodes.count(nodes[i].name))
-      rewritten.push_back(std::move(nodes[i]));
-  }
-  nodes = std::move(rewritten);
-  return true;
-}
 
 annc::OutputInfo makeOutput(const TensorRef& ref,
                             const TensorDescriptor& descriptor) {
@@ -299,6 +104,9 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
       info.inputs.push_back(key);
       info.tf_attrs["tf.input." + std::to_string(i)] = input.canonicalName();
     }
+    for (std::size_t i = 0; i < node.control_inputs.size(); ++i)
+      info.tf_attrs["tf.control_input." + std::to_string(i)] =
+          node.control_inputs[i];
     for (const TensorRef& ref : node.outputs) {
       const TensorDescriptor* descriptor = resolved.find(ref);
       if (!descriptor) {
@@ -338,7 +146,10 @@ bool NodeInfoAdapter::adapt(const ResolvedTfGraph& resolved,
     result.push_back(std::move(info));
   }
 
-  if (!buildSwitchDiamonds(result, error)) return false;
+  // Mirror conversion preserves raw control-flow topology: Switch/Merge/
+  // Enter/Exit/NextIteration/LoopCond nodes are emitted as matching atir.*
+  // mirror ops (see MLIRBuilder::buildControlFlowMirrorNode) and are never
+  // collapsed into structured diamonds.
 
   // Every graph result receives a private Identity boundary. This lets the
   // existing builder return multiple output slots without changing its

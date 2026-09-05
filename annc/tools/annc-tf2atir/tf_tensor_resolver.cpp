@@ -1,8 +1,11 @@
 #include "tf_tensor_resolver.h"
 
+#include <algorithm>
 #include <optional>
+#include <string>
 #include <unordered_set>
 
+#include "Builder/MLIROpBuilder.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 
@@ -91,6 +94,14 @@ bool isComparisonOp(const std::string& op) {
       "Equal",   "NotEqual",     "Less",          "LessEqual",
       "Greater", "GreaterEqual", "GreaterEqualV2"};
   return comparisons.count(op) != 0;
+}
+
+bool isControlFlowOp(const std::string& op) {
+  static const std::unordered_set<std::string> controlFlowOps = {
+      "Switch",          "RefSwitch",      "Merge",   "RefMerge",
+      "Enter",           "RefEnter",       "Exit",    "RefExit",
+      "NextIteration",   "RefNextIteration", "LoopCond"};
+  return controlFlowOps.count(op) != 0;
 }
 
 bool outputShapes(const NodeDef& node,
@@ -285,15 +296,52 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
     }
 
     std::vector<const TensorShapeProto*> shapes;
-    if (!outputShapes(*node.source, shapes, error)) return false;
+    const bool hasAnnotatedShapes = outputShapes(*node.source, shapes, error);
+    const bool shapeBridgeNode = node.op == "Identity" ||
+                                 node.op == "RefIdentity" ||
+                                 node.op == "StopGradient";
+    const bool mirrorNode = isControlFlowOp(node.op) || shapeBridgeNode ||
+                            !annc::MLIRBuilder::isSupportedOp(node.op);
+    if (!hasAnnotatedShapes && !mirrorNode) return false;
+
+    const std::vector<TensorRef> referencedOutputs = node.outputs;
+    std::size_t outputCount = shapes.size();
+    for (const TensorRef& output : referencedOutputs)
+      outputCount = std::max(outputCount,
+                             static_cast<std::size_t>(output.output_index + 1));
+    if (node.op == "Switch" || node.op == "RefSwitch" ||
+        node.op == "Merge" || node.op == "RefMerge")
+      outputCount = std::max<std::size_t>(outputCount, 2);
+    if (outputCount == 0) outputCount = 1;
+
     node.outputs.clear();
-    for (std::size_t index = 0; index < shapes.size(); ++index) {
+    for (std::size_t index = 0; index < outputCount; ++index) {
       TensorDescriptor descriptor;
-      const std::string context =
-          "node '" + node.name + "' output " + std::to_string(index);
-      if (!shapeFromProto(*shapes[index], descriptor.shape,
-                          descriptor.rank_known, error, context))
-        return false;
+      if (index < shapes.size()) {
+        const std::string context =
+            "node '" + node.name + "' output " + std::to_string(index);
+        if (!shapeFromProto(*shapes[index], descriptor.shape,
+                            descriptor.rank_known, error, context))
+          return false;
+      } else {
+        descriptor.rank_known = false;
+      }
+      // Control-flow and bridge nodes must present outputs matching their
+      // data input (the ATIR mirror verifiers require it). Missing slots —
+      // whether the whole annotation is absent or the frozen graph only
+      // annotated the consumed subset — inherit the input descriptor.
+      const bool shapeBridge = isControlFlowOp(node.op) || node.op == "Identity";
+      if (index >= shapes.size() && shapeBridge && !node.inputs.empty()) {
+        const auto input = result.tensors.find(node.inputs.front());
+        if (input != result.tensors.end()) {
+          descriptor.shape = input->second.shape;
+          descriptor.rank_known = input->second.rank_known;
+        }
+      }
+      if ((node.op == "Merge" || node.op == "RefMerge") && index == 1) {
+        descriptor.shape.clear();
+        descriptor.rank_known = true;
+      }
       if (!resolveDtype(node, static_cast<int>(index), result.tensors,
                         descriptor.dtype, error))
         return false;
@@ -338,8 +386,10 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
       node.outputs.push_back(output);
       return true;
     };
-    if (op == "TopK" || op == "TopKV2" || op == "Unique" || op == "Merge" ||
-        op == "RefMerge") {
+    if (op == "TopK" || op == "TopKV2" || op == "Unique") {
+      if (!ensureOutput(1)) return false;
+    } else if (op == "Merge" || op == "RefMerge") {
+      // Merge and RefMerge always expose value and value_index outputs.
       if (!ensureOutput(1)) return false;
     } else if (op == "Split" || op == "DynamicPartition") {
       int64_t count = 0;

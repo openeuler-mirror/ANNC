@@ -42,20 +42,6 @@ struct NodeInfo {
   bool isInputNode = false;
   bool isOutputNode = false;
 
-  // Graph-level TF Switch/Merge reconstruction. A structured switch owns the
-  // nodes that execute on each branch. Each alias pair corresponds to one TF
-  // Switch(data, pred); the branch builder binds the selected alias to data.
-  std::vector<std::string> switch_data_inputs;
-  std::string switch_predicate_input;
-  std::vector<std::string> switch_false_aliases;
-  std::vector<std::string> switch_true_aliases;
-  std::vector<NodeInfo> switch_false_nodes;
-  std::vector<NodeInfo> switch_true_nodes;
-  std::string switch_false_yield;
-  std::string switch_true_yield;
-  int64_t switch_false_index = 0;
-  int64_t switch_true_index = 1;
-
   // Typed attribute lookup; true only for an exact type T match (no coercion).
   template <typename T>
   bool getAttr(const std::string& name, T& out) const {
@@ -93,7 +79,7 @@ class MLIRBuilder {
  private:
   const OpSpec* lookupSpec(llvm::StringRef opType) const;
   mlir::LogicalResult addNode(const NodeInfo& node);
-  mlir::LogicalResult buildStructuredSwitchNode(const NodeInfo& node);
+  mlir::LogicalResult buildControlFlowMirrorNode(const NodeInfo& node);
   mlir::LogicalResult buildConstantNode(const NodeInfo& node);
   // Fallback for TF ops with no OpSpec: emit a warning and build an
   // atir.opaque placeholder that passes inputs/outputs through structurally.

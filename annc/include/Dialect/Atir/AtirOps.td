@@ -348,36 +348,64 @@ def Atir_IndexToTensorOp : Atir_Op<"index_to_tensor"> {
   let hasVerifier = 1;
 }
 
-def Atir_SwitchCaseOp : Atir_Op<"switch", [SingleBlockImplicitTerminator<"atir::ReturnOp">]> {
-  let summary = "switch-case operation on an index argument";
-  let arguments = (ins Index:$arg, DenseI64ArrayAttr:$cases);
-  let results = (outs Variadic<AnyType>:$results);
-  let regions = (region SizedRegion<1>:$defaultRegion,
-                        VariadicRegion<SizedRegion<1>>:$caseRegions);
-
-  let assemblyFormat = [{
-    $arg attr-dict (`->` type($results)^)?
-    custom<SwitchCases>($cases, $caseRegions) `\n`
-    `` `default` $defaultRegion
+def Atir_SwitchOp : Atir_Op<"switch"> {
+  let summary = "TensorFlow Switch mirror operation";
+  let description = [{
+    Mirrors TensorFlow Switch/RefSwitch without restructuring its downstream
+    branches. The false and true results correspond to TensorFlow output slots
+    0 and 1 and have the same runtime tensor type as the data input.
   }];
-
-  let extraClassDeclaration = [{
-    /// Get the number of cases.
-    unsigned getNumCases();
-
-    /// Get the default region body.
-    ::mlir::Block &getDefaultBlock();
-
-    /// Get the body of a case region.
-    ::mlir::Block &getCaseBlock(unsigned idx);
+  let arguments = (ins AnyType:$data, Atir_Tensor:$predicate,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$falseOutput, AnyType:$trueOutput);
+  let assemblyFormat = [{
+    $data `,` $predicate attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
-  // let builders = [
-  //   OpBuilder<(ins CArg<"::mlir::Value">:$arg,
-  //     CArg<"::llvm::SmallVector<int64_t>", "{}">:$cases,
-  //     CArg<"::mlir::IntegerAttr", "{}">:$axis,
-  //     CArg<"::mlir::StringAttr", "{}">:$postOp,
-  //     CArg<"::mlir::BoolAttr", "{}">:$parallel)>]
+}
+
+def Atir_EnterOp : Atir_Op<"enter"> {
+  let summary = "TensorFlow Enter/RefEnter mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_ExitOp : Atir_Op<"exit"> {
+  let summary = "TensorFlow Exit/RefExit mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_NextIterationOp : Atir_Op<"next_iteration"> {
+  let summary = "TensorFlow NextIteration mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_LoopCondOp : Atir_Op<"loop_cond"> {
+  let summary = "TensorFlow LoopCond mirror operation";
+  let arguments = (ins Atir_Tensor:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs Atir_Tensor:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
 }
 
 def Atir_ParallelOp : Atir_Op<"Parallel"> {
@@ -392,7 +420,7 @@ def Atir_ParallelOp : Atir_Op<"Parallel"> {
   }];
 }
 
-def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["ForOp", "ParallelOp", "SwitchCaseOp"]>], Interfaces)> {
+def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["ForOp", "ParallelOp"]>], Interfaces)> {
   let summary = "loop yield and termination operation";
   let description = [{}];
 
@@ -1394,7 +1422,7 @@ def Atir_PadOp : Atir_Op<"Pad", Interfaces> {
   }];
 }
 
-def Atir_MergeOp : Atir_Op<"Merge", Interfaces> {
+def Atir_MergeOp : Atir_Op<"merge", Interfaces> {
   let summary = [{
     Accepts a list of input operands and returns a value of the operand 
     type and the index of the first encountered match.

@@ -30,10 +30,6 @@
 using namespace mlir;
 namespace atir {
 TensorType getAtirTensorType(MLIRContext *ctx);
-ParseResult parseSwitchCases(OpAsmParser &p, DenseI64ArrayAttr &cases,
-                 SmallVectorImpl<std::unique_ptr<Region>> &caseRegions);
-void printSwitchCases(OpAsmPrinter &p, Operation *op, DenseI64ArrayAttr cases,
-                      RegionRange caseRegions);
 }  // namespace atir
 
 #endif  // ATIR_DIALECT_H
