@@ -19,10 +19,13 @@ using namespace mlir;
 namespace annc {
 
 std::unique_ptr<mlir::Pass> createKPGemmOneShotBufferize();
+std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs();
+std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
+    llvm::StringRef packedCPath);
 std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
-    llvm::StringRef configPath);
+    llvm::StringRef configPath, bool enablePrepack);
 std::unique_ptr<mlir::Pass> createAArch64AutotuneGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64FinalizeGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64GemmCacheBlocking();

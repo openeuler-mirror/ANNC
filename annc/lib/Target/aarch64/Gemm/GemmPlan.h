@@ -2,6 +2,7 @@
 #define ANNC_LIB_TARGET_AARCH64_GEMM_GEMMPLAN_H
 
 #include <cstdint>
+#include <string>
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
@@ -35,6 +36,10 @@ inline constexpr llvm::StringLiteral kExecutionKindAttrName =
 inline constexpr llvm::StringLiteral kRhsPackingAttrName = "rhs_packing";
 inline constexpr llvm::StringLiteral kRhsPackSourceAttrName =
     "rhs_pack_source";
+inline constexpr llvm::StringLiteral kPrepackedRhsAttrName =
+    "annc.aarch64.prepacked_rhs";
+inline constexpr llvm::StringLiteral kRhsNameAttrName =
+    "annc.aarch64.rhs_name";
 
 inline constexpr llvm::StringLiteral kCacheBlockedStage = "cache_blocked";
 inline constexpr llvm::StringLiteral kThreadTiledStage = "thread_tiled";
@@ -61,6 +66,9 @@ inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
     "annc_aarch64_sve_packed_b_offset_f32";
 
 inline constexpr int64_t kPlanVersion = 1;
+inline constexpr int64_t kPrepackedRhsVersion = 1;
+// Constant RHS matrices below this K*N threshold stay on the direct path.
+inline constexpr int64_t kMinPrepackedRhsElements = 300;
 // Problems up to this many FMAs keep the RHS in its original row-major layout
 // instead of paying the runtime pack_b call.
 inline constexpr int64_t kRowMajorOperationLimit = 4500;
@@ -80,6 +88,17 @@ struct GemmKernelTile {
   int64_t mr;
   int64_t panelLanes;
 };
+
+// One (KC, NC) cache block of the pc-jc ordered RHS partition.
+struct CacheBlock2D {
+  int64_t kStart;
+  int64_t kSize;
+  int64_t nStart;
+  int64_t nSize;
+};
+
+std::vector<CacheBlock2D> partitionCache2D(int64_t k, int64_t n, int64_t kc,
+                                           int64_t nc);
 
 struct GemmTuningConfig {
   GemmTarget target;
@@ -121,7 +140,7 @@ struct GemmProblem {
 };
 
 // Whether the RHS is read in its original layout or materialized by pack_b.
-enum class RhsPacking { kDirect, kPacked };
+enum class RhsPacking { kDirect, kPacked, kPrepacked };
 enum class KcMode { kOverwrite, kAccumulate };
 enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
@@ -160,6 +179,8 @@ struct GemmTilingPlan {
 struct GemmPlan : GemmTilingPlan {
   GemmTarget target;
   GemmIsa isa;
+  std::string prepackedRhsSymbol;
+  int64_t prepackedRhsElements = 0;
 };
 
 bool isGemmAnchor(mlir::Operation *op);
@@ -178,10 +199,9 @@ struct GemmPathSelection {
   RhsPacking rhsPacking;
 };
 
-// Small generic GEMM problems take the direct-RHS path before skinny GEMV
-// selection. Larger NEON N==1/M==1 problems then use the GEMV families.
 GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
-                                 int64_t k);
+                                 int64_t k, bool enablePrepack,
+                                 bool hasPrepackableRhs);
 
 // The microkernel leaf family selected for a plan, corresponding one-to-one
 // with selectGemmPath: the matrix-vector (N==1) and vector-matrix (M==1)
@@ -202,6 +222,7 @@ GemmLeafKind getGemmLeafKind(GemmExecutionKind executionKind,
 // Whether the leaf signature carries the RHS leading dimension (kVecmat and
 // kRowMajor use the row-major ldb ABI with eight index operands).
 bool usesLdbAbi(GemmLeafKind kind);
+llvm::StringRef getGemmPackedBSchema(GemmIsa isa);
 llvm::StringRef getPackBAsmSymbol(GemmTarget target, GemmIsa isa);
 llvm::StringRef getKcModeName(KcMode mode);
 mlir::LogicalResult requireStage(mlir::Operation *op, llvm::StringRef expected);

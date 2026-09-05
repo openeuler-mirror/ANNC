@@ -175,6 +175,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   fs::path aotAtir = work / "model_aot_atir.mlir";
   fs::path fusionMetadata = work / "fusion_metadata.json";
   fs::path loweredMlir = work / "model_lowered.mlir";
+  fs::path packedC = work / "model_packed_rhs.c";
   fs::path generatedSo = fs::absolute(work / "annc_generated_kernel.so");
   std::string runtimeSharedLibPath =
       opts.sharedLibPath.empty() ? generatedSo.string() : opts.sharedLibPath;
@@ -244,14 +245,18 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   bool hasAot = false;
   if (ok) ok = containsAotKernel(aotAtir, hasAot);
   if (hasAot) {
-    ok = ok &&
-         runCommand({anncAsm, aotAtir.string(), fastCodegenPass,
-                     "--annc-aarch64-gemm-pipeline", "-o",
-                     loweredMlir.string()},
-                    opts.verbose) &&
-         runCommand({annc, loweredMlir.string(), "--shared", "-o",
-                     generatedSo.string()},
-                    opts.verbose);
+    std::vector<std::string> asmArgs = {
+        anncAsm, aotAtir.string(), fastCodegenPass,
+        "--annc-aarch64-gemm-pipeline", "-o", loweredMlir.string()};
+    std::vector<std::string> linkArgs = {
+        annc, loweredMlir.string(), "--shared", "-o", generatedSo.string()};
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+    asmArgs[3] = "--annc-aarch64-gemm-pipeline=packed-c=" + packedC.string();
+    linkArgs.push_back("--packed-rhs-c");
+    linkArgs.push_back(packedC.string());
+#endif
+    ok = ok && runCommand(asmArgs, opts.verbose) &&
+         runCommand(linkArgs, opts.verbose);
   }
   ok = ok && runCommand(converterArgs, opts.verbose);
 
@@ -278,7 +283,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
     std::error_code ec;
     // The generated shared library and full fusion template are referenced by
     // the rewritten GraphDef, so retain them for runtime execution.
-    for (const fs::path &temp : {rawAtir, aotAtir, loweredMlir}) {
+    for (const fs::path &temp : {rawAtir, aotAtir, loweredMlir, packedC}) {
       fs::remove(temp, ec);
       ec.clear();
     }
