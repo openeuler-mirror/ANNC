@@ -1036,10 +1036,12 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
 ANNCFusedOp::~ANNCFusedOp() {}
 
 annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
-    const std::vector<annc::jit::JitArgumentSignature>& arguments) {
+    const std::vector<annc::jit::JitArgumentSignature>& arguments,
+    int64_t intra_thread_count) {
   AnncJitCompileRequest request;
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
+  request.intra_thread_count = intra_thread_count;
   request.argument_shapes.reserve(arguments.size());
   for (const auto& argument : arguments) {
     request.argument_shapes.push_back(argument.dims);
@@ -1122,7 +1124,14 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         profile_enabled ? Clock::now() : TimePoint{};
     annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
       auto compile_start = Clock::now();
-      annc::jit::JitCompileResult compiled = CompileJitKernel(arguments);
+      // Read the pool size only on the compile (miss) path: the GEMM plan is
+      // thread-count specialized and must match the intra-op pool that will
+      // execute it. The pool is fixed at session creation, so this value is
+      // stable for the cache lifetime and intentionally stays out of the key.
+      const int64_t intra_thread_count =
+          tf_thread_pool ? tf_thread_pool->NumThreads() : 1;
+      annc::jit::JitCompileResult compiled =
+          CompileJitKernel(arguments, intra_thread_count);
       if (compiled.ok()) {
         if (profile_enabled) {
           LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << key_summary

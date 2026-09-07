@@ -28,7 +28,6 @@ struct PipelineOptions {
   std::string workDir;
   std::vector<std::string> outputTensors;
   int64_t batchSize = -1;
-  int64_t intraThreadCount = -1;
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
   bool verbose = false;
@@ -42,7 +41,6 @@ static void printUsage() {
          "  --work_dir <dir>          Intermediate artifact directory\n"
          "  --shared_lib_path <path>  AOT library path written to GraphDef\n"
          "  --batch_size <n>          Override dynamic batch dimensions\n"
-         "  --intra_thread_count <n>  Set module-level GEMM thread count\n"
          "  --output_tensor <name>    Preserve a named graph output\n"
          "  --keep_temps              Keep intermediate artifacts\n"
          "  --dump-fusion-metadata    Write fusion_metadata.json\n"
@@ -133,8 +131,6 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   opts->sharedLibPath = takeValue(argc, argv, "--shared_lib_path");
   opts->workDir = takeValue(argc, argv, "--work_dir", defaultWorkDir());
   opts->batchSize = std::stoll(takeValue(argc, argv, "--batch_size", "-1"));
-  opts->intraThreadCount =
-      std::stoll(takeValue(argc, argv, "--intra_thread_count", "-1"));
   opts->keepTemps = hasArg(argc, argv, "--keep_temps") ||
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
@@ -155,10 +151,6 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
   if (opts->inputGraphDef.empty() || opts->outputGraphDef.empty()) {
     std::cerr << "[annc-tf-pipeline] --input_graphdef and --output_graphdef "
               << "are required\n";
-    return false;
-  }
-  if (opts->intraThreadCount == 0 || opts->intraThreadCount < -1) {
-    std::cerr << "[annc-tf-pipeline] --intra_thread_count must be positive\n";
     return false;
   }
   return true;
@@ -217,10 +209,6 @@ static bool runGraphDefRewrite(int argc, char **argv) {
     tf2atirArgs.insert(tf2atirArgs.begin() + 2, "--batch_size");
     tf2atirArgs.insert(tf2atirArgs.begin() + 3,
                        std::to_string(opts.batchSize));
-  }
-  if (opts.intraThreadCount > 0) {
-    tf2atirArgs.push_back("--intra_thread_count");
-    tf2atirArgs.push_back(std::to_string(opts.intraThreadCount));
   }
   for (const std::string &tensor : opts.outputTensors) {
     tf2atirArgs.push_back("--output_tensor");

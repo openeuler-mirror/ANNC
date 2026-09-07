@@ -218,7 +218,6 @@ annc-tf-pipeline \
 | `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
-| `--intra_thread_count <n>` | 写入 ATIR module 的 GEMM intra 线程数；ANNCOptimizer 从 Grappler 配置透传 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
 ### 分步编译命令

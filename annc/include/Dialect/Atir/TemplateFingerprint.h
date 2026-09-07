@@ -4,12 +4,10 @@
 #include <string>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/BuiltinOps.h"
 
 namespace atir {
 
-std::string computeAtirTemplateFingerprint(mlir::ModuleOp module,
-                                           mlir::func::FuncOp function);
+std::string computeAtirTemplateFingerprint(mlir::func::FuncOp function);
 
 }  // namespace atir
 

@@ -10,20 +10,6 @@
 namespace annc {
 namespace {
 
-FailureOr<int64_t> getIntraThreadCount(ModuleOp module) {
-  auto attr = module->getAttrOfType<IntegerAttr>(
-      aarch64::gemm::kIntraThreadCountAttrName);
-  // The annc-asm caller sets this module attribute from the available intra-op
-  // thread count. Omitted attributes intentionally keep GEMM execution serial.
-  if (!attr) return int64_t{1};
-  if (attr.getInt() <= 0) {
-    module.emitError() << aarch64::gemm::kIntraThreadCountAttrName
-                       << " must be a positive i64 module attribute";
-    return failure();
-  }
-  return attr.getInt();
-}
-
 LogicalResult selectGemmStrategy(
     Operation *op, int64_t intraThreadCount,
     const aarch64::gemm::GemmTuningConfig &config, bool enablePrepack) {
@@ -88,17 +74,23 @@ class AArch64SelectGemmStrategy
  public:
   using Base::Base;
 
-  explicit AArch64SelectGemmStrategy(StringRef path, bool allowPrepack) {
+  explicit AArch64SelectGemmStrategy(StringRef path, bool allowPrepack,
+                                     int64_t threads = 1) {
     configPath = path.str();
     enablePrepack = allowPrepack;
+    intraThreadCount = threads;
   }
 
   void runOnOperation() override {
-    FailureOr<int64_t> intraThreadCount = getIntraThreadCount(getOperation());
-    if (failed(intraThreadCount)) {
+    // The annc-asm caller supplies the runtime intra-op thread count through
+    // the pipeline / pass option; 1 keeps GEMM execution serial.
+    if (intraThreadCount <= 0) {
+      getOperation()->emitError(
+          "aarch64-select-gemm-strategy intra-thread-count must be positive");
       signalPassFailure();
       return;
     }
+    int64_t threadCount = intraThreadCount;
     std::string path = configPath;
     if (path.empty()) {
       if (const char *environment = std::getenv("ANNC_GEMM_CONFIG"))
@@ -122,8 +114,7 @@ class AArch64SelectGemmStrategy
         }
         config = *loaded;
       }
-      return failed(selectGemmStrategy(op, *intraThreadCount, *config,
-                                       enablePrepack))
+      return failed(selectGemmStrategy(op, threadCount, *config, enablePrepack))
                  ? WalkResult::interrupt()
                  : WalkResult::advance();
     });
@@ -138,8 +129,9 @@ std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy() {
 }
 
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
-    llvm::StringRef configPath, bool enablePrepack) {
-  return std::make_unique<AArch64SelectGemmStrategy>(configPath, enablePrepack);
+    llvm::StringRef configPath, bool enablePrepack, int64_t intraThreadCount) {
+  return std::make_unique<AArch64SelectGemmStrategy>(configPath, enablePrepack,
+                                                     intraThreadCount);
 }
 
 }  // namespace annc

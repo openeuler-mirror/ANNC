@@ -45,7 +45,10 @@ def AArch64SelectGemmStrategy
     Option<"configPath", "config-path", "std::string", "",
            "Path to the external AArch64 GEMM tuning configuration">,
     Option<"enablePrepack", "enable-prepack", "bool", "false",
-           "Allow compile-time RHS prepacking">
+           "Allow compile-time RHS prepacking">,
+    Option<"intraThreadCount", "intra-thread-count", "int64_t", "1",
+           "Number of intra-op threads available to the GEMM plan "
+           "(1 = serial execution)">
   ];
   let dependentDialects = [
     "mlir::linalg::LinalgDialect"

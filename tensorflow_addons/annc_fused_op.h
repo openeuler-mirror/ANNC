@@ -44,7 +44,8 @@ class ANNCFusedOp : public OpKernel {
   Status ResolveLibrarySymbols(const std::string& so_path);
 
   annc::jit::JitCompileResult CompileJitKernel(
-      const std::vector<annc::jit::JitArgumentSignature>& arguments);
+      const std::vector<annc::jit::JitArgumentSignature>& arguments,
+      int64_t intra_thread_count);
 
   Status ExecuteMlirCifaceKernel(OpKernelContext* context,
                                  void* kernel_function,

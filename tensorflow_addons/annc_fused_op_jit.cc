@@ -181,22 +181,34 @@ Status CompileAnncJitKernel(
               << shape_spec << " arguments=" << request.argument_shapes.size();
   }
 
+  std::string gemm_pipeline_arg = "--annc-aarch64-gemm-pipeline";
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+  const std::string fast_codegen_arg = "--atir-fast-codegen=enable-kdnn=true";
+#else
+  const std::string fast_codegen_arg = "--atir-fast-codegen";
+#endif
+  std::string gemm_pipeline_options;
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  gemm_pipeline_options += "packed-c=" + packed_rhs_c;
+#endif
+  if (request.intra_thread_count > 0) {
+    if (!gemm_pipeline_options.empty()) gemm_pipeline_options += ",";
+    gemm_pipeline_options +=
+        "intra-thread-count=" + std::to_string(request.intra_thread_count);
+  }
+  if (!gemm_pipeline_options.empty()) {
+    gemm_pipeline_arg += "=" + gemm_pipeline_options;
+  }
   std::vector<std::string> asm_args = {
       AnncToolPath("annc-asm"),
       request.atir_module_path,
       "--atir-select-kernel=kernel-name=" + request.kernel_name,
       "--atir-specialize-shapes=shape-spec=" + shape_spec,
-      "--atir-fast-codegen",
-      "--annc-aarch64-gemm-pipeline",
+      fast_codegen_arg,
+      gemm_pipeline_arg,
       "-o",
       lowered_mlir,
   };
-#ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  asm_args[4] = "--atir-fast-codegen=enable-kdnn=true";
-#endif
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  asm_args[5] = "--annc-aarch64-gemm-pipeline=packed-c=" + packed_rhs_c;
-#endif
   status = RunJitTool(asm_args, "annc-asm");
   if (!status.ok()) {
     CleanupAnncJitWorkDir(work_dir);
