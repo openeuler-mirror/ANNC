@@ -33,6 +33,14 @@ namespace tensorflow {
 
 struct AnncFusedProfileSample {
   double load_library_us = 0.0;
+  double jit_arg_shapes_us = 0.0;
+  double jit_cache_key_us = 0.0;
+  double jit_cache_lookup_us = 0.0;
+  double jit_cache_lookup_hit_us = 0.0;
+  double jit_compile_us = 0.0;
+  int jit_hit_count = 0;
+  int jit_compile_count = 0;
+  int jit_wait_count = 0;
   double backend_dispatch_us = 0.0;
   double threadpool_setup_us = 0.0;
   double threadpool_restore_us = 0.0;
@@ -285,6 +293,20 @@ int AnncFusedProfileInterval() {
 struct ProfileStats {
   int count = 0;
   double load_library_us = 0.0;
+  double jit_arg_shapes_us = 0.0;
+  double jit_cache_key_us = 0.0;
+  double jit_cache_lookup_us = 0.0;
+  double jit_cache_lookup_hit_us = 0.0;
+  double jit_compile_us = 0.0;
+  int jit_hits = 0;
+  int jit_compiles = 0;
+  int jit_waits = 0;
+  // 稳态热路径统计：仅统计 JIT cache 命中（或 AOT 已加载）的调用，
+  // 不含首次编译与 wait 等冷启动成本，无需靠减法推导。
+  int steady_calls = 0;
+  double steady_total_us = 0.0;
+  double steady_kernel_us = 0.0;
+  double steady_overhead_us = 0.0;
   double backend_dispatch_us = 0.0;
   double threadpool_setup_us = 0.0;
   double threadpool_restore_us = 0.0;
@@ -323,7 +345,37 @@ void LogProfileStats(const char* tag, int total,
   LOG(INFO) << "[" << tag << "] ====== report (calls=" << total << ") ======";
   for (const auto& [key, s] : stats) {
     const double count = static_cast<double>(s.count);
+    const double jit_hits = static_cast<double>(s.jit_hits);
+    const double steady_calls = static_cast<double>(s.steady_calls);
     LOG(INFO) << "[" << tag << "] key=" << key << " count=" << s.count
+              << " jit_hits=" << s.jit_hits
+              << " jit_compiles=" << s.jit_compiles
+              << " jit_waits=" << s.jit_waits
+              << " steady_calls=" << s.steady_calls
+              << " avg_steady_total="
+              << (steady_calls > 0 ? (s.steady_total_us / steady_calls) : 0.0)
+              << " us"
+              << " avg_steady_kernel="
+              << (steady_calls > 0 ? (s.steady_kernel_us / steady_calls) : 0.0)
+              << " us"
+              << " avg_steady_overhead="
+              << (steady_calls > 0 ? (s.steady_overhead_us / steady_calls)
+                                   : 0.0)
+              << " us"
+              << " avg_jit_arg_shapes=" << (s.jit_arg_shapes_us / count)
+              << " us"
+              << " avg_jit_cache_key=" << (s.jit_cache_key_us / count)
+              << " us"
+              << " avg_jit_cache_lookup="
+              << (s.jit_cache_lookup_us / count) << " us"
+              << " avg_jit_hit_lookup="
+              << (jit_hits > 0 ? (s.jit_cache_lookup_hit_us / jit_hits) : 0.0)
+              << " us"
+              << " avg_jit_compile="
+              << (s.jit_compiles > 0
+                      ? (s.jit_compile_us / static_cast<double>(s.jit_compiles))
+                      : 0.0)
+              << " us"
               << " avg_load_library=" << (s.load_library_us / count) << " us"
               << " avg_backend_dispatch="
               << (s.backend_dispatch_us / count) << " us"
@@ -697,11 +749,11 @@ std::vector<int64_t> ParseShapeSpec(const std::string& spec) {
 
 TensorShape InferOutputShape(OpKernelContext* context, int output_index,
                              int output_rank,
-                             const std::vector<std::string>& output_shapes,
+                             const std::vector<std::vector<int64_t>>& output_specs,
                              int num_constants, int num_fixed) {
-  if (output_index < static_cast<int>(output_shapes.size()) &&
-      !output_shapes[output_index].empty()) {
-    std::vector<int64_t> dims = ParseShapeSpec(output_shapes[output_index]);
+  if (output_index < static_cast<int>(output_specs.size()) &&
+      !output_specs[output_index].empty()) {
+    const std::vector<int64_t>& dims = output_specs[output_index];
     TensorShape shape;
     for (int i = 0; i < static_cast<int>(dims.size()); ++i) {
       int64_t dim = dims[i];
@@ -778,7 +830,7 @@ Status BuildRuntimeArgumentShapes(
     OpKernelContext* context, int num_constants, int num_fixed, int num_dynamic,
     int num_outputs, const std::vector<int>& input_ranks,
     const std::vector<int>& output_ranks,
-    const std::vector<std::string>& output_shapes,
+    const std::vector<std::vector<int64_t>>& output_specs,
     const std::vector<int>& configured_order,
     std::vector<annc::jit::JitArgumentSignature>* arguments) {
   const int num_inputs = num_constants + num_fixed + num_dynamic;
@@ -800,7 +852,7 @@ Status BuildRuntimeArgumentShapes(
 
   for (int i = 0; i < num_outputs; ++i) {
     TensorShape shape = InferOutputShape(
-        context, i, output_ranks[i], output_shapes, num_constants, num_fixed);
+        context, i, output_ranks[i], output_specs, num_constants, num_fixed);
     tensors.push_back({ShapeVector(shape)});
   }
 
@@ -905,6 +957,12 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   }
   if (context->HasAttr("output_shapes")) {
     OP_REQUIRES_OK(context, context->GetAttr("output_shapes", &output_shapes_));
+  }
+  // Parse once here; Compute() runs on the hot path and must not re-parse the
+  // attribute strings (stringstream + getline + stoll) on every call.
+  output_shape_specs_.reserve(output_shapes_.size());
+  for (const std::string& spec : output_shapes_) {
+    output_shape_specs_.push_back(ParseShapeSpec(spec));
   }
   if (context->HasAttr("kernel_arg_order")) {
     OP_REQUIRES_OK(context,
@@ -1019,6 +1077,8 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   }
 
   const bool jit_mode = shared_lib_path_.empty();
+  // 稳态判定：JIT 模式下仅 cache 命中算稳态；AOT 模式下未触发库加载即稳态。
+  bool steady_call = !jit_mode;
   thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
 
   std::shared_ptr<annc::jit::JitExecutable> jit_executable;
@@ -1033,23 +1093,33 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         context, !atir_module_path_.empty(),
         errors::InvalidArgument("ANNCFused JIT requires atir_module_path"));
     std::vector<annc::jit::JitArgumentSignature> arguments;
+    auto t_jit_arg_shapes_start = profile_enabled ? Clock::now() : TimePoint{};
     OP_REQUIRES_OK(
         context, BuildRuntimeArgumentShapes(
                      context, num_constants_, num_fixed_, num_dynamic_,
-                     num_outputs_, input_ranks_, output_ranks_, output_shapes_,
-                     kernel_arg_order_, &arguments));
+                     num_outputs_, input_ranks_, output_ranks_,
+                     output_shape_specs_, kernel_arg_order_, &arguments));
+    if (profile_enabled) {
+      profile_sample.jit_arg_shapes_us = ElapsedUs(t_jit_arg_shapes_start);
+    }
 
     annc::jit::JitCacheKey cache_key;
     std::string cache_key_error;
+    auto t_jit_cache_key_start = profile_enabled ? Clock::now() : TimePoint{};
     OP_REQUIRES(
         context,
         annc::jit::BuildJitCacheKey(template_fingerprint_, arguments,
                                     &cache_key, &cache_key_error),
         errors::Internal("Cannot build ANNC JIT cache key: ",
                          cache_key_error));
+    if (profile_enabled) {
+      profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
+    }
 
     const std::string key_summary = cache_key.digest.substr(0, 16);
     annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
+    auto t_jit_cache_lookup_start =
+        profile_enabled ? Clock::now() : TimePoint{};
     annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
       auto compile_start = Clock::now();
       annc::jit::JitCompileResult compiled = CompileJitKernel(arguments);
@@ -1066,17 +1136,36 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
                    << " compile_ms=" << (ElapsedUs(compile_start) / 1000.0)
                    << " error=" << compiled.error;
       }
+      if (profile_enabled) {
+        profile_sample.jit_compile_us = ElapsedUs(compile_start);
+      }
       return compiled;
     });
     if (profile_enabled) {
-      annc::jit::JitCacheStats stats_after = cache.stats();
-      LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
-                << " key=" << key_summary << " kernel=" << kernel_name_
-                << " entries=" << stats_after.entries;
-      for (const std::string& evicted_key : lookup.evictedKeys) {
-        LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
-                  << evicted_key.substr(0, 16)
+      profile_sample.jit_cache_lookup_us = ElapsedUs(t_jit_cache_lookup_start);
+      if (lookup.event == annc::jit::CacheEvent::kHit) {
+        profile_sample.jit_cache_lookup_hit_us =
+            profile_sample.jit_cache_lookup_us;
+        profile_sample.jit_hit_count = 1;
+      } else if (lookup.event == annc::jit::CacheEvent::kMiss) {
+        profile_sample.jit_compile_count = 1;
+      } else if (lookup.event == annc::jit::CacheEvent::kWait) {
+        profile_sample.jit_wait_count = 1;
+      }
+      // 仅 miss/wait/evicted 打逐条日志；hit 是热路径，其计数已通过
+      // jit_hit_count 汇总进 [ANNC-FUSED-PROFILE] 快照(jit_hits 字段)。
+      // stats() 与 GetOrCompile 共用同一把全局 mutex，逐 hit 调用会在
+      // 并发推理时造成二次锁争用，叠加 LOG 锁进一步放大延迟。
+      if (lookup.event != annc::jit::CacheEvent::kHit) {
+        annc::jit::JitCacheStats stats_after = cache.stats();
+        LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
+                  << " key=" << key_summary << " kernel=" << kernel_name_
                   << " entries=" << stats_after.entries;
+        for (const std::string& evicted_key : lookup.evictedKeys) {
+          LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
+                    << evicted_key.substr(0, 16)
+                    << " entries=" << stats_after.entries;
+        }
       }
     }
     OP_REQUIRES(context, lookup.ok(), errors::Internal(lookup.error));
@@ -1089,10 +1178,12 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         reinterpret_cast<annc::threadpool::AnncThreadPool* (*)()>(
             jit_executable->getThreadPoolFunction());
     library_loaded_this_call = lookup.event != annc::jit::CacheEvent::kHit;
+    steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
   } else if (!loaded_ || current_so_path_ != shared_lib_path_) {
     OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
     current_so_path_ = shared_lib_path_;
     library_loaded_this_call = true;
+    steady_call = false;
   }
   // kernel_function was captured before the AOT branch above; refresh it from
   // the member LoadLibrary just resolved, or the first invocation of a kernel
@@ -1140,6 +1231,20 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   auto& s = stats[key];
   s.count++;
   s.load_library_us += profile_sample.load_library_us;
+  s.jit_arg_shapes_us += profile_sample.jit_arg_shapes_us;
+  s.jit_cache_key_us += profile_sample.jit_cache_key_us;
+  s.jit_cache_lookup_us += profile_sample.jit_cache_lookup_us;
+  s.jit_cache_lookup_hit_us += profile_sample.jit_cache_lookup_hit_us;
+  s.jit_compile_us += profile_sample.jit_compile_us;
+  s.jit_hits += profile_sample.jit_hit_count;
+  s.jit_compiles += profile_sample.jit_compile_count;
+  s.jit_waits += profile_sample.jit_wait_count;
+  if (steady_call) {
+    s.steady_calls++;
+    s.steady_total_us += total_us;
+    s.steady_kernel_us += profile_sample.kernel_us;
+    s.steady_overhead_us += total_us - profile_sample.kernel_us;
+  }
   s.backend_dispatch_us += profile_sample.backend_dispatch_us;
   s.threadpool_setup_us += profile_sample.threadpool_setup_us;
   s.threadpool_restore_us += profile_sample.threadpool_restore_us;
@@ -1361,7 +1466,7 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
     Tensor* output = nullptr;
 
     TensorShape out_shape =
-        InferOutputShape(context, i, output_ranks_[i], output_shapes_,
+        InferOutputShape(context, i, output_ranks_[i], output_shape_specs_,
                          num_constants_, num_fixed_);
     auto t_output_alloc_start = profile_enabled ? Clock::now() : TimePoint{};
     Status alloc_status = context->allocate_output(i, out_shape, &output);

@@ -26,6 +26,8 @@ bool EnvFlagEnabled(const char* name) {
          std::strcmp(value, "false") != 0 && std::strcmp(value, "FALSE") != 0;
 }
 
+bool AnncVerboseEnabled() { return EnvFlagEnabled("ANNC_VERBOSE"); }
+
 std::string AnncToolPath(const char* tool_name) {
   constexpr char kDefaultPipelinePath[] = "/usr/local/bin/annc-tf-pipeline";
   const char* configured_pipeline = std::getenv("ANNC_PIPELINE_PATH");
@@ -92,6 +94,12 @@ Status RunJitTool(const std::vector<std::string>& args, const char* tool_name) {
     return errors::InvalidArgument("Missing executable for ", tool_name);
   }
 
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] " << tool_name
+              << " begin executable=" << args.front()
+              << " argc=" << args.size();
+  }
+
   pid_t pid = fork();
   if (pid < 0) {
     return errors::Internal("Failed to fork ", tool_name, ": ",
@@ -152,6 +160,11 @@ Status CompileAnncJitKernel(
   std::string work_dir;
   TF_RETURN_IF_ERROR(CreateJitWorkDir(&work_dir));
 
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] work directory created path=" << work_dir
+              << " kernel=" << request.kernel_name;
+  }
+
   fs::path work(work_dir);
   const std::string shape_spec = (work / "runtime_shapes.json").string();
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
@@ -162,6 +175,10 @@ Status CompileAnncJitKernel(
   if (!status.ok()) {
     CleanupAnncJitWorkDir(work_dir);
     return status;
+  }
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] runtime shape spec written path="
+              << shape_spec << " arguments=" << request.argument_shapes.size();
   }
 
   std::vector<std::string> asm_args = {
@@ -185,6 +202,9 @@ Status CompileAnncJitKernel(
     CleanupAnncJitWorkDir(work_dir);
     return status;
   }
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] annc-asm completed output=" << lowered_mlir;
+  }
 
   std::vector<std::string> link_args = {
       AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path};
@@ -197,13 +217,23 @@ Status CompileAnncJitKernel(
     CleanupAnncJitWorkDir(work_dir);
     return status;
   }
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] annc completed output=" << so_path;
+  }
 
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] dlopen begin path=" << so_path;
+  }
   void* handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle) {
     const char* error = dlerror();
     CleanupAnncJitWorkDir(work_dir);
     return errors::NotFound("Cannot load JIT library ", so_path, ": ",
                             error ? error : "<null>");
+  }
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] dlopen completed path=" << so_path
+              << " handle=" << handle;
   }
   const std::string symbol_name = "_mlir_ciface_" + request.kernel_name;
   dlerror();
@@ -212,9 +242,12 @@ Status CompileAnncJitKernel(
   if (symbol_error || !kernel_function) {
     dlclose(handle);
     CleanupAnncJitWorkDir(work_dir);
-    return errors::NotFound("Cannot find symbol ", symbol_name, " in ",
-                            so_path, ": ",
-                            symbol_error ? symbol_error : "<null>");
+    return errors::NotFound("Cannot find symbol ", symbol_name, " in ", so_path,
+                            ": ", symbol_error ? symbol_error : "<null>");
+  }
+  if (AnncVerboseEnabled()) {
+    LOG(INFO) << "[ANNC-JIT-TRACE] kernel symbol resolved symbol="
+              << symbol_name << " address=" << kernel_function;
   }
   void* set_thread_pool = dlsym(handle, "annc_set_current_threadpool");
   void* get_thread_pool = dlsym(handle, "annc_get_current_threadpool");

@@ -73,6 +73,9 @@ class ANNCFusedOp : public OpKernel {
   std::vector<int> input_ranks_;
   // Comma-separated dimensions per output; "?" denotes a dynamic dimension.
   std::vector<std::string> output_shapes_;
+  // output_shapes_ parsed once in the constructor (-1 for dynamic dimensions);
+  // the hot path uses this to avoid re-parsing the attribute strings per call.
+  std::vector<std::vector<int64_t>> output_shape_specs_;
   // Permutation over [input memrefs..., output memrefs...] for the kernel call.
   std::vector<int> kernel_arg_order_;
   // Compatibility placeholder; currently read but not interpreted by runtime.
