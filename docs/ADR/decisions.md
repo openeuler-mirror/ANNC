@@ -86,6 +86,17 @@
 | 项目 | 内容 |
 | --- | --- |
 | **上下文** | ADR-007 的同步 JIT 能将请求实际 shape 交给后端，但每次调用都重新执行 `annc-asm`、`annc` 和 `dlopen`。直接按 `kernel_name` 缓存会阻止语义相同但来源名称不同的 fusion func 复用。工具链、GEMM 配置和 ABI 是进程级固定上下文，不需要在每次推理时重新探测。 |
-| **决策** | 在 `ANNCFusedOp` 进程内增加有界编译缓存。key 由 cache schema version、与名字无关的 canonical ATIR template fingerprint 和按 kernel 参数顺序排列的实际 shape 构成；Grappler 阶段将影响 codegen 的 module 属性（包括 `annc.intra_thread_count`）纳入 template fingerprint。`kernel_name` 和 MLIR func 名称不进入 key，只在 miss 时选择 func 和解析首次生成的符号。相同 key 使用 single-flight，同步等待同一编译结果；不同 key 可并行编译。成功 entry 以 `shared_ptr` 管理 `dlopen` handle 和工作目录并按 LRU 淘汰，默认上限 64，`ANNC_JIT_CACHE_MAX_ENTRIES=0` 可关闭缓存。失败结果从表中移除，后续请求重新编译。运行时 shape JSON 只携带参数索引和实际 shape，dtype 由 ATIR 模板和 TensorFlow Op dtype contract 共同约束。 |
+| **决策** | 在 `ANNCFusedOp` 进程内增加有界编译缓存。key 由 cache schema version、与名字无关的 canonical ATIR template fingerprint 和按 kernel 参数顺序排列的实际 shape 构成（`annc.intra_thread_count` 曾纳入 template fingerprint，后按 ADR-009 移出）。`kernel_name` 和 MLIR func 名称不进入 key，只在 miss 时选择 func 和解析首次生成的符号。相同 key 使用 single-flight，同步等待同一编译结果；不同 key 可并行编译。成功 entry 以 `shared_ptr` 管理 `dlopen` handle 和工作目录并按 LRU 淘汰，默认上限 64，`ANNC_JIT_CACHE_MAX_ENTRIES=0` 可关闭缓存。失败结果从表中移除，后续请求重新编译。运行时 shape JSON 只携带参数索引和实际 shape，dtype 由 ATIR 模板和 TensorFlow Op dtype contract 共同约束。 |
 | **后果** | 相同语义和 shape 在进程内只编译一次；工具链、GEMM 配置和 ABI 变化属于不支持的进程级上下文切换，需要重启进程；正在执行的产物在淘汰后仍存活到最后一个引用释放。首次请求仍承担同步编译延迟，缓存仅限当前进程。 |
 | **备选方案** | (a) 每个 Op 仅缓存最后一个 shape——无法跨节点复用且 shape 切换会重复编译；(b) 使用 `kernel_name` 作为 key——把来源身份误当成代码生成语义；(c) 跨进程磁盘缓存——需要额外的原子发布、完整版本校验和不可信 `.so` 安全边界，本阶段不采用。 |
+
+<a id="adr-009"></a>
+
+## ADR-009：GEMM intra 线程数改为运行时 JIT 特化维度
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | GEMM lowering 的线程分片计划按 intra 线程数特化。原设计由 Grappler 阶段解析线程数（session config → env → MaxParallelism）经 `--intra_thread_count` 写入 `annc.intra_thread_count` module 属性，参与 template fingerprint 并被 SelectGemmStrategy 消费。但 TF 的 `GrapplerItem::optimization_options().intra_op_parallelism_threads` 会把未配置值填成 `port::MaxParallelism()`，与显式配置值不可区分，导致 `taskset` 限核 + `TF_NUM_INTRAOP_THREADS=1` 时生成与实际 pool 不匹配的分片计划；而 kernel 执行时注入的正是 TF intra-op pool，精确值在运行时每次 Compute 都可零成本获得。 |
+| **决策** | 线程数的唯一信息源改为 `ANNCFusedOp` 运行时 JIT 编译路径：编译（miss）时读取 `ctx->device()->tensorflow_cpu_worker_threads()->workers->NumThreads()`（无 pool 时串行默认 1），经 `--annc-aarch64-gemm-pipeline=intra-thread-count=N` 传给 annc-asm。移除 `annc.intra_thread_count` module 属性、`annc-tf2atir`/`annc-tf-pipeline` 的 `--intra_thread_count` CLI、ANNCOptimizer 的线程数解析，以及 template fingerprint 中的线程数字段（schema v2→v3）。TF intra-op pool 在 session 创建时初始化且进程内恒定，与 JIT cache 生命周期一致，因此线程数不进入 cache key。AOT 分支不再运行 AArch64 GEMM pipeline（GEMM 融合 kernel 均为 jit 模式，AOT kernel 无 GEMM anchor，属历史污染，一并清理）。 |
+| **后果** | ✅ GEMM 计划线程数与实际执行 pool 恒一致，消除 Grappler 信息歧义；✅ fingerprint 不再被编译期猜测值污染，cache key 只含真实语义维度；✅ 线程池恒定性使 key 不膨胀；❌ 同进程多 session 且 intra 配置不同的场景下 cache 会串用首个编译产物（当前部署为单 session，不做防御）；❌ fingerprint schema 变更导致存量部署升级后首次 miss 重编一次。 |
+| **备选方案** | (a) 保留 Grappler 解析 + 修补启发式（configured==MaxParallelism 视为未配置）——无法区分显式设置恰好等于 MaxParallelism 的情况，且解析发生在信息已被污染的层；(b) 线程数进 cache key——pool 进程内恒定，只会制造冗余 key；(c) 运行时实测后回写 module 属性——Grappler 已结束，属性无人再读。 |

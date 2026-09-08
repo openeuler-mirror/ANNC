@@ -1538,7 +1538,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                                         boundaryInputs, boundaryOutputs);
         setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
         std::string templateFingerprint =
-            atir::computeAtirTemplateFingerprint(module, kernelFunc);
+            atir::computeAtirTemplateFingerprint(kernelFunc);
 
         SmallVector<NamedAttribute> metadata;
         metadata.push_back(rewriter.getNamedAttr(
@@ -1614,7 +1614,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         : createKernelFunc(module, rewriter, kernelName, matmulOp);
     setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
     std::string templateFingerprint =
-        atir::computeAtirTemplateFingerprint(module, kernelFunc);
+        atir::computeAtirTemplateFingerprint(kernelFunc);
 
     SmallVector<NamedAttribute> metadata;
     metadata.push_back(rewriter.getNamedAttr("fusion.pattern",

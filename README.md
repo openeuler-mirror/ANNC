@@ -218,7 +218,6 @@ annc-tf-pipeline \
 | `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
-| `--intra_thread_count <n>` | 写入 ATIR module 的 GEMM intra 线程数；ANNCOptimizer 从 Grappler 配置透传 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
 ### 分步编译命令
@@ -489,7 +488,14 @@ ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ...
 
 | 字段 | 含义 |
 |------|------|
-| `avg_load_library` | 首次加载或 `.so` 路径变化时 `dlopen`/`dlsym` 的平均耗时，缓存命中时为 0 |
+| `avg_load_library` | AOT 模式下首次加载或 `.so` 路径变化时 `dlopen`/`dlsym` 的平均耗时，缓存命中时为 0；JIT 模式恒为 0（JIT 的 `dlopen`/`dlsym` 归入 `avg_jit_compile`） |
+| `avg_jit_arg_shapes` | JIT 运行时构建参数形状/签名的平均耗时（均摊到总调用数） |
+| `avg_jit_cache_key` | JIT 构建 cache key（SHA256）的平均耗时（均摊到总调用数） |
+| `avg_jit_cache_lookup` | JIT `GetOrCompile` 每次调用的平均耗时（hit/miss/wait 混合，均摊到总调用数） |
+| `avg_jit_hit_lookup` | 纯命中（`kHit`）时查表的平均耗时，按命中次数（`jit_hits`）取平均，衡量稳态命中路径 |
+| `avg_jit_compile` | JIT cache miss 时单次编译的平均耗时，按编译次数（`jit_compiles`）取平均（`fork/exec annc-asm` → `annc` → `dlopen`/`dlsym`），衡量首次编译/冷启动成本 |
+| `steady_calls` / `avg_steady_total` / `avg_steady_kernel` / `avg_steady_overhead` | 稳态热路径统计：仅统计 JIT cache 命中（或 AOT 已加载）的调用，不含首次编译与 wait 等冷启动成本；`avg_steady_overhead = avg_steady_total - avg_steady_kernel`，衡量稳态接入层开销，无需靠减法从全量均值推导 |
+| `jit_hits` / `jit_compiles` / `jit_waits` | JIT cache 命中/编译/等待并发编译的调用计数 |
 | `avg_threadpool_setup` | 获取 TensorFlow CPU threadpool 并安装 ANNC TLS threadpool 的平均耗时 |
 | `avg_input_memref` | 输入 Tensor 构造成 MLIR memref descriptor 的平均耗时 |
 | `avg_output_alloc` | TensorFlow 输出 Tensor 分配的平均耗时 |

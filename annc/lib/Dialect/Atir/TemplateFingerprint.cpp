@@ -13,9 +13,7 @@ namespace atir {
 namespace {
 
 constexpr llvm::StringLiteral kTemplateFingerprintSchema =
-    "annc-atir-template-v2";
-constexpr llvm::StringLiteral kIntraThreadCountAttr =
-    "annc.intra_thread_count";
+    "annc-atir-template-v3";
 
 mlir::Type canonicalType(mlir::Type type) {
   if (auto tensor = mlir::dyn_cast<TensorType>(type)) {
@@ -75,8 +73,7 @@ void removeSourceIdentity(mlir::Operation *root) {
 
 }  // namespace
 
-std::string computeAtirTemplateFingerprint(mlir::ModuleOp module,
-                                           mlir::func::FuncOp function) {
+std::string computeAtirTemplateFingerprint(mlir::func::FuncOp function) {
   mlir::OwningOpRef<mlir::Operation *> owner(function->clone());
   auto clone = mlir::cast<mlir::func::FuncOp>(owner.get());
 
@@ -97,11 +94,9 @@ std::string computeAtirTemplateFingerprint(mlir::ModuleOp module,
   std::string canonical;
   llvm::raw_string_ostream output(canonical);
   output << "schema=" << kTemplateFingerprintSchema << '\n';
-  output << kIntraThreadCountAttr << '=';
-  auto intraThreadCount = module->getAttrOfType<mlir::IntegerAttr>(
-      kIntraThreadCountAttr);
-  // The lowering pass treats an omitted attribute as serial execution.
-  output << (intraThreadCount ? intraThreadCount.getInt() : 1) << '\n';
+  // The GEMM intra thread count is a runtime JIT specialization dimension,
+  // not part of the kernel template; it must stay out of the fingerprint so
+  // the runtime can pick the thread budget after Grappler.
 
   mlir::OpPrintingFlags flags;
   flags.printGenericOpForm().useLocalScope();

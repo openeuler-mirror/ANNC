@@ -89,6 +89,21 @@ if(NOT llvm_POPULATED)
   endif()
 endif()
 
+# CMake 3.22 FindPython 规避：本工程一次 configure 内混合了多种 Python 组件组合
+# （MLIR 的 Development.Module-only、mlir/python 的 Module+Embed、ANNC 顶层的全量
+# Development），后一次 find 会改写/清空 _Python_DEVELOPMENT_*_SIGNATURE，导致下一次
+# configure 时 MLIR 的 Module-only 检测签名失配，报
+# "Could NOT find Python (missing: Development.Module)"。
+# 在进入 LLVM 子构建前清空上一轮残留的 FindPython 内部状态，使每次 configure 都从
+# 全新发现开始（解释器可执行文件仍由 Python_EXECUTABLE/Python3_EXECUTABLE 缓存锚定）。
+get_cmake_property(_annc_py_cache_vars CACHE_VARIABLES)
+foreach(_v IN LISTS _annc_py_cache_vars)
+  if(_v MATCHES "^_Python3?_")
+    unset(${_v} CACHE)
+  endif()
+endforeach()
+unset(_annc_py_cache_vars)
+
 # LLVM monorepo: CMakeLists.txt 入口在 llvm/ 子目录
 add_subdirectory(${llvm_SOURCE_DIR}/llvm ${llvm_BINARY_DIR})
 

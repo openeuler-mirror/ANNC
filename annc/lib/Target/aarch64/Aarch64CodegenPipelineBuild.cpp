@@ -19,11 +19,17 @@ namespace annc
         PassOptions::Option<std::string> packedCPath{
             *this, "packed-c",
             llvm::cl::desc("Path for the generated packed RHS C source")};
+        PassOptions::Option<int64_t> intraThreadCount{
+            *this, "intra-thread-count",
+            llvm::cl::desc("Number of intra-op threads available to the GEMM "
+                           "plan (1 = serial execution)"),
+            llvm::cl::init(1)};
     };
 
     void buildAArch64CodegenPipelineImpl(OpPassManager& passManager,
                                          StringRef configPath,
-                                         StringRef packedCPath)
+                                         StringRef packedCPath,
+                                         int64_t intraThreadCount)
     {
         passManager.addPass(atir::createAtirGemmEpilogueFusionPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
@@ -34,8 +40,9 @@ namespace annc
 #else
         const bool enablePrepack = false;
 #endif
-        passManager.addPass(
-            createAArch64SelectGemmStrategy(configPath, enablePrepack));
+        passManager.addPass(createAArch64SelectGemmStrategy(configPath,
+                                                           enablePrepack,
+                                                           intraThreadCount));
         passManager.addPass(createAArch64AutotuneGemmPlan());
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (enablePrepack)
@@ -55,7 +62,7 @@ namespace annc
 
     void buildAArch64CodegenPipeline(OpPassManager& passManager)
     {
-        buildAArch64CodegenPipelineImpl(passManager, {}, {});
+        buildAArch64CodegenPipelineImpl(passManager, {}, {}, 1);
     }
 
     void registerAArch64CodegenPipeline()
@@ -65,7 +72,8 @@ namespace annc
             [](OpPassManager &passManager,
                const AArch64CodegenPipelineOptions &options) {
                 buildAArch64CodegenPipelineImpl(passManager, options.configPath,
-                                                 options.packedCPath);
+                                                 options.packedCPath,
+                                                 options.intraThreadCount);
             });
     }
 } //namespace annc

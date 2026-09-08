@@ -29,8 +29,6 @@ inline constexpr llvm::StringLiteral kMicrokernelNAttrName =
     "annc.aarch64.microkernel_n";
 inline constexpr llvm::StringLiteral kMicrokernelKAttrName =
     "annc.aarch64.microkernel_k";
-inline constexpr llvm::StringLiteral kIntraThreadCountAttrName =
-    "annc.intra_thread_count";
 inline constexpr llvm::StringLiteral kExecutionKindAttrName =
     "execution_kind";
 inline constexpr llvm::StringLiteral kRhsPackingAttrName = "rhs_packing";

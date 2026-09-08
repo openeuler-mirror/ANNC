@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <optional>
 #include <string>
 
 #include "Dialect/Atir/AtirOps.h"
@@ -85,20 +84,13 @@ class TemplateFingerprintTest : public testing::Test {
     context_.loadAllAvailableDialects();
   }
 
-  std::string Fingerprint(const std::string &moduleText,
-                          std::optional<int64_t> intraThreadCount = {}) {
+  std::string Fingerprint(const std::string &moduleText) {
     mlir::OwningOpRef<mlir::ModuleOp> module =
         mlir::parseSourceString<mlir::ModuleOp>(moduleText, &context_);
     EXPECT_TRUE(module);
     if (!module) return "";
-    if (intraThreadCount) {
-      (*module)->setAttr(
-          "annc.intra_thread_count",
-          mlir::IntegerAttr::get(mlir::IntegerType::get(&context_, 64),
-                                 *intraThreadCount));
-    }
     mlir::func::FuncOp function = *module->getOps<mlir::func::FuncOp>().begin();
-    return atir::computeAtirTemplateFingerprint(*module, function);
+    return atir::computeAtirTemplateFingerprint(function);
   }
 
  private:
@@ -134,13 +126,6 @@ TEST_F(TemplateFingerprintTest, PreservesNonIdentityMetadata) {
   EXPECT_NE(
       Fingerprint(BuildKernel("dense_a", "model/a", false, -1.0f, "option-a")),
       Fingerprint(BuildKernel("dense_b", "model/b", false, -1.0f, "option-b")));
-}
-
-TEST_F(TemplateFingerprintTest, IncludesModuleIntraThreadCount) {
-  const std::string module = BuildKernel("dense_a", "model/a", false, -1.0f);
-  EXPECT_EQ(Fingerprint(module, 4), Fingerprint(module, 4));
-  EXPECT_NE(Fingerprint(module, 4), Fingerprint(module, 16));
-  EXPECT_EQ(Fingerprint(module), Fingerprint(module, 1));
 }
 
 TEST_F(TemplateFingerprintTest, IgnoresExecutionMode) {
