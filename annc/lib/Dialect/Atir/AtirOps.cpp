@@ -398,42 +398,6 @@ ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
   return success();
 }
 
-/// Parse the case regions and values.
-ParseResult parseSwitchCases(OpAsmParser &p, DenseI64ArrayAttr &cases,
-                 SmallVectorImpl<std::unique_ptr<Region>> &caseRegions) {
-  SmallVector<int64_t> caseValues;
-  while (succeeded(p.parseOptionalKeyword("case"))) {
-    int64_t value = 0;
-    Region &region = *caseRegions.emplace_back(std::make_unique<Region>());
-    if (p.parseInteger(value) || p.parseRegion(region, /*arguments=*/{}))
-      return failure();
-    caseValues.push_back(value);
-  }
-  cases = p.getBuilder().getDenseI64ArrayAttr(caseValues);
-  return success();
-}
-
-/// Print the case regions and values.
-void printSwitchCases(OpAsmPrinter &p, Operation *op,
-                             DenseI64ArrayAttr cases, RegionRange caseRegions) {
-  for (auto [value, region] : llvm::zip(cases.asArrayRef(), caseRegions)) {
-    p.printNewline();
-    p << "case " << value << ' ';
-    p.printRegion(*region, /*printEntryBlockArgs=*/false);
-  }
-}
-
-unsigned SwitchCaseOp::getNumCases() { return getCases().size(); }
-
-Block &SwitchCaseOp::getDefaultBlock() {
-  return getDefaultRegion().front();
-}
-
-Block &SwitchCaseOp::getCaseBlock(unsigned idx) {
-  assert(idx < getNumCases() && "case index out-of-bounds");
-  return getCaseRegions()[idx].front();
-}
-
 LogicalResult TensorToIndexOp::verify() {
   auto inputType = dyn_cast<TensorType>(getInput().getType());
   if (!inputType)
@@ -454,71 +418,64 @@ LogicalResult IndexToTensorOp::verify() {
   return success();
 }
 
-static bool areSwitchTypesCompatible(Type resultType, Type yieldedType) {
-  if (resultType == yieldedType) return true;
-  auto resultTensor = dyn_cast<TensorType>(resultType);
-  auto yieldedTensor = dyn_cast<TensorType>(yieldedType);
-  if (!resultTensor || !yieldedTensor) return false;
-
-  // Tensor name and cached constant data are provenance, not runtime type.
-  // Branch-local producers naturally carry different names from the Merge
-  // result, while their actual storage representation must still agree.
-  return resultTensor.getShape() == yieldedTensor.getShape() &&
-         resultTensor.getElementType() == yieldedTensor.getElementType() &&
-         resultTensor.getEncoding() == yieldedTensor.getEncoding() &&
-         resultTensor.getStride() == yieldedTensor.getStride() &&
-         resultTensor.getLayout() == yieldedTensor.getLayout() &&
-         resultTensor.getMemType() == yieldedTensor.getMemType() &&
-         resultTensor.getAddress() == yieldedTensor.getAddress() &&
-         resultTensor.getDeviceParallel() ==
-             yieldedTensor.getDeviceParallel() &&
-         resultTensor.getOnchipParallel() == yieldedTensor.getOnchipParallel();
+static bool haveCompatibleMirrorTypes(Type lhs, Type rhs) {
+  if (lhs == rhs) return true;
+  auto lhsTensor = dyn_cast<TensorType>(lhs);
+  auto rhsTensor = dyn_cast<TensorType>(rhs);
+  if (!lhsTensor || !rhsTensor) return false;
+  return lhsTensor.getShape() == rhsTensor.getShape() &&
+         lhsTensor.getElementType() == rhsTensor.getElementType() &&
+         lhsTensor.getEncoding() == rhsTensor.getEncoding() &&
+         lhsTensor.getStride() == rhsTensor.getStride() &&
+         lhsTensor.getLayout() == rhsTensor.getLayout() &&
+         lhsTensor.getMemType() == rhsTensor.getMemType() &&
+         lhsTensor.getAddress() == rhsTensor.getAddress() &&
+         lhsTensor.getDeviceParallel() == rhsTensor.getDeviceParallel() &&
+         lhsTensor.getOnchipParallel() == rhsTensor.getOnchipParallel();
 }
 
-LogicalResult SwitchCaseOp::verify() {
-  if (getCases().size() != getCaseRegions().size()) {
-    return emitOpError("has ")
-           << getCaseRegions().size() << " case regions but "
-           << getCases().size() << " case values";
-  }
-
-  llvm::DenseSet<int64_t> seenCases;
-  for (int64_t value : getCases())
-    if (!seenCases.insert(value).second)
-      return emitOpError("has duplicate case value: ") << value;
-
-  auto verifyRegion = [&](Region &region, const Twine &name) -> LogicalResult {
-    if (region.empty() || region.front().empty())
-      return emitOpError() << name << " must contain one non-empty block";
-    auto returnOp = dyn_cast<ReturnOp>(region.front().back());
-    if (!returnOp) {
-      return emitOpError("expected ")
-             << name << " to end with atir.return, but got "
-             << region.front().back().getName();
-    }
-    if (returnOp.getNumOperands() != getNumResults()) {
-      return emitOpError("expected each region to return ")
-             << getNumResults() << " values, but " << name << " returns "
-             << returnOp.getNumOperands();
-    }
-    for (auto [index, resultType, operand] :
-         llvm::enumerate(getResultTypes(), returnOp.getOperands())) {
-      if (!areSwitchTypesCompatible(resultType, operand.getType())) {
-        return emitOpError("expected result #")
-               << index << " of each region to be " << resultType << ", but "
-               << name << " returns " << operand.getType();
-      }
-    }
-    return success();
-  };
-
-  if (failed(verifyRegion(getDefaultRegion(), "default region")))
-    return failure();
-  for (auto [index, caseRegion] : llvm::enumerate(getCaseRegions()))
-    if (failed(verifyRegion(caseRegion,
-                            "case region #" + Twine(index))))
-      return failure();
+static LogicalResult verifyScalarBool(Operation *op, Type type) {
+  auto tensor = dyn_cast<TensorType>(type);
+  auto encoding = tensor ? dyn_cast_or_null<StringAttr>(tensor.getEncoding())
+                         : StringAttr();
+  if (!tensor || !tensor.getShape().empty() || !encoding ||
+      encoding.getValue() != "bool")
+    return op->emitOpError("predicate must be a scalar bool tensor");
   return success();
+}
+
+LogicalResult SwitchOp::verify() {
+  if (failed(verifyScalarBool(*this, getPredicate().getType()))) return failure();
+  if (!haveCompatibleMirrorTypes(getData().getType(),
+                                 getFalseOutput().getType()) ||
+      !haveCompatibleMirrorTypes(getData().getType(),
+                                 getTrueOutput().getType()))
+    return emitOpError("both outputs must match the data input type");
+  return success();
+}
+
+static LogicalResult verifyPassthrough(Operation *op, Value input,
+                                       Value output) {
+  if (!haveCompatibleMirrorTypes(input.getType(), output.getType()))
+    return op->emitOpError("output must match the input type");
+  return success();
+}
+
+LogicalResult EnterOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult ExitOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult NextIterationOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult LoopCondOp::verify() {
+  if (failed(verifyScalarBool(*this, getInput().getType()))) return failure();
+  return verifyScalarBool(*this, getOutput().getType());
 }
 
 //===----------------------------------------------------------------------===//

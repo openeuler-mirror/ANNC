@@ -364,24 +364,24 @@ struct RankSolver {
     } else if (auto tile = dyn_cast<TileOp>(op)) {
       proposeEquality({tile.getOutput(), tile.getInput(), tile.getResult()});
       proposeRank(tile.getMultiples(), 1);
-    } else if (auto sw = dyn_cast<SwitchCaseOp>(op)) {
-      // SwitchCaseOp::verify requires every region's atir.return operand to
-      // be shape-compatible with the corresponding switch result.  Propagate
-      // both ways so upgrading one side cannot strand the other.
-      auto proposeAcross = [&](Region &region, int64_t resultIndex) {
-        if (region.empty()) return;
-        Block &block = region.getBlocks().front();
-        auto ret = dyn_cast<ReturnOp>(block.getTerminator());
-        if (!ret || resultIndex >= static_cast<int64_t>(ret.getNumOperands()))
-          return;
-        proposeEquality(
-            {sw->getResult(resultIndex), ret.getOperand(resultIndex)});
-      };
-      int64_t numResults = sw->getNumResults();
-      for (int64_t i = 0; i < numResults; ++i) {
-        proposeAcross(sw.getDefaultRegion(), i);
-        for (Region &region : sw.getCaseRegions()) proposeAcross(region, i);
-      }
+    } else if (auto sw = dyn_cast<SwitchOp>(op)) {
+      proposeEquality(
+          {sw.getData(), sw.getFalseOutput(), sw.getTrueOutput()});
+    } else if (auto merge = dyn_cast<MergeOp>(op)) {
+      SmallVector<Value> values(merge.getInputsAndControl());
+      values.push_back(merge.getOutput());
+      proposeEquality(values);
+      proposeRank(merge.getValueIndex(), 0);
+    } else if (auto enter = dyn_cast<EnterOp>(op)) {
+      proposeEquality({enter.getInput(), enter.getOutput()});
+    } else if (auto exit = dyn_cast<ExitOp>(op)) {
+      proposeEquality({exit.getInput(), exit.getOutput()});
+    } else if (auto next = dyn_cast<NextIterationOp>(op)) {
+      proposeEquality({next.getInput(), next.getOutput()});
+    } else if (auto cond = dyn_cast<LoopCondOp>(op)) {
+      proposeEquality({cond.getInput(), cond.getOutput()});
+      proposeRank(cond.getInput(), 0);
+      proposeRank(cond.getOutput(), 0);
     }
   }
 

@@ -254,14 +254,7 @@ bool MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
 
   // Name -> NodeInfo lookup so transformers can resolve constant inputs.
   nodesByName_.clear();
-  std::function<void(const NodeInfo&)> indexNode = [&](const NodeInfo& node) {
-    nodesByName_[node.name] = &node;
-    for (const NodeInfo& branchNode : node.switch_false_nodes)
-      indexNode(branchNode);
-    for (const NodeInfo& branchNode : node.switch_true_nodes)
-      indexNode(branchNode);
-  };
-  for (const auto& node : nodes) indexNode(node);
+  for (const auto& node : nodes) nodesByName_[node.name] = &node;
   std::vector<NodeInfo> inputNodes;
   std::vector<NodeInfo> outputNodes;
   std::vector<NodeInfo> computeNodes;
@@ -372,15 +365,11 @@ LogicalResult MLIRBuilder::emitNodeError(const NodeInfo& node,
 LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   const std::string& type = node.op_type;
 
-  if (type == "ANNCStructuredSwitch")
-    return buildStructuredSwitchNode(node);
-  // A raw Switch/Merge reaching the builder means the adapter's diamond
-  // reconstruction skipped it (non-linear branches, dead outputs, ...).
-  // Fall back to the opaque placeholder instead of failing: this matches how
-  // such graphs converted before structured control flow existed.
   if (type == "Switch" || type == "RefSwitch" || type == "Merge" ||
-      type == "RefMerge")
-    return buildOpaqueOp(node);
+      type == "RefMerge" || type == "Enter" || type == "RefEnter" ||
+      type == "Exit" || type == "RefExit" || type == "NextIteration" ||
+      type == "RefNextIteration" || type == "LoopCond")
+    return buildControlFlowMirrorNode(node);
 
   const OpSpec* spec = lookupSpec(type);
   if (spec == nullptr) return buildOpaqueOp(node);
@@ -442,104 +431,74 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   return success();
 }
 
-LogicalResult MLIRBuilder::buildStructuredSwitchNode(const NodeInfo& node) {
-  if (node.switch_data_inputs.size() != 1 ||
-      node.switch_data_inputs.size() != node.switch_false_aliases.size() ||
-      node.switch_data_inputs.size() != node.switch_true_aliases.size() ||
-      node.switch_predicate_input.empty() || node.outputs.size() != 2) {
-    return emitNodeError(node, "invalid structured Switch description");
+LogicalResult MLIRBuilder::buildControlFlowMirrorNode(
+    const NodeInfo& node) {
+  SmallVector<Value> inputs;
+  for (const std::string& inputName : node.inputs) {
+    Value input = resolveValue(inputName);
+    if (!input) {
+      // A NextIteration -> Merge edge is a TensorFlow loop backedge. It is
+      // preserved in tf.input.N metadata and intentionally omitted from the
+      // acyclic MLIR operand list when its producer is not available yet.
+      if (node.op_type == "Merge" || node.op_type == "RefMerge") continue;
+      return emitNodeError(node, "unknown control-flow input tensor '" +
+                                     inputName + "'");
+    }
+    inputs.push_back(input);
   }
 
-  SmallVector<Value> dataValues;
-  dataValues.reserve(node.switch_data_inputs.size());
-  for (const std::string& input : node.switch_data_inputs) {
-    Value value = resolveValue(input);
-    if (!value)
-      return emitNodeError(node, "unknown Switch data input '" + input + "'");
-    dataValues.push_back(value);
+  SmallVector<Type> outputs;
+  for (unsigned i = 0; i < node.outputs.size(); ++i) {
+    auto type = getTensorType(node, i);
+    if (failed(type)) return failure();
+    outputs.push_back(*type);
   }
-  Value predicate = resolveValue(node.switch_predicate_input);
-  if (!predicate)
-    return emitNodeError(node, "unknown Switch predicate input '" +
-                                   node.switch_predicate_input + "'");
-  auto predicateType = dyn_cast<atir::TensorType>(predicate.getType());
-  auto predicateEncoding =
-      predicateType
-          ? dyn_cast_or_null<StringAttr>(predicateType.getEncoding())
-          : StringAttr();
-  if (!predicateType || !predicateType.getShape().empty() ||
-      !predicateEncoding || predicateEncoding.getValue() != "bool")
-    return emitNodeError(node,
-                         "Switch predicate must be a scalar bool tensor");
-
-  auto valueType = getTensorType(node, 0);
-  auto indexType = getTensorType(node, 1);
-  if (failed(valueType) || failed(indexType)) return failure();
 
   Location loc = annc::getLoc(builder_.getContext(), node.name);
-  auto selector = builder_.create<atir::TensorToIndexOp>(
-      loc, builder_.getIndexType(), predicate);
-  auto switchOp = builder_.create<atir::SwitchCaseOp>(
-      loc, TypeRange{*valueType, builder_.getIndexType()}, selector.getResult(),
-      builder_.getDenseI64ArrayAttr({1}), 1);
-
-  auto buildBranch = [&](Region& region, ArrayRef<NodeInfo> branchNodes,
-                         ArrayRef<std::string> aliases,
-                         StringRef yieldName) -> LogicalResult {
-    if (region.empty()) region.emplaceBlock();
-    Block& block = region.front();
-    if (!block.empty()) block.clear();
-
-    OpBuilder::InsertionGuard guard(builder_);
-    builder_.setInsertionPointToStart(&block);
-    auto savedValues = tensorValues_;
-    for (auto [alias, value] : llvm::zip(aliases, dataValues))
-      tensorValues_[alias] = value;
-
-    for (const NodeInfo& branchNode : branchNodes)
-      if (failed(addNode(branchNode))) {
-        tensorValues_ = std::move(savedValues);
-        return failure();
-      }
-
-    Value yielded = resolveValue(yieldName);
-    if (!yielded) {
-      tensorValues_ = std::move(savedValues);
-      return emitNodeError(node, "unknown branch yield '" + yieldName.str() +
-                                     "'");
-    }
-    const int64_t branchIndex =
-        &region == &switchOp.getDefaultRegion() ? node.switch_false_index
-                                                : node.switch_true_index;
-    Value selectedIndex = builder_.create<arith::ConstantIndexOp>(
-        loc, branchIndex);
-    builder_.create<atir::ReturnOp>(loc,
-                                    ValueRange{yielded, selectedIndex});
-    tensorValues_ = std::move(savedValues);
-    return success();
-  };
-
-  if (failed(buildBranch(switchOp.getDefaultRegion(), node.switch_false_nodes,
-                         node.switch_false_aliases,
-                         node.switch_false_yield)) ||
-      failed(buildBranch(switchOp.getCaseRegions().front(),
-                         node.switch_true_nodes, node.switch_true_aliases,
-                         node.switch_true_yield))) {
-    switchOp.erase();
-    return failure();
+  OperationState state(loc, "atir.opaque");
+  if (node.op_type == "Switch" || node.op_type == "RefSwitch") {
+    if (inputs.size() != 2 || outputs.size() != 2)
+      return emitNodeError(node, "Switch requires two inputs and two outputs");
+    state.name = OperationName("atir.switch", builder_.getContext());
+  } else if (node.op_type == "Merge" || node.op_type == "RefMerge") {
+    if (inputs.empty() || outputs.size() != 2)
+      return emitNodeError(node,
+                           "Merge requires at least one available input and two outputs");
+    state.name = OperationName("atir.merge", builder_.getContext());
+  } else if (node.op_type == "Enter" || node.op_type == "RefEnter") {
+    state.name = OperationName("atir.enter", builder_.getContext());
+  } else if (node.op_type == "Exit" || node.op_type == "RefExit") {
+    state.name = OperationName("atir.exit", builder_.getContext());
+  } else if (node.op_type == "NextIteration" ||
+             node.op_type == "RefNextIteration") {
+    state.name = OperationName("atir.next_iteration", builder_.getContext());
+  } else {
+    state.name = OperationName("atir.loop_cond", builder_.getContext());
   }
+  state.operands.append(inputs.begin(), inputs.end());
+  state.types.append(outputs.begin(), outputs.end());
 
-  builder_.setInsertionPointAfter(switchOp);
-  auto valueIndex = builder_.create<atir::IndexToTensorOp>(
-      loc, *indexType, switchOp.getResult(1));
-  tensorValues_[node.outputs[0].name] = switchOp.getResult(0);
-  tensorValues_[node.outputs[1].name] = valueIndex.getResult();
+  SmallVector<NamedAttribute> metadata;
+  metadata.push_back(
+      builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)));
+  metadata.push_back(builder_.getNamedAttr(
+      "tf.op", builder_.getStringAttr(node.op_type)));
+  for (const auto& [key, value] : node.tf_attrs) {
+    if (key == "tf.name" || key == "tf.op") continue;
+    metadata.push_back(
+        builder_.getNamedAttr(key, builder_.getStringAttr(value)));
+  }
+  for (const auto& [key, value] : node.attrs) {
+    if (key.empty() || key[0] == '_') continue;
+    metadata.push_back(builder_.getNamedAttr(
+        key, builder_.getStringAttr(tfAttrValueToString(value))));
+  }
+  state.addAttribute(builder_.getStringAttr("metadata"),
+                     DictionaryAttr::get(builder_.getContext(), metadata));
 
-  SmallVector<NamedAttribute> metadata{
-      builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)),
-      builder_.getNamedAttr("tf.op", builder_.getStringAttr("SwitchMerge"))};
-  switchOp->setAttr("metadata",
-                    DictionaryAttr::get(builder_.getContext(), metadata));
+  Operation* op = builder_.create(state);
+  for (unsigned i = 0; i < node.outputs.size(); ++i)
+    tensorValues_[node.outputs[i].name] = op->getResult(i);
   return success();
 }
 

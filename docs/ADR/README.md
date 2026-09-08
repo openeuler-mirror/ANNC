@@ -39,6 +39,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-007 | TensorFlow 无缓存同步 JIT | accepted | [decisions.md#adr-007](decisions.md#adr-007) |
 | ADR-008 | TensorFlow 进程内 JIT 编译缓存 | accepted | [decisions.md#adr-008](decisions.md#adr-008) |
 | ADR-009 | GEMM intra 线程数改为运行时 JIT 特化维度 | accepted | [decisions.md#adr-009](decisions.md#adr-009) |
+| ADR-010 | TF 控制流镜像转换（mirror，不做语义重建） | accepted | [decisions.md#adr-010](decisions.md#adr-010) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

@@ -251,3 +251,4 @@ func.func @misc(%arg0: !atir.tensor<*xf32, rank_known = false>)
         !atir.tensor<*xi32, rank_known = false>,
         !atir.tensor<*xi32, rank_known = false>
 }
+

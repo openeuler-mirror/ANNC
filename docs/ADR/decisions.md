@@ -100,3 +100,14 @@
 | **决策** | 线程数的唯一信息源改为 `ANNCFusedOp` 运行时 JIT 编译路径：编译（miss）时读取 `ctx->device()->tensorflow_cpu_worker_threads()->workers->NumThreads()`（无 pool 时串行默认 1），经 `--annc-aarch64-gemm-pipeline=intra-thread-count=N` 传给 annc-asm。移除 `annc.intra_thread_count` module 属性、`annc-tf2atir`/`annc-tf-pipeline` 的 `--intra_thread_count` CLI、ANNCOptimizer 的线程数解析，以及 template fingerprint 中的线程数字段（schema v2→v3）。TF intra-op pool 在 session 创建时初始化且进程内恒定，与 JIT cache 生命周期一致，因此线程数不进入 cache key。AOT 分支不再运行 AArch64 GEMM pipeline（GEMM 融合 kernel 均为 jit 模式，AOT kernel 无 GEMM anchor，属历史污染，一并清理）。 |
 | **后果** | ✅ GEMM 计划线程数与实际执行 pool 恒一致，消除 Grappler 信息歧义；✅ fingerprint 不再被编译期猜测值污染，cache key 只含真实语义维度；✅ 线程池恒定性使 key 不膨胀；❌ 同进程多 session 且 intra 配置不同的场景下 cache 会串用首个编译产物（当前部署为单 session，不做防御）；❌ fingerprint schema 变更导致存量部署升级后首次 miss 重编一次。 |
 | **备选方案** | (a) 保留 Grappler 解析 + 修补启发式（configured==MaxParallelism 视为未配置）——无法区分显式设置恰好等于 MaxParallelism 的情况，且解析发生在信息已被污染的层；(b) 线程数进 cache key——pool 进程内恒定，只会制造冗余 key；(c) 运行时实测后回写 module 属性——Grappler 已结束，属性无人再读。 |
+
+<a id="adr-010"></a>
+
+## ADR-010：TF 控制流镜像转换（mirror，不做语义重建）
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | tf2atir 前端此前用 `ANNCStructuredSwitch`（菱形重构）把 TF Switch/Merge 子图重建成单个结构化 op。真实服务图（dead Switch 输出、fan-out 分支、disjoint 分支、嵌套/多条边）大量无法满足菱形重构的前提，导致转换失败或静默丢结构；且 SwitchCase（region 版 switch）与 TF 静态图拓扑一一对应的诉求不符。 |
+| **决策** | 前端对 11 个 TF 控制流 op（Switch/RefSwitch、Merge/RefMerge、Enter/RefEnter、Exit/RefExit、NextIteration/RefNextIteration、LoopCond）一一镜像为显式 ATIR op：`atir.switch`、`atir.merge`、`atir.enter`、`atir.exit`、`atir.next_iteration`、`atir.loop_cond`，不做语义重建、不降级 opaque；`ANNCStructuredSwitch` 与 region 版 SwitchCaseOp 移除。具体约束：(1) 拓扑排序无条件剥离 NextIteration→Merge 数据回边——NextIteration 在 TF 中仅出现于循环构造且回边必汇入 Merge，剥离是无条件正确的；builder 只在 producer 已构建时接线，其余通过 `tf.input.N` metadata 保留来源。(2) 控制依赖（`^input`）纳入可达性与拓扑排序 indegree——控制边影响执行顺序，必须参与；TF 静态图本身要求 DAG，控制环从"被忽略"改为显式失败属于纠偏。(3) 缺 `_output_shapes` 时不再失败：mirror op、Identity 桥接、未知 op 的缺失 slot 从输入合成 descriptor（Switch/Merge 固定双输出，Merge `value_index` 固定标量 i32），以未知 rank 表达——结构保真优先于早期失败，下游 fusion 以 atir.opaque 语义吸收。(4) mirror op 的定位是**保拓扑、不执行**：Conversion/、Target/aarch64/、Interpret/ 不为它们提供 lowering/解释；完整 AOT lowering 只作用于 prune 后的纯计算 func，mirror 结构供 OpFusion 吸收与 converter（GraphDef 重写）恢复。 |
+| **后果** | ✅ 任意复杂控制流拓扑（嵌套 Switch、fan-out/fan-in、disjoint 分支、Ref 全家族、循环回边）可无损转换并通过 FileCheck/pytest 验证；✅ RankInference 跨镜像 op 等价传播保持 shape 推导能力；❌ 图中 mirror op 若未被 fusion 吸收并走到 AOT lowering 会失败（预期行为：该子图本就不应 AOT 编译）；❌ 控制环图与仅 control 可达的子图行为比旧版严格。 |
+| **备选方案** | (a) 继续菱形重构——前提过强，真实图大量不满足；(b) 控制流降级为 atir.opaque——丢失控制流语义，converter 无法恢复图结构；(c) region 版 SwitchCase——与 TF 静态拓扑不对应，需要额外的 region 语义。 |

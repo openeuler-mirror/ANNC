@@ -239,6 +239,7 @@ bool TfGraphParser::parse(const tensorflow::GraphDef& graph,
                   "' references missing control input: " + control_name;
           return false;
         }
+        if (reachable.insert(control_name).second) worklist.push(control_name);
         continue;
       }
       TensorRef ref;
@@ -296,9 +297,20 @@ bool TfGraphParser::parse(const tensorflow::GraphDef& graph,
   }
   for (const auto& node : graph.node()) {
     if (!reachable.count(node.name())) continue;
-    for (const TensorRef& input : parsed.at(node.name()).inputs) {
+    const TfNode& parsedNode = parsed.at(node.name());
+    for (const TensorRef& input : parsedNode.inputs) {
+      const TfNode& producer = parsed.at(input.node);
+      const bool loopBackedge =
+          (parsedNode.op == "Merge" || parsedNode.op == "RefMerge") &&
+          (producer.op == "NextIteration" ||
+           producer.op == "RefNextIteration");
+      if (loopBackedge) continue;
       ++indegree[node.name()];
       consumers[input.node].push_back(node.name());
+    }
+    for (const std::string& control : parsedNode.control_inputs) {
+      ++indegree[node.name()];
+      consumers[control].push_back(node.name());
     }
   }
 
