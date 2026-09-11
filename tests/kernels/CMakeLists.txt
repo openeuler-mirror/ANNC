@@ -113,6 +113,16 @@ if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
         PRIVATE ANNC::AArch64GemmMicrokernels)
 endif()
 
+# The planner is deliberately separated from the handwritten execution leaf;
+# cover its static-grid invariants without requiring a generated kernel.
+annc_add_kernel_gtest(gemm_planner_test
+    gemm_planner_test.cpp
+)
+target_include_directories(gemm_planner_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/annc/lib/Target/aarch64/Gemm"
+)
+target_link_libraries(gemm_planner_test PRIVATE AArch64Codegen)
+
 annc_add_kernel_gtest(builtin_shared_spec_test
     builtin_shared_spec_test.cpp
     "${ANNC_BUILTIN_KERNEL_WRAPPERS_GEN}"
