@@ -162,7 +162,8 @@ struct AArch64GemmPrepackRhsPass
           packingFailed = true;
           continue;
         }
-        if (candidate->rhsPacking != aarch64::gemm::RhsPacking::kPrepacked)
+        if (candidate->strategy.rhsPacking !=
+            aarch64::gemm::RhsPacking::kPrepacked)
           continue;
 
         auto rhsTy = dyn_cast<MemRefType>(matmul.getInputs()[1].getType());
@@ -192,8 +193,9 @@ struct AArch64GemmPrepackRhsPass
         std::vector<float> rhsData(static_cast<size_t>(rhsElements));
         std::memcpy(rhsData.data(), rawData.data(), rawData.size());
         const aarch64::gemm::GemmTuningConfig tuning{
-            candidate->target, candidate->isa, candidate->dataType,
-            candidate->cacheTile, candidate->kernelTile};
+            candidate->strategy.target, candidate->strategy.isa,
+            candidate->strategy.dataType, candidate->strategy.cacheTile,
+            candidate->strategy.kernelTile};
         std::vector<float> packed = packGemmLayout(rhsData.data(), k, n, tuning);
         if (packed.empty()) continue;
 

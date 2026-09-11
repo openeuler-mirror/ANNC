@@ -43,7 +43,7 @@ namespace annc
         passManager.addPass(createAArch64SelectGemmStrategy(configPath,
                                                            enablePrepack,
                                                            intraThreadCount));
-        passManager.addPass(createAArch64AutotuneGemmPlan());
+        passManager.addPass(createAArch64GemmThreadPlanning());
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (enablePrepack)
             passManager.addPass(createAArch64GemmPrepackRhs(packedCPath));

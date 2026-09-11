@@ -20,7 +20,7 @@ void appendString(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
 LogicalResult appendPrepackedPlanFields(
     Operation *op, Builder &builder, NamedAttrList &plan,
     const aarch64::gemm::GemmProblem &problem,
-    const aarch64::gemm::GemmCandidate &candidate) {
+    const aarch64::gemm::GemmTuningStrategy &strategy) {
   auto contract = op->getAttrOfType<DictionaryAttr>(
       aarch64::gemm::kPrepackedRhsAttrName);
   auto symbol =
@@ -33,16 +33,15 @@ LogicalResult appendPrepackedPlanFields(
         "prepacked RHS requires a valid data_symbol/data_elements contract");
 
   const auto &abi = aarch64::gemm::getGemmKernelABI(
-      candidate.target, candidate.isa, candidate.dataType,
-      candidate.executionKind);
+      strategy.target, strategy.isa, strategy.dataType,
+      strategy.executionKind);
   // Recompute the packed-B size from the candidate geometry; the SVE panel
   // width rounds each N block up to the vector length.
   const int64_t panel =
-      candidate.isa == aarch64::gemm::GemmIsa::kSve ? abi.vectorLengthBytes : 4;
+      strategy.isa == aarch64::gemm::GemmIsa::kSve ? abi.vectorLengthBytes : 4;
   int64_t expectedElements = 0;
   for (const auto &block : aarch64::gemm::partitionCache2D(
-           problem.k, problem.n, candidate.cacheTile.kc,
-           candidate.cacheTile.nc))
+           problem.k, problem.n, strategy.cacheTile.kc, strategy.cacheTile.nc))
     expectedElements +=
         block.kSize * ((block.nSize + panel - 1) / panel) * panel;
 
@@ -53,8 +52,8 @@ LogicalResult appendPrepackedPlanFields(
       {"version", aarch64::gemm::kPrepackedRhsVersion},
       {"k", problem.k},
       {"n", problem.n},
-      {"nc", candidate.cacheTile.nc},
-      {"kc", candidate.cacheTile.kc},
+      {"nc", strategy.cacheTile.nc},
+      {"kc", strategy.cacheTile.kc},
       {"data_elements", expectedElements}};
   for (const auto &field : i64Fields) {
     auto value = contract.getAs<IntegerAttr>(field.first);
@@ -64,14 +63,14 @@ LogicalResult appendPrepackedPlanFields(
       return failure();
     }
   }
-  if (candidate.executionKind != aarch64::gemm::GemmExecutionKind::kGemm)
+  if (strategy.executionKind != aarch64::gemm::GemmExecutionKind::kGemm)
     return op->emitOpError("prepacked RHS requires the generic GEMM path");
 
   appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName, "prepacked");
   appendString(plan, builder, aarch64::gemm::kRhsPackSourceAttrName,
                "prepacked");
   appendString(plan, builder, "pack_b_schema",
-               aarch64::gemm::getGemmPackedBSchema(candidate.isa));
+               aarch64::gemm::getGemmPackedBSchema(strategy.isa));
   appendString(plan, builder, "pack_b_block_order", "pc-jc");
   appendString(plan, builder, "rhs_data_symbol", symbol.getValue());
   appendI64(plan, builder, "rhs_data_elements", elements.getInt());
@@ -87,42 +86,51 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   FailureOr<aarch64::gemm::GemmCandidate> candidate =
       aarch64::gemm::readCandidate(op);
   if (failed(problem) || failed(candidate)) return failure();
+  const aarch64::gemm::GemmTuningStrategy &strategy = candidate->strategy;
+  if (strategy.maxThreadCount < candidate->threadCount ||
+      candidate->tasksM > problem->m || candidate->tasksN > problem->n) {
+    return op->emitOpError("has an invalid AArch64 GEMM candidate task grid");
+  }
+  const int64_t workItems = candidate->tasksM * candidate->tasksN;
+  if (workItems != candidate->threadCount)
+    return op->emitOpError(
+        "requires one aligned static work item per selected thread");
 
   Builder builder(op->getContext());
   NamedAttrList plan;
   appendI64(plan, builder, "version", aarch64::gemm::kPlanVersion);
   appendString(plan, builder, "target_arch",
-               aarch64::gemm::getGemmTargetName(candidate->target));
+               aarch64::gemm::getGemmTargetName(strategy.target));
   appendString(plan, builder, "isa",
-               aarch64::gemm::getGemmIsaName(candidate->isa));
+               aarch64::gemm::getGemmIsaName(strategy.isa));
   const aarch64::gemm::GemmKernelABI &abi =
-      aarch64::gemm::getGemmKernelABI(candidate->target, candidate->isa,
-                                      candidate->dataType,
-                                      candidate->executionKind);
+      aarch64::gemm::getGemmKernelABI(strategy.target, strategy.isa,
+                                      strategy.dataType,
+                                      strategy.executionKind);
   appendString(plan, builder, "data_type",
-               aarch64::gemm::getGemmDataTypeName(candidate->dataType));
+               aarch64::gemm::getGemmDataTypeName(strategy.dataType));
   appendI64(plan, builder, "vector_length_bytes", abi.vectorLengthBytes);
   appendString(plan, builder, "kernel_family", abi.family);
   appendString(plan, builder, aarch64::gemm::kExecutionKindAttrName,
                aarch64::gemm::getGemmExecutionKindName(
-                   candidate->executionKind));
+                   strategy.executionKind));
   appendI64(plan, builder, "m", problem->m);
   appendI64(plan, builder, "n", problem->n);
   appendI64(plan, builder, "k", problem->k);
   appendI64(plan, builder, "lda", problem->lda);
   appendI64(plan, builder, "ldb", problem->ldb);
   appendI64(plan, builder, "ldc", problem->ldc);
-  appendI64(plan, builder, "mc", candidate->cacheTile.mc);
-  appendI64(plan, builder, "nc", candidate->cacheTile.nc);
-  appendI64(plan, builder, "kc", candidate->cacheTile.kc);
-  appendI64(plan, builder, "mr", candidate->kernelTile.mr);
-  appendI64(plan, builder, "panel_lanes", candidate->kernelTile.panelLanes);
+  appendI64(plan, builder, "mc", strategy.cacheTile.mc);
+  appendI64(plan, builder, "nc", strategy.cacheTile.nc);
+  appendI64(plan, builder, "kc", strategy.cacheTile.kc);
+  appendI64(plan, builder, "mr", strategy.kernelTile.mr);
+  appendI64(plan, builder, "panel_lanes", strategy.kernelTile.panelLanes);
   appendString(plan, builder, "macro_order", "mkn");
   appendString(plan, builder, "micro_order", "mn");
-  switch (candidate->rhsPacking) {
+  switch (strategy.rhsPacking) {
     case aarch64::gemm::RhsPacking::kPrepacked:
       if (failed(appendPrepackedPlanFields(op, builder, plan, *problem,
-                                           *candidate)))
+                                           strategy)))
         return failure();
       break;
     case aarch64::gemm::RhsPacking::kDirect:
@@ -132,7 +140,7 @@ LogicalResult finalizeGemmPlan(Operation *op) {
       break;
     case aarch64::gemm::RhsPacking::kPacked:
       appendString(plan, builder, "pack_b_schema",
-                   aarch64::gemm::getGemmPackedBSchema(candidate->isa));
+                   aarch64::gemm::getGemmPackedBSchema(strategy.isa));
       appendString(plan, builder, "pack_b_block_order", "pc-jc");
       appendString(plan, builder, "pack_b_execution", "full-then-compute");
       appendString(plan, builder, aarch64::gemm::kRhsPackingAttrName,
@@ -142,6 +150,10 @@ LogicalResult finalizeGemmPlan(Operation *op) {
       break;
   }
   appendI64(plan, builder, "thread_count", candidate->threadCount);
+  appendI64(plan, builder, "tasks_m", candidate->tasksM);
+  appendI64(plan, builder, "tasks_n", candidate->tasksN);
+  appendString(plan, builder, "shard_direction",
+               candidate->shardByColumns ? "columns" : "rows");
   appendString(plan, builder, "thread_partition", "static-2d");
   appendString(plan, builder, "first_kc_mode", "overwrite");
   appendString(plan, builder, "next_kc_mode", "accumulate");
