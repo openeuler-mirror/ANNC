@@ -544,6 +544,7 @@ private:
 #endif
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+        command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
@@ -578,6 +579,7 @@ private:
 #endif
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
+        command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
