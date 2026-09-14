@@ -1,7 +1,12 @@
 #include "GemmPlan.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <optional>
 
@@ -65,6 +70,18 @@ llvm::Expected<int64_t> getConfigI64(const nlohmann::json &object,
   return it->get<int64_t>();
 }
 
+llvm::Expected<double> getConfigF64(const nlohmann::json &object,
+                                    llvm::StringRef path,
+                                    llvm::StringRef name) {
+  auto it = object.find(name.str());
+  if (it == object.end() || !it->is_number())
+    return configError(path, ("requires numeric field " + name).str());
+  const double value = it->get<double>();
+  if (!std::isfinite(value) || value <= 0.0)
+    return configError(path, ("requires finite positive field " + name).str());
+  return value;
+}
+
 llvm::Expected<nlohmann::json> getConfigObject(const nlohmann::json &object,
                                                llvm::StringRef path,
                                                llvm::StringRef name) {
@@ -93,20 +110,6 @@ mlir::LogicalResult requireString(mlir::Operation *op,
   if (!value || value.getValue() != expected) {
     return op->emitOpError()
            << "requires string field " << name << " = \"" << expected << "\"";
-  }
-  return mlir::success();
-}
-
-mlir::LogicalResult requireThreadPartition(mlir::Operation *op,
-                                           mlir::DictionaryAttr dictionary,
-                                           bool allowLegacySerial) {
-  auto value = dictionary.getAs<mlir::StringAttr>("thread_partition");
-  const bool isStatic2D = value && value.getValue() == "static-2d";
-  const bool isLegacySerial =
-      allowLegacySerial && value && value.getValue() == "serial";
-  if (!isStatic2D && !isLegacySerial) {
-    return op->emitOpError()
-           << "requires string field thread_partition = \"static-2d\"";
   }
   return mlir::success();
 }
@@ -183,6 +186,21 @@ mlir::FailureOr<GemmDataType> parseDataType(mlir::Operation *op,
   return mlir::failure();
 }
 
+mlir::FailureOr<GemmExecutionKind> parseExecutionKind(
+    mlir::Operation *op, mlir::DictionaryAttr dictionary,
+    llvm::StringRef stateName) {
+  auto value = dictionary.getAs<mlir::StringAttr>(kExecutionKindAttrName);
+  if (!value) {
+    op->emitOpError() << "requires string field " << kExecutionKindAttrName
+                      << " in " << stateName;
+    return mlir::failure();
+  }
+  if (auto parsed = parseExecutionKindName(value.getValue())) return *parsed;
+  op->emitOpError() << "has unsupported execution_kind " << value.getValue()
+                    << " in " << stateName;
+  return mlir::failure();
+}
+
 }  // namespace
 
 const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
@@ -193,7 +211,7 @@ const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
   static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 1};
   static const GemmKernelABI sve{"annc-sve-f32-v1", 32, 6, 4, 0};
   static const GemmKernelABI matrixVector{"annc-neon-matvec-f32-v1", 16, 4,
-                                          1, 4};
+                                           1, 4};
   static const GemmKernelABI vectorMatrix{"annc-neon-vecmat-f32-v1", 16, 1,
                                           4, 2};
   if (executionKind == GemmExecutionKind::kMatrixVector &&
@@ -219,6 +237,12 @@ llvm::StringRef getGemmDataTypeName(GemmDataType dataType) {
   return "f32";
 }
 
+const GemmDataTypeInfo &getGemmDataTypeInfo(GemmDataType dataType) {
+  (void)dataType;
+  static const GemmDataTypeInfo f32{4, 4, 4};
+  return f32;
+}
+
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
                                    GemmDataType dataType,
@@ -242,8 +266,9 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
   try {
     input >> config;
     if (!config.is_object()) return configError(path, "root must be an object");
-    if (config.value("version", 0) != 1)
-      return configError(path, "requires version = 1");
+    const int64_t version = config.value("version", 0);
+    if (version != kTuningConfigVersion)
+      return configError(path, "requires version = 2");
     auto target = parseConfigTarget(config, path);
     auto isa = parseConfigIsa(config, path);
     auto dataType = parseConfigDataType(config, path);
@@ -273,9 +298,28 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
           error = llvm::joinErrors(std::move(error), value->takeError());
       return error;
     }
-    return GemmTuningConfig{*target, *isa, *dataType,
-                            GemmCacheTile{*mc, *nc, *kc},
-                            GemmKernelTile{*mr, *panelLanes}};
+    auto costModel = getConfigObject(config, path, "cost_model");
+    if (!costModel) return costModel.takeError();
+    auto load = getConfigF64(*costModel, path, "load_cycles_per_byte");
+    auto store = getConfigF64(*costModel, path, "store_cycles_per_byte");
+    auto compute = getConfigF64(*costModel, path, "compute_cycle_scale");
+    auto gemvCompute =
+        getConfigF64(*costModel, path, "gemv_compute_cycle_scale");
+    auto microkernelCall =
+        getConfigF64(*costModel, path, "microkernel_call_cycles");
+    auto packBytes = getConfigF64(*costModel, path, "pack_cycles_per_byte");
+    auto packCall = getConfigF64(*costModel, path, "pack_call_cycles");
+    if (!load || !store || !compute || !gemvCompute || !microkernelCall ||
+        !packBytes || !packCall)
+      return configError(path, "has invalid cost_model");
+    return GemmTuningConfig{
+        *target,
+        *isa,
+        *dataType,
+        GemmCacheTile{*mc, *nc, *kc},
+        GemmKernelTile{*mr, *panelLanes},
+        GemmPlannerCostModel{*load, *store, *compute, *gemvCompute,
+                             *microkernelCall, *packBytes, *packCall}};
   } catch (const std::exception &error) {
     return configError(path, error.what());
   }
@@ -323,15 +367,10 @@ mlir::FailureOr<GemmProblem> readProblem(mlir::Operation *op) {
                      values[4], values[5], values[6]};
 }
 
-mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
-  auto candidate = op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName);
-  if (!candidate) {
-    op->emitOpError() << "requires " << kCandidateAttrName;
-    return mlir::failure();
-  }
-
+mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
+    mlir::Operation *op, mlir::DictionaryAttr candidate) {
   static constexpr llvm::StringLiteral fields[] = {
-      "version", "mc", "nc", "kc", "mr", "panel_lanes", "thread_count"};
+      "version", "mc", "nc", "kc", "mr", "panel_lanes", "max_thread_count"};
   llvm::SmallVector<int64_t> values;
   values.reserve(std::size(fields));
   for (llvm::StringRef field : fields) {
@@ -344,30 +383,28 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
                       << ".version = " << kPlanVersion;
     return mlir::failure();
   }
-  mlir::FailureOr<GemmTarget> target =
-      parseTarget(op, candidate, kCandidateAttrName);
-  mlir::FailureOr<GemmIsa> isa =
-      parseIsa(op, candidate, kCandidateAttrName);
-  mlir::FailureOr<GemmDataType> dataType =
-      parseDataType(op, candidate, kCandidateAttrName);
-  if (mlir::failed(target) || mlir::failed(isa) || mlir::failed(dataType))
+  auto target = parseTarget(op, candidate, kCandidateAttrName);
+  auto isa = parseIsa(op, candidate, kCandidateAttrName);
+  auto dataType = parseDataType(op, candidate, kCandidateAttrName);
+  auto executionKind = parseExecutionKind(op, candidate, kCandidateAttrName);
+  if (mlir::failed(target) || mlir::failed(isa) || mlir::failed(dataType) ||
+      mlir::failed(executionKind))
     return mlir::failure();
-  GemmExecutionKind executionKind = GemmExecutionKind::kGemm;
-  if (auto value = candidate.getAs<mlir::StringAttr>(kExecutionKindAttrName)) {
-    auto parsed = parseExecutionKindName(value.getValue());
-    if (!parsed) {
-      op->emitOpError() << "has unsupported execution_kind "
-                        << value.getValue();
-      return mlir::failure();
-    }
-    executionKind = *parsed;
-  }
   const GemmKernelABI &abi =
-      getGemmKernelABI(*target, *isa, *dataType, executionKind);
-  if (mlir::failed(
-          requireString(op, candidate, "kernel_family", abi.family)) ||
-      mlir::failed(requireThreadPartition(op, candidate,
-                                          /*allowLegacySerial=*/false))) {
+      getGemmKernelABI(*target, *isa, *dataType, *executionKind);
+  if (mlir::failed(requireString(op, candidate, "kernel_family", abi.family)))
+    return mlir::failure();
+  GemmKernelTile kernelTile{values[4], values[5]};
+  if (kernelTile.mr > abi.maxMr || kernelTile.panelLanes > abi.maxPanelLanes ||
+      mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType,
+                             *executionKind)) ||
+      (*executionKind == GemmExecutionKind::kMatrixVector &&
+       (kernelTile.mr != 4 || kernelTile.panelLanes != 1 ||
+        *isa != GemmIsa::kNeon)) ||
+      (*executionKind == GemmExecutionKind::kVectorMatrix &&
+       (kernelTile.mr != 1 || kernelTile.panelLanes != 4 ||
+        *isa != GemmIsa::kNeon))) {
+    op->emitOpError("has a tuning strategy unsupported by the kernel ABI");
     return mlir::failure();
   }
   RhsPacking rhsPacking = RhsPacking::kPacked;
@@ -379,34 +416,84 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
     }
     rhsPacking = *parsed;
   }
-  if (executionKind != GemmExecutionKind::kGemm &&
+  if (*executionKind != GemmExecutionKind::kGemm &&
       rhsPacking != RhsPacking::kDirect) {
     op->emitOpError("non-GEMM execution requires direct RHS");
     return mlir::failure();
   }
-  GemmKernelTile kernelTile{values[4], values[5]};
-  if (kernelTile.mr > abi.maxMr ||
-      kernelTile.panelLanes > abi.maxPanelLanes ||
-      mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType,
-                             executionKind)) ||
-      (executionKind == GemmExecutionKind::kMatrixVector &&
-       (kernelTile.mr != 4 || kernelTile.panelLanes != 1 ||
-        *isa != GemmIsa::kNeon)) ||
-      (executionKind == GemmExecutionKind::kVectorMatrix &&
-       (kernelTile.mr != 1 || kernelTile.panelLanes != 4 ||
-        *isa != GemmIsa::kNeon))) {
-    op->emitOpError("has a candidate unsupported by the selected target and ISA");
+  return GemmTuningStrategy{*target,
+                            *isa,
+                            *dataType,
+                            *executionKind,
+                            GemmCacheTile{values[1], values[2], values[3]},
+                            kernelTile,
+                            values[6],
+                            rhsPacking};
+}
+
+mlir::FailureOr<GemmPlanningPolicy> readPlanningPolicy(mlir::Operation *op) {
+  auto candidate = op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName);
+  if (!candidate) {
+    op->emitOpError() << "requires " << kCandidateAttrName;
     return mlir::failure();
   }
-  return GemmCandidate{values[0],
-                       *target,
-                       *isa,
-                       *dataType,
-                       GemmCacheTile{values[1], values[2], values[3]},
-                       kernelTile,
-                       values[6],
-                       executionKind,
-                       rhsPacking};
+  if (mlir::failed(requireString(op, candidate, "planning_state", "policy")))
+    return mlir::failure();
+  auto strategy = readTuningStrategy(op, candidate);
+  if (mlir::failed(strategy)) return mlir::failure();
+
+  static constexpr llvm::StringLiteral costFields[] = {
+      "load_cycles_per_byte",    "store_cycles_per_byte",
+      "compute_cycle_scale",     "gemv_compute_cycle_scale",
+      "microkernel_call_cycles", "pack_cycles_per_byte",
+      "pack_call_cycles"};
+  std::array<double, 7> cost{};
+  for (std::size_t index = 0; index < std::size(costFields); ++index) {
+    auto value = candidate.getAs<mlir::FloatAttr>(costFields[index]);
+    if (!value || !std::isfinite(value.getValueAsDouble()) ||
+        value.getValueAsDouble() <= 0.0) {
+      op->emitOpError() << "requires finite positive field "
+                        << costFields[index];
+      return mlir::failure();
+    }
+    cost[index] = value.getValueAsDouble();
+  }
+  return GemmPlanningPolicy{
+      *strategy, GemmPlannerCostModel{cost[0], cost[1], cost[2], cost[3],
+                                      cost[4], cost[5], cost[6]}};
+}
+
+mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
+  auto candidate = op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName);
+  if (!candidate) {
+    op->emitOpError() << "requires " << kCandidateAttrName;
+    return mlir::failure();
+  }
+  auto strategy = readTuningStrategy(op, candidate);
+  if (mlir::failed(strategy)) return mlir::failure();
+
+  static constexpr llvm::StringLiteral fields[] = {"thread_count", "tasks_m",
+                                                   "tasks_n"};
+  llvm::SmallVector<int64_t> values;
+  values.reserve(std::size(fields));
+  for (llvm::StringRef field : fields) {
+    mlir::FailureOr<int64_t> value = getPositiveI64(op, candidate, field);
+    if (mlir::failed(value)) return mlir::failure();
+    values.push_back(*value);
+  }
+  auto shard = candidate.getAs<mlir::StringAttr>("shard_direction");
+  const bool shardByColumns = shard && shard.getValue() == "columns";
+  if (!shard || (!shardByColumns && shard.getValue() != "rows") ||
+      strategy->maxThreadCount < values[0] ||
+      values[1] > std::numeric_limits<int64_t>::max() / values[2] ||
+      values[1] * values[2] != values[0] ||
+      mlir::failed(
+          requireString(op, candidate, "thread_partition", "static-2d"))) {
+    op->emitOpError("has an inconsistent static task topology");
+    return mlir::failure();
+  }
+  return GemmCandidate{*strategy, values[0], values[1], values[2],
+                       shardByColumns};
 }
 
 mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
@@ -428,6 +515,13 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
     values.push_back(*value);
   }
 
+  for (llvm::StringRef field :
+       {llvm::StringRef("tasks_m"), llvm::StringRef("tasks_n")}) {
+    mlir::FailureOr<int64_t> value = getPositiveI64(op, plan, field);
+    if (mlir::failed(value)) return mlir::failure();
+    values.push_back(*value);
+  }
+
   if (values[0] != kPlanVersion) {
     op->emitOpError() << "requires " << kPlanAttrName
                       << ".version = " << kPlanVersion;
@@ -436,19 +530,26 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
   if (mlir::failed(requireString(op, plan, "macro_order", "mkn")) ||
       mlir::failed(requireString(op, plan, "first_kc_mode", "overwrite")) ||
       mlir::failed(requireString(op, plan, "next_kc_mode", "accumulate")) ||
-      mlir::failed(requireThreadPartition(op, plan,
-                                          /*allowLegacySerial=*/true))) {
+      mlir::failed(requireString(op, plan, "thread_partition", "static-2d"))) {
     return mlir::failure();
   }
-  GemmExecutionKind executionKind = GemmExecutionKind::kGemm;
-  if (auto value = plan.getAs<mlir::StringAttr>(kExecutionKindAttrName)) {
-    auto parsed = parseExecutionKindName(value.getValue());
-    if (!parsed) {
-      op->emitOpError() << "has unsupported execution_kind "
-                        << value.getValue();
-      return mlir::failure();
-    }
-    executionKind = *parsed;
+  auto shard = plan.getAs<mlir::StringAttr>("shard_direction");
+  const bool shardByColumns = shard && shard.getValue() == "columns";
+  if (!shard || (!shardByColumns && shard.getValue() != "rows") ||
+      values[14] > values[1] || values[15] > values[2] ||
+      values[14] > std::numeric_limits<int64_t>::max() / values[15] ||
+      values[14] * values[15] != values[13]) {
+    op->emitOpError("has an inconsistent finalized task topology");
+    return mlir::failure();
+  }
+  mlir::FailureOr<GemmExecutionKind> executionKind =
+      parseExecutionKind(op, plan, kPlanAttrName);
+  if (mlir::failed(executionKind)) return mlir::failure();
+  auto rhsPackingValue = plan.getAs<mlir::StringAttr>(kRhsPackingAttrName);
+  if (!rhsPackingValue) {
+    op->emitOpError() << "requires string field " << kRhsPackingAttrName
+                      << " in " << kPlanAttrName;
+    return mlir::failure();
   }
   RhsPacking rhsPacking = RhsPacking::kPacked;
   if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackingAttrName)) {
@@ -490,29 +591,23 @@ mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
       parseDataType(op, plan, kPlanAttrName);
   if (mlir::failed(dataType)) return mlir::failure();
   GemmKernelTile kernelTile{values[10], values[11]};
-  if (mlir::failed(getGemmNr(kernelTile, values[12], *dataType,
-                             executionKind))) {
+  if (mlir::failed(
+          getGemmNr(kernelTile, values[12], *dataType, *executionKind))) {
     op->emitOpError("has an invalid GEMM kernel tile shape");
     return mlir::failure();
   }
 
   return GemmTilingPlan{
-      values[0],
-      values[1],
-      values[2],
-      values[3],
-      values[4],
-      values[5],
-      values[6],
-      GemmCacheTile{values[7], values[8], values[9]},
-      kernelTile,
-      *dataType,
-      values[12],
-      values[13],
-      KcMode::kOverwrite,
-      KcMode::kAccumulate,
-      executionKind,
-      rhsPacking,
+      values[0],          values[1],
+      values[2],          values[3],
+      values[4],          values[5],
+      values[6],          GemmCacheTile{values[7], values[8], values[9]},
+      kernelTile,         *dataType,
+      values[12],         values[13],
+      values[14],         values[15],
+      shardByColumns,
+      KcMode::kOverwrite, KcMode::kAccumulate,
+      *executionKind,     rhsPacking,
       rhsPackSource};
 }
 

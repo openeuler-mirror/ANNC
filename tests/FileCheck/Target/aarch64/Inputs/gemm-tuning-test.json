@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "target_arch": "hip12",
   "isa": "sve",
   "data_type": "f32",
@@ -11,5 +11,14 @@
   "kernel_tile": {
     "mr": 3,
     "panel_lanes": 2
+  },
+  "cost_model": {
+    "load_cycles_per_byte": 0.171875,
+    "store_cycles_per_byte": 0.171875,
+    "compute_cycle_scale": 1.0,
+    "gemv_compute_cycle_scale": 1.0,
+    "microkernel_call_cycles": 1.0,
+    "pack_cycles_per_byte": 0.34375,
+    "pack_call_cycles": 1.0
   }
 }

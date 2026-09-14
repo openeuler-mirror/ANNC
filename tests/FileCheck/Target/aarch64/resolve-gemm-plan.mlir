@@ -1,10 +1,10 @@
 // RUN: annc-asm %s -aarch64-resolve-gemm-plan | FileCheck %s --check-prefix=PROBLEM
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=CANDIDATE
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=HIP09_CANDIDATE
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=HIP09_PLAN
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan | FileCheck %s --check-prefix=LARGE_CANDIDATE
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=LARGE_PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-gemm-thread-planning | FileCheck %s --check-prefix=CANDIDATE
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning | FileCheck %s --check-prefix=HIP09_CANDIDATE
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=HIP09_PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-gemm-thread-planning | FileCheck %s --check-prefix=LARGE_CANDIDATE
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=LARGE_PLAN
 
 // PROBLEM-LABEL: func.func @external_destination(
 // PROBLEM: linalg.matmul {

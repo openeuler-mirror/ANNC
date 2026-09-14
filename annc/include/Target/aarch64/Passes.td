@@ -36,10 +36,10 @@ def AArch64ResolveGemmPlan
   ];
 }
 
-/* Select the baseline target-private strategy before optional autotuning. */
+/* Select target policy before shape-dependent thread planning. */
 def AArch64SelectGemmStrategy
     : Pass<"aarch64-select-gemm-strategy", "ModuleOp"> {
-  let summary = "select a baseline AArch64 GEMM strategy";
+  let summary = "select an AArch64 GEMM target policy";
   let constructor = "createAArch64SelectGemmStrategy()";
   let options = [
     Option<"configPath", "config-path", "std::string", "",
@@ -55,11 +55,11 @@ def AArch64SelectGemmStrategy
   ];
 }
 
-/* Optionally refine a target-private candidate before the plan is frozen. */
-def AArch64AutotuneGemmPlan
-    : Pass<"aarch64-autotune-gemm-plan", "ModuleOp"> {
-  let summary = "autotune an AArch64 GEMM candidate";
-  let constructor = "createAArch64AutotuneGemmPlan()";
+/* Compute the thread topology for an explicitly selected planning policy. */
+def AArch64GemmThreadPlanning
+    : Pass<"aarch64-gemm-thread-planning", "ModuleOp"> {
+  let summary = "plan AArch64 GEMM thread topology";
+  let constructor = "createAArch64GemmThreadPlanning()";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect"
   ];

@@ -6,7 +6,7 @@ set(_gemm_srcs
         Gemm/ConstantFolding/CheckpointReader.cpp
         Gemm/ResolveGemmPlan.cpp
         Gemm/SelectGemmStrategy.cpp
-        Gemm/GemmAutotune.cpp
+        Gemm/GemmThreadPlanning.cpp
         Gemm/FinalizeGemmPlan.cpp
         Gemm/GemmTilingUtils.cpp
         Gemm/GemmCacheBlocking.cpp
@@ -16,6 +16,7 @@ set(_gemm_srcs
         Gemm/GemmABILowering.cpp
         Gemm/GemmEpilogueLowering.cpp
         Gemm/VerifyGemmSchedule.cpp
+        Gemm/Support/GemmPlanner.cpp
 )
 
 add_mlir_library(AArch64Codegen

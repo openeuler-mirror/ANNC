@@ -1,6 +1,8 @@
 #ifndef ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
 #define ATIR_MLIR_AARCH64_CODEGEN_PASSES_H
 
+#include <cstdint>
+
 #include "llvm/ADT/StringRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -26,7 +28,7 @@ std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
     llvm::StringRef configPath, bool enablePrepack, int64_t intraThreadCount);
-std::unique_ptr<mlir::Pass> createAArch64AutotuneGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64GemmThreadPlanning();
 std::unique_ptr<mlir::Pass> createAArch64FinalizeGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64GemmCacheBlocking();
 std::unique_ptr<mlir::Pass> createAArch64GemmKernelTiling();

@@ -41,6 +41,7 @@ LogicalResult selectGemmStrategy(
                    builder.getStringAttr(
                        aarch64::gemm::getGemmDataTypeName(config.dataType)));
   candidate.append("kernel_family", builder.getStringAttr(abi.family));
+  candidate.append("planning_state", builder.getStringAttr("policy"));
   candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
   candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
   candidate.append("kc", builder.getI64IntegerAttr(config.cacheTile.kc));
@@ -52,7 +53,28 @@ LogicalResult selectGemmStrategy(
   candidate.append("mr", builder.getI64IntegerAttr(kernelTile.mr));
   candidate.append("panel_lanes",
                    builder.getI64IntegerAttr(kernelTile.panelLanes));
-  candidate.append("thread_count", builder.getI64IntegerAttr(intraThreadCount));
+  candidate.append(
+      "load_cycles_per_byte",
+      builder.getF64FloatAttr(config.costModel.load_cycles_per_byte));
+  candidate.append(
+      "store_cycles_per_byte",
+      builder.getF64FloatAttr(config.costModel.store_cycles_per_byte));
+  candidate.append(
+      "compute_cycle_scale",
+      builder.getF64FloatAttr(config.costModel.compute_cycle_scale));
+  candidate.append(
+      "gemv_compute_cycle_scale",
+      builder.getF64FloatAttr(config.costModel.gemv_compute_cycle_scale));
+  candidate.append(
+      "microkernel_call_cycles",
+      builder.getF64FloatAttr(config.costModel.microkernel_call_cycles));
+  candidate.append(
+      "pack_cycles_per_byte",
+      builder.getF64FloatAttr(config.costModel.pack_cycles_per_byte));
+  candidate.append("pack_call_cycles",
+                   builder.getF64FloatAttr(config.costModel.pack_call_cycles));
+  candidate.append("max_thread_count",
+                   builder.getI64IntegerAttr(intraThreadCount));
   candidate.append("thread_partition", builder.getStringAttr("static-2d"));
   candidate.append(
       aarch64::gemm::kExecutionKindAttrName,

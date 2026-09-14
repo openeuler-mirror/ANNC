@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "GemmPlanner.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -63,6 +64,9 @@ inline constexpr llvm::StringLiteral kSvePackedBElementsAsmSymbol =
 inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
     "annc_aarch64_sve_packed_b_offset_f32";
 
+// The external tuning JSON schema version is independent from the serialized
+// internal GEMM plan version below.
+inline constexpr int64_t kTuningConfigVersion = 2;
 inline constexpr int64_t kPlanVersion = 1;
 inline constexpr int64_t kPrepackedRhsVersion = 1;
 // Constant RHS matrices below this K*N threshold stay on the direct path.
@@ -104,6 +108,9 @@ struct GemmTuningConfig {
   GemmDataType dataType;
   GemmCacheTile cacheTile;
   GemmKernelTile kernelTile;
+  // Execution tiles remain the user configuration. The worker planner consumes
+  // these exact values; it does not derive an independent cache-blocking plan.
+  GemmPlannerCostModel costModel;
 };
 
 struct GemmKernelABI {
@@ -115,11 +122,18 @@ struct GemmKernelABI {
   int64_t kVectorUnroll;
 };
 
+struct GemmDataTypeInfo {
+  int64_t lhsBytes;
+  int64_t rhsBytes;
+  int64_t outputBytes;
+};
+
 const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
                                       GemmDataType dataType,
                                       GemmExecutionKind executionKind);
 llvm::FailureOr<int64_t> getGemmKScalarUnroll(const GemmKernelABI &abi,
                                               GemmDataType dataType);
+const GemmDataTypeInfo &getGemmDataTypeInfo(GemmDataType dataType);
 llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path);
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
@@ -142,16 +156,38 @@ enum class RhsPacking { kDirect, kPacked, kPrepacked };
 enum class KcMode { kOverwrite, kAccumulate };
 enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
-struct GemmCandidate {
-  int64_t version;
+// The tuning strategy serialized on a GEMM candidate: the kernel environment
+// (target, ISA, data type, execution kind), the L2 cache-blocking tile
+// (mc/nc/kc), the register-level kernel tile (mr/panel_lanes), the thread
+// budget, and the RHS layout choice. SelectGemmStrategy writes it from the
+// external tuning config; every later planning stage re-reads and
+// re-validates it against the kernel ABI. Objective problem inputs (M/N/K and
+// leading dimensions) live in GemmProblem instead.
+struct GemmTuningStrategy {
   GemmTarget target;
   GemmIsa isa;
   GemmDataType dataType;
+  GemmExecutionKind executionKind;
   GemmCacheTile cacheTile;
   GemmKernelTile kernelTile;
-  int64_t threadCount;
-  GemmExecutionKind executionKind;
+  int64_t maxThreadCount;
   RhsPacking rhsPacking;
+};
+
+// A tuning strategy plus the planner cost model, before thread planning.
+struct GemmPlanningPolicy {
+  GemmTuningStrategy strategy;
+  GemmPlannerCostModel costModel;
+};
+
+// A tuning strategy plus the planned static task topology, after thread
+// planning.
+struct GemmCandidate {
+  GemmTuningStrategy strategy;
+  int64_t threadCount;
+  int64_t tasksM;
+  int64_t tasksN;
+  bool shardByColumns;
 };
 
 struct GemmTilingPlan {
@@ -167,6 +203,9 @@ struct GemmTilingPlan {
   GemmDataType dataType;
   int64_t vectorLengthBytes;
   int64_t threadCount;
+  int64_t tasksM;
+  int64_t tasksN;
+  bool shardByColumns;
   KcMode firstKcMode;
   KcMode nextKcMode;
   GemmExecutionKind executionKind;
@@ -185,6 +224,10 @@ bool isGemmAnchor(mlir::Operation *op);
 mlir::Value getGemmInput(mlir::Operation *op, unsigned index);
 mlir::Value getGemmOutput(mlir::Operation *op, unsigned index);
 mlir::FailureOr<GemmProblem> readProblem(mlir::Operation *op);
+// Reads and validates the strategy fields shared by every planning stage.
+mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
+    mlir::Operation *op, mlir::DictionaryAttr candidate);
+mlir::FailureOr<GemmPlanningPolicy> readPlanningPolicy(mlir::Operation *op);
 mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op);
 mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op);
 mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op);
