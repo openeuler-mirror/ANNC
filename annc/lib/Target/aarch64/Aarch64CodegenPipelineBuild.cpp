@@ -49,6 +49,7 @@ namespace annc
             passManager.addPass(createAArch64GemmPrepackRhs(packedCPath));
 #endif
         passManager.addPass(createAArch64FinalizeGemmPlan());
+        passManager.addPass(createAArch64GemmThreadTiling());
         passManager.addPass(createAArch64GemmCacheBlocking());
         passManager.addPass(createAArch64GemmKernelTiling());
         passManager.addPass(createAArch64GemmLeafMaterialization());
@@ -71,9 +72,10 @@ namespace annc
             "annc-aarch64-gemm-pipeline", "ANNC normal AArch64 GEMM lowering",
             [](OpPassManager &passManager,
                const AArch64CodegenPipelineOptions &options) {
-                buildAArch64CodegenPipelineImpl(passManager, options.configPath,
-                                                 options.packedCPath,
-                                                 options.intraThreadCount);
+                buildAArch64CodegenPipelineImpl(passManager,
+                                               options.configPath,
+                                               options.packedCPath,
+                                               options.intraThreadCount);
             });
     }
 } //namespace annc

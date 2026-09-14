@@ -75,6 +75,21 @@ def AArch64FinalizeGemmPlan
   ];
 }
 
+/* Materialize the selected static M/N task grid before cache blocking. */
+def AArch64GemmThreadTiling
+    : Pass<"aarch64-gemm-thread-tiling", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM static thread tiles";
+  let constructor = "createAArch64GemmThreadTiling()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 /* Materialize MC/NC/KC blocking from the resolved target plan. */
 def AArch64GemmCacheBlocking
     : Pass<"aarch64-gemm-cache-blocking", "ModuleOp"> {
