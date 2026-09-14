@@ -18,8 +18,10 @@ func.func @row_major_neon(%c: memref<2x3xf32>, %a: memref<2x5xf32>,
       ldc = 3 : i64, m = 2 : i64, macro_order = "mkn", mc = 3 : i64,
       mr = 3 : i64, n = 3 : i64, nc = 16 : i64,
       next_kc_mode = "accumulate", panel_lanes = 2 : i64,
-      rhs_pack_source = "none", rhs_packing = "direct",
-      thread_count = 1 : i64, thread_partition = "serial",
+      execution_kind = "gemm", rhs_pack_source = "none",
+      rhs_packing = "direct",
+      tasks_m = 1 : i64, tasks_n = 1 : i64, thread_count = 1 : i64,
+      shard_direction = "rows", thread_partition = "static-2d",
       vector_length_bytes = 16 : i64, version = 1 : i64
     }
   } ins(%a, %b : memref<2x5xf32>, memref<5x3xf32>)

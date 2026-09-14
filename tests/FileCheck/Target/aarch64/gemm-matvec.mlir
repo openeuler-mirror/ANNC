@@ -1,6 +1,6 @@
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling | FileCheck %s --check-prefix=TILING
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-autotune-gemm-plan -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization -aarch64-gemm-microkernel-lowering -aarch64-gemm-abi-lowering -aarch64-verify-gemm-schedule | FileCheck %s --check-prefix=LOWERED
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling | FileCheck %s --check-prefix=TILING
+// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization -aarch64-gemm-microkernel-lowering -aarch64-gemm-abi-lowering -aarch64-verify-gemm-schedule | FileCheck %s --check-prefix=LOWERED
 
 // PLAN-LABEL: func.func @matvec
 // PLAN: linalg.matmul
