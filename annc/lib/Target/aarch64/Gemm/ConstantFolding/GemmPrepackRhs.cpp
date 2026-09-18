@@ -57,15 +57,60 @@ std::vector<float> packGemmLayout(
   return packed;
 }
 
+// TF2 SavedModel checkpoints key variables as "<trackable>/.ATTRIBUTES/
+// VARIABLE_VALUE", while TF1 Saver checkpoints use the bare variable name.
+constexpr llvm::StringLiteral kTfVariableKeySuffix =
+    "/.ATTRIBUTES/VARIABLE_VALUE";
+
+// Resource-variable read nodes end with "/ReadVariableOp" (TF2) or "/read"
+// (TF1 ref variables).
+std::string stripReadOpSuffix(const std::string &key) {
+  for (llvm::StringRef suffix : {"/ReadVariableOp", "/read"}) {
+    if (llvm::StringRef(key).ends_with(suffix))
+      return key.substr(0, key.size() - suffix.size());
+  }
+  return key;
+}
+
+// TF renames ops that collide with an existing name by appending "_N"; a read
+// node "w_1/ReadVariableOp" therefore maps back to variable "w".
+std::string stripUniquifier(const std::string &key) {
+  const llvm::StringRef s(key);
+  size_t pos = s.size();
+  while (pos > 0 && s[pos - 1] >= '0' && s[pos - 1] <= '9') --pos;
+  if (pos < 2 || s[pos - 1] != '_') return key;
+  return key.substr(0, pos - 1);
+}
+
 class RhsDataLoader {
  public:
   bool load(StringAttr name, std::vector<char> &out) {
     if (!name || name.getValue().empty()) return false;
     if (!ensureCheckpoint()) return false;
-    std::string key = name.getValue().str();
     std::vector<uint8_t> bytes;
     int32_t dtype = 0;
-    while (!checkpoint_->readTensor(key, bytes, dtype)) {
+    // Try candidate keys in order: the node name (+TF2 suffix), then with a
+    // read-op suffix, a "_N" uniquifier, or the last path component stripped.
+    std::string key = name.getValue().str();
+    auto tryRead = [&](const std::string &candidate) {
+      return checkpoint_->readTensor(candidate, bytes, dtype);
+    };
+    auto tryCandidate = [&](const std::string &candidate) {
+      return tryRead(candidate) ||
+             tryRead(candidate + kTfVariableKeySuffix.str());
+    };
+    while (true) {
+      if (tryCandidate(key)) break;
+      std::string next = stripReadOpSuffix(key);
+      if (next != key) {
+        key = next;
+        continue;
+      }
+      next = stripUniquifier(key);
+      if (next != key) {
+        key = next;
+        continue;
+      }
       const size_t slash = key.rfind('/');
       if (slash == std::string::npos) return false;
       key.resize(slash);

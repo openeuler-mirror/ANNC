@@ -87,6 +87,9 @@ DictionaryAttr getTilePlan(Operation *gemm, OpBuilder &builder, int64_t mSize,
   // original matrices because all subviews retain the original row strides.
   tilePlan.set("m", builder.getI64IntegerAttr(mSize));
   tilePlan.set("n", builder.getI64IntegerAttr(nSize));
+  // Prepacked-RHS leaf materialization indexes packed data laid out over the
+  // whole problem, so task-local GEMMs keep the problem-level N available.
+  if (auto fullN = originalPlan.get("n")) tilePlan.set("full_n", fullN);
   tilePlan.set("thread_count", builder.getI64IntegerAttr(1));
   tilePlan.set("tasks_m", builder.getI64IntegerAttr(1));
   tilePlan.set("tasks_n", builder.getI64IntegerAttr(1));
