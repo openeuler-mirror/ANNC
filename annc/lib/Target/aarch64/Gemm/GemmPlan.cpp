@@ -26,6 +26,8 @@ llvm::Error configError(llvm::StringRef path, llvm::StringRef message) {
 std::optional<GemmTarget> parseTargetName(llvm::StringRef name) {
   if (name == "hip12") return GemmTarget::kHip12;
   if (name == "hip09") return GemmTarget::kHip09;
+  if (name == "kp920b") return GemmTarget::kKp920b;
+  if (name == "kp950") return GemmTarget::kKp950;
   return std::nullopt;
 }
 
@@ -661,7 +663,17 @@ mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
 }
 
 llvm::StringRef getGemmTargetName(GemmTarget target) {
-  return target == GemmTarget::kHip09 ? "hip09" : "hip12";
+  switch (target) {
+    case GemmTarget::kHip09:
+      return "hip09";
+    case GemmTarget::kHip12:
+      return "hip12";
+    case GemmTarget::kKp920b:
+      return "kp920b";
+    case GemmTarget::kKp950:
+      return "kp950";
+  }
+  return "unknown";
 }
 
 llvm::StringRef getGemmIsaName(GemmIsa isa) {

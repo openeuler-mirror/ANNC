@@ -65,12 +65,12 @@ void MatMulOp::Interpret() {
       result[i * N + j] = value;
     }
   }
-  if (getWithBias() && getNumOperands() > 3 &&
-      !isa<atir::NoneOp>(getOperand(3).getDefiningOp())) {
+  if (getWithBias() && !getEpilogueInputs().empty() &&
+      !isa<atir::NoneOp>(getEpilogueInputs().front().getDefiningOp())) {
     atir::TensorType biasType;
     DenseElementsAttr biasAttr;
-    if (failed(getTensorTypeAndData(getOperation(), getOperand(3), "MatMul bias",
-                                    biasType, biasAttr))) {
+    if (failed(getTensorTypeAndData(getOperation(), getEpilogueInputs().front(),
+                                    "MatMul bias", biasType, biasAttr))) {
       return;
     }
     auto biasValsOr = getFloatValues(biasAttr);

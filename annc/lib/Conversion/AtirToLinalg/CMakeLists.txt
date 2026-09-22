@@ -24,5 +24,6 @@ add_mlir_library(AtirToLinalgConversion
         MLIRBufferizationDialect
         CommonConversion
         AtirDialect
+        AtirPasses
         ANNCKernel
 )

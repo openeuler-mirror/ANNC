@@ -3,12 +3,18 @@
 #include <cstdlib>
 #include <optional>
 
+#include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/Support/Error.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 namespace annc {
 namespace {
+
+bool epilogueMatvecEnabled() {
+  const char *value = std::getenv("ANNC_ENABLE_EPILOGUE_MATVEC");
+  return !value || StringRef(value) != "0";
+}
 
 LogicalResult selectGemmStrategy(
     Operation *op, int64_t intraThreadCount,
@@ -26,9 +32,16 @@ LogicalResult selectGemmStrategy(
   NamedAttrList candidate;
   candidate.append("version",
                    builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
-  const auto selection = aarch64::gemm::selectGemmPath(
+  auto selection = aarch64::gemm::selectGemmPath(
       config.isa, problem->m, problem->n, problem->k, enablePrepack,
       op->hasAttr(aarch64::gemm::kRhsNameAttrName));
+  if (op->hasAttr(atir::kGemmEpilogueAttr) &&
+      selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm &&
+      (selection.executionKind !=
+           aarch64::gemm::GemmExecutionKind::kMatrixVector ||
+       !epilogueMatvecEnabled())) {
+    selection.executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
+  }
   const auto executionKind = selection.executionKind;
   const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
       config.target, config.isa, config.dataType, executionKind);

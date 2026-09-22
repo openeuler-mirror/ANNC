@@ -77,87 +77,6 @@ namespace atir {
 
     };
 
-    //matmul + add => matmul
-    struct MatmulWithBiasRewrite : public OpRewritePattern<MatMulOp> {
-        MatmulWithBiasRewrite(MLIRContext* context, PatternBenefit benefit = 9)
-                : OpRewritePattern<MatMulOp>(context, benefit) {}
-
-    public:
-        LogicalResult matchAndRewrite(MatMulOp op,
-                                      PatternRewriter& rewriter) const override {
-            ANNC_LOG_DEBUG("block-fusion") << "this is MatmulWithBiasRewrite\n";
-            if (op.getBias() != nullptr) {
-                return failure();
-            }
-            CHECK_LOGICAL_SUCCESS(op.getResult().getNumUses() == 1)
-            for (auto* user: op.getResult().getUsers()) {
-                if (auto addOp = llvm::dyn_cast<atir::AddOp>(user)) {
-                    // New AddOp structure: Add(output, input1, input2, ...)
-                    // For matmul+bias fusion: Add(output, matmul_result, bias)
-                    CHECK_LOGICAL_SUCCESS(addOp->getOperands().size() == 3);
-
-                    // Get bias from the third operand (index 2)
-                    Value bias = addOp.getOperand(2);
-
-                    std::vector<NamedAttribute> attrs;
-                    attrs.push_back(NamedAttribute(rewriter.getStringAttr("withBias"),
-                                                   rewriter.getBoolAttr(true)));
-                    attrs.push_back(NamedAttribute(rewriter.getStringAttr("right_transpose"),
-                                                   rewriter.getBoolAttr(op.getRightTranspose())));
-
-                    attrs.push_back(NamedAttribute(rewriter.getStringAttr("left_transpose"),
-                                                   rewriter.getBoolAttr(op.getLeftTranspose())));
-
-                    attrs.push_back(NamedAttribute(rewriter.getStringAttr("output_transpose"),
-                                                   rewriter.getBoolAttr(op.getOutputTranspose())));
-
-                    auto matmul_do_relu = op.getDoRelu();
-                    auto matmul_relu_limit = op.getReluLimit().convertToFloat();
-                    auto add_do_relu = addOp.getDoRelu();
-                    auto add_relu_limit = addOp.getReluLimit().convertToFloat();
-
-                    float relu_limit = matmul_relu_limit;
-                    if (matmul_do_relu && matmul_relu_limit > relu_limit) {
-                        relu_limit = matmul_relu_limit;
-                    }
-                    if (add_do_relu && add_relu_limit > relu_limit) {
-                        relu_limit = add_relu_limit;
-                    }
-                    if (matmul_do_relu || add_do_relu) {
-                        attrs.push_back(NamedAttribute(rewriter.getStringAttr("do_relu"),
-                                                       rewriter.getBoolAttr(true)));
-                        attrs.push_back(NamedAttribute(rewriter.getStringAttr("relu_limit"),
-                                                       rewriter.getF32FloatAttr(relu_limit)));
-                    }
-                    // Build inputs for new MatMulOp: lhs, rhs, c, bias
-                    std::vector<Value> ins;
-                    ins.push_back(op.getLhs());
-                    ins.push_back(op.getRhs());
-                    ins.push_back(op.getC());
-                    ins.push_back(bias);
-
-                    // Build outputs
-                    std::vector<Type> outs;
-                    outs.push_back(addOp.getResult().getType());
-
-                    // Move bias constant before matmul if needed
-                    if (bias.getDefiningOp() != nullptr
-                        && llvm::isa<atir::ConstantOp>(bias.getDefiningOp())) {
-                        bias.getDefiningOp()->moveBefore(op);
-                    }
-
-                    auto newMatmulOp = rewriter.create<atir::MatMulOp>(addOp.getLoc(), outs,
-                                                    ins,attrs);
-                    addOp.getResult().replaceAllUsesWith(newMatmulOp);
-                    addOp.erase();
-                    op.erase();
-                }
-            }
-            return failure();
-        };
-
-    };
-
     class AtirBlockFusionPass : public AtirBlockFusionBase<AtirBlockFusionPass> {
     public:
         AtirBlockFusionPass() = default;
@@ -172,7 +91,6 @@ namespace atir {
 
             RewritePatternSet patterns(ctx);
             patterns.add<FuseReluRewrite>(ctx);
-            patterns.add<MatmulWithBiasRewrite>(ctx);
             (void)applyPatternsGreedily(m, std::move(patterns), config);
             ANNC_LOG_DEBUG("block-fusion") << "Block fusion analysis completed\n";
 

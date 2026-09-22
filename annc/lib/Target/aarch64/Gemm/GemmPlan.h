@@ -13,7 +13,6 @@
 
 namespace annc::aarch64::gemm {
 
-inline constexpr llvm::StringLiteral kEpilogueAttrName = "annc.gemm.epilogue";
 inline constexpr llvm::StringLiteral kGemmAttrName = "annc.gemm";
 inline constexpr llvm::StringLiteral kProblemAttrName =
     "annc.aarch64.gemm_problem";
@@ -24,6 +23,9 @@ inline constexpr llvm::StringLiteral kStageAttrName = "annc.aarch64.gemm_stage";
 inline constexpr llvm::StringLiteral kKcModeAttrName = "annc.aarch64.kc_mode";
 inline constexpr llvm::StringLiteral kAsmSymbolAttrName =
     "annc.aarch64.asm_symbol";
+inline constexpr llvm::StringLiteral kGeneratedMicrokernelAttrName =
+    "annc.aarch64.generated_microkernel";
+inline constexpr llvm::StringLiteral kKcRoleAttrName = "annc.aarch64.kc_role";
 inline constexpr llvm::StringLiteral kMicrokernelMAttrName =
     "annc.aarch64.microkernel_m";
 inline constexpr llvm::StringLiteral kMicrokernelNAttrName =
@@ -51,10 +53,37 @@ inline constexpr llvm::StringLiteral kPackBLeafName =
     "__annc_aarch64_gemm_pack_b_leaf";
 inline constexpr llvm::StringLiteral kMicrokernelLeafName =
     "__annc_aarch64_gemm_microkernel_leaf";
+inline constexpr llvm::StringLiteral kMatrixVectorMicrokernelLeafName =
+    "__annc_aarch64_gemm_matrix_vector_microkernel_leaf";
+inline constexpr llvm::StringLiteral kVectorMatrixMicrokernelLeafName =
+    "__annc_aarch64_gemm_vector_matrix_microkernel_leaf";
+inline constexpr llvm::StringLiteral kFusedMicrokernelLeafName =
+    "__annc_aarch64_gemm_fused_microkernel_leaf";
 // Row-major RHS leaf used by the small-shape no-pack path.  Its ABI carries
 // the RHS leading dimension in addition to the packed-family arguments.
 inline constexpr llvm::StringLiteral kMicrokernelRmLeafName =
     "__annc_aarch64_gemm_microkernel_rm_leaf";
+inline constexpr llvm::StringLiteral kFusedRowMajorMicrokernelLeafName =
+    "__annc_aarch64_gemm_fused_row_major_microkernel_leaf";
+
+inline bool isFusedMicrokernelLeaf(llvm::StringRef callee) {
+  return callee == kFusedMicrokernelLeafName ||
+         callee == kFusedRowMajorMicrokernelLeafName;
+}
+
+inline bool isRowMajorMicrokernelLeaf(llvm::StringRef callee) {
+  return callee == kMicrokernelRmLeafName ||
+         callee == kFusedRowMajorMicrokernelLeafName;
+}
+
+inline bool isMicrokernelLeaf(llvm::StringRef callee) {
+  return callee == kMicrokernelLeafName ||
+         callee == kMatrixVectorMicrokernelLeafName ||
+         callee == kVectorMatrixMicrokernelLeafName ||
+         callee == kMicrokernelRmLeafName || isFusedMicrokernelLeaf(callee);
+}
+
+inline constexpr int64_t kEpilogueArgsPointerSlots = 8;
 inline constexpr llvm::StringLiteral kNeonPackBAsmSymbol =
     "annc_aarch64_neon_packb_f32";
 inline constexpr llvm::StringLiteral kSvePackBAsmSymbol =
@@ -75,7 +104,7 @@ inline constexpr int64_t kMinPrepackedRhsElements = 300;
 // instead of paying the runtime pack_b call.
 inline constexpr int64_t kRowMajorOperationLimit = 4500;
 
-enum class GemmTarget { kHip12, kHip09 };
+enum class GemmTarget { kHip12, kHip09, kKp920b, kKp950 };
 enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
 enum class GemmExecutionKind { kGemm, kMatrixVector, kVectorMatrix };

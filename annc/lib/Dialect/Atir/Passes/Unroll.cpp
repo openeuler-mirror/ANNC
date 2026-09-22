@@ -52,10 +52,10 @@ namespace atir {
         if (auto tiling = tensorType.getOnchipParallel()) {
             return tiling.getTilingSize()[kidx][blockIndex];
         }
-        return tensorType.getShape()[kidx]; // 
+        return tensorType.getShape()[kidx]; //
     }
 
-    MatMulOp createBlockMatMulWithAttrs(OpBuilder& builder, Location loc, Value lhs, Value rhs, Value C, Value bias, bool withBias,
+    MatMulOp createBlockMatMulWithAttrs(OpBuilder& builder, Location loc, Value lhs, Value rhs, Value C, ValueRange epilogueInputs, bool withBias,
                                         bool right_transpose, bool left_transpose, bool output_transpose, bool do_relu, float relu_limit,
                                         int64_t MStart, int64_t NStart, int64_t KStart,
                                         int64_t MSize, int64_t NSize, int64_t KSize) {
@@ -106,9 +106,7 @@ namespace atir {
         ins.push_back(lhs);
         ins.push_back(rhs);
         ins.push_back(C);
-        if (bias != nullptr) {
-            ins.push_back(bias);
-        }
+        ins.insert(ins.end(), epilogueInputs.begin(), epilogueInputs.end());
         std::vector<Type> outs;
         outs.push_back(outputType);
         auto matmulOp = builder.create<atir::MatMulOp>(loc,outs,ins,attrs);
@@ -119,11 +117,11 @@ namespace atir {
     // MultipleTensorAdd
     Value createMultipleTensorAdd(OpBuilder& builder, Location loc, ArrayRef<Value> inputs, bool do_relu, float relu_limit) {
         if (inputs.size() == 1) {
-            return inputs[0]; // 
+            return inputs[0]; //
         }
-        // 
+        //
         auto outputType = inputs[0].getType();
-        // 
+        //
         auto addOp = builder.create<atir::AddOp>(loc,outputType,inputs);
         addOp.setDoRelu(do_relu);
         addOp.setReluLimitAttr(builder.getF32FloatAttr(relu_limit));
@@ -275,14 +273,14 @@ namespace atir {
                     if (k == aBlockKCount - 1) {
                         //post process
                         final_value = createBlockMatMulWithAttrs(builder, matmul.getLoc(), matmul.getLhs(), matmul.getRhs(), matmul.getC(),
-                                                   matmul.getBias(), matmul.getWithBias(),matmul.getRightTranspose(),
+                                                   matmul.getEpilogueInputs(), matmul.getWithBias(),matmul.getRightTranspose(),
                                                    matmul.getLeftTranspose(),matmul.getOutputTranspose(),
                                                    matmul.getDoRelu(),matmul.getReluLimit().convertToFloat(),
                                                     aMStart, bNStart, aKStart, aMSize, bNSize, aKSize).getResult();
                     } else {
                         //no post process
                         final_value = createBlockMatMulWithAttrs(builder, matmul.getLoc(), matmul.getLhs(), matmul.getRhs(), matmul.getC(),
-                                                                             nullptr, false,matmul.getRightTranspose(),matmul.getLeftTranspose(),
+                                                                             ValueRange{}, false,matmul.getRightTranspose(),matmul.getLeftTranspose(),
                                                                              matmul.getOutputTranspose(),false,-1.0,
                                                                              aMStart, bNStart, aKStart, aMSize, bNSize, aKSize).getResult();
                     }

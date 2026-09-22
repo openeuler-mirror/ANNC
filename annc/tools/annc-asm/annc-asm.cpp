@@ -15,6 +15,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 
@@ -36,11 +37,13 @@ int main(int argc, char **argv) {
           mlir::bufferization::BufferizationDialect,
           mlir::vector::VectorDialect,
           mlir::scf::SCFDialect,
+          mlir::tensor::TensorDialect,
           mlir::ub::UBDialect,
           atir::AtirDialect
           >();
   linalg::registerBufferizableOpInterfaceExternalModels(registry);
   arith::registerBufferizableOpInterfaceExternalModels(registry);
+  tensor::registerBufferizableOpInterfaceExternalModels(registry);
   bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
 
   MLIRContext context(registry);

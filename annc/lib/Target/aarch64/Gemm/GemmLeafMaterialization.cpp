@@ -1,3 +1,4 @@
+#include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
@@ -141,6 +142,54 @@ Value materializeIndex(OpBuilder &builder, Location loc, OpFoldResult value) {
   return builder.create<arith::ConstantIndexOp>(loc, attr.getInt());
 }
 
+bool hasEpilogue(Operation *op) {
+  if (!op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr))
+    return false;
+  if (auto role =
+          op->getAttrOfType<StringAttr>(aarch64::gemm::kKcRoleAttrName)) {
+    if (role.getValue() == "first" || role.getValue() == "middle") return false;
+  }
+  return true;
+}
+
+Value materializeEpilogueArgs(func::FuncOp function, Operation *op,
+                              OpBuilder &builder) {
+  auto generic = llvm::dyn_cast<linalg::GenericOp>(op);
+  if (!generic || generic.getInputs().size() < 2) return Value();
+  auto program = atir::parseEpilogueCandidatePlan(
+      op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr));
+  if (failed(program)) return Value();
+  unsigned inputCount = 0;
+  for (const atir::EpilogueStep &step : program->steps)
+    if (atir::isBinaryEpilogueOpcode(step.opcode)) ++inputCount;
+  if (inputCount > aarch64::gemm::kEpilogueArgsPointerSlots ||
+      generic.getInputs().size() < 2 + inputCount) {
+    op->emitOpError("exceeds the EpilogueArgs external pointer capacity");
+    return Value();
+  }
+
+  Location loc = op->getLoc();
+  OpBuilder allocBuilder(function.getContext());
+  allocBuilder.setInsertionPointToStart(&function.front());
+  auto args = allocBuilder.create<memref::AllocaOp>(
+      loc, MemRefType::get({aarch64::gemm::kEpilogueArgsPointerSlots},
+                           allocBuilder.getIndexType()));
+  auto inputs = generic.getInputs();
+  for (unsigned slot = 0; slot < inputCount; ++slot) {
+    FailureOr<aarch64::gemm::MemRefBaseAndOffset> base =
+        aarch64::gemm::getMemRefBaseAndOffset(builder, loc, inputs[slot + 2]);
+    if (failed(base)) return Value();
+    Value ptr =
+        builder.create<memref::ExtractAlignedPointerAsIndexOp>(loc, base->base);
+    Value bytes = builder.create<arith::ConstantIndexOp>(loc, sizeof(float));
+    Value byteOffset = builder.create<arith::MulIOp>(loc, base->offset, bytes);
+    ptr = builder.create<arith::AddIOp>(loc, ptr, byteOffset);
+    Value index = builder.create<arith::ConstantIndexOp>(loc, slot);
+    builder.create<memref::StoreOp>(loc, ptr, args, ValueRange{index});
+  }
+  return args;
+}
+
 bool isStaticZero(OpFoldResult value) {
   if (auto dynamicValue = llvm::dyn_cast<Value>(value)) {
     if (auto constant = dynamicValue.getDefiningOp<arith::ConstantIndexOp>())
@@ -158,7 +207,8 @@ void copyScheduleAttrs(Operation *source, func::CallOp target,
                        OpBuilder &builder) {
   for (StringRef name :
        {aarch64::gemm::kPlanAttrName, aarch64::gemm::kKcModeAttrName,
-        aarch64::gemm::kEpilogueAttrName}) {
+        aarch64::gemm::kKcRoleAttrName,
+        atir::kGemmEpilogueAttr}) {
     if (Attribute attr = source->getAttr(name))
       target->setDiscardableAttr(name, attr);
   }
@@ -468,6 +518,15 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   Value outBase =
       aarch64::gemm::castToUnrankedF32MemRef(builder, loc, out->base);
 
+  const bool fused = hasEpilogue(op);
+  Value epilogueArgs;
+  if (fused) {
+    epilogueArgs = materializeEpilogueArgs(
+        op->getParentOfType<func::FuncOp>(), op, builder);
+    if (!epilogueArgs)
+      return op->emitOpError("cannot materialize fused epilogue arguments");
+  }
+
   Value lda = builder.create<arith::ConstantIndexOp>(loc, plan->lda);
   Value ldb = builder.create<arith::ConstantIndexOp>(loc, plan->ldb);
   Value ldc = builder.create<arith::ConstantIndexOp>(loc, plan->ldc);
@@ -491,11 +550,18 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
 
   auto unranked = UnrankedMemRefType::get(builder.getF32Type(), 0);
   auto index = builder.getIndexType();
-  StringRef leafName = usesLdbAbi ? aarch64::gemm::kMicrokernelRmLeafName
-                                  : aarch64::gemm::kMicrokernelLeafName;
+  StringRef leafName =
+      usesLdbAbi
+          ? (fused ? aarch64::gemm::kFusedRowMajorMicrokernelLeafName
+                   : aarch64::gemm::kMicrokernelRmLeafName)
+          : (fused ? aarch64::gemm::kFusedMicrokernelLeafName
+                   : aarch64::gemm::kMicrokernelLeafName);
   SmallVector<Type> leafTypes = {unranked, unranked, unranked};
   for (int64_t i = 0, count = usesLdbAbi ? 8 : 7; i < count; ++i)
     leafTypes.push_back(index);
+  if (fused)
+    leafTypes.push_back(MemRefType::get(
+        {aarch64::gemm::kEpilogueArgsPointerSlots}, builder.getIndexType()));
   getOrCreateLeafDeclaration(module, leafName,
                              builder.getFunctionType(leafTypes, {}));
 
@@ -519,6 +585,7 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   leafOperands.push_back(ldc);
   leafOperands.push_back(kSize);
   leafOperands.push_back(familyArgument);
+  if (fused) leafOperands.push_back(epilogueArgs);
   auto kernelCall = builder.create<func::CallOp>(loc, leafName, TypeRange{},
                                                  leafOperands);
   copyScheduleAttrs(op, kernelCall, builder);

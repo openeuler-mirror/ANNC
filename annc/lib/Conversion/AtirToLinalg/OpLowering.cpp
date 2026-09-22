@@ -1,68 +1,61 @@
 #include "Conversion/AtirToLinalg/OpLowering.h"
+
+#include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/Common/CustomizeCallLowering.h"
-#include "Conversion/AtirToLinalg/AtirTypeConverter.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/IR/BuiltinAttributes.h"
+#include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 namespace {
-constexpr llvm::StringLiteral kGemmEpilogueAttrName = "annc.gemm.epilogue";
 constexpr llvm::StringLiteral kGemmAttrName = "annc.gemm";
 
-struct GemmEpilogue {
-  bool hasBias = false;
-  bool hasRelu = false;
-  FloatAttr reluLimit;
-};
+Value asTensor(PatternRewriter& rewriter, Location loc, Value value) {
+  auto type = llvm::dyn_cast<MemRefType>(value.getType());
+  if (!type) return value;
+  return rewriter.create<bufferization::ToTensorOp>(
+      loc, RankedTensorType::get(type.getShape(), type.getElementType()), value,
+      /*restrict=*/true, /*writable=*/true);
+}
 
-FailureOr<GemmEpilogue> getEpilogue(atir::MatMulOp op) {
-  auto attr = op->getAttrOfType<ArrayAttr>(kGemmEpilogueAttrName);
-  if (!attr) return GemmEpilogue{};
-  GemmEpilogue epilogue;
-  bool sawRelu = false;
-  for (Attribute attribute : attr) {
-    auto step = llvm::dyn_cast<DictionaryAttr>(attribute);
-    auto kind = step ? step.getAs<StringAttr>("kind") : StringAttr();
-    if (!kind)
-      return op.emitOpError("expects each epilogue step to have a kind"),
-             failure();
-    if (kind.getValue() == "bias_add") {
-      auto input = step.getAs<IntegerAttr>("input");
-      auto broadcast = step.getAs<StringAttr>("broadcast");
-      if (epilogue.hasBias || sawRelu || !input || input.getInt() != 0 ||
-          !broadcast || broadcast.getValue() != "n")
-        return op.emitOpError(
-                   "only a single leading N-axis bias_add epilogue is "
-                   "supported"),
-               failure();
-      epilogue.hasBias = true;
-    } else if (kind.getValue() == "relu") {
-      auto limit = step.getAs<FloatAttr>("limit");
-      if (epilogue.hasRelu || !limit)
-        return op.emitOpError("expects one relu epilogue with a limit"),
-               failure();
-      epilogue.hasRelu = true;
-      epilogue.reluLimit = limit;
-      sawRelu = true;
-    } else {
-      return op.emitOpError() << "does not support epilogue step '"
-                              << kind.getValue() << "'",
-             failure();
-    }
+FailureOr<AffineMap> addBroadcastMap(RankedTensorType input,
+                                     RankedTensorType output, AffineExpr m,
+                                     AffineExpr n, unsigned dimensions,
+                                     MLIRContext* context) {
+  if (input.getElementType() != output.getElementType()) return failure();
+  auto map = [&](ArrayRef<AffineExpr> results) {
+    return AffineMap::get(dimensions, 0, results, context);
+  };
+  if (input.getShape() == output.getShape()) return map({m, n});
+  auto broadcast =
+      atir::classifyEpilogueBroadcastShape(output.getShape(), input.getShape());
+  if (!broadcast) return failure();
+  auto zero = getAffineConstantExpr(0, context);
+  switch (*broadcast) {
+    case atir::BroadcastKind::kScalar:
+      if (input.getRank() == 0) return map({});
+      return input.getRank() == 1 ? map({zero}) : map({zero, zero});
+    case atir::BroadcastKind::kM:
+      return map({m, zero});
+    case atir::BroadcastKind::kN:
+      return input.getRank() == 1 ? map({n}) : map({zero, n});
+    case atir::BroadcastKind::kMatrix:
+      return map({m, n});
   }
-  if (!epilogue.hasBias && !epilogue.hasRelu)
-    return op.emitOpError("requires a non-empty gemm epilogue"), failure();
-  return epilogue;
+  llvm_unreachable("unknown epilogue broadcast");
 }
 
 FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
                                         atir::MatMulOp op, Value lhs, Value rhs,
-                                        Value output, Value bias,
-                                        const GemmEpilogue& epilogue) {
+                                        Value output,
+                                        llvm::ArrayRef<Value> epilogueInputs,
+                                        const atir::EpilogueProgram& epilogue) {
   auto lhsType = llvm::dyn_cast<RankedTensorType>(lhs.getType());
   auto rhsType = llvm::dyn_cast<RankedTensorType>(rhs.getType());
   auto outputType = llvm::dyn_cast<RankedTensorType>(output.getType());
@@ -87,96 +80,136 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
                "fused linalg.generic lowering requires a floating-point "
                "element type"),
            failure();
-  if (epilogue.hasBias) {
-    auto biasType = llvm::dyn_cast<RankedTensorType>(bias.getType());
-    if (!biasType || biasType.getRank() != 1 ||
-        biasType.getElementType() != elementType)
-      return op.emitOpError(
-                 "bias_add epilogue requires a rank-1 bias with the output "
-                 "element type"),
-             failure();
-  }
   MLIRContext* ctx = rewriter.getContext();
   auto m = rewriter.getAffineDimExpr(0);
   auto n = rewriter.getAffineDimExpr(1);
+  unsigned binaryInputCount = 0;
+  for (const atir::EpilogueStep& step : epilogue.steps)
+    if (atir::isBinaryEpilogueOpcode(step.opcode)) ++binaryInputCount;
+  if (epilogueInputs.size() != binaryInputCount) {
+    return op.emitOpError(
+               "fused epilogue inputs do not match the ordered binary steps"),
+           failure();
+  }
+  unsigned inputIndex = 0;
+  SmallVector<AffineMap> epilogueMaps;
+  for (const atir::EpilogueStep& step : epilogue.steps) {
+    if (!atir::isBinaryEpilogueOpcode(step.opcode)) continue;
+    auto biasType =
+        llvm::dyn_cast<RankedTensorType>(epilogueInputs[inputIndex].getType());
+    if (!biasType)
+      return op.emitOpError("epilogue input must be a ranked tensor"),
+             failure();
+    auto map = addBroadcastMap(biasType, outputType, m, n, 3, ctx);
+    if (failed(map))
+      return op.emitOpError("epilogue input has an invalid broadcast shape"),
+             failure();
+    epilogueMaps.push_back(*map);
+    ++inputIndex;
+  }
   auto k = rewriter.getAffineDimExpr(2);
   SmallVector<AffineMap> indexingMaps = {
       AffineMap::get(3, 0, ArrayRef<AffineExpr>{m, k}, ctx),
       AffineMap::get(3, 0, ArrayRef<AffineExpr>{k, n}, ctx)};
   SmallVector<Value> inputs = {lhs, rhs};
-  if (epilogue.hasBias) {
-    inputs.push_back(bias);
-    indexingMaps.push_back(AffineMap::get(3, 0, n, ctx));
-  }
+  inputs.append(epilogueInputs.begin(), epilogueInputs.end());
+  indexingMaps.append(epilogueMaps.begin(), epilogueMaps.end());
   indexingMaps.push_back(AffineMap::get(3, 0, ArrayRef<AffineExpr>{m, n}, ctx));
   SmallVector<utils::IteratorType> iteratorTypes = {
       utils::IteratorType::parallel, utils::IteratorType::parallel,
       utils::IteratorType::reduction};
+  const unsigned accumulatorIndex = 2 + binaryInputCount;
   auto generic = rewriter.create<linalg::GenericOp>(
       op.getLoc(), TypeRange{output.getType()}, inputs, ValueRange{output},
       indexingMaps, iteratorTypes,
-      [hasBias = epilogue.hasBias, hasRelu = epilogue.hasRelu,
-       reluLimitAttr = epilogue.reluLimit, elementType,
-       lastReductionIndex = reductionSize - 1](OpBuilder& builder, Location loc,
-                                               ValueRange args) {
+      [accumulatorIndex](OpBuilder& builder, Location loc, ValueRange args) {
         Value product = builder.create<arith::MulFOp>(loc, args[0], args[1]);
         Value sum =
-            builder.create<arith::AddFOp>(loc, args[hasBias ? 3 : 2], product);
-        Value epilogueValue = sum;
-        if (hasBias)
-          epilogueValue =
-              builder.create<arith::AddFOp>(loc, epilogueValue, args[2]);
-        if (hasRelu) {
-          auto zeroAttr = FloatAttr::get(elementType, 0.0);
-          Value zero = builder.create<arith::ConstantOp>(loc, zeroAttr);
-          epilogueValue =
-              builder.create<arith::MaxNumFOp>(loc, epilogueValue, zero);
-          if (reluLimitAttr.getValueAsDouble() >= 0.0) {
-            auto limitAttr =
-                FloatAttr::get(elementType, reluLimitAttr.getValueAsDouble());
-            Value limit = builder.create<arith::ConstantOp>(loc, limitAttr);
-            epilogueValue =
-                builder.create<arith::MinNumFOp>(loc, epilogueValue, limit);
-          }
-        }
-        Value reductionIndex = builder.create<linalg::IndexOp>(loc, 2);
-        Value lastIndex =
-            builder.create<arith::ConstantIndexOp>(loc, lastReductionIndex);
-        Value isLastReductionIteration = builder.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::eq, reductionIndex, lastIndex);
-        Value result = builder.create<arith::SelectOp>(
-            loc, isLastReductionIteration, epilogueValue, sum);
-        builder.create<linalg::YieldOp>(loc, result);
+            builder.create<arith::AddFOp>(loc, args[accumulatorIndex], product);
+        builder.create<linalg::YieldOp>(loc, sum);
       });
   for (NamedAttribute attr : op->getAttrs())
     generic->setAttr(attr.getName(), attr.getValue());
   generic->setAttr(kGemmAttrName, UnitAttr::get(ctx));
   return generic.getResult(0);
 }
-
+}  // namespace
+namespace atir {
+void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter,
+                                            TypeConverter& atirTypeConverter,
+                                            RewritePatternSet& patterns) {
+  patterns.add<ConstantLoweringToLinalg>(atirTypeConverter,
+                                         patterns.getContext());
+  patterns.add<MatMulLoweringToLinalg>(atirTypeConverter,
+                                       patterns.getContext());
+  patterns.add<AddLoweringToLinalg>(atirTypeConverter, patterns.getContext());
+  patterns.add<ReluLoweringToLinalg>(atirTypeConverter, patterns.getContext());
+  patterns.add<BufferLoweringToLinalg>(atirTypeConverter,
+                                       patterns.getContext());
+  patterns.add<ReshapeLoweringToLinalg>(atirTypeConverter,
+                                        patterns.getContext());
+  patterns.add<CustomizeLoweringToLinalg>(inputTypeConverter,
+                                          patterns.getContext());
+  patterns.add<FuncReturnOpLowering>(inputTypeConverter, patterns.getContext());
+  populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+      patterns, inputTypeConverter);
 }
-namespace atir
-{
-void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter, TypeConverter& atirTypeConverter, RewritePatternSet& patterns)
-{
-    // patterns.add<NoneLoweringToLinalg>(typeConverter, patterns.getContext());
-    // patterns.add<ConstantLoweringToLinalg>(typeConverter, patterns.getContext());
-    // patterns.add<ReluLoweringToLinalg>(typeConverter, patterns.getContext());
-    // patterns.add<LoadLoweringToLinalg>(typeConverter, patterns.getContext());
-    // patterns.add<AddLoweringToLinalg>(typeConverter, patterns.getContext());
-    // patterns.add<ConcatLoweringToLinalg>(typeConverter, patterns.getContext());
-    patterns.add<MatMulLoweringToLinalg>(atirTypeConverter, patterns.getContext());
-    patterns.add<BufferLoweringToLinalg>(atirTypeConverter, patterns.getContext());
-    // patterns.add<ReturnLoweringToLinalg>(inputTypeConverter, patterns.getContext());
-    patterns.add<CustomizeLoweringToLinalg>(inputTypeConverter, patterns.getContext());
-    patterns.add<FuncReturnOpLowering>(inputTypeConverter, patterns.getContext());
-    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, inputTypeConverter);
+
+bool isSupportedInsertUnitDimensionBeforeN(atir::ReshapeOp op) {
+  auto inputType = llvm::dyn_cast<atir::TensorType>(op.getInput().getType());
+  auto resultType = llvm::dyn_cast<atir::TensorType>(op.getResult().getType());
+  auto targetShapeType =
+      llvm::dyn_cast<atir::TensorType>(op.getTargetShape().getType());
+  if (!inputType || !resultType || inputType.getShape().size() != 2 ||
+      resultType.getShape().size() != 3 ||
+      inputType.getElementType() != resultType.getElementType() ||
+      ShapedType::isDynamicShape(inputType.getShape()) ||
+      ShapedType::isDynamicShape(resultType.getShape()) ||
+      resultType.getShape()[0] != inputType.getShape()[0] ||
+      resultType.getShape()[1] != 1 ||
+      resultType.getShape()[2] != inputType.getShape()[1] || !targetShapeType ||
+      !llvm::isa<IntegerType, IndexType>(targetShapeType.getElementType()) ||
+      !targetShapeType.getCacheData() ||
+      !llvm::isa<IntegerType, IndexType>(
+          targetShapeType.getCacheData().getElementType()) ||
+      targetShapeType.getCacheData().getNumElements() != 3)
+    return false;
+  llvm::SmallVector<int64_t> targetDimensions;
+  for (const APInt& dimension :
+       targetShapeType.getCacheData().getValues<APInt>())
+    targetDimensions.push_back(dimension.getSExtValue());
+  return targetDimensions ==
+         llvm::SmallVector<int64_t>{inputType.getShape()[0], 1,
+                                    inputType.getShape()[1]};
+}
+
+mlir::LogicalResult ReshapeLoweringToLinalg::matchAndRewrite(
+    atir::ReshapeOp op, atir::ReshapeOp::Adaptor adaptor,
+    mlir::ConversionPatternRewriter& rewriter) const {
+  if (!isSupportedInsertUnitDimensionBeforeN(op)) return mlir::failure();
+  Operation* targetShapeDef = op.getTargetShape().getDefiningOp();
+  auto inputType =
+      llvm::dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+  auto resultType = llvm::dyn_cast_or_null<RankedTensorType>(
+      getTypeConverter()->convertType(op.getResult().getType()));
+  if (!inputType || !resultType)
+    return rewriter.notifyMatchFailure(op, "requires ranked tensor types");
+  llvm::SmallVector<ReassociationIndices> reassociation = {{0}, {1, 2}};
+  auto expanded = rewriter.create<tensor::ExpandShapeOp>(
+      op.getLoc(), resultType, adaptor.getInput(), reassociation);
+  rewriter.create<bufferization::MaterializeInDestinationOp>(
+      op.getLoc(), expanded.getResult(), adaptor.getOutput());
+  rewriter.eraseOp(op);
+  if (targetShapeDef && targetShapeDef->use_empty())
+    rewriter.eraseOp(targetShapeDef);
+  return mlir::success();
 }
 
 LogicalResult BufferLoweringToLinalg::matchAndRewrite(
     BufferOp op, BufferOp::Adaptor adaptor,
     ConversionPatternRewriter& rewriter) const {
-  auto convertedType = getTypeConverter()->convertType(op.getOutput().getType());
+  auto convertedType =
+      getTypeConverter()->convertType(op.getOutput().getType());
   auto rankedType = llvm::dyn_cast_or_null<RankedTensorType>(convertedType);
   if (!rankedType || !rankedType.hasStaticShape())
     return rewriter.notifyMatchFailure(
@@ -190,96 +223,159 @@ LogicalResult BufferLoweringToLinalg::matchAndRewrite(
   return success();
 }
 
-void NoneLoweringToLinalg::Lowering(PatternRewriter& rewriter, NoneOpAdaptor adaptor, NoneOp op) const
-{
-    rewriter.eraseOp(op);
+void ConstantLoweringToLinalg::Lowering(PatternRewriter& rewriter,
+                                        ConstantOpAdaptor adaptor,
+                                        ConstantOp op) const {
+  auto type = llvm::dyn_cast<atir::TensorType>(op.getData().getType());
+  if (!type || !type.getCacheData()) {
+    if (!op->use_empty())
+      op->emitOpError(
+          "constant without cache data cannot be lowered while it has uses");
+    else
+      rewriter.eraseOp(op);
+    return;
+  }
+  auto tensorType =
+      RankedTensorType::get(type.getShape(), type.getElementType());
+  rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, tensorType,
+                                                 type.getCacheData());
 }
 
-void ConstantLoweringToLinalg::Lowering(PatternRewriter& rewriter, ConstantOpAdaptor adaptor, ConstantOp op) const
-{
+void AddLoweringToLinalg::Lowering(PatternRewriter& rewriter,
+                                   AddOpAdaptor adaptor, AddOp op) const {
+  auto outputType = llvm::dyn_cast<RankedTensorType>(
+      getTypeConverter()->convertType(op.getResult().getType()));
+  if (!outputType || outputType.getRank() != 2) {
+    op.emitOpError("Linalg Add lowering requires a ranked rank-2 output");
+    return;
+  }
 
-}
-
-void ReluLoweringToLinalg::Lowering(PatternRewriter &rewriter, ReluOpAdaptor adaptor, ReluOp op) const {
-
-}
-
-void LoadLoweringToLinalg::Lowering(PatternRewriter &rewriter, LoadOpAdaptor adaptor, LoadOp op) const {
-
-}
-
-void AddLoweringToLinalg::Lowering(PatternRewriter& rewriter, AddOpAdaptor adaptor, AddOp op) const
-{
-
-}
-
-void ConcatLoweringToLinalg::Lowering(PatternRewriter& rewriter, ConcatOpAdaptor adaptor, ConcatOp op) const
-{
-
-}
-
-void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor adaptor, MatMulOp op) const
-{
-    auto loc = op.getLoc();
-    Value lhs = adaptor.getLhs();
-    Value rhs = adaptor.getRhs();
-    auto lhs_type = mlir::cast<RankedTensorType>(lhs.getType());
-    auto rhs_type = mlir::cast<RankedTensorType>(rhs.getType());
-    auto lhs_rank = lhs_type.getRank();
-    auto rhs_rank = rhs_type.getRank();
-    Value c = adaptor.getC();
-    if (lhs_rank == 2 && rhs_rank == 2)
-    {
-        if (op.getLeftTranspose() || op.getRightTranspose() ||
-            op.getOutputTranspose()) {
-            op.emitOpError("Linalg MatMul lowering does not support transpose");
-            return;
-        }
-        FailureOr<GemmEpilogue> epilogue = getEpilogue(op);
-        if (failed(epilogue)) return;
-        Value bias = adaptor.getBias();
-        if (bias && !epilogue->hasBias) {
-            op.emitOpError("a bias operand requires a bias_add gemm epilogue");
-            return;
-        }
-        if (epilogue->hasBias && !bias) {
-            op.emitOpError("bias_add epilogue requires a bias operand");
-            return;
-        }
-        if (epilogue->hasBias || epilogue->hasRelu) {
-            FailureOr<Value> fused =
-                createFusedGemmGeneric(rewriter, op, lhs, rhs, c, bias,
-                                       *epilogue);
-            if (failed(fused)) return;
-            rewriter.replaceOp(op, *fused);
-            return;
-        }
-        auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
-            loc, c.getType(), ValueRange{lhs, rhs}, c, op->getAttrs());
-        // Preserve the checkpoint variable name of a constant RHS for the
-        // post-strategy prepack pass.  TensorType metadata is not available
-        // after bufferization; the name must match GemmPlan.h
-        // kRhsNameAttrName.
-        if (auto rhsType =
-                llvm::dyn_cast<atir::TensorType>(op.getRhs().getType())) {
-            if (auto name = rhsType.getName();
-                name && !name.getValue().empty())
-                linalgMatmul->setDiscardableAttr("annc.aarch64.rhs_name",
-                                                 name);
-        }
-        rewriter.replaceOp(op, linalgMatmul.getResult(0));
+  MLIRContext* ctx = rewriter.getContext();
+  auto m = rewriter.getAffineDimExpr(0);
+  auto n = rewriter.getAffineDimExpr(1);
+  SmallVector<Value> inputs;
+  for (Value input : adaptor.getInputs())
+    inputs.push_back(asTensor(rewriter, op.getLoc(), input));
+  Value output = asTensor(rewriter, op.getLoc(), adaptor.getOutput());
+  SmallVector<AffineMap> indexingMaps;
+  for (Value input : inputs) {
+    auto inputType = llvm::dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType) {
+      op.emitOpError("Linalg Add inputs must be ranked tensors");
+      return;
     }
+    auto map = addBroadcastMap(inputType, outputType, m, n, 2, ctx);
+    if (failed(map)) {
+      op.emitOpError(
+          "Linalg Add input is not an exact or statically provable "
+          "scalar, M, N, or matrix broadcast");
+      return;
+    }
+    indexingMaps.push_back(*map);
+  }
+  indexingMaps.push_back(AffineMap::get(2, 0, ArrayRef<AffineExpr>{m, n}, ctx));
+  SmallVector<utils::IteratorType> iteratorTypes = {
+      utils::IteratorType::parallel, utils::IteratorType::parallel};
+  auto generic = rewriter.create<linalg::GenericOp>(
+      op.getLoc(), TypeRange{outputType}, inputs, ValueRange{output},
+      indexingMaps, iteratorTypes,
+      [&](OpBuilder& builder, Location loc, ValueRange args) {
+        Value value = builder.create<arith::ConstantOp>(
+            loc, FloatAttr::get(outputType.getElementType(), 0.0));
+        for (Value arg : args.drop_back())
+          value = builder.create<arith::AddFOp>(loc, value, arg);
+        if (op.getScalarAttr())
+          value = builder.create<arith::AddFOp>(
+              loc, value,
+              builder.create<arith::ConstantOp>(loc, op.getScalarAttr()));
+        if (op.getDoRelu()) {
+          Value zero = builder.create<arith::ConstantOp>(
+              loc, FloatAttr::get(outputType.getElementType(), 0.0));
+          value = builder.create<arith::MaxNumFOp>(loc, value, zero);
+          const float reluLimit = op.getReluLimit().convertToFloat();
+          if (reluLimit >= 0.0f) {
+            Value limit = builder.create<arith::ConstantOp>(
+                loc, FloatAttr::get(outputType.getElementType(), reluLimit));
+            value = builder.create<arith::MinNumFOp>(loc, value, limit);
+          }
+        }
+        builder.create<linalg::YieldOp>(loc, value);
+      });
+  rewriter.replaceOp(op, generic.getResult(0));
 }
 
-void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter, atir::CustomizeOpAdaptor adaptor,
+LogicalResult ReluLoweringToLinalg::matchAndRewrite(
+    atir::ReluOp op, atir::ReluOp::Adaptor adaptor,
+    ConversionPatternRewriter& rewriter) const {
+  auto output = asTensor(rewriter, op.getLoc(), adaptor.getOutput());
+  auto input = asTensor(rewriter, op.getLoc(), adaptor.getInput());
+  auto type = llvm::dyn_cast<RankedTensorType>(input.getType());
+  if (!type || type.getRank() != 2)
+    return rewriter.notifyMatchFailure(op, "requires a ranked rank-2 tensor");
+  MLIRContext* ctx = rewriter.getContext();
+  auto map = AffineMap::getMultiDimIdentityMap(2, ctx);
+  auto generic = rewriter.create<linalg::GenericOp>(
+      op.getLoc(), TypeRange{output.getType()}, ValueRange{input},
+      ValueRange{output}, ArrayRef<AffineMap>{map, map},
+      SmallVector<utils::IteratorType>{utils::IteratorType::parallel,
+                                       utils::IteratorType::parallel},
+      [&](OpBuilder& builder, Location loc, ValueRange args) {
+        Value zero = builder.create<arith::ConstantOp>(
+            loc, FloatAttr::get(type.getElementType(), 0.0));
+        Value value = builder.create<arith::MaxNumFOp>(loc, args[0], zero);
+        if (op.getReluLimitAttr().getValueAsDouble() >= 0.0)
+          value = builder.create<arith::MinNumFOp>(
+              loc, value,
+              builder.create<arith::ConstantOp>(
+                  loc,
+                  FloatAttr::get(type.getElementType(),
+                                 op.getReluLimitAttr().getValueAsDouble())));
+        builder.create<linalg::YieldOp>(loc, value);
+      });
+  rewriter.replaceOp(op, generic.getResult(0));
+  return success();
+}
+
+void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter,
+                                      MatMulOpAdaptor adaptor,
+                                      MatMulOp op) const {
+  auto loc = op.getLoc();
+  Value lhs = adaptor.getLhs();
+  Value rhs = adaptor.getRhs();
+  auto lhs_type = mlir::cast<RankedTensorType>(lhs.getType());
+  auto rhs_type = mlir::cast<RankedTensorType>(rhs.getType());
+  auto lhs_rank = lhs_type.getRank();
+  auto rhs_rank = rhs_type.getRank();
+  Value c = adaptor.getC();
+  if (lhs_rank == 2 && rhs_rank == 2) {
+    if (op.getLeftTranspose() || op.getRightTranspose() ||
+        op.getOutputTranspose()) {
+      op.emitOpError("Linalg MatMul lowering does not support transpose");
+      return;
+    }
+    auto attr = op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr);
+    llvm::SmallVector<Value> epilogueInputs(adaptor.getEpilogueInputs().begin(),
+                                            adaptor.getEpilogueInputs().end());
+    if (attr) {
+      FailureOr<atir::EpilogueProgram> epilogue =
+          atir::parseEpilogueCandidatePlan(attr);
+      if (failed(epilogue)) return;
+      FailureOr<Value> fused = createFusedGemmGeneric(
+          rewriter, op, lhs, rhs, c, epilogueInputs, *epilogue);
+      if (failed(fused)) return;
+      rewriter.replaceOp(op, *fused);
+      return;
+    }
+    auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
+        loc, c.getType(), ValueRange{lhs, rhs}, c, op->getAttrs());
+    rewriter.replaceOp(op, linalgMatmul.getResult(0));
+  }
+}
+
+void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter& rewriter,
+                                         atir::CustomizeOpAdaptor adaptor,
                                          atir::CustomizeOp op) const {
   lowerCustomizeOpToFuncCall(rewriter, adaptor, op);
 }
 
-
-void ReturnLoweringToLinalg::Lowering(PatternRewriter &rewriter, ReturnOpAdaptor adaptor, ReturnOp op) const {
-    auto ret = adaptor.getResults();
-    auto funcReturn = rewriter.create<func::ReturnOp>(op.getLoc(), ret);
-    rewriter.replaceOp(op, funcReturn);
-}
-}
+}  // namespace atir

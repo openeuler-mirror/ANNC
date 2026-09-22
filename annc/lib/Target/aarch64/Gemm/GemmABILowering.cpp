@@ -92,12 +92,13 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
   if (failed(plan)) return failure();
   const bool isRowMajor = aarch64::gemm::usesLdbAbi(
     aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
+  const bool isFused = aarch64::gemm::isFusedMicrokernelLeaf(call.getCallee());
   const bool hasRowMajorCallee =
-      call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName;
+      aarch64::gemm::isRowMajorMicrokernelLeaf(call.getCallee());
   if (isRowMajor != hasRowMajorCallee)
     return call.emitOpError("microkernel leaf does not match the GEMM plan");
   // Packed leaves have seven index operands; row-major leaves add ldb.
-  const int64_t expectedOperands = isRowMajor ? 11 : 10;
+  const int64_t expectedOperands = (isRowMajor ? 11 : 10) + (isFused ? 1 : 0);
   if (call.getNumOperands() != expectedOperands)
     return call.emitOpError("has an invalid microkernel leaf signature");
   if (!aarch64::gemm::hasStage(call, aarch64::gemm::kMicrokernelLoweredStage)) {
@@ -119,19 +120,36 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
       call->getAttrOfType<StringAttr>(aarch64::gemm::kAsmSymbolAttrName);
   if (!symbol)
     return call.emitOpError("has no statically selected microkernel symbol");
+  auto generated = call->getAttrOfType<DictionaryAttr>(
+      aarch64::gemm::kGeneratedMicrokernelAttrName);
+  if (isFused && !generated)
+    return call.emitOpError("fused leaf has no generated metadata");
 
   SmallVector<Value> arguments = {*lhs, *rhs, *out};
-  for (unsigned index = 6; index < call.getNumOperands(); ++index)
+  const unsigned indexEnd = call.getNumOperands() - (isFused ? 1 : 0);
+  for (unsigned index = 6; index < indexEnd; ++index)
     arguments.push_back(toI32(builder, loc, call.getOperand(index)));
+  if (isFused) {
+    Value base = builder.create<memref::ExtractAlignedPointerAsIndexOp>(
+        loc, call.getOperand(call.getNumOperands() - 1));
+    Value addressI64 =
+        builder.create<arith::IndexCastOp>(loc, builder.getI64Type(), base);
+    arguments.push_back(builder.create<LLVM::IntToPtrOp>(
+        loc, LLVM::LLVMPointerType::get(builder.getContext()), addressI64));
+  }
 
   Type ptr = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   SmallVector<Type> inputTypes = {ptr, ptr, ptr, i32, i32, i32, i32};
   if (isRowMajor) inputTypes.push_back(i32);
+  if (isFused) inputTypes.push_back(ptr);
   LLVM::LLVMFuncOp declaration = getOrCreateAssemblyDeclaration(
       module, symbol.getValue(), inputTypes,
       LLVM::LLVMVoidType::get(module.getContext()));
-  builder.create<LLVM::CallOp>(loc, declaration, arguments);
+  LLVM::CallOp llvmCall =
+      builder.create<LLVM::CallOp>(loc, declaration, arguments);
+  if (generated)
+    llvmCall->setAttr(aarch64::gemm::kGeneratedMicrokernelAttrName, generated);
   call.erase();
   return success();
 }
@@ -182,6 +200,7 @@ class AArch64GemmABILowering
       if (call.getCallee() == aarch64::gemm::kPackBLeafName ||
           call.getCallee() == aarch64::gemm::kMicrokernelLeafName ||
           call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName ||
+          aarch64::gemm::isFusedMicrokernelLeaf(call.getCallee()) ||
           isSvePackedBHelper(call.getCallee())) {
         calls.push_back(call);
       }
@@ -191,7 +210,8 @@ class AArch64GemmABILowering
           call.getCallee() == aarch64::gemm::kPackBLeafName
               ? lowerPackBCall(module, call)
           : call.getCallee() == aarch64::gemm::kMicrokernelLeafName ||
-                  call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName
+                  call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName ||
+                  aarch64::gemm::isFusedMicrokernelLeaf(call.getCallee())
               ? lowerMicrokernelCall(module, call)
               : lowerSvePackedBHelperCall(module, call);
       if (failed(result)) {
@@ -201,8 +221,10 @@ class AArch64GemmABILowering
     }
 
     for (StringRef name :
-         {aarch64::gemm::kPackBLeafName, aarch64::gemm::kMicrokernelLeafName,
-          aarch64::gemm::kMicrokernelRmLeafName,
+        {aarch64::gemm::kPackBLeafName, aarch64::gemm::kMicrokernelLeafName,
+         aarch64::gemm::kMicrokernelRmLeafName,
+         aarch64::gemm::kFusedMicrokernelLeafName,
+         aarch64::gemm::kFusedRowMajorMicrokernelLeafName,
           aarch64::gemm::kSvePackedBElementsAsmSymbol,
           aarch64::gemm::kSvePackedBOffsetAsmSymbol}) {
       if (auto declaration = module.lookupSymbol<func::FuncOp>(name);

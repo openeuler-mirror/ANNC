@@ -21,6 +21,11 @@ mlir::FailureOr<MemRefBaseAndOffset> getBaseAndOffsetImpl(
   if (auto castOp = memref.getDefiningOp<mlir::memref::CastOp>())
     return getBaseAndOffsetImpl(builder, loc, castOp.getSource());
 
+  if (llvm::isa<mlir::UnrankedMemRefType>(memref.getType())) {
+    mlir::Value zero = builder.create<mlir::arith::ConstantIndexOp>(loc, 0);
+    return MemRefBaseAndOffset{memref, zero};
+  }
+
   auto subview = memref.getDefiningOp<mlir::memref::SubViewOp>();
   if (!subview) {
     auto type = llvm::dyn_cast<mlir::MemRefType>(memref.getType());
@@ -99,9 +104,15 @@ mlir::FailureOr<mlir::Value> createProjectedSubview(
   strides.reserve(type.getRank());
   for (mlir::AffineExpr expression : map.getResults()) {
     auto dim = llvm::dyn_cast<mlir::AffineDimExpr>(expression);
+    if (auto constant = llvm::dyn_cast<mlir::AffineConstantExpr>(expression);
+        constant && constant.getValue() == 0) {
+      offsets.push_back(builder.getIndexAttr(0));
+      sizes.push_back(builder.getIndexAttr(1));
+      strides.push_back(builder.getIndexAttr(1));
+      continue;
+    }
     if (!dim || dim.getPosition() >= iterationOffsets.size()) {
-      generic.emitOpError(
-          "requires projected M/N/K indexing maps for every operand");
+      generic.emitOpError("requires projected or constant-zero indexing maps");
       return mlir::failure();
     }
     offsets.push_back(iterationOffsets[dim.getPosition()]);

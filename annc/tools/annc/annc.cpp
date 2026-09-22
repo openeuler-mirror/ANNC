@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -67,17 +68,20 @@ public:
     string inputFile;
     string outputFile;
     string testFile;
+    string programDir;
     string packedRhsC;
     string kernelLibPath;
     bool verbose = false;
     bool sharedLibrary = false;
     vector<string> extraArgs;
+    vector<string> linkObjects;
     string mLirSymbolName = "annc";  // step4.o_mlirannc
     int M = 0, K = 0, N = 0;  // .mlir
 
     CompilationConfig() = default;
     
     void parseArgs(int argc, char **argv) {
+        programDir = fs::path(argv[0]).parent_path().string();
         for (int i = 1; i < argc; i++) {
             string arg = argv[i];
             if (arg == "-v" || arg == "--verbose") {
@@ -246,6 +250,11 @@ public:
             //  4: LLVM IR -> object
             if (!step4_LLVMIRToObject()) {
                 log("Step 4 failed");
+                return false;
+            }
+
+            if (!step4b_GenerateAndAssembleAotKernels()) {
+                log("Step 4b failed");
                 return false;
             }
             
@@ -479,6 +488,64 @@ private:
         return true;
     }
 
+    bool step4b_GenerateAndAssembleAotKernels() {
+        log("Step 4b: export and assemble AOT generated kernels");
+
+        string exportTool =
+            (fs::path(config.programDir) / "annc-model-kernel-export").string();
+        fs::path aotDir = tempDir / "aot-kernels";
+        fs::create_directories(aotDir);
+        string exportCommand = "\"" + exportTool + "\" \"" +
+                               (tempDir / "step1_llvm.mlir").string() +
+                               "\" --output-dir \"" + aotDir.string() + "\"";
+        logCommand(exportCommand);
+        if (!CommandExecutor::executeCommand(exportCommand)) {
+            log("AOT kernel export failed");
+            return false;
+        }
+
+        fs::path kernelsDir = aotDir / "model_generated_kernels";
+        if (!fs::exists(kernelsDir)) return true;
+
+        const char* asmRootEnv = getenv("ANNC_GEMM_ASM_SOURCE_DIR");
+        fs::path asmRoot = asmRootEnv && *asmRootEnv
+                               ? fs::path(asmRootEnv)
+                               : fs::path(ANNC_GEMM_ASM_SOURCE_DIR);
+        if (asmRoot.empty() || !fs::exists(asmRoot / "Sve") ||
+            !fs::exists(asmRoot / "Neon")) {
+            cerr << "ANNC_GEMM_ASM_SOURCE_DIR must point to a GEMM-ASM checkout"
+                 << endl;
+            return false;
+        }
+
+        string includeArgs = " -I \"" + (asmRoot / "Sve").string() +
+                             "\" -I \"" + (asmRoot / "Neon").string() + "\"";
+        vector<fs::path> sources;
+        for (const auto& entry : fs::directory_iterator(kernelsDir)) {
+            if (entry.path().extension() == ".S")
+                sources.push_back(entry.path());
+        }
+        sort(sources.begin(), sources.end());
+        for (const fs::path& source : sources) {
+            fs::path object = source;
+            object.replace_extension(".o");
+            const bool sve = source.filename().string().find("_sve_") !=
+                             string::npos;
+            string command = getClangPath() +
+                             (sve ? " -c -march=armv8-a+sve"
+                                  : " -c -march=armv8-a") +
+                             includeArgs + " \"" + source.string() +
+                             "\" -o \"" + object.string() + "\"";
+            logCommand(command);
+            if (!CommandExecutor::executeCommand(command)) {
+                log("AOT kernel assembly failed: " + source.string());
+                return false;
+            }
+            config.linkObjects.push_back(object.string());
+        }
+        return true;
+    }
+
     // step4.o_mlir
     void extractMLIRSymbolName() {
         log("Extracting defined MLIR C interface symbols from step4.o");
@@ -538,6 +605,8 @@ private:
         string command = getClangPath() + " -O3 \"" + (tempDir / inputFile).string() + "\"";
         appendPrepackedSource(command);
         command += " \"" + config.testFile + "\"";
+        for (const string& objectFile : config.linkObjects)
+            command += " \"" + objectFile + "\"";
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
         command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
@@ -556,7 +625,7 @@ private:
         command += " -DK=" + to_string(config.K);
         command += " -DN=" + to_string(config.N);
         command += " -o \"" + (fs::path(config.outputFile)).string() + "\"";
-        command += " -lm";
+        command += " -lstdc++ -lm";
         
         logCommand(command);
         return CommandExecutor::executeCommand(command);
@@ -573,6 +642,8 @@ private:
         
         string command = getClangPath() + " -shared -fPIC -O3 \"" + (tempDir / inputFile).string() + "\"";
         appendPrepackedSource(command);
+        for (const string& objectFile : config.linkObjects)
+            command += " \"" + objectFile + "\"";
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
 #if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
         command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
@@ -587,6 +658,7 @@ private:
         command += " -Wl,-rpath," KDNN_LIB_DIR;
         command += " " ANNC_KDNN_OPENMP_LINK_FLAGS;
 #endif
+        command += " -lstdc++";
         command += " -o \"" + (fs::path(sharedLibName)).string() + "\"";
         
         logCommand(command);

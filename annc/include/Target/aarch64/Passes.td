@@ -36,6 +36,13 @@ def AArch64ResolveGemmPlan
   ];
 }
 
+def AArch64AtirGemmEpilogueCommit
+    : Pass<"aarch64-atir-gemm-epilogue-commit", "ModuleOp"> {
+  let summary = "commit ATIR GEMM epilogue candidates";
+  let constructor = "createAArch64AtirGemmEpilogueCommit()";
+  let dependentDialects = ["atir::AtirDialect"];
+}
+
 /* Select target policy before shape-dependent thread planning. */
 def AArch64SelectGemmStrategy
     : Pass<"aarch64-select-gemm-strategy", "ModuleOp"> {

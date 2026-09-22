@@ -10,6 +10,7 @@ add_executable(annc annc.cpp)
 
 target_compile_definitions(annc PRIVATE
     ANNC_KERNEL_LIB_PATH="${CMAKE_INSTALL_PREFIX}/lib"
+    ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR}"
 )
 if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
     target_compile_definitions(annc PRIVATE
