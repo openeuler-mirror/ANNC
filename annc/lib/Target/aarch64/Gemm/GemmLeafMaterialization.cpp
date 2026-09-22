@@ -214,11 +214,12 @@ using PackedBBlockMap = llvm::DenseMap<Value, PackedBWorkspace>;
 // Materialize the (PC, JC) offset for the pc-major / jc-minor packed RHS.
 Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
                                       const aarch64::gemm::GemmPlan &plan,
-                                      int64_t kSize, Value pc, Value jc) {
+                                      int64_t fullN, int64_t kSize, Value pc,
+                                      Value jc) {
   const int64_t kc = plan.cacheTile.kc;
   const int64_t nc = plan.cacheTile.nc;
   const int64_t kRows = (plan.k + kc - 1) / kc;
-  const int64_t nCols = (plan.n + nc - 1) / nc;
+  const int64_t nCols = (fullN + nc - 1) / nc;
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value rowIndex = builder.create<arith::DivUIOp>(
       loc, pc, builder.create<arith::ConstantIndexOp>(loc, kc));
@@ -238,17 +239,50 @@ Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
     const int64_t kr = std::min(kc, plan.k - r * kc);
     int64_t rowWidth = 0;
     for (int64_t c = 0; c < nCols; ++c) {
-      const int64_t blockN = std::min(nc, plan.n - c * nc);
+      const int64_t blockN = std::min(nc, fullN - c * nc);
       rowWidth += packedBElements(plan.isa, kr, blockN);
     }
     addContribution(rowIndex, r, rowWidth);
   }
   // Columns before JC inside the current K row.
   for (int64_t c = 0; c < nCols; ++c) {
-    const int64_t blockN = std::min(nc, plan.n - c * nc);
+    const int64_t blockN = std::min(nc, fullN - c * nc);
     addContribution(colIndex, c, packedBElements(plan.isa, kSize, blockN));
   }
   return offset;
+}
+
+// Absolute (K, N) origin of a cache block in the original RHS buffer: walk
+// the subview chain to the root, accumulating each level's offsets.
+FailureOr<std::pair<Value, Value>> absoluteBlockBase(Operation *op,
+                                                     Value block) {
+  OpBuilder builder(op);
+  Location loc = op->getLoc();
+  Value kAccum;
+  Value nAccum;
+  size_t levels = 0;
+  Value current = block;
+  while (auto subview = current.getDefiningOp<memref::SubViewOp>()) {
+    ++levels;
+    if (subview.getMixedOffsets().size() != 2) return failure();
+    if (!isStaticZero(subview.getMixedOffsets()[0])) {
+      Value kOffset =
+          materializeIndex(builder, loc, subview.getMixedOffsets()[0]);
+      kAccum = kAccum ? builder.create<arith::AddIOp>(loc, kAccum, kOffset)
+                      : kOffset;
+    }
+    if (!isStaticZero(subview.getMixedOffsets()[1])) {
+      Value nOffset =
+          materializeIndex(builder, loc, subview.getMixedOffsets()[1]);
+      nAccum = nAccum ? builder.create<arith::AddIOp>(loc, nAccum, nOffset)
+                      : nOffset;
+    }
+    current = subview.getSource();
+  }
+  if (levels == 0) return failure();
+  if (!kAccum) kAccum = builder.create<arith::ConstantIndexOp>(loc, 0);
+  if (!nAccum) nAccum = builder.create<arith::ConstantIndexOp>(loc, 0);
+  return std::make_pair(kAccum, nAccum);
 }
 
 FailureOr<PackedBBlock> materializePrepackedBBlock(
@@ -264,38 +298,63 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
 
   OpBuilder &microBuilder = builder;
   Location loc = op->getLoc();
-  Value pc = materializeIndex(microBuilder, loc,
-                              rhsSubview.getMixedOffsets()[0]);
-  Value jc = materializeIndex(microBuilder, loc,
-                              rhsSubview.getMixedOffsets()[1]);
-  // packed offset = cache-block prefix (pc row + jc column) + panel offset.
+  FailureOr<std::pair<Value, Value>> base = absoluteBlockBase(op, rhsBlock);
+  if (failed(base))
+    return op->emitOpError("prepacked RHS requires a subview chain rooted at "
+                           "the original RHS buffer");
+  Value pc = base->first;
+  Value blockColumn = base->second;
+
+  // Thread-task plans carry a tile-local N; recover the problem-level N that
+  // shapes the packed data blocks.
+  int64_t fullN = plan.n;
+  if (auto planDict =
+          op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName)) {
+    if (auto fullNAttr = planDict.getAs<IntegerAttr>("full_n"))
+      fullN = fullNAttr.getInt();
+  }
+
+  // packed offset = cache-block prefix (pc row + block column) + panel offset.
   Value offset;
   auto pcConstant = pc.getDefiningOp<arith::ConstantIndexOp>();
-  auto jcConstant = jc.getDefiningOp<arith::ConstantIndexOp>();
-  if (pcConstant && jcConstant) {
+  auto columnConstant = blockColumn.getDefiningOp<arith::ConstantIndexOp>();
+  if (pcConstant && columnConstant) {
     offset = microBuilder.create<arith::ConstantIndexOp>(
         loc, rowPrefix(plan.isa, plan.k, plan.n, plan.cacheTile,
                        pcConstant.value() / plan.cacheTile.kc) +
                  columnPrefix(plan.isa, *kSize, plan.n, plan.cacheTile.nc,
-                              jcConstant.value() / plan.cacheTile.nc));
+                              columnConstant.value() / plan.cacheTile.nc));
   } else {
-    offset = materializePrepackedCacheOffset(microBuilder, loc, plan, *kSize,
-                                             pc, jc);
+    offset = materializePrepackedCacheOffset(microBuilder, loc, plan, fullN,
+                                             *kSize, pc, blockColumn);
+  }
+  // Panel numbering restarts at each NC-aligned packed block, so a task tile
+  // starting mid-block must rebase JR into that block's column space.
+  Value panelColumn = jr;
+  if (!columnConstant || columnConstant.value() % plan.cacheTile.nc != 0) {
+    Value ncValue = microBuilder.create<arith::ConstantIndexOp>(
+        loc, plan.cacheTile.nc);
+    Value blockStart = microBuilder.create<arith::MulIOp>(
+        loc, microBuilder.create<arith::DivUIOp>(loc, blockColumn, ncValue),
+        ncValue);
+    panelColumn = microBuilder.create<arith::AddIOp>(
+        loc, microBuilder.create<arith::SubIOp>(loc, blockColumn, blockStart),
+        jr);
   }
   if (plan.isa == aarch64::gemm::GemmIsa::kSve) {
     Value blockK = microBuilder.create<arith::ConstantIndexOp>(loc, *kSize);
     Value panel = callSvePackedBHelper(
         module, microBuilder, loc, aarch64::gemm::kSvePackedBOffsetAsmSymbol,
-        blockK, jr);
+        blockK, panelColumn);
     offset = microBuilder.create<arith::AddIOp>(loc, offset, panel);
   } else {
     Value group = microBuilder.create<arith::DivUIOp>(
-        loc, jr, microBuilder.create<arith::ConstantIndexOp>(loc, 4));
+        loc, panelColumn, microBuilder.create<arith::ConstantIndexOp>(loc, 4));
     Value groupOffset = microBuilder.create<arith::MulIOp>(
         loc, group,
         microBuilder.create<arith::ConstantIndexOp>(loc, *kSize * 4));
     Value lane = microBuilder.create<arith::AndIOp>(
-        loc, jr, microBuilder.create<arith::ConstantIndexOp>(loc, 3));
+        loc, panelColumn, microBuilder.create<arith::ConstantIndexOp>(loc, 3));
     offset = microBuilder.create<arith::AddIOp>(
         loc, offset, microBuilder.create<arith::AddIOp>(loc, groupOffset, lane));
   }
