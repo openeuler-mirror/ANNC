@@ -105,6 +105,17 @@ annc_add_kernel_gtest(customcall_symbol_resolution_test
 )
 target_link_libraries(customcall_symbol_resolution_test PRIVATE ANNCKernel)
 
+annc_add_kernel_gtest(gemm_epilogue_test
+    gemm_epilogue_test.cpp
+)
+target_link_libraries(gemm_epilogue_test
+    PRIVATE
+    AArch64Codegen
+    AtirPasses
+    AtirDialect
+    MLIRDialect
+)
+
 if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
     annc_add_kernel_gtest(gemm_smallshape_microkernel_test
         gemm_smallshape_microkernel_test.cpp
