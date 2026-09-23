@@ -51,6 +51,17 @@ FailureOr<AffineMap> addBroadcastMap(RankedTensorType input,
   llvm_unreachable("unknown epilogue broadcast");
 }
 
+void preserveRhsCheckpointName(Operation* target, atir::MatMulOp source) {
+  auto rhsType = llvm::dyn_cast<atir::TensorType>(source.getRhs().getType());
+  if (!rhsType) return;
+  auto name = rhsType.getName();
+  if (!name || name.getValue().empty()) return;
+  // The AArch64 prepack pass runs after bufferization, where TensorType
+  // metadata is no longer available. Preserve the checkpoint tensor name on
+  // the lowered GEMM operation.
+  target->setDiscardableAttr("annc.aarch64.rhs_name", name);
+}
+
 FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
                                         atir::MatMulOp op, Value lhs, Value rhs,
                                         Value output,
@@ -131,6 +142,7 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
   for (NamedAttribute attr : op->getAttrs())
     generic->setAttr(attr.getName(), attr.getValue());
   generic->setAttr(kGemmAttrName, UnitAttr::get(ctx));
+  preserveRhsCheckpointName(generic, op);
   return generic.getResult(0);
 }
 }  // namespace
@@ -368,6 +380,7 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter,
     }
     auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
         loc, c.getType(), ValueRange{lhs, rhs}, c, op->getAttrs());
+    preserveRhsCheckpointName(linalgMatmul, op);
     rewriter.replaceOp(op, linalgMatmul.getResult(0));
   }
 }

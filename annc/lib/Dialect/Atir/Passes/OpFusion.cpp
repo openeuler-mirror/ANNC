@@ -1421,9 +1421,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-    if (!matmulOp.getRhsFormat()) return failure();
-#endif
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
