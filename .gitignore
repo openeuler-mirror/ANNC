@@ -18,6 +18,9 @@ proxy
 __pycache__
 *.whl
 install/
+# Per-configuration install prefixes used by the build-switch acceptance runs
+# (install/, install-onnx-only/, install-tf-only/, ...).
+install-*/
 tf_protos_minimal/
 *.log
 *.bak
@@ -34,3 +37,8 @@ tmp/
 /Testing/
 .worktrees/
 /tools/
+
+# Generated ONNX protobuf sources (frontends/onnx/protos/onnx/onnx.proto and
+# frontends/onnx/protos/onnx_protos_minimal.sh are hand-maintained and
+# committed; only the generated tree is ignored).
+frontends/onnx/protos/gen_code/

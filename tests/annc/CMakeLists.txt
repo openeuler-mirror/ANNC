@@ -34,17 +34,22 @@ gtest_discover_tests(jit_template_fingerprint_test
     TEST_PREFIX "JitTemplateFingerprint."
 )
 
-add_executable(annc_jit_cache_test
-    annc_jit_cache_test.cpp
-)
-target_include_directories(annc_jit_cache_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/tensorflow_addons"
-)
-target_link_libraries(annc_jit_cache_test PRIVATE
-    GTest::gtest_main
-    Threads::Threads
-    annc_jit_cache
-)
-gtest_discover_tests(annc_jit_cache_test
-    TEST_PREFIX "JitCompilationCache."
-)
+# The JIT cache lives in the TensorFlow addon, so its test is registered only
+# while that addon is built (ANNC_ENABLE_TENSORFLOW_ADDON gates
+# tensorflow_addons/, which defines the annc_jit_cache target).
+if(ANNC_ENABLE_TENSORFLOW_ADDON)
+    add_executable(annc_jit_cache_test
+        annc_jit_cache_test.cpp
+    )
+    target_include_directories(annc_jit_cache_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/tensorflow_addons"
+    )
+    target_link_libraries(annc_jit_cache_test PRIVATE
+        GTest::gtest_main
+        Threads::Threads
+        annc_jit_cache
+    )
+    gtest_discover_tests(annc_jit_cache_test
+        TEST_PREFIX "JitCompilationCache."
+    )
+endif()

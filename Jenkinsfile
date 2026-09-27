@@ -31,6 +31,9 @@
 //    - 使用 jenkins 用户安装：
 //        sudo -u jenkins pip3 install -r requirements.txt
 //    - 若 Deps Check 阶段报 "missing required python packages"，请按上述命令安装。
+//    - TensorFlow 只在构建 TF addon 时需要：勾选 DISABLE_TENSORFLOW 或
+//      DISABLE_TENSORFLOW_ADDON 参数后 Deps Check 不再要求 tensorflow；
+//      勾选 DISABLE_ONNX 则跳过 ONNX 前端的构建与 proto 生成校验。
 //
 // 4. 磁盘空间要求
 //    - 首次编译 LLVM 需要约 50GB 磁盘空间
@@ -107,6 +110,21 @@ pipeline {
             defaultValue: false,
             description: '是否运行 pytest/ctest（当前预留）'
         )
+        booleanParam(
+            name: 'DISABLE_TENSORFLOW',
+            defaultValue: false,
+            description: '关闭 TensorFlow 前端与其 addon（映射 build.sh --disable-tensorflow）'
+        )
+        booleanParam(
+            name: 'DISABLE_TENSORFLOW_ADDON',
+            defaultValue: false,
+            description: '只关闭 TF addon，TF 前端工具仍构建（映射 build.sh --disable-tensorflow-addon）'
+        )
+        booleanParam(
+            name: 'DISABLE_ONNX',
+            defaultValue: false,
+            description: '关闭 ONNX 前端（映射 build.sh --disable-onnx）'
+        )
     }
 
     environment {
@@ -118,6 +136,15 @@ pipeline {
         INSTALL_PREFIX = "${env.ANNC_NIGHTLY_HOME}/install"
         BUILD_INFO_FILE = "${env.ANNC_NIGHTLY_HOME}/build_info.txt"
         BUILD_STATUS_FILE = "${env.ANNC_NIGHTLY_HOME}/build_status.json"
+
+        // pytest 显式使用本次构建目录，避免测试脚本回退到其他 build 目录
+        // （tests/test_onnx_frontend.py 等优先选择 build-v2/）。
+        ANNC_BUILD_DIR = "${WORKSPACE}/build"
+        // 依赖预检与安装校验随框架开关条件化；默认三项均为 1（与改动前
+        // 的默认任务等价）。TensorFlow Python 包只在构建 TF addon 时需要。
+        ANNC_TF_ENABLED = "${params.DISABLE_TENSORFLOW ? '0' : '1'}"
+        ANNC_TF_ADDON_ENABLED = "${params.DISABLE_TENSORFLOW || params.DISABLE_TENSORFLOW_ADDON ? '0' : '1'}"
+        ANNC_ONNX_ENABLED = "${params.DISABLE_ONNX ? '0' : '1'}"
     }
 
     stages {
@@ -156,8 +183,11 @@ pipeline {
                 sh '''
                     set -e
                     python3 - <<'PY'
+import os
 import sys
-required = ['tensorflow', 'pybind11', 'nanobind']
+required = ['pybind11', 'nanobind']
+if os.environ.get('ANNC_TF_ADDON_ENABLED', '1') == '1':
+    required.append('tensorflow')
 missing = []
 for mod in required:
     try:
@@ -182,6 +212,12 @@ PY
             steps {
                 script {
                     def cleanFlag = params.CLEAN_BUILD ? '--clean' : ''
+                    // 框架开关默认全开；--disable-tensorflow 已隐含关闭 addon。
+                    def frameworkFlags = [
+                        params.DISABLE_TENSORFLOW ? '--disable-tensorflow' : '',
+                        (!params.DISABLE_TENSORFLOW && params.DISABLE_TENSORFLOW_ADDON) ? '--disable-tensorflow-addon' : '',
+                        params.DISABLE_ONNX ? '--disable-onnx' : '',
+                    ].findAll { it }.join(' ')
                     // 使用 RELEASE 模式拉取 KDNN：CMake 在 configure 阶段从
                     // gitcode release 下载预编译 zip，解 rpm 后 staging 成
                     // include/ + src/libkdnn.a，等价于 LOCAL 布局。
@@ -193,6 +229,7 @@ PY
                           --install-prefix "${env.INSTALL_PREFIX}" \
                           --no-install-deps \
                           --kdnn-source RELEASE \
+                          ${frameworkFlags} \
                           ${cleanFlag}
                     """
                 }
@@ -207,9 +244,18 @@ PY
                     test -f "${INSTALL_PREFIX}/bin/annc-opt"
                     test -f "${INSTALL_PREFIX}/bin/annc-asm"
                     test -f "${INSTALL_PREFIX}/bin/annc"
-                    test -f "${INSTALL_PREFIX}/bin/annc-tf-pipeline"
                     test -f "${INSTALL_PREFIX}/bin/annc-verify"
-                    test -f "${INSTALL_PREFIX}/bin/annc-converter"
+                    # 前端与 addon 产物按本次构建的开关检查；默认（全开）时
+                    # 覆盖 TF 三工具与两个 addon 库。
+                    if [ "${ANNC_TF_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/bin/annc-tf-pipeline"
+                      test -f "${INSTALL_PREFIX}/bin/annc-converter"
+                      test -f "${INSTALL_PREFIX}/bin/annc-tf2atir"
+                    fi
+                    if [ "${ANNC_TF_ADDON_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/lib/libannc_optimizer.so"
+                      test -f "${INSTALL_PREFIX}/lib/libannc_fused_op.so"
+                    fi
                     echo "Install directory size:"
                     du -sh "${INSTALL_PREFIX}"
                 '''
@@ -224,8 +270,8 @@ PY
                 sh '''
                     set -e
                     export PATH="${INSTALL_PREFIX}/bin:${PATH}"
-                    echo "Running pytest..."
-                    python3 -m pytest tests/ -v || true
+                    echo "Running pytest with ANNC_BUILD_DIR=${ANNC_BUILD_DIR}..."
+                    ANNC_BUILD_DIR="${ANNC_BUILD_DIR}" python3 -m pytest tests/ -v || true
                     echo "Tests stage completed (currently non-blocking)"
                 '''
             }

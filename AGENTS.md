@@ -60,7 +60,7 @@ python3 -m pytest tests/test_asm.py -v  # 单个测试文件
 
 ### C++ 单元测试（ctest）
 
-`tests/kernels/` 下的 GTest 用例通过 CTest 注册，是工程当前唯一接入 CTest 的测试套件：
+`tests/kernels/` 与 `tests/annc/` 下的 GTest 用例通过 CTest 注册（`annc_jit_cache_test` 随 TF addon 开关注册）：
 
 ```bash
 cd build && ctest --output-on-failure   # 跑全部 GTest 用例
