@@ -1327,6 +1327,50 @@ def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([SameOperandsAndResultShape, Ele
   }];
 }
 
+def Atir_SqrtOp : Atir_Op<"Sqrt", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
+  let summary = "Computes square root element-wise.";
+  let description = [{
+    Performs element-wise square root on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = sqrt(x)`.
+
+    Sqrt is distinct from Rsqrt (`1 / sqrt(x)`) and is the form ONNX models
+    export (a LayerNorm variance chain is `Add(eps) -> Sqrt -> Reciprocal`);
+    folding the two would change the graph's arithmetic.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
+  }];
+}
+
+def Atir_ReciprocalOp : Atir_Op<"Reciprocal", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
+  let summary = "Computes the element-wise reciprocal.";
+  let description = [{
+    Performs element-wise reciprocal on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = 1 / x`.
+
+    Kept as a dedicated op instead of `RealDiv(1, x)` because RealDiv is
+    same-shape only while ONNX exports Reciprocal on tensors whose shape is not
+    statically known; a materialized ones-tensor would be unbuildable there.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
+  }];
+}
+
 def Atir_TopKOp : Atir_Op<"TopK", Interfaces> {
   let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
   let description = [{

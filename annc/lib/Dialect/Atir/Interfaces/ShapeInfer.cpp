@@ -1991,6 +1991,24 @@ void RsqrtOp::inferShape() {
   (void)setSingleResultShape(getOperation(), inputType.getShape());
 }
 
+void SqrtOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getX().getType());
+  if (!inputType) {
+    emitError("Sqrt input must be atir::TensorType");
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), inputType.getShape());
+}
+
+void ReciprocalOp::inferShape() {
+  auto inputType = dyn_cast<atir::TensorType>(getX().getType());
+  if (!inputType) {
+    emitError("Reciprocal input must be atir::TensorType");
+    return;
+  }
+  (void)setSingleResultShape(getOperation(), inputType.getShape());
+}
+
 void SplitOp::inferShape() {
   auto valueType = dyn_cast<atir::TensorType>(getValue().getType());
   auto dimType = dyn_cast<atir::TensorType>(getSplitDim().getType());
