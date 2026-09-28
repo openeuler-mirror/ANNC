@@ -198,11 +198,13 @@ struct AArch64GemmPrepackRhsPass
 
     OpBuilder builder(module.getContext());
     module.walk([&](func::FuncOp func) {
-      SmallVector<linalg::MatmulOp> matmuls;
-      func.walk([&](linalg::MatmulOp matmul) { matmuls.push_back(matmul); });
-      for (auto [ordinal, matmul] : llvm::enumerate(matmuls)) {
-        if (!matmul->hasAttr(aarch64::gemm::kCandidateAttrName)) continue;
-        auto candidate = aarch64::gemm::readCandidate(matmul);
+      SmallVector<Operation *> gemms;
+      func.walk([&](Operation *op) {
+        if (aarch64::gemm::isGemmAnchor(op)) gemms.push_back(op);
+      });
+      for (auto [ordinal, gemm] : llvm::enumerate(gemms)) {
+        if (!gemm->hasAttr(aarch64::gemm::kCandidateAttrName)) continue;
+        auto candidate = aarch64::gemm::readCandidate(gemm);
         if (failed(candidate)) {
           packingFailed = true;
           continue;
@@ -211,24 +213,25 @@ struct AArch64GemmPrepackRhsPass
             aarch64::gemm::RhsPacking::kPrepacked)
           continue;
 
-        auto rhsTy = dyn_cast<MemRefType>(matmul.getInputs()[1].getType());
+        auto rhsTy = dyn_cast<MemRefType>(
+            aarch64::gemm::getGemmInput(gemm, 1).getType());
         if (!rhsTy || rhsTy.getRank() != 2 || !rhsTy.hasStaticShape() ||
             !rhsTy.getElementType().isF32())
           continue;
         const int64_t k = rhsTy.getShape()[0];
         const int64_t n = rhsTy.getShape()[1];
         if (k <= 0 || n <= 0) {
-          matmul.emitOpError("has incompatible static GEMM operand shapes");
+          gemm->emitOpError("has incompatible static GEMM operand shapes");
           packingFailed = true;
           continue;
         }
 
         std::vector<char> rawData;
         if (!rhsLoader.load(
-                matmul->getAttrOfType<StringAttr>(
+                gemm->getAttrOfType<StringAttr>(
                     aarch64::gemm::kRhsNameAttrName),
                 rawData)) {
-          matmul.emitOpError("cannot load prepacked RHS checkpoint data");
+          gemm->emitOpError("cannot load prepacked RHS checkpoint data");
           packingFailed = true;
           continue;
         }
@@ -245,12 +248,12 @@ struct AArch64GemmPrepackRhsPass
         if (packed.empty()) continue;
 
         std::string dataSymbol = "packed_" + func.getName().str();
-        if (matmuls.size() > 1)
+        if (gemms.size() > 1)
           dataSymbol += "_matmul_" + std::to_string(ordinal);
 
         DictionaryAttr contract = buildPrepackedContract(
             builder, tuning, k, n, dataSymbol, packed.size());
-        Operation *target = matmul.getOperation();
+        Operation *target = gemm;
         if (auto existing = target->getAttrOfType<DictionaryAttr>(
                 aarch64::gemm::kPrepackedRhsAttrName);
             existing && existing != contract) {
@@ -268,7 +271,7 @@ struct AArch64GemmPrepackRhsPass
       return;
     }
     if (pendingPacks.empty()) {
-      module.emitWarning("aarch64-gemm-prepack-rhs: no MatMul packed");
+      module.emitWarning("aarch64-gemm-prepack-rhs: no GEMM packed");
       return;
     }
 

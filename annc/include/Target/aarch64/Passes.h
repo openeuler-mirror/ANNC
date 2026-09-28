@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "Dialect/Atir/AtirOps.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -25,6 +26,7 @@ std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs();
 std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
     llvm::StringRef packedCPath);
 std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64AtirGemmEpilogueCommit();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
     llvm::StringRef configPath, bool enablePrepack, int64_t intraThreadCount);

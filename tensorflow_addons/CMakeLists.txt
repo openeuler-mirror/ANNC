@@ -195,6 +195,8 @@ foreach(_target annc_optimizer annc_fused_op)
 endforeach()
 
 if(ANNC_TENSORFLOW_PRELOAD)
+    string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS
+        "${CMAKE_SHARED_LINKER_FLAGS}")
     target_link_libraries(annc_optimizer PRIVATE dl pthread)
     target_include_directories(annc_fused_op PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/annc")

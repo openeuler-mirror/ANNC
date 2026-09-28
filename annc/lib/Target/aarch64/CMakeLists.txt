@@ -16,6 +16,11 @@ set(_gemm_srcs
         Gemm/GemmMicrokernelLowering.cpp
         Gemm/GemmABILowering.cpp
         Gemm/GemmEpilogueLowering.cpp
+        Gemm/Epilogue/AtirGemmEpilogueCommit.cpp
+        Gemm/Epilogue/SveEpilogueEmitters.cpp
+        Gemm/Epilogue/NeonEpilogueEmitters.cpp
+        Gemm/Epilogue/EpilogueEmitterRegistry.cpp
+        Gemm/Epilogue/MicrokernelGenerator.cpp
         Gemm/VerifyGemmSchedule.cpp
         Gemm/Support/GemmPlanner.cpp
 )
@@ -63,6 +68,9 @@ add_mlir_library(AArch64Codegen
         MLIRLinalgDialect
         MLIRLinalgTransforms
         MLIRLLVMDialect
+        MLIRSCFDialect
+        AtirDialect
+        AtirPasses
 )
 
 if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)

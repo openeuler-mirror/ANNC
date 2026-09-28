@@ -2,6 +2,7 @@
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/Common/CustomizeCallLowering.h"
 #include "Conversion/AtirToAffine/AtirTypeConverter.h"
+#include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -250,9 +251,10 @@ void MatMulLoweringToAffine::Lowering(PatternRewriter& rewriter, MatMulOpAdaptor
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
     Value c = adaptor.getC();
-    if (op.getBias() || op->hasAttr("annc.gemm.epilogue")) {
-        op.emitOpError("requires the Linalg GEMM path for an ordered epilogue");
-        return;
+    if (!op.getEpilogueInputs().empty() ||
+        op->hasAttr(atir::kGemmEpilogueAttr)) {
+      op.emitOpError("requires the Linalg GEMM path for an ordered epilogue");
+      return;
     }
 
     auto lShape = mlir::cast<MemRefType>(lhs.getType()).getShape();

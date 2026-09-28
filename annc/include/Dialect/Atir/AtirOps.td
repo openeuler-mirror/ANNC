@@ -198,7 +198,7 @@ def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
     ins Atir_Tensor:$C, 
     Atir_Tensor:$lhs,
     Atir_Tensor:$rhs,
-    Optional<Atir_Tensor>:$bias,
+    Variadic<Atir_Tensor>:$epilogueInputs,
     BoolAttr:$withBias,
     DefaultValuedAttr<BoolAttr, "false">:$right_transpose,
     DefaultValuedAttr<BoolAttr, "false">:$left_transpose,

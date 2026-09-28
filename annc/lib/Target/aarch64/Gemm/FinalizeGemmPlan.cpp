@@ -157,10 +157,6 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendString(plan, builder, "thread_partition", "static-2d");
   appendString(plan, builder, "first_kc_mode", "overwrite");
   appendString(plan, builder, "next_kc_mode", "accumulate");
-  if (auto epilogue =
-          op->getAttrOfType<ArrayAttr>(aarch64::gemm::kEpilogueAttrName))
-    plan.append("epilogue", epilogue);
-
   op->setDiscardableAttr(aarch64::gemm::kPlanAttrName,
                          plan.getDictionary(op->getContext()));
   op->removeDiscardableAttr(aarch64::gemm::kProblemAttrName);

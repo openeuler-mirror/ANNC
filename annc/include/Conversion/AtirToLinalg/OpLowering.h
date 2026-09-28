@@ -11,10 +11,15 @@ void populateAtirToLinalgConversionPatterns(TypeConverter &inputTypeConverter, T
   void Lowering(PatternRewriter &rewriter, OP##OpAdaptor adaptor, OP##Op op) const override;   \
   };
 
-OpLowering(None)OpLowering(Constant)OpLowering(Relu)OpLowering(Add)OpLowering(Concat)OpLowering(MatMul)
-  OpLowering(Return)OpLowering(Load)OpLowering(Customize)
-
+OpLowering(Constant) OpLowering(Add) OpLowering(MatMul) OpLowering(Customize)
 #undef OpLowering
+
+struct ReluLoweringToLinalg : public mlir::OpConversionPattern<atir::ReluOp> {
+  using OpConversionPattern<atir::ReluOp>::OpConversionPattern;
+  mlir::LogicalResult matchAndRewrite(
+      atir::ReluOp op, atir::ReluOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
 
 struct BufferLoweringToLinalg
     : public mlir::OpConversionPattern<atir::BufferOp> {
@@ -24,4 +29,15 @@ struct BufferLoweringToLinalg
       atir::BufferOp op, atir::BufferOp::Adaptor adaptor,
       mlir::ConversionPatternRewriter &rewriter) const override;
 };
+
+struct ReshapeLoweringToLinalg
+    : public mlir::OpConversionPattern<atir::ReshapeOp> {
+  using OpConversionPattern<atir::ReshapeOp>::OpConversionPattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      atir::ReshapeOp op, atir::ReshapeOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
+
+bool isSupportedInsertUnitDimensionBeforeN(atir::ReshapeOp op);
 }

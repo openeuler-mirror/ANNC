@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 
 using namespace mlir;
 
@@ -27,8 +28,15 @@ namespace atir {
                                    arith::ArithDialect,
                                    bufferization::BufferizationDialect,
                                    memref::MemRefDialect,
+                                   tensor::TensorDialect,
                                    func::FuncDialect>();
-            target.addIllegalOp<atir::BufferOp, atir::MatMulOp>();
+            target.addIllegalOp<atir::AddOp, atir::BufferOp, atir::MatMulOp,
+                                atir::ReluOp>();
+            target.addDynamicallyLegalOp<atir::ReshapeOp>(
+                [](atir::ReshapeOp op) {
+                  return !isSupportedInsertUnitDimensionBeforeN(op);
+                });
+            target.addIllegalOp<atir::ConstantOp>();
             AtirTypeToLinalgConverter atirTypeConverter;
             InputTypeConverter inputTypeConverter;
             RewritePatternSet patterns(&getContext());

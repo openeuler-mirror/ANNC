@@ -39,7 +39,8 @@ Value createIndexConstant(OpBuilder &builder, Location loc, int64_t value) {
 
 LogicalResult createCacheTile(OpBuilder &builder, Operation *original, Value ic,
                               Value pc, Value jc, int64_t mSize, int64_t kSize,
-                              int64_t nSize, llvm::StringRef kcMode) {
+                              int64_t nSize, llvm::StringRef kcMode,
+                              llvm::StringRef kcRole) {
   Location loc = original->getLoc();
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(original)) {
     SmallVector<OpFoldResult> offsets = {ic, jc, pc};
@@ -52,6 +53,8 @@ LogicalResult createCacheTile(OpBuilder &builder, Operation *original, Value ic,
     aarch64::gemm::setStage(*tiled, builder, aarch64::gemm::kCacheBlockedStage);
     (*tiled)->setDiscardableAttr(aarch64::gemm::kKcModeAttrName,
                                  builder.getStringAttr(kcMode));
+    (*tiled)->setDiscardableAttr(aarch64::gemm::kKcRoleAttrName,
+                                 builder.getStringAttr(kcRole));
     return success();
   }
 
@@ -81,19 +84,22 @@ LogicalResult createCacheTile(OpBuilder &builder, Operation *original, Value ic,
   aarch64::gemm::setStage(tiled, builder, aarch64::gemm::kCacheBlockedStage);
   tiled->setDiscardableAttr(aarch64::gemm::kKcModeAttrName,
                             builder.getStringAttr(kcMode));
+  tiled->setDiscardableAttr(aarch64::gemm::kKcRoleAttrName,
+                            builder.getStringAttr(kcRole));
   return success();
 }
 
 LogicalResult createJcBlocks(OpBuilder &builder, Operation *original, Value ic,
                              Value pc, int64_t mSize, int64_t kSize, int64_t n,
-                             int64_t nc, llvm::StringRef kcMode) {
+                             int64_t nc, llvm::StringRef kcMode,
+                             llvm::StringRef kcRole) {
   Location loc = original->getLoc();
   const int64_t fullN = n / nc * nc;
   if (fullN > 0) {
     if (fullN == nc) {
       if (failed(createCacheTile(builder, original, ic, pc,
                                  createIndexConstant(builder, loc, 0), mSize,
-                                 kSize, nc, kcMode)))
+                                 kSize, nc, kcMode, kcRole)))
         return failure();
     } else {
       Value zero = createIndexConstant(builder, loc, 0);
@@ -105,14 +111,14 @@ LogicalResult createJcBlocks(OpBuilder &builder, Operation *original, Value ic,
       builder.setInsertionPointToStart(jcLoop.getBody());
       if (failed(createCacheTile(builder, original, ic, pc,
                                  jcLoop.getInductionVar(), mSize, kSize, nc,
-                                 kcMode)))
+                                 kcMode, kcRole)))
         return failure();
     }
   }
   if (fullN != n) {
     if (failed(createCacheTile(builder, original, ic, pc,
                                createIndexConstant(builder, loc, fullN), mSize,
-                               kSize, n - fullN, kcMode)))
+                               kSize, n - fullN, kcMode, kcRole)))
       return failure();
   }
   return success();
@@ -121,45 +127,58 @@ LogicalResult createJcBlocks(OpBuilder &builder, Operation *original, Value ic,
 LogicalResult createKcBlocks(OpBuilder &builder, Operation *original, Value ic,
                              int64_t mSize, const GemmTilingPlan &plan) {
   Location loc = original->getLoc();
+  const bool single = plan.k <= plan.cacheTile.kc;
   const int64_t firstK = std::min(plan.k, plan.cacheTile.kc);
   if (failed(createJcBlocks(builder, original, ic,
                             createIndexConstant(builder, loc, 0), mSize, firstK,
                             plan.n, plan.cacheTile.nc,
-                            aarch64::gemm::getKcModeName(plan.firstKcMode))))
+                            aarch64::gemm::getKcModeName(plan.firstKcMode),
+                            single ? "single" : "first")))
     return failure();
 
   const int64_t remainingK = plan.k - firstK;
   const int64_t fullCount = remainingK / plan.cacheTile.kc;
-  if (fullCount == 1) {
-    if (failed(createJcBlocks(builder, original, ic,
-                              createIndexConstant(builder, loc, firstK), mSize,
-                              plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
-                              aarch64::gemm::getKcModeName(plan.nextKcMode))))
+  const int64_t tailK = remainingK % plan.cacheTile.kc;
+  const bool hasTail = tailK != 0;
+  const int64_t middleCount =
+      hasTail ? fullCount : (fullCount > 0 ? fullCount - 1 : 0);
+  if (middleCount == 1) {
+    if (failed(createJcBlocks(
+            builder, original, ic, createIndexConstant(builder, loc, firstK),
+            mSize, plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
+            aarch64::gemm::getKcModeName(plan.nextKcMode), "middle")))
       return failure();
-  } else if (fullCount > 1) {
+  } else if (middleCount > 1) {
     Value lower = createIndexConstant(builder, loc, firstK);
-    Value upper =
-        createIndexConstant(builder, loc,
-                            firstK + fullCount * plan.cacheTile.kc);
+    Value upper = createIndexConstant(builder, loc,
+                                      firstK + middleCount * plan.cacheTile.kc);
     Value step = createIndexConstant(builder, loc, plan.cacheTile.kc);
     auto pcLoop = builder.create<scf::ForOp>(loc, lower, upper, step);
     aarch64::gemm::disableLoopUnrolling(builder, pcLoop);
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPointToStart(pcLoop.getBody());
-    if (failed(createJcBlocks(builder, original, ic, pcLoop.getInductionVar(),
-                              mSize, plan.cacheTile.kc, plan.n,
-                              plan.cacheTile.nc,
-                              aarch64::gemm::getKcModeName(plan.nextKcMode))))
+    if (failed(createJcBlocks(
+            builder, original, ic, pcLoop.getInductionVar(), mSize,
+            plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
+            aarch64::gemm::getKcModeName(plan.nextKcMode), "middle")))
       return failure();
   }
-  const int64_t tailK = remainingK % plan.cacheTile.kc;
-  if (tailK != 0) {
+
+  if (hasTail) {
     if (failed(createJcBlocks(
             builder, original, ic,
-            createIndexConstant(
-                builder, loc, firstK + fullCount * plan.cacheTile.kc),
+            createIndexConstant(builder, loc,
+                                firstK + fullCount * plan.cacheTile.kc),
             mSize, tailK, plan.n, plan.cacheTile.nc,
-            aarch64::gemm::getKcModeName(plan.nextKcMode))))
+            aarch64::gemm::getKcModeName(plan.nextKcMode), "final")))
+      return failure();
+  } else if (fullCount >= 1) {
+    if (failed(createJcBlocks(
+            builder, original, ic,
+            createIndexConstant(builder, loc,
+                                firstK + (fullCount - 1) * plan.cacheTile.kc),
+            mSize, plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
+            aarch64::gemm::getKcModeName(plan.nextKcMode), "final")))
       return failure();
   }
   return success();

@@ -9,8 +9,8 @@
 using namespace mlir;
 namespace annc {
 
-// atir.MatMul: output = lhs x rhs (+ optional bias), with fusion attributes
-// decoded from the TF graph.
+// atir.MatMul: output = lhs x rhs.  A third TF input is represented as a
+// separate ATIR Add so the epilogue discovery pass sees the canonical chain.
 LogicalResult transformMatMul(const NodeInfo& node, ArrayRef<Type> outs,
                               ArrayRef<Value> ins, OpContext& ctx) {
   auto& b = ctx.builder();
@@ -34,8 +34,8 @@ LogicalResult transformMatMul(const NodeInfo& node, ArrayRef<Type> outs,
   bool transposeB = readFlag("transpose_b");
 
   auto matmul = b.create<atir::MatMulOp>(
-      loc, outs[0], C, lhs, rhs, hasBias ? bias : Value{},
-      b.getBoolAttr(hasBias), b.getBoolAttr(transposeB),
+      loc, outs[0], C, lhs, rhs, ValueRange{}, b.getBoolAttr(false),
+      b.getBoolAttr(transposeB),
       b.getBoolAttr(transposeA), b.getBoolAttr(false), b.getBoolAttr(false),
       b.getF32FloatAttr(-1.0f), IntegerAttr(), IntegerAttr(), IntegerAttr(),
       IntegerAttr(), IntegerAttr(), IntegerAttr(), [&]() -> StringAttr {
@@ -44,7 +44,16 @@ LogicalResult transformMatMul(const NodeInfo& node, ArrayRef<Type> outs,
         }
         return StringAttr();
       }());
-  ctx.bindResult(node.outputs[0].name, matmul.getResult());
+  if (!hasBias) {
+    ctx.bindResult(node.outputs[0].name, matmul.getResult());
+    return success();
+  }
+
+  Value output = b.create<atir::BufferOp>(loc, outputTensorType);
+  auto add = b.create<atir::AddOp>(
+      loc, outputTensorType, output, ValueRange{matmul.getResult(), bias},
+      b.getBoolAttr(false), b.getF32FloatAttr(-1.0f), FloatAttr());
+  ctx.bindResult(node.outputs[0].name, add.getResult());
   return success();
 }
 

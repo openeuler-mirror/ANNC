@@ -1,4 +1,5 @@
 #include "GemmPlan.h"
+#include "Target/aarch64/Gemm/Epilogue/EpilogueEmitter.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/ADT/Twine.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -115,6 +116,43 @@ FailureOr<std::string> selectMicrokernelSymbol(func::CallOp call,
       .str();
 }
 
+FailureOr<std::string> getGeneratedMicrokernelSymbol(func::CallOp call,
+                                                     bool isRowMajor,
+                                                     bool isFused) {
+  auto generated = call->getAttrOfType<DictionaryAttr>(
+      aarch64::gemm::kGeneratedMicrokernelAttrName);
+  if (!generated) return failure();
+  auto symbol = generated.getAs<StringAttr>("symbol");
+  if (!symbol || symbol.getValue().empty()) {
+    call.emitOpError("has an invalid generated microkernel metadata attr");
+    return failure();
+  }
+  if (!isFused || !symbol.getValue().contains("_generated_")) {
+    call.emitOpError(
+        "generated metadata is attached to an ordinary or static symbol");
+    return failure();
+  }
+  FailureOr<std::string> staticSymbol =
+      selectMicrokernelSymbol(call, isRowMajor);
+  if (failed(staticSymbol)) return failure();
+  auto kcMode =
+      call->getAttrOfType<mlir::StringAttr>(aarch64::gemm::kKcModeAttrName);
+  if (!kcMode) return failure();
+  llvm::StringRef modeSuffix =
+      kcMode.getValue() == "accumulate" ? "_acc_f32" : "_f32";
+  llvm::StringRef expectedBase(*staticSymbol);
+  if (!expectedBase.ends_with(modeSuffix)) return failure();
+  expectedBase = expectedBase.drop_back(modeSuffix.size());
+  std::string expectedPrefix = (expectedBase + "_generated_").str();
+  if (!symbol.getValue().starts_with(expectedPrefix) ||
+      !symbol.getValue().ends_with(modeSuffix)) {
+    call.emitOpError(
+        "generated microkernel symbol does not match the selected kernel ABI");
+    return failure();
+  }
+  return symbol.getValue().str();
+}
+
 class AArch64GemmMicrokernelLowering
     : public AArch64GemmMicrokernelLoweringBase<
           AArch64GemmMicrokernelLowering> {
@@ -125,16 +163,28 @@ class AArch64GemmMicrokernelLowering
     Builder builder(&getContext());
     getOperation().walk([&](func::CallOp call) {
       const bool isRowMajor =
-          call.getCallee() == aarch64::gemm::kMicrokernelRmLeafName;
+          aarch64::gemm::isRowMajorMicrokernelLeaf(call.getCallee());
+      const bool isFused =
+          aarch64::gemm::isFusedMicrokernelLeaf(call.getCallee());
       if (call.getCallee() != aarch64::gemm::kMicrokernelLeafName &&
-          !isRowMajor)
+          call.getCallee() != aarch64::gemm::kMicrokernelRmLeafName &&
+          !isFused)
         return;
+      if (isFused &&
+          !call->hasAttr(aarch64::gemm::kGeneratedMicrokernelAttrName)) {
+        call.emitOpError("fused leaf has no generated microkernel metadata");
+        signalPassFailure();
+        return;
+      }
       if (!aarch64::gemm::hasStage(call, aarch64::gemm::kPackedStage)) {
         call.emitOpError("requires the packed GEMM leaf stage");
         signalPassFailure();
         return;
       }
-      FailureOr<std::string> symbol = selectMicrokernelSymbol(call, isRowMajor);
+      FailureOr<std::string> symbol =
+          call->hasAttr(aarch64::gemm::kGeneratedMicrokernelAttrName)
+              ? getGeneratedMicrokernelSymbol(call, isRowMajor, isFused)
+              : selectMicrokernelSymbol(call, isRowMajor);
       if (failed(symbol)) {
         signalPassFailure();
         return;

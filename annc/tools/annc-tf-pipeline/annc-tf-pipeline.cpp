@@ -1,6 +1,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <iostream>
@@ -31,7 +32,15 @@ struct PipelineOptions {
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
   bool verbose = false;
+  bool enableEpilogue = true;
 };
+
+static bool envFlagEnabled(const char *name, bool defaultValue) {
+  const char *value = std::getenv(name);
+  if (!value || value[0] == '\0') return defaultValue;
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "FALSE") != 0;
+}
 
 static void printUsage() {
   std::cout
@@ -135,6 +144,8 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
+  opts->enableEpilogue =
+      envFlagEnabled("ANNC_ENABLE_GEMM_EPILOGUE", true);
 
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) != "--output_tensor") continue;
@@ -197,6 +208,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::string foldBatchNormPass = "--atir-fold-batch-norm";
   std::string rankInferencePass = "--atir-rank-inference";
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
+  std::string epilogueDiscoveryPass = "--atir-gemm-epilogue-fusion";
   std::string fusionPass = "--atir-op-fusion";
   std::string fastCodegenPass = "--atir-fast-codegen";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
@@ -215,12 +227,15 @@ static bool runGraphDefRewrite(int argc, char **argv) {
     tf2atirArgs.push_back(tensor);
   }
 
+  std::vector<std::string> optArgs = {
+      anncOpt, rawAtir.string(), rankInferencePass,
+      identityCanonicalizePass};
+  if (opts.enableEpilogue) optArgs.push_back(epilogueDiscoveryPass);
+  optArgs.insert(optArgs.end(), {fusionPass, "-o", fusedAtir.string()});
+
   bool ok =
       runCommand(tf2atirArgs, opts.verbose) &&
-      runCommand({anncOpt, rawAtir.string(), rankInferencePass,
-                  identityCanonicalizePass, fusionPass, "-o",
-                  fusedAtir.string()},
-                 opts.verbose) &&
+      runCommand(optArgs, opts.verbose) &&
       runCommand({anncOpt, fusedAtir.string(),
                   "--atir-prune-func=execution-mode=aot", "-o",
                   aotAtir.string()},

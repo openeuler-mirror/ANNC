@@ -192,7 +192,7 @@ Status CompileAnncJitKernel(
   gemm_pipeline_options += "packed-c=" + packed_rhs_c;
 #endif
   if (request.intra_thread_count > 0) {
-    if (!gemm_pipeline_options.empty()) gemm_pipeline_options += ",";
+    if (!gemm_pipeline_options.empty()) gemm_pipeline_options += " ";
     gemm_pipeline_options +=
         "intra-thread-count=" + std::to_string(request.intra_thread_count);
   }

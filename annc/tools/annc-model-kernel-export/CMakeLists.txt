@@ -1,0 +1,30 @@
+set(LLVM_LINK_COMPONENTS
+  Core
+  Support
+)
+set(LIBS
+  MLIRIR
+  MLIRParser
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRLLVMDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+)
+add_llvm_executable(annc-model-kernel-export
+  annc-model-kernel-export.cpp
+  DEPENDS
+  ${LIBS}
+)
+target_link_libraries(annc-model-kernel-export PRIVATE
+  MLIRIR
+  MLIRParser
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRLLVMDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  LLVMSupport
+)
+llvm_update_compile_flags(annc-model-kernel-export)
+install(TARGETS annc-model-kernel-export DESTINATION bin)

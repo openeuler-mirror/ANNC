@@ -31,7 +31,7 @@ namespace annc
                                          StringRef packedCPath,
                                          int64_t intraThreadCount)
     {
-        passManager.addPass(atir::createAtirGemmEpilogueFusionPass());
+        passManager.addPass(createAArch64AtirGemmEpilogueCommit());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
         passManager.addPass(createAArch64ResolveGemmPlan());
@@ -52,6 +52,7 @@ namespace annc
         passManager.addPass(createAArch64GemmThreadTiling());
         passManager.addPass(createAArch64GemmCacheBlocking());
         passManager.addPass(createAArch64GemmKernelTiling());
+        passManager.addPass(createAArch64GemmEpilogueLowering());
         passManager.addPass(createAArch64GemmLeafMaterialization());
         passManager.addPass(createAArch64GemmEpilogueLowering());
         passManager.addPass(createConvertLinalgToLoopsPass());

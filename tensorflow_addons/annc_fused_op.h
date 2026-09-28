@@ -109,6 +109,14 @@ class ANNCFusedOp : public OpKernel {
   // True after the current shared library and kernel symbol are resolved.
   bool loaded_;
 
+  // Per-op single-entry cache bypasses key hashing and the global cache lock
+  // when consecutive calls have the same validated runtime signature.
+  mutex jit_fastpath_mu_;
+  std::vector<annc::jit::JitArgumentSignature> last_jit_arguments_
+      TF_GUARDED_BY(jit_fastpath_mu_);
+  std::shared_ptr<annc::jit::JitExecutable> last_jit_executable_
+      TF_GUARDED_BY(jit_fastpath_mu_);
+
   // Process-wide cache prevents repeated dlopen calls for the same library.
   static mutex lib_cache_mu_;
   static std::unordered_map<std::string, void*> lib_cache_;

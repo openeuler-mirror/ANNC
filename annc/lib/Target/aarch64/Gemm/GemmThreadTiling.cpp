@@ -16,10 +16,14 @@ namespace {
 
 constexpr llvm::StringLiteral kGemmParallelFor =
     "annc_threadpool_parallel_for_gemm";
+constexpr llvm::StringLiteral kGemmParallelForEpilogue =
+    "annc_threadpool_parallel_for_gemm_epilogue";
 
 func::FuncOp getOrCreateGemmParallelForDeclaration(ModuleOp module,
-                                                   FunctionType taskType) {
-  StringRef name = kGemmParallelFor;
+                                                   FunctionType taskType,
+                                                   bool withEpilogueInputs) {
+  StringRef name =
+      withEpilogueInputs ? kGemmParallelForEpilogue : kGemmParallelFor;
   if (auto declaration = module.lookupSymbol<func::FuncOp>(name))
     return declaration;
 
@@ -30,6 +34,11 @@ func::FuncOp getOrCreateGemmParallelForDeclaration(ModuleOp module,
       {ShapedType::kDynamic, ShapedType::kDynamic}, builder.getF32Type());
   SmallVector<Type> inputs = {i64, taskType, dynamicF32MemRef, dynamicF32MemRef,
                               dynamicF32MemRef};
+  if (withEpilogueInputs) {
+    Type unrankedF32MemRef = UnrankedMemRefType::get(builder.getF32Type(), 0);
+    inputs.append(aarch64::gemm::kEpilogueArgsPointerSlots,
+                  unrankedF32MemRef);
+  }
   auto declaration = builder.create<func::FuncOp>(
       module.getLoc(), name, builder.getFunctionType(inputs, {}));
   declaration.setPrivate();
@@ -49,9 +58,10 @@ LogicalResult validateThreadTiling(Operation *gemm,
                                    const aarch64::gemm::GemmTilingPlan &plan) {
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(gemm)) {
     if (failed(aarch64::gemm::validateGemmGeneric(generic))) return failure();
-    if (generic.getInputs().size() != 2) {
+    if (generic.getInputs().size() >
+        2 + aarch64::gemm::kEpilogueArgsPointerSlots) {
       return generic.emitOpError(
-          "thread tiling supports only ordinary GEMM with A and B inputs");
+          "has more epilogue inputs than the thread task ABI supports");
     }
   }
   if (gemm->getNumResults() != 0)
@@ -107,13 +117,19 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
   Location loc = gemm->getLoc();
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(gemm)) {
-    SmallVector<Value> operands;
-    operands.append(generic.getInputs().begin(), generic.getInputs().end());
-    operands.append(generic.getOutputs().begin(), generic.getOutputs().end());
     IRMapping taskMapping;
-    for (auto [operand, argument] :
-         llvm::zip_equal(operands, entry->getArguments().drop_front(1))) {
-      taskMapping.map(operand, argument);
+    taskMapping.map(generic.getInputs()[0], entry->getArgument(1));
+    taskMapping.map(generic.getInputs()[1], entry->getArgument(2));
+    taskMapping.map(generic.getOutputs()[0], entry->getArgument(3));
+    for (auto [index, input] :
+         llvm::enumerate(generic.getInputs().drop_front(2))) {
+      auto inputType = llvm::dyn_cast<MemRefType>(input.getType());
+      if (!inputType || !inputType.getElementType().isF32())
+        return generic.emitOpError(
+            "threaded epilogue inputs must be ranked f32 memrefs");
+      Value rankedInput = builder.create<memref::CastOp>(
+          loc, inputType, entry->getArgument(4 + index));
+      taskMapping.map(input, rankedInput);
     }
     auto taskGeneric = llvm::cast<linalg::GenericOp>(
         builder.clone(*generic.getOperation(), taskMapping));
@@ -287,12 +303,21 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
       {ShapedType::kDynamic, ShapedType::kDynamic}, builder.getF32Type());
   SmallVector<Type> taskInputs = {i64, dynamicF32MemRef, dynamicF32MemRef,
                                   dynamicF32MemRef};
+  auto generic = llvm::dyn_cast<linalg::GenericOp>(gemm);
+  const unsigned epilogueInputCount =
+      generic ? generic.getInputs().size() - 2 : 0;
+  const bool withEpilogueInputs = epilogueInputCount != 0;
+  Type unrankedF32MemRef = UnrankedMemRefType::get(builder.getF32Type(), 0);
+  if (withEpilogueInputs)
+    taskInputs.append(aarch64::gemm::kEpilogueArgsPointerSlots,
+                      unrankedF32MemRef);
   FunctionType taskType = builder.getFunctionType(taskInputs, {});
   func::FuncOp task;
   if (failed(createThreadTask(module, gemm, *plan, taskType, task)))
     return failure();
   func::FuncOp dispatcher =
-      getOrCreateGemmParallelForDeclaration(module, taskType);
+      getOrCreateGemmParallelForDeclaration(module, taskType,
+                                             withEpilogueInputs);
 
   OperationState state(loc, func::ConstantOp::getOperationName());
   state.addTypes(taskType);
@@ -309,6 +334,16 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
   Value out = builder.create<memref::CastOp>(
       loc, dynamicF32MemRef, aarch64::gemm::getGemmOutput(gemm, 0));
   callOperands.push_back(out);
+  if (withEpilogueInputs) {
+    for (Value input : generic.getInputs().drop_front(2))
+      callOperands.push_back(aarch64::gemm::castToUnrankedF32MemRef(
+          builder, loc, input));
+    Value unused = aarch64::gemm::castToUnrankedF32MemRef(
+        builder, loc, aarch64::gemm::getGemmInput(gemm, 0));
+    callOperands.append(aarch64::gemm::kEpilogueArgsPointerSlots -
+                            epilogueInputCount,
+                        unused);
+  }
   builder.create<func::CallOp>(loc, dispatcher, callOperands);
 
   gemm->erase();

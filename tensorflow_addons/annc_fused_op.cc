@@ -258,6 +258,24 @@ annc::jit::JitCompilationCache& GlobalJitCompilationCache() {
   return *cache;
 }
 
+bool IsJitShapeFastPathEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ANNC_ENABLE_JIT_SHAPE_FASTPATH");
+    return !value || value[0] == '\0' || std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+bool SameJitArguments(
+    const std::vector<annc::jit::JitArgumentSignature>& lhs,
+    const std::vector<annc::jit::JitArgumentSignature>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (lhs[i].dims != rhs[i].dims) return false;
+  }
+  return true;
+}
+
 const char* CacheEventName(annc::jit::CacheEvent event) {
   switch (event) {
     case annc::jit::CacheEvent::kMiss:
@@ -1105,80 +1123,106 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       profile_sample.jit_arg_shapes_us = ElapsedUs(t_jit_arg_shapes_start);
     }
 
-    annc::jit::JitCacheKey cache_key;
-    std::string cache_key_error;
-    auto t_jit_cache_key_start = profile_enabled ? Clock::now() : TimePoint{};
-    OP_REQUIRES(
-        context,
-        annc::jit::BuildJitCacheKey(template_fingerprint_, arguments,
-                                    &cache_key, &cache_key_error),
-        errors::Internal("Cannot build ANNC JIT cache key: ",
-                         cache_key_error));
-    if (profile_enabled) {
-      profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
-    }
-
-    const std::string key_summary = cache_key.digest.substr(0, 16);
-    annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
     auto t_jit_cache_lookup_start =
         profile_enabled ? Clock::now() : TimePoint{};
-    annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
-      auto compile_start = Clock::now();
-      // Read the pool size only on the compile (miss) path: the GEMM plan is
-      // thread-count specialized and must match the intra-op pool that will
-      // execute it. The pool is fixed at session creation, so this value is
-      // stable for the cache lifetime and intentionally stays out of the key.
-      const int64_t intra_thread_count =
-          tf_thread_pool ? tf_thread_pool->NumThreads() : 1;
-      annc::jit::JitCompileResult compiled =
-          CompileJitKernel(arguments, intra_thread_count);
-      if (compiled.ok()) {
-        if (profile_enabled) {
-          LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << key_summary
-                    << " kernel=" << kernel_name_
-                    << " compile_ms="
-                    << (ElapsedUs(compile_start) / 1000.0);
-        }
-      } else {
-        LOG(ERROR) << "[ANNC-JIT-CACHE] compile_failed key=" << key_summary
-                   << " kernel=" << kernel_name_
-                   << " compile_ms=" << (ElapsedUs(compile_start) / 1000.0)
-                   << " error=" << compiled.error;
+    if (IsJitShapeFastPathEnabled()) {
+      mutex_lock lock(jit_fastpath_mu_);
+      if (last_jit_executable_ &&
+          SameJitArguments(last_jit_arguments_, arguments)) {
+        jit_executable = last_jit_executable_;
       }
+    }
+    if (jit_executable) {
       if (profile_enabled) {
-        profile_sample.jit_compile_us = ElapsedUs(compile_start);
-      }
-      return compiled;
-    });
-    if (profile_enabled) {
-      profile_sample.jit_cache_lookup_us = ElapsedUs(t_jit_cache_lookup_start);
-      if (lookup.event == annc::jit::CacheEvent::kHit) {
+        profile_sample.jit_cache_lookup_us =
+            ElapsedUs(t_jit_cache_lookup_start);
         profile_sample.jit_cache_lookup_hit_us =
             profile_sample.jit_cache_lookup_us;
         profile_sample.jit_hit_count = 1;
-      } else if (lookup.event == annc::jit::CacheEvent::kMiss) {
-        profile_sample.jit_compile_count = 1;
-      } else if (lookup.event == annc::jit::CacheEvent::kWait) {
-        profile_sample.jit_wait_count = 1;
       }
-      // 仅 miss/wait/evicted 打逐条日志；hit 是热路径，其计数已通过
-      // jit_hit_count 汇总进 [ANNC-FUSED-PROFILE] 快照(jit_hits 字段)。
-      // stats() 与 GetOrCompile 共用同一把全局 mutex，逐 hit 调用会在
-      // 并发推理时造成二次锁争用，叠加 LOG 锁进一步放大延迟。
-      if (lookup.event != annc::jit::CacheEvent::kHit) {
-        annc::jit::JitCacheStats stats_after = cache.stats();
-        LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
-                  << " key=" << key_summary << " kernel=" << kernel_name_
-                  << " entries=" << stats_after.entries;
-        for (const std::string& evicted_key : lookup.evictedKeys) {
-          LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
-                    << evicted_key.substr(0, 16)
+      steady_call = true;
+    } else {
+      annc::jit::JitCacheKey cache_key;
+      std::string cache_key_error;
+      auto t_jit_cache_key_start =
+          profile_enabled ? Clock::now() : TimePoint{};
+      OP_REQUIRES(
+          context,
+          annc::jit::BuildJitCacheKey(template_fingerprint_, arguments,
+                                      &cache_key, &cache_key_error),
+          errors::Internal("Cannot build ANNC JIT cache key: ",
+                           cache_key_error));
+      if (profile_enabled) {
+        profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
+      }
+
+      const std::string key_summary = cache_key.digest.substr(0, 16);
+      annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
+      annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
+        auto compile_start = Clock::now();
+        // Read the pool size only on the compile (miss) path: the GEMM plan is
+        // thread-count specialized and must match the intra-op pool that will
+        // execute it. The pool is fixed at session creation, so this value is
+        // stable for the cache lifetime and intentionally stays out of the key.
+        const int64_t intra_thread_count =
+            tf_thread_pool ? tf_thread_pool->NumThreads() : 1;
+        annc::jit::JitCompileResult compiled =
+            CompileJitKernel(arguments, intra_thread_count);
+        if (compiled.ok()) {
+          if (profile_enabled) {
+            LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << key_summary
+                      << " kernel=" << kernel_name_
+                      << " compile_ms="
+                      << (ElapsedUs(compile_start) / 1000.0);
+          }
+        } else {
+          LOG(ERROR) << "[ANNC-JIT-CACHE] compile_failed key=" << key_summary
+                     << " kernel=" << kernel_name_
+                     << " compile_ms=" << (ElapsedUs(compile_start) / 1000.0)
+                     << " error=" << compiled.error;
+        }
+        if (profile_enabled) {
+          profile_sample.jit_compile_us = ElapsedUs(compile_start);
+        }
+        return compiled;
+      });
+      if (profile_enabled) {
+        profile_sample.jit_cache_lookup_us =
+            ElapsedUs(t_jit_cache_lookup_start);
+        if (lookup.event == annc::jit::CacheEvent::kHit) {
+          profile_sample.jit_cache_lookup_hit_us =
+              profile_sample.jit_cache_lookup_us;
+          profile_sample.jit_hit_count = 1;
+        } else if (lookup.event == annc::jit::CacheEvent::kMiss) {
+          profile_sample.jit_compile_count = 1;
+        } else if (lookup.event == annc::jit::CacheEvent::kWait) {
+          profile_sample.jit_wait_count = 1;
+        }
+        // stats() 与 GetOrCompile 共用同一把全局 mutex，逐 hit 调用会在
+        // 并发推理时造成二次锁争用，叠加 LOG 锁进一步放大延迟。
+        if (lookup.event != annc::jit::CacheEvent::kHit) {
+          annc::jit::JitCacheStats stats_after = cache.stats();
+          LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
+                    << " key=" << key_summary << " kernel=" << kernel_name_
                     << " entries=" << stats_after.entries;
+          for (const std::string& evicted_key : lookup.evictedKeys) {
+            LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
+                      << evicted_key.substr(0, 16)
+                      << " entries=" << stats_after.entries;
+          }
         }
       }
+      OP_REQUIRES(context, lookup.ok(), errors::Internal(lookup.error));
+      jit_executable = std::move(lookup.executable);
+      library_loaded_this_call =
+          lookup.event != annc::jit::CacheEvent::kHit;
+      steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
+      if (IsJitShapeFastPathEnabled()) {
+        mutex_lock lock(jit_fastpath_mu_);
+        last_jit_arguments_ = arguments;
+        last_jit_executable_ = jit_executable;
+      }
     }
-    OP_REQUIRES(context, lookup.ok(), errors::Internal(lookup.error));
-    jit_executable = std::move(lookup.executable);
     kernel_function = jit_executable->kernelFunction();
     set_thread_pool =
         reinterpret_cast<void (*)(annc::threadpool::AnncThreadPool*)>(
@@ -1186,8 +1230,6 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
     get_thread_pool =
         reinterpret_cast<annc::threadpool::AnncThreadPool* (*)()>(
             jit_executable->getThreadPoolFunction());
-    library_loaded_this_call = lookup.event != annc::jit::CacheEvent::kHit;
-    steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
   } else if (!loaded_ || current_so_path_ != shared_lib_path_) {
     OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
     current_so_path_ = shared_lib_path_;

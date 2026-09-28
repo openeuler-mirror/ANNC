@@ -1,7 +1,6 @@
-#include <cstdlib>
-
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/CustomOpSchema.h"
+#include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Dialect/Atir/Passes/Patterns/FusionBoundaryUtils.h"
 #include "Dialect/Atir/TemplateFingerprint.h"
@@ -31,21 +30,6 @@ namespace {
 
 constexpr StringLiteral kAotExecutionMode = "aot";
 constexpr StringLiteral kJitExecutionMode = "jit";
-constexpr char kGemmEnv[] = "ANNC_GEMM";
-
-// Reads ANNC_GEMM to control MatMul fusion on the generic path:
-//   unset / "0" — disabled, matmul stays on the generic path
-//   "1"         — enabled, but skip MatMul+Add fusion (plain MatMul only)
-//   "2"         — enabled, allow MatMul+Add fusion
-static int getGemmFusionLevel() {
-  const char *value = std::getenv(kGemmEnv);
-  if (!value) return 0;
-  StringRef trimmed = StringRef(value).trim();
-  if (trimmed == "1") return 1;
-  if (trimmed == "2") return 2;
-  return 0;
-}
-
 static void setExecutionMode(func::FuncOp function,
                              PatternRewriter &rewriter, StringRef mode) {
   function->setAttr("annc.execution_mode", rewriter.getStringAttr(mode));
@@ -342,60 +326,6 @@ static OpT findUserOf(Value value) {
   return nullptr;
 }
 
-static bool isReturnUser(Operation *op) { return isa<func::ReturnOp>(op); }
-
-static bool hasOnlyNonReturnUser(Value value, Operation *allowedUser) {
-  for (Operation *user : value.getUsers()) {
-    if (isReturnUser(user)) continue;
-    if (user != allowedUser) return false;
-  }
-  return true;
-}
-
-static void replaceNonReturnUsesWith(Value value, Value replacement) {
-  SmallVector<OpOperand *> uses;
-  for (OpOperand &use : value.getUses()) {
-    if (!isReturnUser(use.getOwner())) uses.push_back(&use);
-  }
-  for (OpOperand *use : uses) use->set(replacement);
-}
-
-static AddOp findCompatibleMatMulAddUser(MatMulOp matmulOp, Value &bias) {
-  for (Operation *user : matmulOp.getResult().getUsers()) {
-    auto addOp = dyn_cast<AddOp>(user);
-    if (!addOp || addOp->getNumOperands() != 3) continue;
-
-    Value candidateBias;
-    if (addOp.getOperand(1) == matmulOp.getResult()) {
-      candidateBias = addOp.getOperand(2);
-    } else if (addOp.getOperand(2) == matmulOp.getResult()) {
-      candidateBias = addOp.getOperand(1);
-    } else {
-      continue;
-    }
-
-    if (getRank(candidateBias.getType()) != 1 ||
-        !hasCompatibleBiasDim(matmulOp.getResult().getType(),
-                              candidateBias.getType())) {
-      continue;
-    }
-    if (!hasOnlyNonReturnUser(matmulOp.getResult(), addOp)) continue;
-
-    bias = candidateBias;
-    return addOp;
-  }
-  return nullptr;
-}
-
-static ReluOp findCompatibleAddReluUser(AddOp addOp) {
-  for (Operation *user : addOp->getResult(0).getUsers()) {
-    auto reluOp = dyn_cast<ReluOp>(user);
-    if (!reluOp) continue;
-    if (hasOnlyNonReturnUser(addOp->getResult(0), reluOp)) return reluOp;
-  }
-  return nullptr;
-}
-
 static AddOp findUniqueMatMulAddUser(MatMulOp matmulOp, Value &bias) {
   AddOp found = nullptr;
   for (Operation *user : matmulOp.getResult().getUsers()) {
@@ -459,7 +389,8 @@ static MatMulOp createMatMulBodyOp(PatternRewriter &rewriter, Location loc,
                                    Type resultType, Value output, Value lhs,
                                    Value rhs, MatMulOp source) {
   return rewriter.create<MatMulOp>(
-      loc, resultType, output, lhs, rhs, Value{}, rewriter.getBoolAttr(false),
+      loc, resultType, output, lhs, rhs, ValueRange{},
+      rewriter.getBoolAttr(false),
       rewriter.getBoolAttr(source.getRightTranspose()),
       rewriter.getBoolAttr(source.getLeftTranspose()),
       rewriter.getBoolAttr(source.getOutputTranspose()),
@@ -603,10 +534,41 @@ static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
   return func;
 }
 
-static func::FuncOp createMatMulPostOpKernelFunc(
+static StringRef epilogueOpcodeName(EpilogueOpcode opcode) {
+  switch (opcode) {
+    case EpilogueOpcode::kAdd:
+      return "add";
+    case EpilogueOpcode::kMul:
+      return "mul";
+    case EpilogueOpcode::kRelu:
+      return "relu";
+    case EpilogueOpcode::kSigmoid:
+      return "sigmoid";
+  }
+  llvm_unreachable("unknown epilogue opcode");
+}
+
+static std::string epiloguePatternName(const EpilogueProgram &program) {
+  std::string pattern = "matmul";
+  for (const EpilogueStep &step : program.steps)
+    pattern += (Twine("_") + epilogueOpcodeName(step.opcode)).str();
+  return pattern;
+}
+
+static Value epilogueExternalInput(const EpilogueStep &step) {
+  assert(isBinaryEpilogueOpcode(step.opcode) && step.source);
+  return step.inputIndex == 1 ? step.source->getOperand(2)
+                              : step.source->getOperand(1);
+}
+
+static Operation *epilogueTerminalOp(const EpilogueProgram &program) {
+  return program.terminalViewSource ? program.terminalViewSource
+                                    : program.steps.back().source;
+}
+
+static func::FuncOp createMatMulEpilogueKernelFunc(
     ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    MatMulOp matmulOp, Value output, Value bias, StringRef pattern,
-    StringRef customOpName) {
+    MatMulOp matmulOp, const EpilogueProgram &program, Value output) {
   if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
     return existing;
   }
@@ -615,44 +577,52 @@ static func::FuncOp createMatMulPostOpKernelFunc(
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {matmulOp.getLhs().getType(),
-                                  matmulOp.getRhs().getType(), output.getType(),
-                                  bias.getType()};
+                                  matmulOp.getRhs().getType(),
+                                  output.getType()};
+  for (const EpilogueStep &step : program.steps)
+    if (isBinaryEpilogueOpcode(step.opcode))
+      inputTypes.push_back(epilogueExternalInput(step).getType());
   auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
   auto func =
       rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
   func.setPrivate();
   func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern", rewriter.getStringAttr(pattern));
+  func->setAttr("fusion.pattern",
+                rewriter.getStringAttr(epiloguePatternName(program)));
   func->setAttr("annc.kernel", rewriter.getUnitAttr());
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
-  Value lhs = entry->getArgument(0);
-  Value rhs = entry->getArgument(1);
-  Value out = entry->getArgument(2);
-  Value biasArg = entry->getArgument(3);
+  IRMapping mapper;
+  mapper.map(matmulOp.getLhs(), entry->getArgument(0));
+  mapper.map(matmulOp.getRhs(), entry->getArgument(1));
+  mapper.map(output, entry->getArgument(2));
 
-  auto matmulBuffer =
-      rewriter.create<BufferOp>(func.getLoc(), out.getType()).getResult();
-  auto matmul = createMatMulBodyOp(rewriter, func.getLoc(), out.getType(),
-                                   matmulBuffer, lhs, rhs, matmulOp);
+  auto mapOutput = [&](Value destination) {
+    if (mapper.contains(destination)) return;
+    mapper.map(destination,
+               rewriter.create<BufferOp>(func.getLoc(), destination.getType())
+                   .getResult());
+  };
+  mapOutput(matmulOp.getC());
+  rewriter.clone(*matmulOp, mapper);
 
-  Value postOpInput = matmul.getResult();
-  if (pattern == "matmul_add_relu") {
-    auto addBuffer =
-        rewriter.create<BufferOp>(func.getLoc(), out.getType()).getResult();
-    auto add = rewriter.create<AddOp>(
-        func.getLoc(), out.getType(), addBuffer,
-        ValueRange{postOpInput, biasArg}, rewriter.getBoolAttr(false),
-        rewriter.getF32FloatAttr(-1.0f), FloatAttr());
-    postOpInput = add.getResult();
-    rewriter.create<ReluOp>(func.getLoc(), out.getType(), out, postOpInput,
-                            rewriter.getF32FloatAttr(-1.0f));
-  } else {
-    rewriter.create<AddOp>(func.getLoc(), out.getType(), out,
-                           ValueRange{postOpInput, biasArg},
-                           rewriter.getBoolAttr(false),
-                           rewriter.getF32FloatAttr(-1.0f), FloatAttr());
+  unsigned inputIndex = 3;
+  for (const EpilogueStep &step : program.steps) {
+    mapOutput(step.source->getOperand(0));
+    if (isBinaryEpilogueOpcode(step.opcode)) {
+      Value input = epilogueExternalInput(step);
+      if (!mapper.contains(input))
+        mapper.map(input, entry->getArgument(inputIndex));
+      ++inputIndex;
+    }
+    rewriter.clone(*step.source, mapper);
+  }
+  if (program.terminalViewSource) {
+    Value shape = program.terminalViewSource->getOperand(2);
+    if (!mapper.contains(shape))
+      rewriter.clone(*shape.getDefiningOp(), mapper);
+    rewriter.clone(*program.terminalViewSource, mapper);
   }
   rewriter.create<func::ReturnOp>(func.getLoc());
 
@@ -1451,24 +1421,9 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
-    const int gemmLevel = getGemmFusionLevel();
-    if (gemmLevel == 0) return failure();
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
-
-    AddOp addOp = nullptr;
-    ReluOp reluOp = nullptr;
-    Value bias;
-    bool hasBiasPostOp = false;
-    bool hasReluPostOp = false;
-
-    if (gemmLevel == 2) addOp = findCompatibleMatMulAddUser(matmulOp, bias);
-    if (addOp) {
-      hasBiasPostOp = true;
-      reluOp = findCompatibleAddReluUser(addOp);
-      hasReluPostOp = reluOp != nullptr;
-    }
 
     std::string matmulName = getTfName(matmulOp);
     ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
@@ -1588,29 +1543,38 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
       }
     }
 
-    Operation *outputOp = hasReluPostOp   ? reluOp.getOperation()
-                          : hasBiasPostOp ? addOp.getOperation()
-                                          : matmulOp.getOperation();
-    Value output = hasBiasPostOp ? outputOp->getOperand(0) : matmulOp.getC();
+    std::optional<EpilogueProgram> epilogue;
+    if (auto candidate = matmulOp->getAttrOfType<DictionaryAttr>(
+            kGemmEpilogueCandidateAttr)) {
+      auto parsed = parseEpilogueCandidatePlan(candidate);
+      if (failed(parsed) || failed(bindEpilogueProgramToSource(matmulOp,
+                                                               *parsed))) {
+        matmulOp.emitOpError(
+            "epilogue candidate does not match the current source chain");
+        return failure();
+      }
+      epilogue = std::move(*parsed);
+    }
+
+    Operation *outputOp =
+        epilogue ? epilogueTerminalOp(*epilogue) : matmulOp.getOperation();
+    Value output = epilogue ? outputOp->getOperand(0) : matmulOp.getC();
     Type outputType = output.getType();
-    StringRef pattern = hasReluPostOp   ? StringRef("matmul_add_relu")
-                        : hasBiasPostOp ? StringRef("matmul_add")
-                                        : StringRef("matmul");
-    StringRef customOpName = hasReluPostOp   ? StringRef("MatMulAddRelu")
-                             : hasBiasPostOp ? StringRef("MatMulAdd")
-                                             : StringRef("MatMul");
-    std::string outputName = hasBiasPostOp ? getTfName(outputOp) : matmulName;
-    std::string kernelName =
-        hasBiasPostOp
-            ? uniquifySymbolName(
-                  module, getStableMatMulFusionKernelName(matmulOp, pattern))
-            : uniquifySymbolName(module, getStableMatMulKernelName(matmulOp));
+    std::string pattern =
+        epilogue ? epiloguePatternName(*epilogue) : std::string("matmul");
+    std::string outputName =
+        epilogue ? getFusionOutputName(epilogue->result) : matmulName;
+    if (outputName.empty()) outputName = getTfName(outputOp);
+    std::string kernelName = epilogue
+        ? uniquifySymbolName(
+              module, getStableMatMulFusionKernelName(matmulOp, pattern))
+        : uniquifySymbolName(module, getStableMatMulKernelName(matmulOp));
     std::string clusterName =
         uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
 
-    auto kernelFunc = hasBiasPostOp
-        ? createMatMulPostOpKernelFunc(module, rewriter, kernelName, matmulOp,
-                                       output, bias, pattern, customOpName)
+    auto kernelFunc = epilogue
+        ? createMatMulEpilogueKernelFunc(module, rewriter, kernelName, matmulOp,
+                                         *epilogue, output)
         : createKernelFunc(module, rewriter, kernelName, matmulOp);
     setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
     std::string templateFingerprint =
@@ -1627,27 +1591,50 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "tf.name", rewriter.getStringAttr(clusterName)));
 
-    bool lhsIsDynamic =
-        hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
-    bool rhsIsDynamic =
-        hasMatchingBatchDim(matmulOp.getRhs().getType(), outputType);
-    if (lhsIsDynamic == rhsIsDynamic) {
-      lhsIsDynamic = true;
-      rhsIsDynamic = false;
-    }
-    Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
-    Value dynamicInput = lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
-    SmallVector<int64_t> kernelArgOrder = lhsIsDynamic
-                                              ? SmallVector<int64_t>{1, 0, 2}
-                                              : SmallVector<int64_t>{0, 1, 2};
     SmallVector<FusionArgSpec> argSpecs;
-    if (hasBiasPostOp) {
-      argSpecs.push_back({"fixed", getValueName(matmulOp.getRhs()),
-                          matmulOp.getRhs().getType()});
-      argSpecs.push_back({"fixed", getValueName(bias), bias.getType()});
-      argSpecs.push_back({"dynamic", getValueName(matmulOp.getLhs()),
-                          matmulOp.getLhs().getType()});
+    SmallVector<int64_t> kernelArgOrder;
+    if (epilogue) {
+      struct PendingArg {
+        Value value;
+        unsigned kernelIndex;
+      };
+      SmallVector<PendingArg> fixed = {{matmulOp.getRhs(), 1}};
+      SmallVector<PendingArg> dynamic = {{matmulOp.getLhs(), 0}};
+      unsigned kernelIndex = 3;
+      for (const EpilogueStep &step : epilogue->steps) {
+        if (!isBinaryEpilogueOpcode(step.opcode)) continue;
+        PendingArg input{epilogueExternalInput(step), kernelIndex++};
+        if (step.broadcast == BroadcastKind::kM ||
+            step.broadcast == BroadcastKind::kMatrix)
+          dynamic.push_back(input);
+        else
+          fixed.push_back(input);
+      }
+      kernelArgOrder.resize(kernelIndex);
+      auto appendArgs = [&](ArrayRef<PendingArg> args, StringRef role) {
+        for (const PendingArg &arg : args) {
+          kernelArgOrder[arg.kernelIndex] = argSpecs.size();
+          argSpecs.push_back(
+              {role.str(), getValueName(arg.value), arg.value.getType()});
+        }
+      };
+      appendArgs(fixed, "fixed");
+      appendArgs(dynamic, "dynamic");
+      kernelArgOrder[2] = argSpecs.size();
     } else {
+      bool lhsIsDynamic =
+          hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
+      bool rhsIsDynamic =
+          hasMatchingBatchDim(matmulOp.getRhs().getType(), outputType);
+      if (lhsIsDynamic == rhsIsDynamic) {
+        lhsIsDynamic = true;
+        rhsIsDynamic = false;
+      }
+      Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
+      Value dynamicInput =
+          lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
+      kernelArgOrder = lhsIsDynamic ? SmallVector<int64_t>{1, 0, 2}
+                                    : SmallVector<int64_t>{0, 1, 2};
       argSpecs.push_back(
           {"fixed", getValueName(fixedInput), fixedInput.getType()});
       argSpecs.push_back(
@@ -1659,9 +1646,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     outputSpecs.push_back({"output", outputName, outputType});
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    if (hasBiasPostOp) {
-      kernelArgOrder = {2, 0, 3, 1};
-    }
     metadata.push_back(
         rewriter.getNamedAttr("abi", rewriter.getStringAttr("mlir_ciface")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -1677,28 +1661,20 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                         DictionaryAttr::get(rewriter.getContext(), metadata));
 
     rewriter.setInsertionPoint(outputOp);
-    if (hasBiasPostOp) {
-      rewriter.create<func::CallOp>(
-          outputOp->getLoc(), kernelFunc,
-          ValueRange{matmulOp.getLhs(), matmulOp.getRhs(), output, bias});
-
-      rewriter.replaceAllUsesWith(outputOp->getResult(0), output);
-      if (hasReluPostOp) {
-        rewriter.eraseOp(reluOp);
-        replaceNonReturnUsesWith(addOp->getResult(0), output);
-      }
-      bool erasedAdd = false;
-      if (addOp->getResult(0).use_empty()) {
-        rewriter.eraseOp(addOp);
-        erasedAdd = true;
-      }
-
-      if (erasedAdd) replaceNonReturnUsesWith(matmulOp.getResult(), output);
-      if (erasedAdd && matmulOp.getResult().use_empty()) {
-        rewriter.eraseOp(matmulOp);
-      } else {
-        matmulOp->setAttr("annc.postop_fused", rewriter.getUnitAttr());
-      }
+    if (epilogue) {
+      SmallVector<Value> callArgs = {matmulOp.getLhs(), matmulOp.getRhs(),
+                                     output};
+      for (const EpilogueStep &step : epilogue->steps)
+        if (isBinaryEpilogueOpcode(step.opcode))
+          callArgs.push_back(epilogueExternalInput(step));
+      rewriter.create<func::CallOp>(outputOp->getLoc(), kernelFunc, callArgs);
+      rewriter.replaceAllUsesWith(epilogue->result, output);
+      if (epilogue->terminalViewSource)
+        rewriter.eraseOp(epilogue->terminalViewSource);
+      for (auto it = epilogue->steps.rbegin(); it != epilogue->steps.rend();
+           ++it)
+        rewriter.eraseOp(it->source);
+      rewriter.eraseOp(matmulOp);
     } else {
       rewriter.create<func::CallOp>(
           matmulOp.getLoc(), kernelFunc,
@@ -1708,7 +1684,6 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     return success();
   }
 };
-
 
 // ==== KP fusion one-level rewrite patterns (kp-01/02/03) ====
 
@@ -3240,6 +3215,24 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
     auto module = getOperation();
     auto mainFunc = module.lookupSymbol<func::FuncOp>("main");
     if (!mainFunc) return;
+
+    WalkResult validation = mainFunc.walk([&](MatMulOp matmul) {
+      auto candidate = matmul->getAttrOfType<DictionaryAttr>(
+          kGemmEpilogueCandidateAttr);
+      if (!candidate) return WalkResult::advance();
+      auto parsed = parseEpilogueCandidatePlan(candidate);
+      if (failed(parsed) ||
+          failed(bindEpilogueProgramToSource(matmul, *parsed))) {
+        matmul.emitOpError(
+            "epilogue candidate does not match the current source chain");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (validation.wasInterrupted()) {
+      signalPassFailure();
+      return;
+    }
 
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
