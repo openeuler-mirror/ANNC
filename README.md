@@ -138,6 +138,9 @@ ATIR MLIR
   └─→ annc-converter → TF GraphDef（ANNCFused 图重写）
 
 annc-tf-pipeline → 端到端编排上述所有步骤
+
+annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点报告 → annc-asm → annc
+                     （bytecode 中间件；一次产出模型全部站点的 kernel .so）
 ```
 
 ### 自定义方言：ATIR（AI Tensor IR）
@@ -164,6 +167,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 |------|------|
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
 | [`annc-onnx2atir`](docs/Feature/onnx-frontend-architecture-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
+| `annc-onnx-pipeline` | ONNX 模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 的运行时编译模式使用 |
 | `annc-opt` | ATIR 优化（算子融合、块融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |
 | `annc-asm` | ATIR → lowered MLIR（affine/linalg） |
@@ -293,6 +297,27 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 | `--atir-block-fusion` | 块融合 |
 | `--atir-Eltwise` | Elementwise 融合（当前为占位 stub） |
 | `--atir-select-lowering-strategy` | 选择 lowering 策略 |
+
+### `annc-onnx-pipeline`
+
+`annc-onnx-pipeline` 把整个 ONNX 模型编译成「一个模型一个 `.so`」的 AOT kernel 库，并同时产出
+**站点报告 `sites.json`**：每个融合站点的 kernel 名、实参/输出契约、ABI，以及该站点的**成员节点名单**
+（`member_node_names`，被融合吞并的图节点）。它供 ONNX Runtime EP 插件的运行时编译模式
+（`addons/onnxruntime/`）调用——EP 在 `GetCapability` 内导出整图、调用本工具、按报告精确申报融合区域。
+
+```shell
+annc-onnx-pipeline --model model.onnx --out-dir <dir> [--work-dir <dir>] [--verbose]
+annc-onnx-pipeline --toolchain-info     # 打印工具链指纹 JSON（缓存键用）
+```
+
+产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。中间件走 MLIR bytecode
+（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方
+应回落到 CPU 执行而不是让会话失败。
+
+前置：`annc` 链接阶段从**单一目录** `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib`）解析全部归档
+（ANNC kernel 归档 + `libLLVMSupport.a` 等 LLVM 归档），因此该目录必须来自 `ninja install` 的安装树；
+工具启动时会预检并给出明确报错。同理，`annc` 以裸名调用 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`，
+本工具会把自身 bin 目录（构建树另加 `_deps/llvm-build/bin`）前置到子进程 `PATH`。
 
 ### `annc-fusion-metadata`
 

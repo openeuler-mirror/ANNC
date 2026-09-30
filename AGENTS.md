@@ -147,6 +147,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | `annc-verify` | Kernel 正确性验证 |
 | `annc-converter` | ATIR → TF SavedModel（反向）+ GraphDef 重写 |
 | `annc-tf-pipeline` | 端到端编排 |
+| `annc-onnx-pipeline` | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 运行时编译 |
 
 ### TensorFlow 集成
 
