@@ -307,17 +307,33 @@ bool writeSiteReport(const std::string &fusedModulePath, const std::string &outP
     *error = "cannot parse the fused module '" + fusedModulePath + "'";
     return false;
   }
-  auto infos = annc::fusion::extractFusionInfos(*module);
-  if (!infos) {
-    *error = llvm::toString(infos.takeError());
+
+  // Walk the kernels directly instead of using extractFusionInfos(): that
+  // helper treats "no fused kernel" as an error (the AOT tools rely on it),
+  // while for a graph with no fusable region zero sites is the expected,
+  // successful outcome -- the EP then claims nothing and the model runs on the
+  // CPU EP.
+  std::vector<annc::fusion::FusionInfo> infos;
+  llvm::Error errors = llvm::Error::success();
+  module->walk([&](func::FuncOp funcOp) {
+    if (!funcOp->hasAttr("annc.kernel")) return;
+    auto info = annc::fusion::readFusionInfo(funcOp);
+    if (!info) {
+      errors = llvm::joinErrors(std::move(errors), info.takeError());
+      return;
+    }
+    infos.push_back(std::move(*info));
+  });
+  if (errors) {
+    *error = llvm::toString(std::move(errors));
     return false;
   }
 
   nlohmann::json report;
   report["schema"] = kReportSchema;
   report["contract_version"] = kContractVersion;
-  report["sites"] = annc::fusion::fusionInfosToJson(*infos)["fusions"];
-  *siteCount = infos->size();
+  report["sites"] = annc::fusion::fusionInfosToJson(infos)["fusions"];
+  *siteCount = infos.size();
   return writeFile(outPath, report.dump(1) + "\n");
 }
 
@@ -385,6 +401,15 @@ int runPipeline(int argc, char **argv, const Options &opts) {
   if (rc != 0) return rc;
 
   // 3. Site report, in-process (see the file header).
+  auto dropIntermediates = [&]() {
+    if (opts.keepTemps) return;
+    std::error_code ignored;
+    fs::remove(rawModule, ignored);
+    fs::remove(fusedModule, ignored);
+    fs::remove(aotModule, ignored);
+    fs::remove(loweredModule, ignored);
+  };
+
   size_t siteCount = 0;
   std::string error;
   if (!writeSiteReport(fusedModule.string(), reportPath.string(), &siteCount, &error)) {
@@ -394,6 +419,7 @@ int runPipeline(int argc, char **argv, const Options &opts) {
   if (siteCount == 0) {
     // Zero sites is a valid outcome (a graph with no fusable region); skipping
     // codegen keeps the cold path short for such models.
+    dropIntermediates();
     std::cerr << "[annc-onnx-pipeline] no fusion sites; skipping codegen\n";
     return 0;
   }
@@ -412,13 +438,7 @@ int runPipeline(int argc, char **argv, const Options &opts) {
                cwd, env, opts.verbose);
   if (rc != 0) return rc;
 
-  if (!opts.keepTemps) {
-    std::error_code ignored;
-    fs::remove(rawModule, ignored);
-    fs::remove(fusedModule, ignored);
-    fs::remove(aotModule, ignored);
-    fs::remove(loweredModule, ignored);
-  }
+  dropIntermediates();
   std::cerr << "[annc-onnx-pipeline] " << siteCount << " site(s) -> "
             << kernelSo.string() << "\n";
   return 0;

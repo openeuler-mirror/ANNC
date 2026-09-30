@@ -68,6 +68,7 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon
 > - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建
 > - `--disable-onnx`：关闭 ONNX 前端（`annc-onnx2atir`）
+> - `--enable-ort-ep`：构建 ONNX Runtime EP 插件（`addons/onnxruntime`，默认关闭）；需 ONNX 前端可用，并把环境变量 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录
 > - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
 
 只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
@@ -193,6 +194,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
 | `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema 与生成脚本），按框架开关注册 |
+| `addons/onnxruntime/` | ONNX Runtime EP 插件（`annc_ep.cpp` + 清单脚本）；默认不参与根构建，`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时构建并安装 `libannc_ep.so` |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
@@ -302,7 +304,7 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 
 `annc-onnx-pipeline` 把整个 ONNX 模型编译成「一个模型一个 `.so`」的 AOT kernel 库，并同时产出
 **站点报告 `sites.json`**：每个融合站点的 kernel 名、实参/输出契约、ABI，以及该站点的**成员节点名单**
-（`member_node_names`，被融合吞并的图节点）。它供 ONNX Runtime EP 插件的运行时编译模式
+（`member_node_names`，被融合吞并的图节点）。它供 ONNX Runtime EP 插件
 （`addons/onnxruntime/`）调用——EP 在 `GetCapability` 内导出整图、调用本工具、按报告精确申报融合区域。
 
 ```shell
@@ -567,6 +569,8 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
+| `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort-ep` |
+| `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |

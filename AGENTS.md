@@ -147,7 +147,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | `annc-verify` | Kernel 正确性验证 |
 | `annc-converter` | ATIR → TF SavedModel（反向）+ GraphDef 重写 |
 | `annc-tf-pipeline` | 端到端编排 |
-| `annc-onnx-pipeline` | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 运行时编译 |
+| `annc-onnx-pipeline` | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 运行时编译调用 |
 
 ### TensorFlow 集成
 
@@ -166,6 +166,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
 | `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema + 生成脚本），按 `ANNC_ENABLE_ONNX` 注册 |
+| `addons/onnxruntime/` | ONNX Runtime EP 插件（运行时编译，无离线产物）：`annc_ep.cpp` + 编译驱动/导出 `annc_ep_compile.*`/`annc_ep_graph_export.cc`；默认不参与根构建，`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时构建 `libannc_ep.so` |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg + 公共工具（`Common/`） |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
