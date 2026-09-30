@@ -10,5 +10,8 @@
 pybind11==2.11.1
 nanobind>=2.4,<3
 numpy<2
-tensorflow==2.20.0
 pytest>=8,<9
+# TensorFlow is only needed while the TensorFlow addons are built
+# (ANNC_ENABLE_TENSORFLOW_ADDON, on by default). Builds that disable the addons
+# — e.g. --disable-tensorflow or --disable-tensorflow-addon — do not need it.
+tensorflow==2.20.0

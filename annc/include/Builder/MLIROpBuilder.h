@@ -76,8 +76,16 @@ class MLIRBuilder {
   // All declared op specs (drives isSupportedOp); used by tests and tooling.
   static llvm::ArrayRef<OpSpec> getAllOpSpecs();
 
+ protected:
+  // Framework substitution seams. The base implementation resolves against the
+  // TF table and never forces a fallback, so TF behaviour is unchanged; a
+  // subclass (annc-onnx2atir) supplies its own table and fallback decision.
+  virtual const OpSpec* lookupSpec(llvm::StringRef opType) const;
+  // Returns true when the node must land in atir.opaque even though a spec
+  // could be found, because the frontend could not faithfully normalize it.
+  virtual bool shouldLowerToOpaque(const NodeInfo& node) const;
+
  private:
-  const OpSpec* lookupSpec(llvm::StringRef opType) const;
   mlir::LogicalResult addNode(const NodeInfo& node);
   mlir::LogicalResult buildControlFlowMirrorNode(const NodeInfo& node);
   mlir::LogicalResult buildConstantNode(const NodeInfo& node);

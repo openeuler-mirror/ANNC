@@ -51,6 +51,8 @@ static bool dispatchOp(Operation &op) {
       DISPATCH_ATIR_OP(ParallelDynamicStitchOp)
       DISPATCH_ATIR_OP(ReshapeOp)
       DISPATCH_ATIR_OP(RsqrtOp)
+      DISPATCH_ATIR_OP(SqrtOp)
+      DISPATCH_ATIR_OP(ReciprocalOp)
       DISPATCH_ATIR_OP(SumOp)
       DISPATCH_ATIR_OP(StridedSliceOp)
       DISPATCH_ATIR_OP(CastOp)

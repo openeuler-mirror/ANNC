@@ -7,6 +7,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
 option(ANNC_ENABLE_COVERAGE "Enable source-based code coverage (clang only)" OFF)
 option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG); third-party build type unchanged" OFF)
+
+# Framework frontends and their addons. A framework switch gates its frontend
+# tool, its proto preparation and its addon; an addon switch is only meaningful
+# while its framework switch is on. The defaults keep the historical build:
+# TensorFlow tools + addons and the ONNX frontend are built, nothing else is
+# required. build.sh mirrors these options (--disable-tensorflow,
+# --disable-tensorflow-addon, --disable-onnx).
+option(ANNC_ENABLE_TENSORFLOW "Build the TensorFlow frontend tools (annc-tf2atir, annc-converter, annc-tf-pipeline)" ON)
+option(ANNC_ENABLE_TENSORFLOW_ADDON "Build the TensorFlow addons (annc_optimizer, annc_fused_op); requires ANNC_ENABLE_TENSORFLOW" ${ANNC_ENABLE_TENSORFLOW})
+option(ANNC_ENABLE_ONNX "Build the ONNX frontend and generate its protobuf sources" ON)
+
+if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
+  message(FATAL_ERROR
+    "ANNC_ENABLE_TENSORFLOW_ADDON=ON requires ANNC_ENABLE_TENSORFLOW=ON: the "
+    "TensorFlow addons are built from the TensorFlow frontend toolchain. Set "
+    "ANNC_ENABLE_TENSORFLOW_ADDON=OFF or ANNC_ENABLE_TENSORFLOW=ON.")
+endif()
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 
 # set(ABSL_PROPAGATE_CXX_STD ON)
@@ -184,8 +201,12 @@ include(CTest)
 
 add_subdirectory(annc)
 add_subdirectory(python)
-# TensorFlow configuration is owned by the addon subdirectory alone.
-add_subdirectory(tensorflow_addons)
+# TensorFlow configuration is owned by the addon subdirectory alone, so it is
+# entered only when the addon is enabled: with the addon off no TensorFlow
+# headers or OpenSSL are looked up.
+if(ANNC_ENABLE_TENSORFLOW_ADDON)
+  add_subdirectory(tensorflow_addons)
+endif()
 
 if(BUILD_TESTING)
   add_subdirectory(tests)

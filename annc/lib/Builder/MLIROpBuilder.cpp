@@ -242,6 +242,9 @@ const OpSpec* MLIRBuilder::lookupSpec(llvm::StringRef opType) const {
   return it == table.end() ? nullptr : it->second;
 }
 
+// Default seam: the TF path never forces the opaque fallback.
+bool MLIRBuilder::shouldLowerToOpaque(const NodeInfo&) const { return false; }
+
 bool MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
   failed_ = false;
   auto unknownLoc = UnknownLoc::get(module_.getContext());
@@ -370,6 +373,8 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
       type == "Exit" || type == "RefExit" || type == "NextIteration" ||
       type == "RefNextIteration" || type == "LoopCond")
     return buildControlFlowMirrorNode(node);
+
+  if (shouldLowerToOpaque(node)) return buildOpaqueOp(node);
 
   const OpSpec* spec = lookupSpec(type);
   if (spec == nullptr) return buildOpaqueOp(node);

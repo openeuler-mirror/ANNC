@@ -147,6 +147,72 @@ void RsqrtOp::Interpret() {
   (void)setDenseResult(resultType, outputShape, result);
 }
 
+void SqrtOp::Interpret() {
+  this->inferShape();
+
+  atir::TensorType inputType;
+  DenseElementsAttr inputAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getX(), "Sqrt input",
+                                  inputType, inputAttr))) {
+    return;
+  }
+
+  auto inputValsOr = getFloatValues(inputAttr);
+  if (failed(inputValsOr)) {
+    emitOpError("Sqrt only supports numeric input cacheData");
+    return;
+  }
+
+  auto resultType = getResult().getType();
+  auto outputShape = resultType.getShape();
+  int64_t outputSize = getElementCount(outputShape);
+  if (outputSize < 0) {
+    emitOpError("Sqrt output shape must be static for interpretation");
+    return;
+  }
+
+  std::vector<float> result(outputSize, 0.0f);
+
+  for (int64_t i = 0; i < outputSize; ++i) {
+    result[i] = result[i] + std::sqrt((*inputValsOr)[i]);
+  }
+
+  (void)setDenseResult(resultType, outputShape, result);
+}
+
+void ReciprocalOp::Interpret() {
+  this->inferShape();
+
+  atir::TensorType inputType;
+  DenseElementsAttr inputAttr;
+  if (failed(getTensorTypeAndData(getOperation(), getX(), "Reciprocal input",
+                                  inputType, inputAttr))) {
+    return;
+  }
+
+  auto inputValsOr = getFloatValues(inputAttr);
+  if (failed(inputValsOr)) {
+    emitOpError("Reciprocal only supports numeric input cacheData");
+    return;
+  }
+
+  auto resultType = getResult().getType();
+  auto outputShape = resultType.getShape();
+  int64_t outputSize = getElementCount(outputShape);
+  if (outputSize < 0) {
+    emitOpError("Reciprocal output shape must be static for interpretation");
+    return;
+  }
+
+  std::vector<float> result(outputSize, 0.0f);
+
+  for (int64_t i = 0; i < outputSize; ++i) {
+    result[i] = result[i] + (1.0f / (*inputValsOr)[i]);
+  }
+
+  (void)setDenseResult(resultType, outputShape, result);
+}
+
 void ZerosLikeOp::Interpret() {
   this->inferShape();
 

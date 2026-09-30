@@ -26,7 +26,7 @@ ANNC-Next 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统�
 # Python 依赖（也可使用：pip install -r requirements.txt）
 pip install pybind11 nanobind
 
-# TensorFlow 2.20（CMake 会在 configure 时自动检测）
+# TensorFlow 2.20（仅 TF addon 需要；CMake 会在 configure 时自动检测）
 pip install tensorflow==2.20.0
 
 # 系统工具、Protobuf、OpenSSL Crypto 和 GoogleTest C++ 开发库
@@ -37,6 +37,8 @@ yum install cmake clang ninja-build protobuf-devel openssl-devel gtest-devel
 >
 > `build.sh` 会自动检测并安装 `pybind11` 和 `nanobind`；如不需要自动安装，可传入 `--no-install-deps`。TensorFlow 需要预先手动安装。
 > `build.sh` 会在系统 `protoc` 版本变化后自动重新生成最小 TensorFlow protobuf 源码；也可用 `--regen-tf-protos` 强制重新生成。
+>
+> **框架依赖随构建开关生效**：TensorFlow Python 包只在构建 TF addon 时需要；`protobuf-devel`/`protoc` 只在启用任一新前端（TF 或 ONNX）时需要。关闭对应开关后 `build.sh` 跳过其 proto 生成与依赖检查，详见「CMake / 构建选项参考」。
 
 ### LLVM & MLIR + nlohmann/json
 
@@ -63,6 +65,10 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：选择 KDNN 来源（默认 RELEASE）
 > - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
 > - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party（LLVM/json）保持原构建类型、不重编
+> - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon
+> - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建
+> - `--disable-onnx`：关闭 ONNX 前端（跳过其 protobuf 源码生成）
+> - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
 
 只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
 
@@ -528,6 +534,9 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | CMake 选项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
+| `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
+| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
+| `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 启用 ONNX 前端并生成其 protobuf 源码；对应 `build.sh --disable-onnx` |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |

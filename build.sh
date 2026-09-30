@@ -17,6 +17,13 @@ CXX_COMPILER="${CXX:-g++}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_DEPS="YES"
 REGEN_TF_PROTOS="NO"
+REGEN_ONNX_PROTOS="NO"
+# Framework frontends and addons (see the option block in CMakeLists.txt).
+# ENABLE_TENSORFLOW_ADDON stays empty until parsing finishes so that its
+# default can follow ENABLE_TENSORFLOW.
+ENABLE_TENSORFLOW="ON"
+ENABLE_TENSORFLOW_ADDON=""
+ENABLE_ONNX="ON"
 ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
@@ -96,6 +103,25 @@ while [[ $# -gt 0 ]]; do
       REGEN_TF_PROTOS="YES"
       shift
       ;;
+    --regen-onnx-protos)
+      REGEN_ONNX_PROTOS="YES"
+      shift
+      ;;
+    --disable-tensorflow)
+      ENABLE_TENSORFLOW="OFF"
+      # The addons are built from the frontend toolchain, so disabling the
+      # framework disables them as well.
+      ENABLE_TENSORFLOW_ADDON="OFF"
+      shift
+      ;;
+    --disable-tensorflow-addon)
+      ENABLE_TENSORFLOW_ADDON="OFF"
+      shift
+      ;;
+    --disable-onnx)
+      ENABLE_ONNX="OFF"
+      shift
+      ;;
     --coverage)
       ENABLE_COVERAGE="ON"
       shift
@@ -120,6 +146,13 @@ while [[ $# -gt 0 ]]; do
       echo "  --clean                       Clean build directory before build (forces full reconfigure)"
       echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
+      echo "                                (also regenerates the ONNX protos while the ONNX frontend is enabled)"
+      echo "  --regen-onnx-protos           Regenerate the ONNX protobuf sources (requires the ONNX frontend)"
+      echo "  --disable-tensorflow          Disable the TensorFlow frontend (annc-tf2atir,"
+      echo "                                annc-converter, annc-tf-pipeline) and its addons"
+      echo "  --disable-tensorflow-addon    Disable the TensorFlow addons (annc_optimizer, annc_fused_op);"
+      echo "                                the TensorFlow frontend tools are still built"
+      echo "  --disable-onnx                Disable the ONNX frontend (its protobuf sources)"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
       echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
       echo "                                third_party (LLVM/json) build type is unchanged"
@@ -137,6 +170,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# The TensorFlow addon follows the TensorFlow framework switch unless it was
+# set explicitly; --disable-tensorflow already forces it off.
+if [ -z "${ENABLE_TENSORFLOW_ADDON}" ]; then
+  ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW}"
+fi
 
 # Resolve the selected interpreter before entering build/. Relative virtualenv
 # paths such as .venv/bin/python would otherwise stop resolving during CMake
@@ -183,19 +222,39 @@ if [[ -n "${_user_kdnn_lib_variant_set}" && \
   exit 1
 fi
 
-if [[ "${ANNC_TENSORFLOW_PRELOAD}" != "ON" && "${ANNC_TENSORFLOW_PRELOAD}" != "OFF" ]]; then
-  echo "ERROR: ANNC_TENSORFLOW_PRELOAD must be ON or OFF, got '${ANNC_TENSORFLOW_PRELOAD}'" >&2
+# Regeneration requests only apply to enabled frontends: the old
+# --regen-tf-protos regenerates whatever TensorFlow/ONNX side is enabled, while
+# --regen-onnx-protos needs the ONNX frontend.
+if [ "${REGEN_ONNX_PROTOS}" == "YES" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --regen-onnx-protos requires the ONNX frontend, which is disabled." >&2
+  echo "       The ONNX protobuf sources are neither generated nor used." >&2
   exit 1
 fi
 
-if [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
-  echo "ERROR: ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1, got '${ANNC_TENSORFLOW_CXX11_ABI}'" >&2
+if [ "${REGEN_TF_PROTOS}" == "YES" ] && \
+   [ "${ENABLE_TENSORFLOW}" == "OFF" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --regen-tf-protos has no enabled frontend to regenerate:" >&2
+  echo "       both the TensorFlow and ONNX frontends are disabled." >&2
   exit 1
 fi
 
-if [[ "${ANNC_TENSORFLOW_PRELOAD}" == "ON" && -n "${ANNC_TENSORFLOW_LIBRARIES}" ]]; then
-  echo "ERROR: ANNC_TENSORFLOW_LIBRARIES is invalid when ANNC_TENSORFLOW_PRELOAD=ON." >&2
-  exit 1
+# The TensorFlow preload/ABI parameters only select how the addon is built;
+# they are neither a TensorFlow support switch nor meaningful without it.
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  if [[ "${ANNC_TENSORFLOW_PRELOAD}" != "ON" && "${ANNC_TENSORFLOW_PRELOAD}" != "OFF" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_PRELOAD must be ON or OFF, got '${ANNC_TENSORFLOW_PRELOAD}'" >&2
+    exit 1
+  fi
+
+  if [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1, got '${ANNC_TENSORFLOW_CXX11_ABI}'" >&2
+    exit 1
+  fi
+
+  if [[ "${ANNC_TENSORFLOW_PRELOAD}" == "ON" && -n "${ANNC_TENSORFLOW_LIBRARIES}" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_LIBRARIES is invalid when ANNC_TENSORFLOW_PRELOAD=ON." >&2
+    exit 1
+  fi
 fi
 
 # Coverage note: keep the existing build type (forcing Debug would recompile
@@ -223,21 +282,25 @@ if ! command -v ninja >/dev/null 2>&1; then
 fi
 
 # annc-tf2atir parses TensorFlow GraphDefs using the system Protobuf C++
-# library. TensorFlow's Python package does not provide this development
+# library, and both protobuf source sets (TensorFlow, ONNX) are generated with a
+# matching protoc. Neither framework's Python package provides this development
 # dependency, so detect the common package-managed setup before CMake starts.
-if command -v rpm >/dev/null 2>&1 && ! rpm -q protobuf-devel >/dev/null 2>&1; then
-  echo "ERROR: Required system package 'protobuf-devel' is not installed." >&2
-  echo "       Install it on openEuler/RPM-based systems with:" >&2
-  echo "         sudo yum install -y protobuf-devel" >&2
-  exit 1
-fi
+# With both frontends disabled nothing needs protobuf at all.
+if [ "${ENABLE_TENSORFLOW}" == "ON" ] || [ "${ENABLE_ONNX}" == "ON" ]; then
+  if command -v rpm >/dev/null 2>&1 && ! rpm -q protobuf-devel >/dev/null 2>&1; then
+    echo "ERROR: Required system package 'protobuf-devel' is not installed." >&2
+    echo "       Install it on openEuler/RPM-based systems with:" >&2
+    echo "         sudo yum install -y protobuf-devel" >&2
+    exit 1
+  fi
 
-if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
-    ! dpkg-query -W -f='${Status}' libprotobuf-dev 2>/dev/null | grep -q "install ok installed"; then
-  echo "ERROR: Required system package 'libprotobuf-dev' is not installed." >&2
-  echo "       Install it on Debian/Ubuntu systems with:" >&2
-  echo "         sudo apt-get install -y libprotobuf-dev protobuf-compiler" >&2
-  exit 1
+  if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
+      ! dpkg-query -W -f='${Status}' libprotobuf-dev 2>/dev/null | grep -q "install ok installed"; then
+    echo "ERROR: Required system package 'libprotobuf-dev' is not installed." >&2
+    echo "       Install it on Debian/Ubuntu systems with:" >&2
+    echo "         sudo apt-get install -y libprotobuf-dev protobuf-compiler" >&2
+    exit 1
+  fi
 fi
 
 # Kernel unit tests are registered unconditionally, so their C++ GoogleTest
@@ -370,14 +433,19 @@ if [ "${ENABLE_COVERAGE}" == "ON" ]; then
   fi
 fi
 
-# TensorFlow is large and version-sensitive; only verify presence, do not auto-install.
-if ! python_module_available "tensorflow"; then
-  echo "ERROR: TensorFlow cannot be imported by ${PYTHON}." >&2
-  echo "       ANNC requires TensorFlow at configure time. Install compatible deps with:" >&2
-  echo "         ${PYTHON} -m pip install -r requirements.txt" >&2
-  echo "       If the error mentions NumPy 2.x, downgrade with:" >&2
-  echo "         ${PYTHON} -m pip install 'numpy<2'" >&2
-  DEP_ERRORS=$((DEP_ERRORS + 1))
+# TensorFlow is large and version-sensitive; only verify presence, do not
+# auto-install. The Python package is what the addon resolves its headers and
+# libraries from, so the check is needed exactly while the addon is built; the
+# frontend tools only consume the vendored protobuf schema.
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  if ! python_module_available "tensorflow"; then
+    echo "ERROR: TensorFlow cannot be imported by ${PYTHON}." >&2
+    echo "       The TensorFlow addons require TensorFlow at configure time. Install compatible deps with:" >&2
+    echo "         ${PYTHON} -m pip install -r requirements.txt" >&2
+    echo "       If the error mentions NumPy 2.x, downgrade with:" >&2
+    echo "         ${PYTHON} -m pip install 'numpy<2'" >&2
+    DEP_ERRORS=$((DEP_ERRORS + 1))
+  fi
 fi
 
 if [ ${DEP_ERRORS} -ne 0 ]; then
@@ -449,7 +517,59 @@ ensure_tf_protos() {
   bash "${PWD}/tf_protos_minimal.sh" -d "${PWD}"
 }
 
-ensure_tf_protos
+# Only the enabled frontends get their protobuf sources prepared; a disabled
+# framework's proto directory is neither generated nor consumed.
+if [ "${ENABLE_TENSORFLOW}" == "ON" ]; then
+  ensure_tf_protos
+else
+  echo "Skipping TensorFlow protobuf sources (TensorFlow frontend disabled)"
+fi
+
+# -----------------------------------------------------------------------------
+# ONNX proto generation
+# -----------------------------------------------------------------------------
+
+ensure_onnx_protos() {
+  local proto_root="${PWD}/frontends/onnx/protos"
+  local gen_dir="${proto_root}/gen_code"
+  local protoc_version_file="${gen_dir}/.protoc-version"
+  local required_header="${gen_dir}/onnx/onnx.pb.h"
+
+  local missing="NO"
+  if [ "${REGEN_TF_PROTOS}" == "YES" ] || [ "${REGEN_ONNX_PROTOS}" == "YES" ]; then
+    missing="YES"
+  elif [ ! -f "${required_header}" ] || [ ! -f "${protoc_version_file}" ]; then
+    missing="YES"
+  else
+    local protoc_bin="${PROTOC_BIN:-}"
+    if [ -z "${protoc_bin}" ]; then
+      protoc_bin="$(command -v protoc 2>/dev/null || true)"
+    fi
+    if [ -z "${protoc_bin}" ] || [ ! -x "${protoc_bin}" ]; then
+      echo "ERROR: protoc is required to verify generated ONNX protobuf sources." >&2
+      echo "       Install a protobuf compiler compatible with the system protobuf-devel package." >&2
+      exit 1
+    fi
+    if [ "$(<"${protoc_version_file}")" != "$("${protoc_bin}" --version)" ]; then
+      echo "ONNX protobuf sources were generated by a different protoc version; regenerating."
+      missing="YES"
+    fi
+  fi
+
+  if [ "${missing}" == "NO" ]; then
+    echo "ONNX protobuf sources already generated (${gen_dir})"
+    return 0
+  fi
+
+  echo "Generating ONNX protobuf sources..."
+  bash "${proto_root}/onnx_protos_minimal.sh" -d "${PWD}"
+}
+
+if [ "${ENABLE_ONNX}" == "ON" ]; then
+  ensure_onnx_protos
+else
+  echo "Skipping ONNX protobuf sources (ONNX frontend disabled)"
+fi
 
 # -----------------------------------------------------------------------------
 # Create build directory (preserve LLVM build if exists)
@@ -518,6 +638,58 @@ check_cache_consistency() {
     printf '%s\n' "${mismatches[@]}" >&2
     echo "       Use --clean to reconfigure with the new options." >&2
     exit 1
+  fi
+}
+
+# Framework switches were introduced after the strings around them, so a cache
+# written by an older build.sh has no ANNC_ENABLE_TENSORFLOW[_ADDON] or
+# ANNC_ENABLE_ONNX key. Such a cache was configured with the historical default
+# combination (all three ON). Compare the requested values against that
+# combination instead of skipping missing keys: an unchanged request only needs
+# one in-place reconfigure (third-party artifacts are kept), while a request
+# that changes the default combination must not silently reuse the old build.
+check_framework_switch_cache() {
+  [ -f "CMakeCache.txt" ] || return 0
+
+  local key new_val legacy_default old_val entry
+  local -a entries=(
+    "ANNC_ENABLE_TENSORFLOW:${ENABLE_TENSORFLOW}:ON"
+    "ANNC_ENABLE_TENSORFLOW_ADDON:${ENABLE_TENSORFLOW_ADDON}:ON"
+    "ANNC_ENABLE_ONNX:${ENABLE_ONNX}:ON"
+  )
+  local -a mismatches=()
+  local missing_keys="NO"
+
+  for entry in "${entries[@]}"; do
+    key="${entry%%:*}"
+    new_val="${entry#*:}"
+    new_val="${new_val%%:*}"
+    legacy_default="${entry##*:}"
+    old_val=$(get_cache_value "${key}")
+    if [ -z "${old_val}" ]; then
+      missing_keys="YES"
+      old_val="${legacy_default}"
+    fi
+    if [ "${old_val}" != "${new_val}" ]; then
+      mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+    fi
+  done
+
+  if [ ${#mismatches[@]} -ne 0 ]; then
+    echo "ERROR: Framework build switch(es) changed but an existing CMakeCache.txt was found." >&2
+    printf '%s\n' "${mismatches[@]}" >&2
+    if [ "${missing_keys}" == "YES" ]; then
+      echo "       Missing keys are read as the pre-switch default combination (ON/ON/ON)." >&2
+    fi
+    echo "       Use --clean to reconfigure with the new switches." >&2
+    exit 1
+  fi
+
+  if [ "${missing_keys}" == "YES" ]; then
+    echo "Framework switches are absent from the existing CMakeCache.txt but the"
+    echo "requested values match the pre-switch defaults; reconfiguring in place"
+    echo "(third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
   fi
 }
 
@@ -601,6 +773,7 @@ if [ -f "CMakeCache.txt" ]; then
     check_source_glob_changes
   else
     check_annc_debug_toggle
+    check_framework_switch_cache
     check_cache_consistency
     check_source_glob_changes
     [ -f "CMakeCache.txt" ] && SKIP_CMAKE="YES"
@@ -621,6 +794,9 @@ else
   echo "  Python: ${PYTHON}"
   echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
   echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+  echo "  TensorFlow Frontend: ${ENABLE_TENSORFLOW}"
+  echo "  TensorFlow Addon: ${ENABLE_TENSORFLOW_ADDON}"
+  echo "  ONNX Frontend: ${ENABLE_ONNX}"
   echo "  Coverage: ${ENABLE_COVERAGE}"
   echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
   echo "  KDNN Source: ${KDNN_SOURCE}"
@@ -643,6 +819,9 @@ else
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
     -DANNC_DEBUG="${ANNC_DEBUG}" \
+    -DANNC_ENABLE_TENSORFLOW="${ENABLE_TENSORFLOW}" \
+    -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
+    -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
     -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \
