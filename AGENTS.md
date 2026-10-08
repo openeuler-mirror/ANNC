@@ -103,6 +103,9 @@ ANNC 是基于 MLIR 的 AI 编译工具链，将 TensorFlow GraphDef 编译为 A
 TF SavedModel/GraphDef
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
+ONNX .onnx
+  └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
+
 ATIR MLIR
   ├─→ annc-opt（--atir-op-fusion、--atir-block-fusion）→ 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
@@ -159,6 +162,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | 目录 | 内容 |
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
+| `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR）与 `onnx/protos/`（ONNX schema + 生成脚本），按 `ANNC_ENABLE_ONNX` 注册 |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg + 公共工具（`Common/`） |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |

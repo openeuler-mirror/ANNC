@@ -50,8 +50,15 @@ void outputBinary(const ModuleOp &module, const std::string &output) {
   mlir::ParserConfig config(module->getContext(), true, &fallbackResourceMap);
   mlir::BytecodeWriterConfig writerConfig(fallbackResourceMap);
 
-  mlir::writeBytecodeToFile(module, dest, writerConfig);
+  // Both the writer's own failure and a flush error (full disk, quota) must
+  // fail the run: the caller hands this file to a follow-up tool, which would
+  // otherwise report a misleading "cannot read the module" instead.
+  if (mlir::failed(mlir::writeBytecodeToFile(module, dest, writerConfig)))
+    llvm::report_fatal_error("Could not write bytecode to output file");
   dest.flush();
+  if (dest.has_error())
+    llvm::report_fatal_error(llvm::Twine("Could not write output file: ") +
+                             dest.error().message());
 }
 
 llvm::ArrayRef<int64_t> getTensorShape(const Value &val) {
