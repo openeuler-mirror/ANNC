@@ -11,8 +11,7 @@
 
 namespace annc::onnx2atir {
 
-// Machine-readable fallback reasons (design decision D9 of
-// projects/annc/architecture/onnx-frontend-design.md).
+// Machine-readable fallback reasons.
 inline constexpr const char* kReasonNoSpec = "NO_SPEC";
 inline constexpr const char* kReasonUnsupportedDtype = "UNSUPPORTED_DTYPE";
 inline constexpr const char* kReasonUnsupportedAttr = "UNSUPPORTED_ATTR";

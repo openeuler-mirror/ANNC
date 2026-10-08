@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -34,8 +35,6 @@ namespace {
 
 // Contract version of the produced ATIR module and of the reports beside it.
 // MAJOR = shape-incompatible change, MINOR = pure addition, PATCH = wording.
-// Frozen in design decision D5 of
-// projects/annc/architecture/onnx-frontend-design.md.
 constexpr const char* kContractVersion = "1.0.0";
 
 // Opset whose operator shapes this frontend knows. A model declaring another
@@ -84,6 +83,13 @@ bool writeJsonFile(const std::string& path, const llvm::json::Value& value,
     return false;
   }
   out << llvm::formatv("{0:2}", value) << "\n";
+  // The reports are part of this tool's contract, so a short write (full disk,
+  // quota) must fail the run instead of leaving a truncated report behind.
+  out.flush();
+  if (out.has_error()) {
+    error = "cannot write '" + path + "': " + out.error().message();
+    return false;
+  }
   return true;
 }
 
@@ -265,9 +271,8 @@ llvm::json::Value buildInferenceReport(const OnnxGraph& graph,
   llvm::json::Object root;
   root["contract_version"] = kContractVersion;
   root["tool"] = "annc-onnx2atir";
-  // Same shape vocabulary as the recorded onnx.shape_inference dump
-  // (projects/annc/data/20260924-ort-annc-perf/onnx-static-stats/
-  // shape-inference.json) so the two can be diffed tensor by tensor.
+  // Same shape vocabulary as the recorded onnx.shape_inference dump so the
+  // two can be diffed tensor by tensor.
   root["dynamic_dim_marker"] = nullptr;
 
   // Runtime inputs are part of the comparison surface too: the official
@@ -410,7 +415,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Opset assertion (design decision D7). The whole-model refusal is the
+  // Opset assertion. The whole-model refusal is the
   // default because a table built for one opset silently mistranslates another.
   if (loaded.opset_version != kSupportedOpset && !options.relaxed_opset) {
     llvm::errs() << "Error: OP_SET_MISMATCH: model declares ai.onnx opset "
@@ -477,7 +482,7 @@ int main(int argc, char** argv) {
   // The module is created here rather than through ANNCBuilder, because that
   // helper instantiates the TF-spec MLIRBuilder directly; the two module-level
   // attributes below are the ones ANNCBuilder::buildModule sets, plus the
-  // contract version this frontend freezes (design decision D5).
+  // contract version this frontend freezes.
   ModuleOp module = ModuleOp::create(UnknownLoc::get(&context),
                                      StringRef("main"));
   module->setAttr("module.state", StringAttr::get(&context, "atir"));
