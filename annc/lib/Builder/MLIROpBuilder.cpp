@@ -671,8 +671,12 @@ void MLIRBuilder::attachMetadata(Operation* op, const NodeInfo& node,
   }
   for (const auto& [key, value] : node.attrs) {
     if (key == "tf.name" || key == "tf.op") continue;
-    if (!isDeclared(key) && !isHarmless(key) && !key.empty() &&
-        key[0] != '_') {
+    // A leading underscore marks a frontend-internal attribute (the ONNX
+    // adapter's fallback marker and its normalized Slice window). They drive
+    // construction only and are never part of the emitted metadata, exactly as
+    // in buildOpaqueOp above.
+    if (key.empty() || key[0] == '_') continue;
+    if (!isDeclared(key) && !isHarmless(key)) {
       mlir::emitWarning(annc::getLoc(builder_.getContext(), node.name))
           << "TF attribute '" << key << "' of node '" << node.name
           << "' is not mapped to an ATIR attribute (kept in metadata only)";
