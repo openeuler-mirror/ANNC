@@ -14,7 +14,6 @@ set(LIBS
   AtirDialect
   AtirPasses
   ANNCHelper
-  AtirToAffineConversion
   AtirToLinalgConversion
 )
 add_llvm_executable(annc-opt

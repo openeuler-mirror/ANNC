@@ -3,19 +3,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-/* Affine */
-def ConvertAtirToAffine : Pass<"convert-atir-to-affine", "ModuleOp"> {
-  let summary = "convert atir ops to affine ops";
-  let constructor = "createConvertAtirToAffine()";
-  let dependentDialects = [
-    "AtirDialect",
-    "mlir::affine::AffineDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::bufferization::BufferizationDialect"
-  ];
-}
-
 /* Linalg */
 def ConvertAtirToLinalg : Pass<"convert-atir-to-linalg", "ModuleOp"> {
   let summary = "convert atir ops to linalg ops";

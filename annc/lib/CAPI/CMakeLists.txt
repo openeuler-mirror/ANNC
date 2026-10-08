@@ -17,7 +17,6 @@ add_mlir_public_c_api_library(AtirCAPIPasses
   LINK_LIBS PUBLIC
   AtirDialect
   AtirBuilder
-  AtirToAffineConversion
   AtirToLinalgConversion
   AArch64Codegen
 )

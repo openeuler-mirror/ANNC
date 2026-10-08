@@ -28,6 +28,8 @@
 
 ## ADR-003：两层选择算子接入策略
 
+状态：已由 ADR-011 替代。以下保留原始决策背景。
+
 | 项目 | 内容 |
 | --- | --- |
 | **上下文** | 融合后的子图需要高效执行代码。CPU 微架构优化深度要求高，但不同算子类型的最佳编译策略差异大：GEMM 类算子适合 MLIR 多级 tiling 优化，Embedding Lookup 聚合等非 GEMM 子图走通用 MLIR Lowering，LLM 类算子适合 LLM 辅助自动生成，未来还可能接入 XLA 等外部编译器。同时，已有 vendor kernel（如 KDNN）可直接复用，应优先于自动生成。单一接入路径无法同时满足性能、覆盖度和演进灵活性的要求 |
@@ -111,3 +113,14 @@
 | **决策** | 前端对 11 个 TF 控制流 op（Switch/RefSwitch、Merge/RefMerge、Enter/RefEnter、Exit/RefExit、NextIteration/RefNextIteration、LoopCond）一一镜像为显式 ATIR op：`atir.switch`、`atir.merge`、`atir.enter`、`atir.exit`、`atir.next_iteration`、`atir.loop_cond`，不做语义重建、不降级 opaque；`ANNCStructuredSwitch` 与 region 版 SwitchCaseOp 移除。具体约束：(1) 拓扑排序无条件剥离 NextIteration→Merge 数据回边——NextIteration 在 TF 中仅出现于循环构造且回边必汇入 Merge，剥离是无条件正确的；builder 只在 producer 已构建时接线，其余通过 `tf.input.N` metadata 保留来源。(2) 控制依赖（`^input`）纳入可达性与拓扑排序 indegree——控制边影响执行顺序，必须参与；TF 静态图本身要求 DAG，控制环从"被忽略"改为显式失败属于纠偏。(3) 缺 `_output_shapes` 时不再失败：mirror op、Identity 桥接、未知 op 的缺失 slot 从输入合成 descriptor（Switch/Merge 固定双输出，Merge `value_index` 固定标量 i32），以未知 rank 表达——结构保真优先于早期失败，下游 fusion 以 atir.opaque 语义吸收。(4) mirror op 的定位是**保拓扑、不执行**：Conversion/、Target/aarch64/、Interpret/ 不为它们提供 lowering/解释；完整 AOT lowering 只作用于 prune 后的纯计算 func，mirror 结构供 OpFusion 吸收与 converter（GraphDef 重写）恢复。 |
 | **后果** | ✅ 任意复杂控制流拓扑（嵌套 Switch、fan-out/fan-in、disjoint 分支、Ref 全家族、循环回边）可无损转换并通过 FileCheck/pytest 验证；✅ RankInference 跨镜像 op 等价传播保持 shape 推导能力；❌ 图中 mirror op 若未被 fusion 吸收并走到 AOT lowering 会失败（预期行为：该子图本就不应 AOT 编译）；❌ 控制环图与仅 control 可达的子图行为比旧版严格。 |
 | **备选方案** | (a) 继续菱形重构——前提过强，真实图大量不满足；(b) 控制流降级为 atir.opaque——丢失控制流语义，converter 无法恢复图结构；(c) region 版 SwitchCase——与 TF 静态拓扑不对应，需要额外的 region 语义。 |
+
+<a id="adr-011"></a>
+
+## ADR-011：按 predictor 编译路径收敛 Pass 与 lowering
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | predictor 测试使用 ATIR 图优化、FastCodegen、ATIR→Linalg 和 AArch64 GEMM pipeline；旧 Distribute/ATIR 单级 tiling/ATIR→Affine/旧后端分块链路未进入 predictor 流程，增加注册、构建和维护成本。 |
+| **决策** | 移除 BlockFusion、Tiling、Unroll、Distribute、Canonicalize、SelectLoweringStrategy、EltwiseFusion、LLMCodeGen、ATIR→Affine 转换及旧后端五个分块/打包 Pass，并移除只供该路径使用的 LoweringConfigAttr、专属脚本和测试。保留 ATIR→Linalg、FastCodegen、AArch64 GEMM pipeline 及其现有 AOT/JIT 调用方式。 |
+| **后果** | CLI 与 Python Pass 注册不再提供被移除的名称；依赖旧 pass、ATIR→Affine 或 `lowering_config` 属性的外部脚本需改用保留的 pipeline。predictor AOT 产物生成与 JIT 编译路径保持一致。 |
+| **备选方案** | 继续保留旧链路及其专属测试，或只停用注册但仍编译旧源码；两者均无法完成本轮工程瘦身。 |
