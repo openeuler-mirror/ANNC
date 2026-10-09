@@ -60,7 +60,7 @@ python3 -m pytest tests/test_asm.py -v  # 单个测试文件
 
 ### C++ 单元测试（ctest）
 
-`tests/kernels/` 与 `tests/annc/` 下的 GTest 用例通过 CTest 注册（`annc_jit_cache_test` 随 TF addon 开关注册）：
+`tests/kernels/`、`tests/annc/` 与 `frontends/onnx/onnx2atir/test/` 下的 GTest 用例通过 CTest 注册（`annc_jit_cache_test` 随 TF addon 开关注册，ONNX 用例随 `ANNC_ENABLE_ONNX` 注册）：
 
 ```bash
 cd build && ctest --output-on-failure   # 跑全部 GTest 用例
@@ -83,8 +83,10 @@ cd build && ninja coverage               # 跑 ctest + 生成报告
 
 - **C++ / TableGen / MLIR TD**：使用项目根目录 `.clang-format`（Google-based，列宽 80，2 空格缩进）。提交前运行：
   ```bash
-  clang-format -i annc/lib/**/*.cpp annc/include/**/*.h annc/include/**/*.td
+  clang-format -i annc/lib/**/*.cpp annc/include/**/*.h annc/include/**/*.td \
+                 frontends/onnx/onnx2atir/**/*.cpp frontends/onnx/onnx2atir/**/*.h
   ```
+  （`frontends/` 下只格式化该前端的手写源码；`onnx/protos/gen_code/` 为 protoc 生成产物，不入格式化范围。）
 - **Python**：遵循 PEP 8，文件使用 4 空格缩进。提交前可运行：
   ```bash
   python3 -m black python/ tests/
@@ -102,6 +104,9 @@ ANNC 是基于 MLIR 的 AI 编译工具链，将 TensorFlow GraphDef 编译为 A
 ```
 TF SavedModel/GraphDef
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
+
+ONNX .onnx
+  └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
 
 ATIR MLIR
   ├─→ annc-opt（--atir-op-fusion、--atir-block-fusion）→ 融合后的 ATIR
@@ -159,6 +164,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 | 目录 | 内容 |
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
+| `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema + 生成脚本），按 `ANNC_ENABLE_ONNX` 注册 |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg + 公共工具（`Common/`） |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |

@@ -16,7 +16,7 @@ option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG
 # --disable-tensorflow-addon, --disable-onnx).
 option(ANNC_ENABLE_TENSORFLOW "Build the TensorFlow frontend tools (annc-tf2atir, annc-converter, annc-tf-pipeline)" ON)
 option(ANNC_ENABLE_TENSORFLOW_ADDON "Build the TensorFlow addons (annc_optimizer, annc_fused_op); requires ANNC_ENABLE_TENSORFLOW" ${ANNC_ENABLE_TENSORFLOW})
-option(ANNC_ENABLE_ONNX "Build the ONNX frontend and generate its protobuf sources" ON)
+option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protobuf sources" ON)
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
@@ -174,7 +174,7 @@ add_compile_options(
 # Code coverage via gcov (--coverage, portable across gcc/clang). Set AFTER the
 # LLVM/MLIR sub-build so LLVM is neither recompiled nor relinked with --coverage;
 # the options apply only to directories processed afterwards (annc/, python/,
-# tests/, ...). Both compile and link flags are required: compile flags
+# frontends/, tests/, ...). Both compile and link flags are required: compile flags
 # instrument objects (referencing __gcov_* symbols), link flags pull in the gcov
 # runtime that resolves them — so any ANNC executable linking an instrumented
 # object (e.g. libANNCKernel) must also get the link flag, which the global
@@ -187,8 +187,8 @@ endif()
 
 # ANNC-scoped debug mode (--annc-debug). Set AFTER the LLVM/MLIR sub-build, for
 # the same reason as coverage above: directory-level compile options apply only
-# to targets defined afterwards (annc/, python/, tensorflow_addons/, tests/),
-# so third-party LLVM/json compile commands are untouched and ninja does not
+# to targets defined afterwards (annc/, python/, frontends/, tensorflow_addons/,
+# tests/), so third-party LLVM/json compile commands are untouched and ninja does not
 # rebuild them. The flags are appended at the end of the compile command, so
 # -O0 overrides the Release -O3 and -UNDEBUG re-enables assert() in ANNC code
 # even when CMAKE_BUILD_TYPE=Release.
@@ -207,6 +207,9 @@ add_subdirectory(python)
 if(ANNC_ENABLE_TENSORFLOW_ADDON)
   add_subdirectory(tensorflow_addons)
 endif()
+# Framework frontends, registered after the ANNC libraries they link against.
+# frontends/CMakeLists.txt applies the per-framework switches.
+add_subdirectory(frontends)
 
 if(BUILD_TESTING)
   add_subdirectory(tests)

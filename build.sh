@@ -152,7 +152,7 @@ while [[ $# -gt 0 ]]; do
       echo "                                annc-converter, annc-tf-pipeline) and its addons"
       echo "  --disable-tensorflow-addon    Disable the TensorFlow addons (annc_optimizer, annc_fused_op);"
       echo "                                the TensorFlow frontend tools are still built"
-      echo "  --disable-onnx                Disable the ONNX frontend (its protobuf sources)"
+      echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
       echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
       echo "                                third_party (LLVM/json) build type is unchanged"
@@ -281,8 +281,8 @@ if ! command -v ninja >/dev/null 2>&1; then
   exit 1
 fi
 
-# annc-tf2atir parses TensorFlow GraphDefs using the system Protobuf C++
-# library, and both protobuf source sets (TensorFlow, ONNX) are generated with a
+# annc-tf2atir and annc-onnx2atir parse GraphDefs/models using the system
+# Protobuf C++ library, and both protobuf source sets are generated with a
 # matching protoc. Neither framework's Python package provides this development
 # dependency, so detect the common package-managed setup before CMake starts.
 # With both frontends disabled nothing needs protobuf at all.
