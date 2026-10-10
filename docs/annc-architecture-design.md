@@ -210,7 +210,7 @@ flowchart TB
 | 影响维度                | 影响说明                                 | 应对措施                                |
 | ------------------- | ------------------------------------ | ----------------------------------- |
 | **优化能力复用效率**        | 新框架接入时仅需开发前端适配器，复用已有 ATIR 优化和算子接入能力  | 定义稳定的 NodeInfo 接口契约，降低前端适配成本        |
-| **前端适配覆盖度**         | 当前仅 TF 前端完整，ONNX 在规划中，PyTorch 未纳入    | 优先覆盖客户量最大的框架，通过 NodeInfo 抽象降低边际适配成本 |
+| **前端适配覆盖度**         | TF 前端完整；ONNX 前端已落地（覆盖融合子图所需算子子集），PyTorch 未纳入 | 优先覆盖客户量最大的框架，通过 NodeInfo 抽象降低边际适配成本 |
 | **TF Serving 启动时延** | 首次加载模型需执行编译 pipeline                 | 离线预编译、图优化缓存（未来）、合理设置 timeout        |
 | **磁盘空间**            | 构建 LLVM/MLIR 需约 50GB                 | 构建机独立环境、增量构建                        |
 | **构建环境**            | 依赖 openEuler、鲲鹏 920X、TensorFlow 2.20 | 明确依赖清单，提供 build.sh 一键构建             |
@@ -546,6 +546,7 @@ sequenceDiagram
 | 模块                                | 职责                            | 对外接口                                        | 所属层        | 稳定性 |
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
 | `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N] [--intra_thread_count N]`（未指定时保留动态 shape；线程数写入 module 属性） | ANNC 框架对接层 | 稳定  |
+| `frontends/onnx/onnx2atir`        | ONNX 模型 → ATIR MLIR           | CLI：`annc-onnx2atir <model.onnx> [-o out.mlir] [--dump-stats JSON] [--dump-inference JSON] [--strict] [--relaxed-opset] [--quiet]`；op 覆盖为目标融合子图所需子集，不支持控制流 | ANNC 框架对接层 | 早期  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
@@ -738,12 +739,13 @@ flowchart TB
 ### 7.3 可演进性
 
 - **三层架构**：ANNC 框架对接层、工具链前端、工具链后端独立演进。
-- **前端扩展**：`NodeInfo` 抽象支持未来 ONNX 前端。
+- **前端扩展**：`NodeInfo` 抽象已支撑 ONNX 前端接入（`frontends/onnx/onnx2atir/`），后续框架前端沿用同一契约；各框架前端由 `frontends/CMakeLists.txt` 按构建开关注册。
 - **后端扩展**：`KernelRegistry` 支持新 backend 注册。
 - **Pass 插件化**：ATIR Pass 通过 MLIR Pass 机制注册，便于新增融合策略。
 
 ### 7.4 开放性
 
+- **框架前端开放**：框架前端集中在 `frontends/<framework>/`，由 `ANNC_ENABLE_<FRAMEWORK>` 与 `frontends/CMakeLists.txt` 注册；新增框架前端不改动其他框架的构建路径。
 - **标准 IR**：基于 MLIR/LLVM 生态， lowered IR 可被标准 MLIR 工具分析。
 - **标准 C ABI**：Kernel 通过 `_mlir_ciface_*` 暴露，可被外部调用。
 - **Python 绑定**：`python/annc` 提供 ATIR 构建能力，便于原型开发。
@@ -834,7 +836,8 @@ flowchart TB
 ### 9.4 遗留问题
 
 - GEMM MLIR 优化路径的 Lowering 策略（Affine vs Linalg）尚未收敛，Linalg 路径仅 MatMul/Customize 实现完整。
-- ONNX 前端支持处于规划阶段。
+- LLM 自动生成路径和 XLA 接入路径处于开发/规划阶段。
+- ONNX 前端已实现（`frontends/onnx/onnx2atir/`），op 覆盖以目标融合子图所需子集为准，尚未做全量 op 覆盖与控制流。
 - `ANNCOptimizer` 会向 annc-tf-pipeline 透传 `--backend` 参数，但 pipeline 当前不解析该参数（静默忽略），存在接口漂移，需对齐。
 - `ANNCOptimizer::Init()` 未实现 `pipeline_path` 启动期校验（见 5.6 节），`timeout_seconds` 等配置无范围校验，需补强。
 
@@ -852,7 +855,7 @@ flowchart TB
 | FR-006 | 动态 Shape 支持                          | annc-converter + ANNCFusedOp             | 中   | 已实现  | 编译器开发团队             |
 | FR-007 | 自定义 Kernel 扩展                        | annc/lib/Kernel                          | 中   | 已实现  | AI 技术创新团队           |
 | FR-009 | Embedding 层优化（访存密集型融合 + 通用 Lowering） | annc-opt / Dialect/Atir / Target/aarch64 | 高   | 部分实现 | 编译器开发团队 + AI 技术创新团队 |
-| US-010 | ONNX 前端支持                            | annc/tools/annc-tf2atir                  | 中   | 规划中  | 编译器开发团队             |
+| US-010 | ONNX 前端支持                            | frontends/onnx/onnx2atir                 | 中   | 已实现（算子子集） | 编译器开发团队             |
 | US-011 | 自定义 Kernel 注册                        | annc/lib/Kernel                          | 中   | 已实现  | AI 技术创新团队           |
 | US-013 | Embedding Lookup 聚合                  | annc-opt / Dialect/Atir                  | 高   | 已实现  | 编译器开发团队             |
 | US-014 | GEMM MLIR 优化路径收敛                     | Target/aarch64 + Conversion              | 中   | 开发中  | AI 技术创新团队           |
@@ -908,7 +911,7 @@ flowchart TB
 | \[3] | TensorFlow GraphDef 格式 | <https://www.tensorflow.org/> | 输入模型格式参考       |
 | \[4] | MLIR 文档                | <https://mlir.llvm.org/>      | 中间表示与 Pass 机制  |
 | \[5] | LLVM 文档                | <https://llvm.org/>           | 代码生成基础设施       |
-| \[6] | ONNX 规范                | <https://onnx.ai/>            | 规划中的前端格式       |
+| \[6] | ONNX 规范                | <https://onnx.ai/>            | ONNX 前端输入格式      |
 | \[7] | openEuler 文档           | <https://openeuler.org/zh/>   | 目标操作系统         |
 
 ***

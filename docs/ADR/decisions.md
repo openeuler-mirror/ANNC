@@ -116,11 +116,11 @@
 
 <a id="adr-011"></a>
 
-## ADR-011：按 predictor 编译路径收敛 Pass 与 lowering
+## ADR-011：ONNX 前端接入与"不可表达即降级"契约
 
 | 项目 | 内容 |
 | --- | --- |
-| **上下文** | predictor 测试使用 ATIR 图优化、FastCodegen、ATIR→Linalg 和 AArch64 GEMM pipeline；旧 Distribute/ATIR 单级 tiling/ATIR→Affine/旧后端分块链路未进入 predictor 流程，增加注册、构建和维护成本。 |
-| **决策** | 移除 BlockFusion、Tiling、Unroll、Distribute、Canonicalize、SelectLoweringStrategy、EltwiseFusion、LLMCodeGen、ATIR→Affine 转换及旧后端五个分块/打包 Pass，并移除只供该路径使用的 LoweringConfigAttr、专属脚本和测试。保留 ATIR→Linalg、FastCodegen、AArch64 GEMM pipeline 及其现有 AOT/JIT 调用方式。 |
-| **后果** | CLI 与 Python Pass 注册不再提供被移除的名称；依赖旧 pass、ATIR→Affine 或 `lowering_config` 属性的外部脚本需改用保留的 pipeline。predictor AOT 产物生成与 JIT 编译路径保持一致。 |
-| **备选方案** | 继续保留旧链路及其专属测试，或只停用注册但仍编译旧源码；两者均无法完成本轮工程瘦身。 |
+| **上下文** | 需要把 ONNX 模型接入既有 ATIR 优化与后端，而不是另起一套框架专属优化。可复用的部分只有 ATIR 与共享 builder 引擎（`MLIRBuilder`）：TF 与 ONNX 对**同名算子**语义不同（ONNX `Sum` 是变参逐元素加、TF `Sum` 是归约；ONNX `Gather` 的 axis 是 attribute、TF `GatherV2` 是第三个 operand），直接共用一张 op 规格表必然静默错译。此外 ONNX 的算子 schema 随 opset 漂移（`Squeeze`/`ReduceSum` 的 axes 在 opset 13 从 attribute 变 operand、`Softmax` 的默认 axis 从 1 变 -1），而 ATIR 当前的数值语义是 float32 优先（`Interpret/` 的元素级实现统一走 `getFloatValues`，`Target/aarch64` 无整型算术路径），两者之间存在无法靠 op 名对齐的表达差距。 |
+| **决策** | (1) **位置**：新框架前端放 `frontends/<framework>/`，由 `frontends/CMakeLists.txt` 按 `ANNC_ENABLE_<FRAMEWORK>` 注册，不进 `annc/tools/`（避免核心目录膨胀，新增框架不改其它框架的构建路径）。(2) **复用接缝**：前端继承 `MLIRBuilder`，只替换两处虚接缝——`lookupSpec`（ONNX 专表，与 TF 表分离）与 `shouldLowerToOpaque`（逐节点降级判定）；节点校验、op 构造、属性映射、metadata、诊断全部继承。(3) **opset**：只支持 `ai.onnx` opset 13，其它版本默认整体拒绝（表按一个 opset 建立，换版本会静默错译）；`--relaxed-opset` 时按算子敏感表逐节点降级并以 `OP_SET_MISMATCH` 记录。(4) **降级契约**：任何无法忠实表达的节点（无表行、变参 arity 超出表行、不支持的属性/元素类型、rank 未知、opset 漂移）一律降级为 `atir.opaque`，并写入机器可读 reason；配套 provenance 逐节点审计、`nodes_accounted`/`opaque_nodes_match` 守恒校验、`--strict` 与退出码 0/2/1。前端内部状态（降级标记、归一化后的 Slice 窗口）以 `NodeInfo::attrs` 中前导下划线的私有属性传递，构建器保证其**不进入** emitted metadata。(5) **边界**：不做控制流（含 GRAPH 属性的模型整体拒绝而非部分导入，否则守恒账目会出现缺口）；不支持 float8/int4 等 ATIR 无法承载的元素类型（普通节点降级为 `UNSUPPORTED_DTYPE`，initializer 因 payload 无法解码而响亮失败）。(6) **dtype 门禁**：ATIR 数值路径为 float32 优先，因此对 `Div/Pow/Sqrt/Reciprocal/Abs/Min/Max/Mod/Equal/Greater/Less` 的整型输入逐节点降级为 `UNSUPPORTED_DTYPE`；`Add/Sub/Mul/Tile` 等索引与形状算术**暂不设门禁**（同受 float32 约束，但只在 |v| > 2^24 时失真），作为已知缺口记录，待 ATIR 补齐整型内核后统一放开。 |
+| **后果** | ✅ ONNX 前端复用 ATIR 优化与 AArch64 后端，新增框架的成本收敛为"一张表 + 一个适配器 + 一组 transformer"；✅ 没有静默漏节点：每个模型节点、initializer 与图输出都有 provenance 行，覆盖率报告可审计，退出码区分"全映射/有降级/硬错误"；✅ 同名算子语义分歧（`Sum`、`Gather`）被表分离结构性隔离。❌ op 覆盖是目标融合子图所需的**子集**，子图之外的模型会大量落到 `atir.opaque` 或被整体拒绝；❌ 保守的 dtype 门禁牺牲整型模型的映射率（整型 `Min`/`Max`/`Div` 等可直接降级）；❌ `Add/Sub/Mul` 的整型路径仍是潜在静默失真点，需要 ADR 之外的工作（ATIR 整型内核）才能真正闭合；❌ opset 13 之外的模型需要重跑或显式放宽。 |
+| **备选方案** | (a) 与 TF 共用一张 op 规格表——同名不同义（`Sum`/`Gather`）会静默错译，正是拆表的理由；(b) 无表行的节点直接报错——与"逐节点降级、绝不整体拒绝"的架构目标冲突，且单点缺失会放大为全模型不可导入；(c) 把 ONNX 前端放进 `annc/tools/`——与 §8「核心模块膨胀控制」冲突，且会把框架差异渗进 TF 前端；(d) 支持多 opset 自适应——需要按 opset 分版本建表，属未来工作。 |

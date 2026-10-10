@@ -67,7 +67,7 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party（LLVM/json）保持原构建类型、不重编
 > - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon
 > - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建
-> - `--disable-onnx`：关闭 ONNX 前端（跳过其 protobuf 源码生成）
+> - `--disable-onnx`：关闭 ONNX 前端（`annc-onnx2atir`）
 > - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
 
 只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
@@ -125,6 +125,9 @@ python3 -m pytest tests/test_config_fusion_kp_fused_gather.py -v  # 单个测试
 TF SavedModel/GraphDef
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
+ONNX .onnx
+  └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
+
 ATIR MLIR
   ├─→ annc-opt (--atir-rank-inference, --atir-identity-canonicalize, --atir-gemm-epilogue-fusion, --atir-op-fusion) → 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
@@ -159,6 +162,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | 工具 | 功能 |
 |------|------|
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
+| [`annc-onnx2atir`](docs/Feature/onnx-frontend-architecture-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
 | `annc-opt` | ATIR 优化（算子融合、块融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |
 | `annc-asm` | ATIR → lowered MLIR（affine/linalg） |
@@ -183,6 +187,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | 目录 | 内容 |
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
+| `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema 与生成脚本），按框架开关注册 |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
@@ -524,7 +529,7 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
-| `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 启用 ONNX 前端并生成其 protobuf 源码；对应 `build.sh --disable-onnx` |
+| `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |

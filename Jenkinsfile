@@ -33,7 +33,7 @@
 //    - 若 Deps Check 阶段报 "missing required python packages"，请按上述命令安装。
 //    - TensorFlow 只在构建 TF addon 时需要：勾选 DISABLE_TENSORFLOW 或
 //      DISABLE_TENSORFLOW_ADDON 参数后 Deps Check 不再要求 tensorflow；
-//      勾选 DISABLE_ONNX 则跳过 ONNX 前端的构建与 proto 生成校验。
+//      勾选 DISABLE_ONNX 则跳过 ONNX 前端的构建与安装校验。
 //
 // 4. 磁盘空间要求
 //    - 首次编译 LLVM 需要约 50GB 磁盘空间
@@ -246,7 +246,7 @@ PY
                     test -f "${INSTALL_PREFIX}/bin/annc"
                     test -f "${INSTALL_PREFIX}/bin/annc-verify"
                     # 前端与 addon 产物按本次构建的开关检查；默认（全开）时
-                    # 覆盖 TF 三工具与两个 addon 库。
+                    # 覆盖 TF 三工具、两个 addon 库与 ONNX 前端。
                     if [ "${ANNC_TF_ENABLED}" = "1" ]; then
                       test -f "${INSTALL_PREFIX}/bin/annc-tf-pipeline"
                       test -f "${INSTALL_PREFIX}/bin/annc-converter"
@@ -255,6 +255,9 @@ PY
                     if [ "${ANNC_TF_ADDON_ENABLED}" = "1" ]; then
                       test -f "${INSTALL_PREFIX}/lib/libannc_optimizer.so"
                       test -f "${INSTALL_PREFIX}/lib/libannc_fused_op.so"
+                    fi
+                    if [ "${ANNC_ONNX_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/bin/annc-onnx2atir"
                     fi
                     echo "Install directory size:"
                     du -sh "${INSTALL_PREFIX}"
