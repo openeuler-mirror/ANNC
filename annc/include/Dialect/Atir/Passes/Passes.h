@@ -11,24 +11,16 @@ namespace atir {
 #define GEN_PASS_DECL
 #include "Dialect/Atir/Passes/Passes.h.inc"
 
-std::unique_ptr<OperationPass<ModuleOp>> createAtirTilingPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirOpFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirConfigFusionPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirIdentityCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirGemmEpilogueFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirFoldBatchNormPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirRankInferencePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirDistributePass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirBlockFusionPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirUnrollPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirEltwiseFusionPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirLLMCodeGenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirPruneFuncPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectKernelPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSpecializeShapesPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectLoweringStrategyPass();
 void populateAtirOpFusionPatterns(RewritePatternSet &patterns);
 
 #define GEN_PASS_REGISTRATION

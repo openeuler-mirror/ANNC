@@ -3,24 +3,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-/* Tiling */
-def AtirTiling : Pass<"atir-tiling", "ModuleOp"> {
-  let summary = "tensor tiling";
-  let constructor = "createAtirTilingPass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
-/* Canonicalize */
-def AtirCanonicalize : Pass<"atir-canonicalize", "ModuleOp"> {
-  let summary = "constant canonicalize";
-  let constructor = "createAtirCanonicalizePass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
 /* Identity Canonicalize */
 def AtirIdentityCanonicalize : Pass<"atir-identity-canonicalize", "ModuleOp"> {
   let summary = "eliminate redundant ATIR Identity operations";
@@ -51,15 +33,6 @@ def AtirFoldBatchNorm : Pass<"atir-fold-batch-norm", "ModuleOp"> {
 def AtirRankInference : Pass<"atir-rank-inference", "ModuleOp"> {
   let summary = "infer tensor ranks for rank_known=false values from TF op semantics";
   let constructor = "createAtirRankInferencePass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
-/* Select Lowering Strategy */
-def AtirSelectLoweringStrategy : Pass<"atir-select-lowering-strategy", "ModuleOp"> {
-  let summary = "select lowering strategy";
-  let constructor = "createAtirSelectLoweringStrategyPass()";
   let dependentDialects = [
     "AtirDialect"
   ];
@@ -113,24 +86,6 @@ def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
   ];
 }
 
-/* distribute pass */
-def AtirDistribute : Pass<"atir-distribute", "ModuleOp"> {
-  let summary = "distribute";
-  let constructor = "createAtirDistributePass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
-/* block-fusion pass */
-def AtirBlockFusion : Pass<"atir-block-fusion", "ModuleOp"> {
-  let summary = "block fusion";
-  let constructor = "createAtirBlockFusionPass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
 /* prune-func pass */
 def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
   let summary = "prune func";
@@ -164,33 +119,6 @@ def AtirSpecializeShapes : Pass<"atir-specialize-shapes", "ModuleOp"> {
            "Path to the runtime shape specification JSON">
   ];
   let dependentDialects = ["AtirDialect"];
-}
-
-/* unroll pass */
-def AtirUnroll : Pass<"atir-unroll", "ModuleOp"> {
-  let summary = "unroll";
-  let constructor = "createAtirUnrollPass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
-/* eltwise pass */
-def AtirEltwiseFusion : Pass<"atir-Eltwise", "ModuleOp"> {
-  let summary = "eltwise fusion";
-  let constructor = "createAtirEltwiseFusionPass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
-}
-
-/* llm pass */
-def AtirLLMCodeGen : Pass<"atir-LLM-CodeGen", "ModuleOp"> {
-  let summary = "LLM CodeGen";
-  let constructor = "createAtirLLMCodeGenPass()";
-  let dependentDialects = [
-    "AtirDialect"
-  ];
 }
 
 #endif // ATIR_ALL_PASSES_TD

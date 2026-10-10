@@ -114,7 +114,7 @@ which annc-opt annc-asm
 
 # 运行测试
 python3 -m pytest tests/          # 全部测试
-python3 -m pytest tests/test_asm.py -v  # 单个测试文件
+python3 -m pytest tests/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
 ```
 
 ## 架构概览
@@ -129,10 +129,10 @@ ONNX .onnx
   └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
 
 ATIR MLIR
-  ├─→ annc-opt (--atir-identity-canonicalize, --atir-op-fusion, --atir-block-fusion) → 融合后的 ATIR
+  ├─→ annc-opt (--atir-rank-inference, --atir-identity-canonicalize, --atir-gemm-epilogue-fusion, --atir-op-fusion) → 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
-  ├─→ annc-asm (--atir-prune-func, --atir-tiling, --atir-unroll, --convert-atir-to-affine)
-  │     └─→ lowered MLIR (affine/linalg)
+  ├─→ annc-asm (--atir-fast-codegen, --annc-aarch64-gemm-pipeline)
+  │     └─→ lowered MLIR (linalg/affine/scf)
   ├─→ annc → .so / 可执行文件（driver: mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证
   └─→ annc-converter → TF GraphDef（ANNCFused 图重写）
@@ -146,7 +146,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 
 - **源码位置**：`annc/lib/Dialect/Atir/`（实现），`annc/include/Dialect/Atir/`（TableGen TD 定义）
 - **核心 Op**：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
-- **优化 Pass**：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
+- **优化 Pass**：`RankInference`、`IdentityCanonicalize`、`GemmEpilogueFusion`、`OpFusion`、`ConfigFusion`、`PruneFunc`、`SelectKernel`、`SpecializeShapes`、`FastCodegen`、`FoldBatchNorm`
 - **接口**：`ShapeInfer`（形状推导）、`Interpret`（解释执行）
 - **验证**：OpVerify（通过 `kpGenLibPath` 指定 kernel，执行正确性验证）
 
@@ -155,8 +155,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | 路径 | 说明 |
 |------|------|
 | `Conversion/AtirToLinalg/` | ATIR → Linalg（通用路径） |
-| `Conversion/AtirToAffine/` | ATIR → Affine（主要路径） |
-| `Target/aarch64/` | AArch64 后端：`MatmulPackAffine`、`VectorReduction`、`VectorCommonParallel`、`CacheParallel`、`CacheReduction`、`AnncOneShotBufferize` |
+| `Target/aarch64/` | AArch64 GEMM 规划、分块与微内核 lowering |
 
 ### 工具矩阵
 
@@ -249,10 +248,11 @@ annc-opt raw.mlir \
 annc-fusion-metadata fused.mlir \
   -o fusion_metadata.json
 
-# 4. ATIR lowering 到 affine/linalg 等低层 MLIR
-annc-asm fused.mlir \
-  --atir-prune-func \
-  --convert-atir-to-affine \
+# 4. 筛选 AOT kernel，再 lowering 到低层 MLIR
+annc-opt fused.mlir --atir-prune-func=execution-mode=aot -o aot.mlir
+annc-asm aot.mlir \
+  --atir-fast-codegen \
+  --annc-aarch64-gemm-pipeline \
   -o lowered.mlir
 
 # 5. lowered MLIR -> 共享库
@@ -290,9 +290,8 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 |------|------|
 | `--atir-identity-canonicalize` | 清理语义等价的 Identity 透传，供后续融合匹配规范化图形 |
 | `--atir-op-fusion` | 算子融合 |
-| `--atir-block-fusion` | 块融合 |
-| `--atir-Eltwise` | Elementwise 融合（当前为占位 stub） |
-| `--atir-select-lowering-strategy` | 选择 lowering 策略 |
+| `--atir-rank-inference` | 推断未知张量秩 |
+| `--atir-gemm-epilogue-fusion` | 识别 GEMM epilogue 融合候选 |
 
 ### `annc-fusion-metadata`
 
@@ -351,25 +350,14 @@ annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
 
 ### `annc-asm`
 
-`annc-asm` 是注册了 ATIR、转换 pass 和 AArch64 target pass 的 `mlir-opt` 风格工具，用于将 ATIR lowering 到 affine/linalg 等低层 MLIR。
+`annc-asm` 是注册了 ATIR、转换 pass 和 AArch64 target pass 的 `mlir-opt` 风格工具，用于将 ATIR lowering 到低层 MLIR。
 
 ```shell
-annc-asm model_fused_atir.mlir \
-  --atir-prune-func \
-  --convert-atir-to-affine \
+annc-opt model_fused_atir.mlir --atir-prune-func=execution-mode=aot -o model_aot_atir.mlir
+annc-asm model_aot_atir.mlir \
+  --atir-fast-codegen \
+  --annc-aarch64-gemm-pipeline \
   -o model_lowered.mlir
-```
-
-更完整的示例：
-
-```shell
-annc-asm output.bin \
-  --atir-prune-func \
-  --atir-block-fusion \
-  --atir-tiling \
-  --atir-unroll \
-  --convert-atir-to-affine \
-  -o asm.mlir
 ```
 
 `--atir-fast-codegen` 默认允许非 GEMM 的已注册自定义算子类型；`MatMul`、
@@ -382,12 +370,12 @@ denylist 优先级更高：
 # 只允许 MatMulAdd，其他自定义算子保持原 ATIR
 annc-asm model_fused_atir.mlir \
   "--atir-fast-codegen=enable-custom-ops=MatMulAdd" \
-  --convert-atir-to-affine -o model_lowered.mlir
+  --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 
 # 禁用 MatMul，MatMulAdd / MatMulAddRelu 等其他类型仍可改写
 annc-asm model_fused_atir.mlir \
   "--atir-fast-codegen=disable-custom-ops=MatMul" \
-  --convert-atir-to-affine -o model_lowered.mlir
+  --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 ```
 
 端到端流程或其他不便修改 `annc-asm` 参数的调用方，可设置进程环境变量：

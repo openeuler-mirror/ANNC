@@ -1,4 +1,4 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen -convert-atir-to-affine | FileCheck %s
+// RUN: annc-asm --split-input-file %s -atir-fast-codegen -convert-atir-to-linalg | FileCheck %s
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=FAST
 
 // CHECK-LABEL: func.func private @fused_matmul_add_relu(

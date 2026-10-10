@@ -14,7 +14,6 @@ set(LIBS
   AtirDialect
   AtirBuilder
   AtirPasses
-  AtirToAffineConversion
   AtirToLinalgConversion
   AArch64Codegen
 )
@@ -34,7 +33,6 @@ target_link_libraries(annc-asm PRIVATE
   MLIRParser
   AtirDialect
   AtirBuilder
-  AtirToAffineConversion
   AtirToLinalgConversion
   AArch64Codegen
 )

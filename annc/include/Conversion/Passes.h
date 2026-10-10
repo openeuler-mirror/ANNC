@@ -13,7 +13,6 @@
 using namespace mlir;
 namespace atir {
 
-std::unique_ptr<mlir::Pass> createConvertAtirToAffine();
 std::unique_ptr<mlir::Pass> createConvertAtirToLinalg();
 
 #define GEN_PASS_REGISTRATION

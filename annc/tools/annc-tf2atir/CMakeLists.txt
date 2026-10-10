@@ -123,7 +123,6 @@ endif()
 
 target_link_libraries(annc-tf2atir PRIVATE
     AtirBuilder AtirDialect AtirPasses
-    AtirToAffineConversion
     AtirToLinalgConversion
     MLIRArithDialect
     MLIROptLib

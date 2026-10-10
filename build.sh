@@ -715,7 +715,6 @@ check_source_glob_changes() {
     "annc/lib/Dialect/Atir/Interfaces|Interpret"
     "annc/lib/Builder|"
     "annc/lib/Conversion/Common|"
-    "annc/lib/Conversion/AtirToAffine|"
     "annc/lib/Conversion/AtirToLinalg|"
     "annc/lib/Target/aarch64|"
   )

@@ -4,9 +4,6 @@
 
 namespace atir {
 void registerAllAtirPasses() {
-    atir::registerAtirDistributePass();
-    atir::registerAtirTilingPass();
-    atir::registerAtirCanonicalizePass();
     atir::registerAtirIdentityCanonicalizePass();
     atir::registerAtirGemmEpilogueFusionPass();
     atir::registerAtirFoldBatchNormPass();
@@ -14,12 +11,8 @@ void registerAllAtirPasses() {
     atir::registerAtirOpFusionPass();
     atir::registerAtirConfigFusionPass();
     atir::registerAtirFastCodegenPass();
-    atir::registerAtirBlockFusionPass();
-    atir::registerAtirUnrollPass();
-    atir::registerAtirEltwiseFusionPass();
     atir::registerAtirPruneFuncPass();
     atir::registerAtirSelectKernelPass();
     atir::registerAtirSpecializeShapesPass();
-    atir::registerAtirSelectLoweringStrategyPass();
 }
 }  // namespace atir

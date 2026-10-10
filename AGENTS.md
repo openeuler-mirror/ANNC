@@ -109,10 +109,10 @@ ONNX .onnx
   └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
 
 ATIR MLIR
-  ├─→ annc-opt（--atir-op-fusion、--atir-block-fusion）→ 融合后的 ATIR
+  ├─→ annc-opt（--atir-rank-inference、--atir-identity-canonicalize、--atir-gemm-epilogue-fusion、--atir-op-fusion）→ 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
-  ├─→ annc-asm（--atir-prune-func、--atir-tiling、--atir-unroll、--convert-atir-to-affine）
-  │     └─→ lowered MLIR（affine/linalg）
+  ├─→ annc-asm（--atir-fast-codegen、--annc-aarch64-gemm-pipeline）
+  │     └─→ lowered MLIR（linalg/affine/scf）
   ├─→ annc → .so / 可执行文件（driver：mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证
   └─→ annc-converter → TF SavedModel/GraphDef（反向转换 + GraphDef 重写）
@@ -124,7 +124,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 - 位置：`annc/lib/Dialect/Atir/`（实现）、`annc/include/Dialect/Atir/`（TableGen TD 定义）
 - 核心 Op：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
-- Passes：`OpFusion`、`EltwiseFusion`、`BlockFusion`、`Tiling`、`Unroll`、`PruneFunc`、`LLMCodeGen`、`FastCodegen`、`Canonicalize`、`SelectLoweringStrategy`、`Distribute`
+- Passes：`RankInference`、`IdentityCanonicalize`、`GemmEpilogueFusion`、`OpFusion`、`ConfigFusion`、`PruneFunc`、`SelectKernel`、`SpecializeShapes`、`FastCodegen`、`FoldBatchNorm`
 - Interfaces：`ShapeInfer`（形状推导）、`Interpret`（解释执行，实现在 `Interfaces/Interpret/` 中）
 - OpVerify：kernel 正确性验证（通过 `kpGenLibPath` / `llmGenLibPath` 指定验证库路径）
 
@@ -132,8 +132,7 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 - `Conversion/Common/` — 公共 lowering 工具（`AtirLowering`、`InputTypeConverter`）
 - `Conversion/AtirToLinalg/` — ATIR → Linalg（通用路径）
-- `Conversion/AtirToAffine/` — ATIR → Affine（主要路径）
-- `Target/aarch64/` — AArch64 后端 pass 集合（如 `MatmulPackAffine`、`VectorReduction` 等）
+- `Target/aarch64/` — AArch64 GEMM 规划、分块与微内核 lowering Pass
 
 ### 工具矩阵
 
