@@ -71,6 +71,7 @@ struct Site {
   struct Arg {
     std::string name;
     std::string role;
+    std::string dtype;
     int64_t rank = -1;
     std::vector<int64_t> shape;
   };

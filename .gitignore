@@ -40,5 +40,7 @@ tmp/
 
 # Generated ONNX protobuf sources (frontends/onnx/protos/onnx/onnx.proto and
 # frontends/onnx/protos/onnx_protos_minimal.sh are hand-maintained and
-# committed; only the generated tree is ignored).
-frontends/onnx/protos/gen_code/
+# committed; only the generated tree is ignored). No trailing slash: a local
+# build tree may satisfy the dependency with a symlink, and git sees that as a
+# file.
+frontends/onnx/protos/gen_code

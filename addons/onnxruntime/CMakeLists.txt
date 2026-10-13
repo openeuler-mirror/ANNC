@@ -28,6 +28,7 @@ add_library(annc_ep SHARED
     annc_ep_site.cc
     annc_ep_graph_export.cc
     annc_ep_compile.cc
+    annc_ep_execution.cc
     ${ONNX_PROTO_SRCS}
 )
 target_include_directories(annc_ep SYSTEM PRIVATE
@@ -40,6 +41,9 @@ target_include_directories(annc_ep SYSTEM PRIVATE
 target_include_directories(annc_ep PRIVATE
     "${Protobuf_INCLUDE_DIRS}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    # Execution-context ABI and the AnncThreadPool interface the context
+    # carries into the kernels. Header-only use: the plugin never links ANNC.
+    "${CMAKE_SOURCE_DIR}/annc/include"
 )
 
 find_package(PkgConfig QUIET)
