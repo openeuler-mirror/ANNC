@@ -7,6 +7,7 @@
 
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
+#include "Support/ThreadPool/ThreadPool.h"
 #include "llvm/Support/Error.h"
 
 namespace annc::kernels::execution {
@@ -29,23 +30,64 @@ inline llvm::Error error(const AnncExecutionContext* context,
   return llvm::createStringError(llvm::inconvertibleErrorCode(), "%s", message);
 }
 
+inline bool isV3Context(const AnncExecutionContext* context) {
+  return context != nullptr &&
+         context->struct_size == sizeof(AnncExecutionContext) &&
+         context->abi_version == ANNC_EXECUTION_ABI_VERSION;
+}
+
+inline bool isV2Context(const AnncExecutionContext* context) {
+  return context != nullptr &&
+         context->struct_size == ANNC_EXECUTION_V2_CONTEXT_SIZE &&
+         context->abi_version == ANNC_EXECUTION_V2_ABI_VERSION;
+}
+
+// Both context layouts are accepted: every field except `thread_pool` sits at
+// the same offset, so the callbacks are usable from either. Reading
+// `thread_pool` off a v2 context would overrun the host's object -- use
+// threadPool() below, never the field directly.
 inline llvm::Error validateContext(const AnncExecutionContext* context) {
   if (context == nullptr) {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "execution context is null");
   }
-  if (context->struct_size != sizeof(AnncExecutionContext)) {
+  if (!isV2Context(context) && !isV3Context(context)) {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "invalid execution context size");
+                                   "invalid execution context size or version");
   }
-  if (context->abi_version != ANNC_EXECUTION_ABI_VERSION ||
-      context->handle == nullptr ||
-      context->allocate_output == nullptr || context->allocate_temp == nullptr ||
+  if (context->handle == nullptr ||
+      context->allocate_output == nullptr ||
+      context->allocate_temp == nullptr ||
       context->report_error == nullptr) {
     return error(context, ANNC_STATUS_INVALID_ARGUMENT,
                  "invalid execution context");
   }
   return llvm::Error::success();
+}
+
+// Returns the thread pool carried by the context (ABI v3), or nullptr when the
+// host supplied the v2 layout or left the field empty. The host guarantees the
+// pool outlives the call that received the context.
+inline annc::threadpool::AnncThreadPool* threadPool(
+    const AnncExecutionContext* context) {
+  constexpr uint32_t kThreadPoolFieldEnd =
+      ANNC_EXECUTION_V2_CONTEXT_SIZE + sizeof(AnncThreadPoolHandle*);
+  if (context == nullptr || context->struct_size < kThreadPoolFieldEnd ||
+      context->abi_version < ANNC_EXECUTION_ABI_VERSION) {
+    return nullptr;
+  }
+  return reinterpret_cast<annc::threadpool::AnncThreadPool*>(
+      context->thread_pool);
+}
+
+// Pool lookup for kernels: the context pool wins; when the context carries
+// none, fall back to the pool the host injected into this library's TLS (the
+// TensorFlow path). Returns nullptr when neither channel is populated, and
+// parallel_for then runs the callback serially.
+inline annc::threadpool::AnncThreadPool* resolveThreadPool(
+    const AnncExecutionContext* context) {
+  if (auto* pool = threadPool(context)) return pool;
+  return annc::threadpool::getCurrentThreadPool();
 }
 
 inline llvm::Expected<size_t> elementSize(AnncElementType type) {
@@ -176,6 +218,13 @@ inline Expected<AnncMemRef2DF32> allocateOutput2DF32(
     int64_t dim1, AnncAllocationFlags flags) {
   const int64_t dims[] = {dim0, dim1};
   return allocate<AnncMemRef2DF32>(context, slot, ANNC_ELEMENT_TYPE_F32, 2, dims,
+                                   flags);
+}
+inline Expected<AnncMemRef3DF32> allocateOutput3DF32(
+    const AnncExecutionContext* context, uint32_t slot, int64_t dim0,
+    int64_t dim1, int64_t dim2, AnncAllocationFlags flags) {
+  const int64_t dims[] = {dim0, dim1, dim2};
+  return allocate<AnncMemRef3DF32>(context, slot, ANNC_ELEMENT_TYPE_F32, 3, dims,
                                    flags);
 }
 inline Expected<AnncMemRef2DI32> allocateOutput2DI32(
