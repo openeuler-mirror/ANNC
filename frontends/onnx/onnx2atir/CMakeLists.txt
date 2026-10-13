@@ -66,7 +66,6 @@ endif()
 
 target_link_libraries(annc-onnx2atir PRIVATE
     AtirBuilder AtirDialect AtirPasses
-    AtirToAffineConversion
     AtirToLinalgConversion
     MLIRArithDialect
     MLIROptLib
