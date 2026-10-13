@@ -93,6 +93,21 @@ if(BUILD_TESTING)
   set_target_properties(annc-ep-compile-test PROPERTIES CXX_STANDARD 17
       CXX_STANDARD_REQUIRED ON)
   gtest_discover_tests(annc-ep-compile-test)
+  # The execution context's failure bookkeeping, driven through a fake OrtApi
+  # (no ORT host needed): the fixture suites never provoke a failing ORT call.
+  add_executable(annc-ep-execution-test
+      annc_ep_execution_test.cpp
+      annc_ep_execution.cc)
+  target_include_directories(annc-ep-execution-test SYSTEM PRIVATE
+      "${ANNC_ONNXRUNTIME_INCLUDE_DIR}")
+  target_include_directories(annc-ep-execution-test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${CMAKE_SOURCE_DIR}/annc/include")
+  target_link_libraries(annc-ep-execution-test PRIVATE
+      GTest::gtest_main ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+  set_target_properties(annc-ep-execution-test PROPERTIES CXX_STANDARD 17
+      CXX_STANDARD_REQUIRED ON)
+  gtest_discover_tests(annc-ep-execution-test PROPERTIES TIMEOUT 60)
   foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report concurrent
                    cache-config missing-pipeline pipeline-failure zero-site)
     add_test(NAME AnncEpAotFixture.${mode}
@@ -101,11 +116,47 @@ if(BUILD_TESTING)
         --ep-library $<TARGET_FILE:annc_ep> --mode ${mode})
     set_tests_properties(AnncEpAotFixture.${mode} PROPERTIES TIMEOUT 60)
   endforeach()
+  # annc_execution_v2 sites: the context callbacks, the pool the context
+  # carries, and the failure paths of both.
+  foreach(mode IN ITEMS normal threads nested concurrent error bad-slot)
+    add_test(NAME AnncEpContextFixture.${mode}
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/ep_context_fixture.py
+        --ep-library $<TARGET_FILE:annc_ep> --mode ${mode})
+    set_tests_properties(AnncEpContextFixture.${mode} PROPERTIES TIMEOUT 120)
+  endforeach()
   add_test(NAME AnncEpFtdmmAotE2e
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/ftdmm_aot_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>)
   set_tests_properties(AnncEpFtdmmAotE2e PROPERTIES TIMEOUT 300)
+  # The context-ABI FTDMM needs the pipeline and kernel library built from
+  # this tree (the legacy e2e can also run against an installed dev pipeline).
+  if(TARGET annc-onnx-pipeline)
+    set(AnncEpFtdmmContextE2eLlvmLibArg "")
+    if(TARGET LLVMSupport)
+      list(APPEND AnncEpFtdmmContextE2eLlvmLibArg
+           --llvm-lib-dir $<TARGET_FILE_DIR:LLVMSupport>)
+    endif()
+    set(AnncEpFtdmmContextE2eExtraLibArgs "")
+    if(TARGET ANNCGemmSupport)
+      list(APPEND AnncEpFtdmmContextE2eExtraLibArgs
+           --extra-lib-dir $<TARGET_FILE_DIR:ANNCGemmSupport>)
+    endif()
+    if(TARGET ANNC::AArch64GemmMicrokernels)
+      list(APPEND AnncEpFtdmmContextE2eExtraLibArgs
+           --extra-lib-dir $<TARGET_FILE_DIR:ANNC::AArch64GemmMicrokernels>)
+    endif()
+    add_test(NAME AnncEpFtdmmContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/ftdmm_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpFtdmmContextE2e PROPERTIES TIMEOUT 600)
+  endif()
 endif()
 
 # The ORT C++ API resolves OrtGetApiBase from the host process at load time, so
