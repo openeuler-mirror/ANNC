@@ -8,12 +8,14 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -146,7 +148,12 @@ int RunCaptured(const std::vector<std::string>& argv, int timeout_seconds,
     ::_exit(127);
   }
 
+  // Establish the process group from the parent too; the child can otherwise
+  // race past setpgid before a timeout tries to signal the group.
+  (void)::setpgid(pid, pid);
   ::close(pipe_fds[1]);
+  const int flags = ::fcntl(pipe_fds[0], F_GETFL, 0);
+  if (flags >= 0) (void)::fcntl(pipe_fds[0], F_SETFL, flags | O_NONBLOCK);
   std::string output;
   char buffer[4096];
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
@@ -171,7 +178,8 @@ int RunCaptured(const std::vector<std::string>& argv, int timeout_seconds,
       status = -1;  // report a timeout, not a signal death
       break;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    struct pollfd poll_fd {pipe_fds[0], POLLIN, 0};
+    (void)::poll(&poll_fd, 1, 20);
   }
   // Drain whatever is left.
   ssize_t got = ::read(pipe_fds[0], buffer, sizeof(buffer));
@@ -188,6 +196,7 @@ int RunCaptured(const std::vector<std::string>& argv, int timeout_seconds,
 
 bool ReadSite(const nlohmann::json& entry, Site* site) {
   if (!entry.is_object()) return false;
+  site->pattern = entry.value("pattern", "");
   site->kernelName = entry.value("kernel_name", "");
   if (site->kernelName.empty()) return false;
   site->executionMode = entry.value("execution_mode", "aot");
@@ -213,7 +222,8 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
       ++position;
     }
   }
-  return true;
+  std::string validation_error;
+  return ValidateSite(*site, &validation_error);
 }
 
 }  // namespace
@@ -224,7 +234,9 @@ std::string CacheEntryPath(const std::string& signature) {
 }
 
 std::string ProcessTempDir() {
-  const std::string dir = CacheRoot() + "/tmp-" + std::to_string(::getpid());
+  static std::atomic<uint64_t> next_id{0};
+  const std::string dir = CacheRoot() + "/tmp-" + std::to_string(::getpid()) +
+                          "-" + std::to_string(next_id.fetch_add(1));
   MakeDirs(dir);
   return dir;
 }
@@ -324,12 +336,22 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
   const std::string donePath = entry + "/" + kDoneMarker;
   g_work_dir = entry + ".work";
 
-  // Fast path: a published entry.
-  if (FileExists(donePath) && FileExists(reportPath) && FileExists(libraryPath)) {
-    if (!ReadReport(reportPath, report, error)) return false;
-    *kernelLibrary = libraryPath;
+  auto loadPublished = [&]() {
+    if (!FileExists(donePath) || !FileExists(reportPath)) return false;
+    SiteReport cached;
+    std::string report_error;
+    if (!ReadReport(reportPath, &cached, &report_error)) return false;
+    // A zero-site model is a successful pipeline result and intentionally has
+    // no shared library. Non-empty reports must have the library before the
+    // marker is considered usable.
+    if (!cached.sites.empty() && !FileExists(libraryPath)) return false;
+    *report = std::move(cached);
+    *kernelLibrary = report->sites.empty() ? std::string() : libraryPath;
     return true;
-  }
+  };
+
+  // Fast path: a published entry.
+  if (loadPublished()) return true;
 
   // Cold path: one compiler per signature across processes. The lock file is
   // opened O_CLOEXEC -- the compile children are grandchildren of this process
@@ -351,11 +373,9 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
     return false;
   }
   // Re-check under the lock: another process may have published meanwhile.
-  if (FileExists(donePath) && FileExists(reportPath) && FileExists(libraryPath)) {
+  if (loadPublished()) {
     ::flock(lock_fd, LOCK_UN);
     ::close(lock_fd);
-    if (!ReadReport(reportPath, report, error)) return false;
-    *kernelLibrary = libraryPath;
     return true;
   }
 
@@ -392,9 +412,13 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
       break;
     }
     std::ofstream done(donePath);
-    done << "ok\n";
+    if (done) done << "ok\n";
     done.close();
-    *kernelLibrary = libraryPath;
+    if (!done) {
+      stage_error = "cannot publish cache marker '" + donePath + "'";
+      break;
+    }
+    *kernelLibrary = report->sites.empty() ? std::string() : libraryPath;
     ok = true;
   } while (false);
 

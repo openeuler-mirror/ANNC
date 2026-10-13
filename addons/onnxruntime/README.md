@@ -14,16 +14,16 @@ export ANNC_ONNXRUNTIME_INCLUDE_DIR=<ORT_ROOT>/include/onnxruntime/core/session
 对应 CMake 选项 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 与 `ANNC_ONNXRUNTIME_INCLUDE_DIR=<path>`。
 该路径必须实际含有 `onnxruntime_c_api.h` 与 `onnxruntime_ep_c_api.h`，缺失时 configure
 直接失败（不自动下载 SDK）；文件存在只验证路径，不代表版本兼容。开启后产出
-`build/lib/libannc_ep.so` 并安装到 `<prefix>/lib/libannc_ep.so`。**EP 编译与宿主加载验收
+`build/lib/libannc_ep.so` 并安装到 `<prefix>/<libdir>/libannc_ep.so`。**EP 编译与宿主加载验收
 须使用 ORT 1.26.0 SDK/runtime**。
 
 > 与 `tensorflow_addons/` 的差异：TF addon 由 `ANNC_ENABLE_TENSORFLOW_ADDON` 控制且默认
 > 构建，本插件的开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭。
 
-> 状态：**运行时编译是唯一形态**（2026-09-29 起；此前的离线 AOT + manifest 路径及其
-> matcher 重放、路径 C 对照实现均已删除，仅存于 git 历史）。端到端实测（`min_ms`，
-> ORT 1.26.0 基线）：接入 ANNC 的模型延迟分别下降 7.33% 与 8.95%，27 个站点输出与
-> 基线逐字节相同。
+> 状态：**运行时编译是唯一形态**（2026-09-29 起）。当前 MR2 接入切片只接受
+> `pattern=matmul`、`abi=mlir_ciface`、AOT site，并按固定 3D lhs + 2D rhs + 3D output
+> 调用；`layer_norm`、`masked_mul`、`batched_matmul_add` 和其他 ABI 必须先完成独立
+> kernel/metadata/Compute 契约后才能申报。四模型性能数据不属于本切片验收。
 
 ## 会话初始化时发生什么
 
@@ -44,7 +44,8 @@ session init
 - **谁决定融合边界**：ANNC 工具链（`annc-opt --atir-op-fusion`），EP 不做任何 pattern
   匹配。EP 按报告里的成员节点名单整体申报，`sites.json` 的 `outputs[0].tf_name` 是
   回映射 ORT 节点的键（EP 导出时自命名，故可精确反查）。
-- **缓存**：`$ANNC_EP_CACHE_DIR/v1/<签名前2位>/<签名>/{sites.json,libannc_kernels.so,DONE}`，
+- **缓存**：`$ANNC_EP_CACHE_DIR/v1/<签名前2位>/<签名>/{sites.json,[libannc_kernels.so],DONE}`，
+  零站点结果不生成共享库；非零站点必须同时存在共享库，
   签名 = EP 版本 ‖ 工具链指纹 ‖ 宿主指纹 ‖ 模型结构签名（丢弃权重内容——kernel 把权重
   当运行时实参）。冷缓存下一次编译（实测 profile1 约 0.6 s、profile4 约 6 s），
   热缓存与不注册 EP 同量级。

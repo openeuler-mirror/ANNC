@@ -68,6 +68,7 @@ std::string ModelSignature(const std::string& modelPath,
 // ---------------------------------------------------------------------------
 
 struct Site {
+  std::string pattern;      // pattern implemented by the current EP ABI
   std::string kernelName;   // ANNC kernel function name (the .so symbol stem)
   std::string executionMode;
   std::string abi;
@@ -80,6 +81,11 @@ struct Site {
 struct SiteReport {
   std::vector<Site> sites;
 };
+
+// Validates the part of the site ABI consumed by the EP. Reports a reason
+// suitable for diagnostics; invalid sites must be ignored before capability
+// registration or cache publication.
+bool ValidateSite(const Site& site, std::string* error);
 
 // Invokes `annc-onnx-pipeline` (the tool that runs the ANNC stages and writes
 // the site report) and reads its output back.

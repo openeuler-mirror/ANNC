@@ -4,6 +4,7 @@
 # ORT headers. The library is compiled against the external ORT SDK and is not
 # linked into any ANNC target; the loader is the ORT host process itself.
 cmake_minimum_required(VERSION 3.15)
+include(GNUInstallDirs)
 
 # Building the plugin needs onnxruntime_c_api.h and onnxruntime_ep_c_api.h; the
 # root CMakeLists.txt fails the configure when the directory does not hold
@@ -24,6 +25,7 @@ file(GLOB_RECURSE ONNX_PROTO_SRCS
 
 add_library(annc_ep SHARED
     annc_ep.cpp
+    annc_ep_site.cc
     annc_ep_graph_export.cc
     annc_ep_compile.cc
     ${ONNX_PROTO_SRCS}
@@ -72,9 +74,25 @@ set_target_properties(annc_ep PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
+if(BUILD_TESTING)
+  find_package(GTest REQUIRED)
+  include(GoogleTest)
+  add_executable(annc-ep-compile-test
+      annc_ep_compile_test.cpp
+      annc_ep_site.cc)
+  target_include_directories(annc-ep-compile-test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${CMAKE_SOURCE_DIR}/third_party/json/include")
+  target_link_libraries(annc-ep-compile-test PRIVATE
+      GTest::gtest_main ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+  set_target_properties(annc-ep-compile-test PROPERTIES CXX_STANDARD 17
+      CXX_STANDARD_REQUIRED ON)
+  gtest_discover_tests(annc-ep-compile-test)
+endif()
+
 # The ORT C++ API resolves OrtGetApiBase from the host process at load time, so
 # the plugin must link with undefined symbols allowed -- the same arrangement
 # the TensorFlow addon uses when its host provides the TF symbols.
 target_link_options(annc_ep PRIVATE
     "-Wl,--allow-shlib-undefined" "-Wl,-z,undefs")
-install(TARGETS annc_ep DESTINATION lib)
+install(TARGETS annc_ep DESTINATION ${CMAKE_INSTALL_LIBDIR})

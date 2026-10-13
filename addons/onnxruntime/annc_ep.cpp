@@ -489,6 +489,12 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
     return nullptr;
   }
 
+  // ORT may ask an EP to evaluate capability for more than one top-level graph
+  // during session construction. Do not retain claims or a library from a
+  // prior graph, otherwise Compile() can match stale node ids.
+  ep->sites.clear();
+  ep->kernel_library.clear();
+
   // One driver per process: the compile memo, the disk cache and the toolchain
   // fingerprint are all process-scoped.
   static annc_ep::CompileDriver driver;
