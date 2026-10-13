@@ -15,6 +15,10 @@ Site ValidSite() {
   site.outputTensor = "t1_0";
   site.flattenXIndex = 0;
   site.weightIndex = 1;
+  site.args = {{"x", "dynamic", 3, {1, 2, 4}},
+               {"w", "fixed", 2, {4, 8}}};
+  site.outputs = {{"y", "output", 3, {1, 2, 8}}};
+  site.kernelArgOrder = {0, 1, 2};
   return site;
 }
 
@@ -62,6 +66,22 @@ TEST(AnncEpSiteValidation, AllowsUnresolvedOperandIndices) {
   site.weightIndex = -1;
   std::string error;
   EXPECT_TRUE(ValidateSite(site, &error)) << error;
+}
+
+TEST(AnncEpSiteValidation, RejectsMismatchedArgumentShape) {
+  Site site = ValidSite();
+  site.args[0].shape.pop_back();
+  std::string error;
+  EXPECT_FALSE(ValidateSite(site, &error));
+  EXPECT_NE(error.find("shape"), std::string::npos);
+}
+
+TEST(AnncEpSiteValidation, RejectsNonPermutationKernelOrder) {
+  Site site = ValidSite();
+  site.kernelArgOrder = {0, 0, 2};
+  std::string error;
+  EXPECT_FALSE(ValidateSite(site, &error));
+  EXPECT_NE(error.find("permutation"), std::string::npos);
 }
 
 }  // namespace

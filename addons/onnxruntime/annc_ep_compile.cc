@@ -204,10 +204,29 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
   site->memberNodes = entry.value("member_node_names", std::vector<std::string>{});
   if (site->memberNodes.empty()) return false;
 
-  if (entry.contains("outputs") && entry["outputs"].is_array() && !entry["outputs"].empty()) {
-    const auto& first = entry["outputs"].front();
-    if (first.is_object()) site->outputTensor = first.value("tf_name", "");
+  auto readArgs = [](const nlohmann::json& value, std::vector<Site::Arg>* out) {
+    if (!value.is_array()) return false;
+    for (const auto& item : value) {
+      if (!item.is_object()) return false;
+      Site::Arg arg;
+      arg.name = item.value("tf_name", "");
+      arg.role = item.value("role", "");
+      arg.rank = item.value("rank", int64_t{-1});
+      if (item.contains("shape") && item["shape"].is_array()) {
+        for (const auto& dim : item["shape"]) {
+          if (!dim.is_number_integer()) return false;
+          arg.shape.push_back(dim.get<int64_t>());
+        }
+      }
+      out->push_back(std::move(arg));
+    }
+    return true;
+  };
+  if (!entry.contains("args") || !readArgs(entry["args"], &site->args) ||
+      !entry.contains("outputs") || !readArgs(entry["outputs"], &site->outputs)) {
+    return false;
   }
+  if (!site->outputs.empty()) site->outputTensor = site->outputs.front().name;
   if (entry.contains("args") && entry["args"].is_array()) {
     int position = 0;
     for (const auto& arg : entry["args"]) {
@@ -220,6 +239,12 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
       if (role == "fixed" && rank == 2 && site->weightIndex < 0) site->weightIndex = position;
       if (role == "dynamic" && rank == 3 && site->flattenXIndex < 0) site->flattenXIndex = position;
       ++position;
+    }
+  }
+  if (entry.contains("kernel_arg_order") && entry["kernel_arg_order"].is_array()) {
+    for (const auto& value : entry["kernel_arg_order"]) {
+      if (!value.is_number_integer()) return false;
+      site->kernelArgOrder.push_back(value.get<int64_t>());
     }
   }
   std::string validation_error;

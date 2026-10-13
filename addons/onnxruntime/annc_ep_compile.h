@@ -68,12 +68,22 @@ std::string ModelSignature(const std::string& modelPath,
 // ---------------------------------------------------------------------------
 
 struct Site {
+  struct Arg {
+    std::string name;
+    std::string role;
+    int64_t rank = -1;
+    std::vector<int64_t> shape;
+  };
+
   std::string pattern;      // pattern implemented by the current EP ABI
   std::string kernelName;   // ANNC kernel function name (the .so symbol stem)
   std::string executionMode;
   std::string abi;
   std::string outputTensor;  // fused output tensor, in the EP's naming
   std::vector<std::string> memberNodes;
+  std::vector<Arg> args;
+  std::vector<Arg> outputs;
+  std::vector<int64_t> kernelArgOrder;
   int64_t flattenXIndex = -1;  // index of the dynamic (rank-3) input, if known
   int64_t weightIndex = -1;    // index of the fixed (rank-2) input, if known
 };
