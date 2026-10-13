@@ -155,10 +155,11 @@ void OrtThreadPool::parallel_for(
 
 OnnxExecutionContext::OnnxExecutionContext(
     const OrtApi* api, OrtKernelContext* kernel_context,
-    std::vector<OutputContract> outputs)
+    std::vector<OutputContract> outputs, std::vector<uint32_t> output_slots)
     : api_(api),
       kernel_context_(kernel_context),
       outputs_(std::move(outputs)),
+      output_slots_(std::move(output_slots)),
       allocated_(outputs_.size(), false),
       pool_(api, kernel_context) {
   handle_payload_.state = this;
@@ -271,9 +272,15 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
     }
   }
 
+  // The site's slots and the fused node's outputs can be ordered differently
+  // (the pattern lists its sites; ORT numbers the partition's escaping
+  // values). The EP resolves that mapping by tensor name at Compile time and
+  // hands it over here; without one the orders agree.
+  const uint32_t physical =
+      slot < output_slots_.size() ? output_slots_[slot] : slot;
   OrtValue* value = nullptr;
   if (OrtStatus* status = api_->KernelContext_GetOutput(
-          kernel_context_, slot, desc->dims, desc->rank, &value)) {
+          kernel_context_, physical, desc->dims, desc->rank, &value)) {
     RecordStatus(status);  // keeps the ORT message; ownership moves here
     return ANNC_STATUS_ALLOCATION_FAILED;
   }
@@ -297,8 +304,9 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   AnncElementType expected = 0;
   if (!AnncElementFromOrt(ort_type, &expected) || expected != desc->element_type) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
-                "output slot " + std::to_string(slot) +
-                    " does not match the graph's element type");
+                "output slot " + std::to_string(slot) + " (graph output " +
+                    std::to_string(physical) +
+                    ") does not match the graph's element type");
   }
 
   void* data = nullptr;
@@ -418,7 +426,8 @@ void BuildMemRefDescriptor(int64_t rank, const int64_t* dims, void* data,
 OrtStatus* ComputeWithContext(const OrtApi* api,
                               OrtKernelContext* kernel_context,
                               const ContextCall& request) {
-  OnnxExecutionContext context(api, kernel_context, request.outputs);
+  OnnxExecutionContext context(api, kernel_context, request.outputs,
+                               request.output_slots);
 
   std::vector<MemRefStorage> storage(request.arg_indices.size());
   std::vector<void*> args;

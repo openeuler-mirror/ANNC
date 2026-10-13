@@ -67,9 +67,13 @@ bool ValidateLegacySite(const Site& site, bool matmul, std::string* error) {
 // The annc_execution_v2 contract: the kernel receives the execution context
 // plus its argument memrefs and allocates the outputs itself through the
 // context callbacks, so the call has no output memrefs and no argument order.
-// The EP resolves each argument to an ORT input by rank, which is why ranks
-// must be distinct; the outputs are a slot contract (rank/type) the callbacks
-// check when the kernel allocates.
+// Compile() resolves each argument to an ORT input by tensor name when the
+// claim-time translation produced the graph's names (namesResolved); that path
+// allows repeated argument ranks -- masked_mul sites take several rank-3 data
+// operands. Without resolved names the EP falls back to binding by rank and
+// element type, which only identifies an argument when the ranks are distinct.
+// The outputs are a slot contract (rank/type) the callbacks check when the
+// kernel allocates.
 bool ValidateContextSite(const Site& site, std::string* error) {
   if (!site.kernelArgOrder.empty()) {
     return Fail(error,
@@ -83,6 +87,7 @@ bool ValidateContextSite(const Site& site, std::string* error) {
     return Fail(error, "context-ABI site must declare at least one output");
   }
   std::unordered_set<int64_t> arg_ranks;
+  std::unordered_set<std::string> arg_names;
   for (const Site::Arg& arg : site.args) {
     if (arg.name.empty() || arg.role.empty() || arg.rank < 0 || arg.rank > 4 ||
         static_cast<size_t>(arg.rank) != arg.shape.size()) {
@@ -90,16 +95,23 @@ bool ValidateContextSite(const Site& site, std::string* error) {
           error,
           "context-ABI site argument has invalid name, role, rank, or shape");
     }
-    if (arg.dtype != "f32") {
+    if (arg.dtype != "f32" && arg.dtype != "i64") {
       return Fail(error,
                   "context-ABI site argument element type is not supported");
     }
-    if (!arg_ranks.insert(arg.rank).second) {
-      return Fail(error, "context-ABI site arguments must have distinct ranks");
-    }
+    arg_ranks.insert(arg.rank);
+    arg_names.insert(arg.name);
+  }
+  const bool distinct_ranks = arg_ranks.size() == site.args.size();
+  const bool distinct_names = arg_names.size() == site.args.size();
+  if (!distinct_ranks && !(site.namesResolved && distinct_names)) {
+    return Fail(error,
+                "context-ABI site arguments must have distinct ranks unless "
+                "every argument name resolves");
   }
   for (const Site::Arg& output : site.outputs) {
-    if (output.role != "output" || output.rank < 0 || output.rank > 4 ||
+    if (output.role != "output" || output.name.empty() || output.rank < 0 ||
+        output.rank > 4 ||
         static_cast<size_t>(output.rank) != output.shape.size() ||
         output.dtype != "f32") {
       return Fail(error,
@@ -111,11 +123,25 @@ bool ValidateContextSite(const Site& site, std::string* error) {
 
 }  // namespace
 
+bool SiteNeedsResolvedNames(const Site& site) {
+  if (site.abi != "annc_execution_v2") return false;
+  if (site.outputs.size() > 1) return true;
+  std::unordered_set<int64_t> arg_ranks;
+  for (const Site::Arg& arg : site.args) {
+    if (!arg_ranks.insert(arg.rank).second) return true;
+  }
+  return false;
+}
+
 bool ValidateSite(const Site& site, std::string* error) {
   if (site.kernelName.empty()) return Fail(error, "site has no kernel name");
+  // Patterns the EP knows how to execute. The legacy preallocated-output ABI
+  // only ever carried matmul-shaped sites; context-ABI sites carry their own
+  // argument/output contract, which ValidateContextSite checks per pattern.
+  static const std::unordered_set<std::string> kSupportedPatterns = {
+      "matmul", "tensordot_matmul", "masked_mul"};
   const bool matmul = site.pattern == "matmul";
-  const bool tensordot = site.pattern == "tensordot_matmul";
-  if (!matmul && !tensordot) {
+  if (kSupportedPatterns.find(site.pattern) == kSupportedPatterns.end()) {
     return Fail(error,
                 "site pattern is not supported by the current EP ABI");
   }

@@ -61,8 +61,14 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
 // The per-call context plus its state.
 class OnnxExecutionContext {
  public:
+  // `output_slots` maps the site's output order (the slot a kernel asks for)
+  // onto the fused node's output order (what ORT numbers slots by); empty means
+  // the two agree. The site's order is the pattern's, ORT's is the partition's,
+  // so they only agree by luck -- the EP resolves the mapping by tensor name at
+  // Compile time.
   OnnxExecutionContext(const OrtApi* api, OrtKernelContext* kernel_context,
-                       std::vector<OutputContract> outputs);
+                       std::vector<OutputContract> outputs,
+                       std::vector<uint32_t> output_slots = {});
   ~OnnxExecutionContext();
 
   OnnxExecutionContext(const OnnxExecutionContext&) = delete;
@@ -104,6 +110,7 @@ class OnnxExecutionContext {
   const OrtApi* api_;
   OrtKernelContext* kernel_context_;
   std::vector<OutputContract> outputs_;
+  std::vector<uint32_t> output_slots_;
   std::vector<bool> allocated_;
   OrtStatus* error_ = nullptr;
   OrtMemoryInfo* mem_info_ = nullptr;       // lazy, released in the destructor
@@ -165,6 +172,8 @@ struct ContextCall {
   // ORT input index each argument resolves to; same order as arg_ranks.
   std::vector<int64_t> arg_indices;
   std::vector<OutputContract> outputs;
+  // ORT output index each declared output slot maps to; empty = identity.
+  std::vector<uint32_t> output_slots;
 };
 
 // Runs one context-ABI site: builds one ranked-memref descriptor per argument,

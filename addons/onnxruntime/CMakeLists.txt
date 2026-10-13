@@ -156,6 +156,37 @@ if(BUILD_TESTING)
         ${AnncEpFtdmmContextE2eLlvmLibArg}
         ${AnncEpFtdmmContextE2eExtraLibArgs})
     set_tests_properties(AnncEpFtdmmContextE2e PROPERTIES TIMEOUT 600)
+    # masked_mul: a site whose arguments need name binding and whose two
+    # outputs need the report->fused-node permutation.
+    add_test(NAME AnncEpMaskedMulContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/masked_mul_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpMaskedMulContextE2e PROPERTIES TIMEOUT 600)
+    # layer_norm: rank-1 gamma/beta force name binding, eps is rank-0.
+    add_test(NAME AnncEpLayerNormContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_norm_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpLayerNormContextE2e PROPERTIES TIMEOUT 600)
+    # batched_matmul_add: all three arguments are rank-3 f32 (name binding).
+    add_test(NAME AnncEpBatchedMatMulAddContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/batched_matmul_add_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpBatchedMatMulAddContextE2e PROPERTIES TIMEOUT 600)
   endif()
 endif()
 

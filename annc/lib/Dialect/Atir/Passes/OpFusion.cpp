@@ -3633,6 +3633,1112 @@ struct FuseTensordotMatMulAsFuncCallPattern
   }
 };
 
+// ══ FusedMaskedMul（execution v2，ONNX 站点）═════════════════════════════════
+//
+// ONNX 的掩码乘链，每站点 6~7 个算子：
+//
+//   ids ─ Equal(pad) → Not → Cast(f32) → Unsqueeze(末轴) → [Tile] ─┐
+//   data ───────────────────────────────────────────────────────── Mul → y
+//
+// ids 为 i64 rank2、data 为 f32 rank3，Tile 只沿末维重复（纯广播、不搬信息）。
+// 链的语义就是逐行取因子再缩放 data 的末维：
+//
+//   y[b, t, n] = data[b, t, n] * (ids[b, t] != pad ? 1.0f : 0.0f)
+//
+// 一条链可喂 1~4 个 Mul，且这些 Mul 与链必须同生共死——链只要留下就没有收益，
+// 而链的每个中间结果都不允许有别的消费者，否则融合后链仍要执行。故一个站点
+// 带 k 个输出；execution v2 的 kernel C 签名按符号固定，据此按元数拆成
+// MaskedMul1..MaskedMul4 四个符号（同 KPFusedSparseDynamicStitchN* 的多符号
+// 方案），四个符号共享一份实现。
+//
+// 匹配条件对齐 ORT 的 FusedMaskedMul（annc_opt 0005，
+// masked-mul-patch/0005-add-fused-masked-mul.patch::MatchMaskedMul）。
+// 与 dev 线（任务 20260924-016）的差别只在交付形态：kernel 函数首参为执行
+// 上下文、输出由 kernel 经上下文回调分配（不再有输出 memref 形参），主图区域
+// 只标记 annc.fusion_materialized、不重写，AOT 裁剪会丢弃主图。
+
+struct MaskedMulSite {
+  MulOp mul;           // 吃掉链的 Mul（一个站点对应一个输出）
+  Value data;          // Mul 的 data 操作数
+  Value output;        // Mul 的结果
+  Value outputBuffer;  // Mul 的输出缓冲（BufferOp 结果）
+};
+
+struct MaskedMulMatch {
+  Value ids;                     // Equal 的 rank-2 i64 输入
+  int64_t padding = 0;           // Equal 折叠出的常量
+  int64_t tileLastMultiple = 0;  // 无 Tile 时为 0
+  // Tile?, ExpandDims, Cast, Compare(NE), Compare(EQ)，由外向内。
+  SmallVector<Operation *, 6> chain;
+  SmallVector<MaskedMulSite, 2> sites;  // 链的全部 Mul 消费者
+};
+
+// 一个站点的最大 Mul 数：链的消费者再多就不融（ORT 侧同样有上限语义，
+// 站点内的 Mul 会一起申报成同一个融合节点，元数越大收益越低、风险越高）。
+static constexpr size_t kMaxMaskedMulSites = 4;
+
+// 读取整数常量张量的元素（splat 展开）。非 atir.constant 或非整数 cacheData
+// 一律失败。
+static bool readConstInts(Value value, SmallVectorImpl<int64_t> *out) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType || !value.getDefiningOp<ConstantOp>()) return false;
+  auto data = dyn_cast_or_null<DenseElementsAttr>(tensorType.getCacheData());
+  if (!data || !data.getElementType().isIntOrIndex()) return false;
+  out->clear();
+  if (data.isSplat()) {
+    out->assign(static_cast<size_t>(data.getNumElements()),
+                data.getSplatValue<APInt>().getSExtValue());
+    return true;
+  }
+  for (const APInt &element : data.getValues<APInt>()) {
+    out->push_back(element.getSExtValue());
+  }
+  return true;
+}
+
+// 单值常量（0 维、单元素或 splat），所有元素必须一致。
+static bool readConstScalar(Value value, int64_t *out) {
+  SmallVector<int64_t, 4> values;
+  if (!readConstInts(value, &values) || values.empty()) return false;
+  for (int64_t candidate : values) {
+    if (candidate != values[0]) return false;
+  }
+  *out = values[0];
+  return true;
+}
+
+// ONNX 前端把 i1（bool）张量标成 encoding == "bool"。
+static bool isBoolEncoded(Value value) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType) return false;
+  auto encoding = dyn_cast_or_null<StringAttr>(tensorType.getEncoding());
+  return encoding && encoding.getValue() == "bool";
+}
+
+// onnxTransformNot 为 Not(Equal(...)) 造的 i1 "true" 常量。
+static bool isMaskTrueConstant(Value value) {
+  if (!isBoolEncoded(value)) return false;
+  int64_t flag = 0;
+  return readConstScalar(value, &flag) && flag == 1;
+}
+
+// 把 mask 操作数回溯到 ids/padding。失败时 match 可能已被部分写入，调用方
+// 负责重置（与 dev 相同）。
+static LogicalResult matchMaskChain(Value mask, MaskedMulMatch *match) {
+  SmallVector<Operation *, 6> chain;
+  Value current = mask;
+
+  if (auto tile = current.getDefiningOp<TileOp>()) {
+    if (tile.getResult() != current) return failure();
+    SmallVector<int64_t, 4> multiples;
+    if (!readConstInts(tile.getMultiples(), &multiples) ||
+        multiples.size() != 3) {
+      return failure();
+    }
+    // 纯广播：只有末轴可重复，且必须重复。
+    if (multiples[0] != 1 || multiples[1] != 1 || multiples[2] < 1) {
+      return failure();
+    }
+    match->tileLastMultiple = multiples[2];
+    chain.push_back(tile.getOperation());
+    current = tile.getInput();
+  }
+
+  auto expand = current.getDefiningOp<ExpandDimsOp>();
+  if (!expand || expand.getResult() != current) return failure();
+  auto expandType = dyn_cast<atir::TensorType>(expand.getType());
+  if (!expandType || expandType.getShape().size() != 3) return failure();
+  const int64_t rank = static_cast<int64_t>(expandType.getShape().size());
+  int64_t axis = 0;
+  if (!readConstScalar(expand.getAxis(), &axis)) return failure();
+  if (axis < 0) axis += rank;
+  if (axis != rank - 1) return failure();
+  chain.push_back(expand.getOperation());
+
+  auto cast = expand.getInput().getDefiningOp<CastOp>();
+  if (!cast || cast.getResult() != expand.getInput()) return failure();
+  auto castType = dyn_cast<atir::TensorType>(cast.getType());
+  if (!castType || !castType.getElementType().isF32()) return failure();
+  if (!isBoolEncoded(cast.getInput())) return failure();
+  chain.push_back(cast.getOperation());
+
+  auto notCompare = cast.getInput().getDefiningOp<CompareOp>();
+  if (!notCompare || notCompare.getResult() != cast.getInput()) return failure();
+  if (notCompare.getComparisonDirection() != "NE") return failure();
+  Value notInput;
+  if (isMaskTrueConstant(notCompare.getRhs())) {
+    notInput = notCompare.getLhs();
+  } else if (isMaskTrueConstant(notCompare.getLhs())) {
+    notInput = notCompare.getRhs();
+  } else {
+    return failure();
+  }
+  chain.push_back(notCompare.getOperation());
+
+  // Equal(ids, pad)：真实掩码链的 ids 是 i64，而 ONNX 前端按 ADR-011 的
+  // dtype 门禁拒绝整型比较，把该节点降级成 atir.opaque。两种形态都接受：
+  // atir.opaque 的文档写明它"expected to be absorbed by a fusion pattern"，
+  // 门禁要防的两件事（比较的类型语义、常量约束）由本匹配器重新校验——ids
+  // 必须是 rank-2 i64、padding 必须是单个整型常量；命中后整条链由
+  // masked_mul kernel 以 i64 精确执行，opaque 节点不再存活。
+  int64_t padding = 0;
+  Value ids;
+  Operation *equalOp = nullptr;
+  if (auto equalCompare = notInput.getDefiningOp<CompareOp>()) {
+    if (equalCompare.getResult() != notInput) return failure();
+    if (equalCompare.getComparisonDirection() != "EQ") return failure();
+    if (readConstScalar(equalCompare.getRhs(), &padding)) {
+      ids = equalCompare.getLhs();
+    } else if (readConstScalar(equalCompare.getLhs(), &padding)) {
+      ids = equalCompare.getRhs();
+    } else {
+      return failure();
+    }
+    equalOp = equalCompare.getOperation();
+  } else if (auto equalOpaque = notInput.getDefiningOp<OpaqueOp>()) {
+    if (equalOpaque.getOpType() != "Equal") return failure();
+    if (equalOpaque->getNumOperands() != 2 || equalOpaque.getNumResults() != 1) {
+      return failure();
+    }
+    if (equalOpaque.getOutput().front() != notInput) return failure();
+    Value lhs = equalOpaque.getInputs()[0];
+    Value rhs = equalOpaque.getInputs()[1];
+    if (readConstScalar(rhs, &padding)) {
+      ids = lhs;
+    } else if (readConstScalar(lhs, &padding)) {
+      ids = rhs;
+    } else {
+      return failure();
+    }
+    equalOp = equalOpaque.getOperation();
+  } else {
+    return failure();
+  }
+  auto idsType = dyn_cast<atir::TensorType>(ids.getType());
+  if (!idsType || idsType.getShape().size() != 2) return failure();
+  if (!idsType.getElementType().isInteger(64)) return failure();
+
+  chain.push_back(equalOp);
+  match->ids = ids;
+  match->padding = padding;
+  match->chain = std::move(chain);
+  return success();
+}
+
+// mul 是否以 mask 为其操作数、且构成合法站点：data 为 rank-3 f32、前缀与 ids
+// 对齐、写进缓冲。
+static bool matchMaskedMulConsumer(MulOp mul, Value mask, Value ids,
+                                   MaskedMulSite *site) {
+  if (mul->hasAttr("annc.fusion_materialized")) return false;
+  Value data;
+  if (mul.getY() == mask) {
+    data = mul.getX();
+  } else if (mul.getX() == mask) {
+    data = mul.getY();
+  } else {
+    return false;
+  }
+  auto dataType = dyn_cast<atir::TensorType>(data.getType());
+  if (!dataType || dataType.getShape().size() != 3) return false;
+  if (!dataType.getElementType().isF32()) return false;
+  auto idsType = dyn_cast<atir::TensorType>(ids.getType());
+  if (!idsType) return false;
+  // 前缀形状必须对齐（kernel 按行索引 ids）；动态维留给运行时校验。
+  for (int64_t axis = 0; axis < 2; ++axis) {
+    const int64_t dataDim = dataType.getShape()[axis];
+    const int64_t idsDim = idsType.getShape()[axis];
+    if (dataDim >= 0 && idsDim >= 0 && dataDim != idsDim) return false;
+  }
+  if (dataType.getShape()[2] == 0) return false;
+
+  Value outputBuffer = mul.getOutput();
+  Operation *bufferOp = outputBuffer ? outputBuffer.getDefiningOp() : nullptr;
+  if (!bufferOp || !isa<BufferOp>(bufferOp)) return false;
+  if (mul.getResult().getType() != outputBuffer.getType()) return false;
+
+  site->mul = mul;
+  site->data = data;
+  site->output = mul.getResult();
+  site->outputBuffer = outputBuffer;
+  return true;
+}
+
+// 两个成员之间是否存在"绕出去"的路径。这种组合 ORT 会拒绝，而且会连带丢弃
+// 同一 EP 提交的**全部**分组，所以站点根本不能申报。model1 就是这种形状：
+// 一个站点的 Mul 喂给第三个 Mul，后者自己的输出又是第四个 Mul 的 data，而第
+// 四个 Mul 吃同一个 mask。
+static bool hasHoleBetweenMembers(ArrayRef<Operation *> members) {
+  SmallPtrSet<Operation *, 16> memberSet(members.begin(), members.end());
+  for (Operation *member : members) {
+    for (Value result : member->getResults()) {
+      SmallVector<Operation *, 16> worklist;
+      SmallPtrSet<Operation *, 16> visited;
+      for (Operation *user : result.getUsers()) {
+        if (!memberSet.contains(user)) worklist.push_back(user);
+      }
+      while (!worklist.empty()) {
+        Operation *current = worklist.pop_back_val();
+        if (!visited.insert(current).second) continue;
+        for (Value res : current->getResults()) {
+          for (Operation *user : res.getUsers()) {
+            if (memberSet.contains(user)) return true;
+            worklist.push_back(user);
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// 以 anchor 为起点匹配整个站点：链 + 链的每个 Mul。任何链值有非站点 Mul 的
+// 消费者即失败（链会活下来），超过 kMaxMaskedMulSites 个 Mul 也失败。
+static FailureOr<MaskedMulMatch> matchMaskedMul(MulOp anchor) {
+  MaskedMulMatch match;
+  Value mask;
+  if (succeeded(matchMaskChain(anchor.getY(), &match))) {
+    mask = anchor.getY();
+  } else {
+    match = MaskedMulMatch();
+    if (succeeded(matchMaskChain(anchor.getX(), &match))) {
+      mask = anchor.getX();
+    } else {
+      return failure();
+    }
+  }
+
+  for (Operation *op : match.chain) {
+    for (Value result : op->getResults()) {
+      for (Operation *user : result.getUsers()) {
+        if (llvm::is_contained(match.chain, user)) continue;
+        auto mul = dyn_cast<MulOp>(user);
+        if (!mul) return failure();
+        if (std::any_of(match.sites.begin(), match.sites.end(),
+                        [&](const MaskedMulSite &site) {
+                          return site.mul == mul;
+                        })) {
+          continue;
+        }
+        if (match.sites.size() >= kMaxMaskedMulSites) return failure();
+        MaskedMulSite site;
+        if (!matchMaskedMulConsumer(mul, result, match.ids, &site)) {
+          return failure();
+        }
+        // Tile 必须恰好广播到 data 的末维（已知时逐个消费者核对）。
+        auto dataType = dyn_cast<atir::TensorType>(site.data.getType());
+        const int64_t lastDim = dataType.getShape()[2];
+        if (match.tileLastMultiple != 0 && lastDim >= 0 &&
+            lastDim != match.tileLastMultiple) {
+          return failure();
+        }
+        // kernel 的 data 实参全部来自区域外，data 由本站点另一个 Mul 产出的
+        // 链（mask → Mul → Mul）在这里表达不了。
+        for (const MaskedMulSite &other : match.sites) {
+          if (other.data == site.data) return failure();
+        }
+        match.sites.push_back(site);
+      }
+    }
+  }
+  if (match.sites.empty()) return failure();
+  return match;
+}
+
+// kernel 算子名按元数区分（MaskedMul1..MaskedMul4），与 kernel 符号一致。
+static std::string getMaskedMulOpName(size_t sites) {
+  return "MaskedMul" + std::to_string(sites);
+}
+
+// 实参顺序 (data..., ids)（动态在前、常量在后），输出在 kernel 侧经上下文按
+// 槽位分配，故不在调用参数里。
+static atir::CustomOpSchema getMaskedMulSchema(size_t sites, int64_t padding) {
+  auto schema =
+      atir::CustomOpSchema::get(getMaskedMulOpName(sites))
+          .TypeVar("T")
+          .TypeVar("TMask");
+  for (size_t i = 0; i < sites; ++i) {
+    schema.MemRefArg("data" + std::to_string(i), 3, "T");
+  }
+  schema.MemRefArg("ids", 2, "TMask");
+  for (size_t i = 0; i < sites; ++i) {
+    schema.Result("output" + std::to_string(i), 3, "T");
+  }
+  schema.I64AttrArg("padding", padding);
+  return schema;
+}
+
+// Execution v2 的 kernel 函数：(execution, data..., ids) -> (output...)，体内
+// 只有一次 atir.CustomizeOp；CustomizeCallLowering 把首参（!llvm.ptr）透传给
+// 手写 kernel（annc/lib/Kernel/builtin_kernels/masked_mul_*），k 个输出由
+// kernel 经上下文按槽位分配后作为 CustomizeOp 的结果返回（槽位 = 站点下标）。
+static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
+                                              PatternRewriter &rewriter,
+                                              StringRef kernelName,
+                                              const MaskedMulMatch &match) {
+  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
+    return existing;
+  }
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+
+  const size_t siteCount = match.sites.size();
+  SmallVector<Type> inputTypes = {
+      LLVM::LLVMPointerType::get(rewriter.getContext())};
+  for (const MaskedMulSite &site : match.sites) {
+    inputTypes.push_back(site.data.getType());
+  }
+  inputTypes.push_back(match.ids.getType());
+  SmallVector<Type> resultTypes;
+  for (const MaskedMulSite &site : match.sites) {
+    resultTypes.push_back(site.output.getType());
+  }
+
+  auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
+  auto func =
+      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
+  func.setPrivate();
+  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+  func->setAttr("annc.kernel", rewriter.getUnitAttr());
+  func->setAttr("fusion.pattern", rewriter.getStringAttr("masked_mul"));
+
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  SmallVector<Value> operands;
+  for (size_t i = 0; i < siteCount; ++i) {
+    operands.push_back(entry->getArgument(i + 1));
+  }
+  operands.push_back(entry->getArgument(siteCount + 1));
+  auto customCall = rewriter.create<atir::CustomizeOp>(
+      func.getLoc(), TypeRange(resultTypes), ValueRange(operands),
+      rewriter.getStringAttr(getMaskedMulOpName(siteCount)),
+      getMaskedMulSchema(siteCount, match.padding)
+          .toMetadata(rewriter.getContext()));
+  rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResults());
+  return func;
+}
+
+struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
+  // 与 FTDMM 相同的 benefit 次序：同一个 Mul 上本 pattern 与通用逐元素融合
+  // 都可能匹配，本形态更具体，必须先试。
+  explicit FuseMaskedMulAsFuncCallPattern(MLIRContext *context)
+      : OpRewritePattern<MulOp>(context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(MulOp mulOp,
+                                PatternRewriter &rewriter) const override {
+    auto match = matchMaskedMul(mulOp);
+    if (failed(match)) return failure();
+    ModuleOp module = mulOp->getParentOfType<ModuleOp>();
+    if (!module) return failure();
+    // 站点本轮只服务 ONNX 导入（同 FTDMM）：ONNX 前端在模块上留
+    // annc.contract_version，据此把 pattern 限定在 ONNX 模块，TF 侧融合行为
+    // 不变（kernel 本身在 TF 宿主下也能跑，池走 TLS 回退）。
+    if (!module->hasAttr("annc.contract_version")) return failure();
+
+    const size_t siteCount = match->sites.size();
+    SmallVector<Operation *, 8> fusedOps;
+    for (const MaskedMulSite &site : match->sites) {
+      fusedOps.push_back(static_cast<Operation *>(site.mul));
+    }
+    fusedOps.append(match->chain.begin(), match->chain.end());
+
+    if (hasHoleBetweenMembers(fusedOps)) return failure();
+    // data 必须来自区域外：kernel 以实参读取，区域内产出就没有值可传。
+    for (const MaskedMulSite &site : match->sites) {
+      Operation *producer = site.data.getDefiningOp();
+      if (producer && llvm::is_contained(fusedOps, producer)) return failure();
+    }
+    // 区域里除站点输出外不得有结果逃逸：融合节点的输出必须恰是站点输出，
+    // 否则成员名单与 EP 的申报对不上。
+    SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
+    if (escaping.size() != siteCount) return failure();
+    for (const MaskedMulSite &site : match->sites) {
+      if (!llvm::is_contained(escaping, site.output)) return failure();
+    }
+
+    // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    auto schema = getMaskedMulSchema(siteCount, match->padding);
+    SmallVector<Type> schemaInputTypes;
+    for (const MaskedMulSite &site : match->sites) {
+      schemaInputTypes.push_back(site.data.getType());
+    }
+    schemaInputTypes.push_back(match->ids.getType());
+    SmallVector<Type> schemaResultTypes;
+    for (const MaskedMulSite &site : match->sites) {
+      schemaResultTypes.push_back(site.output.getType());
+    }
+    auto inferred = atir::inferTypeConstraintsFromSchema(
+        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
+        TypeRange(schemaResultTypes));
+    if (!inferred) {
+      llvm::consumeError(inferred.takeError());
+      return failure();
+    }
+    annc::kernels::KernelResolveRequest request;
+    request.op_type = getMaskedMulOpName(siteCount);
+    request.abi = "annc_execution_v2";
+    request.type_constraints = std::move(*inferred);
+    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
+
+    std::string anchorName =
+        getTfName(static_cast<Operation *>(match->sites.front().mul));
+    std::string kernelName = uniquifySymbolName(
+        module, getStableFusionKernelName(anchorName, "masked_mul"));
+    std::string clusterName = uniquifyFusionName(
+        module, sanitizeName(anchorName + "/masked_mul"));
+
+    auto kernelFunc =
+        createMaskedMulKernelFunc(module, rewriter, kernelName, *match);
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
+
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr(
+        "fusion.pattern", rewriter.getStringAttr("masked_mul")));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
+    SmallVector<FusionArgSpec> args;
+    for (const MaskedMulSite &site : match->sites) {
+      args.push_back({"dynamic", getValueName(site.data), site.data.getType()});
+    }
+    args.push_back({"fixed", getValueName(match->ids), match->ids.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "args", makeFusionArgArray(rewriter.getContext(), args)));
+    SmallVector<FusionArgSpec> outputs;
+    for (const MaskedMulSite &site : match->sites) {
+      outputs.push_back({"output", getFusionOutputName(site.output),
+                         site.output.getType()});
+    }
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("annc_execution_v2")));
+    // 输出由 kernel 经执行上下文分配，不在调用参数里，故 kernel_arg_order 为空。
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
+                                             rewriter.getStringAttr("")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "member_node_names",
+        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+    kernelFunc->setAttr("fusion.metadata",
+                        DictionaryAttr::get(rewriter.getContext(), metadata));
+
+    // execution v2 的主图区域保留原样（AOT 裁剪丢弃主图），只做标记。
+    for (Operation *op : fusedOps) {
+      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+    }
+    return success();
+  }
+};
+
+// ══ FusedLayerNorm（execution v2，ONNX 站点）═════════════════════════════════
+//
+// ONNX（TF 导出）的 reciprocal-multiply LayerNorm 链，11 个算子：
+//
+//   mean  = ReduceMean(x, 末轴, keepdims)
+//   d     = Sub(x, mean)
+//   var   = ReduceMean(Mul(d, d), 末轴, keepdims)
+//   rsqrt = Reciprocal(Sqrt(Add(var, eps)))
+//   g     = Mul(rsqrt, gamma)
+//   y     = Add(Mul(x, g), Sub(beta, Mul(mean, g)))
+//
+// 融合后由一个 kernel 重算逐行矩并套同样的因式分解
+// （annc/lib/Kernel/builtin_kernels/layer_norm_*），整链变一个节点。
+//
+// 只融"闭式"形态：每个中间值必须恰好只有链上列出的消费者。共享的
+// mean/variance 会活下来，而 kernel 单输出提供不了，这类站点一律不动。
+//
+// 匹配条件对齐 ORT 的 LayerNorm/RM-LN 扩展（annc_opt 0001，
+// layer_norm_fusion.cc::TryFuseReciprocalMulLayerNorm）。
+
+// 恰好一个消费者，且是 expected。
+static bool hasSingleUser(Value value, Operation *expected) {
+  for (Operation *user : value.getUsers()) {
+    if (user != expected) return false;
+  }
+  return value.getUsers().begin() != value.getUsers().end();
+}
+
+// 消费者全部在 allowed 里，且至少有一个。
+static bool allUsersIn(Value value, ArrayRef<Operation *> allowed) {
+  bool any = false;
+  for (Operation *user : value.getUsers()) {
+    any = true;
+    if (!llvm::is_contained(allowed, user)) return false;
+  }
+  return any;
+}
+
+static bool isConstF32(Value value, int64_t rank) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType || !tensorType.getElementType().isF32()) return false;
+  if (static_cast<int64_t>(tensorType.getShape().size()) != rank) return false;
+  if (!value.getDefiningOp<ConstantOp>()) return false;
+  return static_cast<bool>(tensorType.getCacheData());
+}
+
+// 末轴 keepdims 的 ReduceMean，链上两次归约都要求这一形态。
+static bool isLastAxisMean(ReduceMeanOp mean, int64_t rank) {
+  if (!mean.getKeepDims()) return false;
+  SmallVector<int64_t, 4> axes;
+  if (!readConstInts(mean.getIndices(), &axes) || axes.size() != 1) return false;
+  int64_t axis = axes[0];
+  if (axis < 0) axis += rank;
+  return axis == rank - 1;
+}
+
+struct LayerNormMatch {
+  Value input;   // rank-2 f32 x
+  Value gamma;   // rank-1 f32 常量
+  Value beta;    // rank-1 f32 常量
+  Value eps;     // rank-0 f32 常量
+  Value output;  // 末端 Add 的结果
+  Value outputBuffer;
+  SmallVector<Operation *, 10> chainOps;  // x 与输出之间的全部算子
+};
+
+static FailureOr<LayerNormMatch> matchLayerNorm(AddOp out) {
+  if (out->hasAttr("annc.fusion_materialized")) return failure();
+  if (out.getInputs().size() != 2) return failure();
+
+  Value outputBuffer = out.getOutput();
+  Operation *bufferOp = outputBuffer ? outputBuffer.getDefiningOp() : nullptr;
+  if (!bufferOp || !isa<BufferOp>(bufferOp)) return failure();
+  if (out.getResult().getType() != outputBuffer.getType()) return failure();
+
+  auto outputType = dyn_cast<atir::TensorType>(out.getResult().getType());
+  if (!outputType || outputType.getShape().size() != 2) return failure();
+  if (!outputType.getElementType().isF32()) return failure();
+
+  // y = Add(Mul(x, g), Sub(beta, Mul(mean, g)))
+  Value xTerm, biasTerm;
+  if (out.getInputs()[0].getDefiningOp<MulOp>()) {
+    xTerm = out.getInputs()[0];
+    biasTerm = out.getInputs()[1];
+  } else {
+    xTerm = out.getInputs()[1];
+    biasTerm = out.getInputs()[0];
+  }
+  if (out.getDoRelu() || out.getScalar()) return failure();
+  auto xMul = xTerm.getDefiningOp<MulOp>();
+  auto biasSub = biasTerm.getDefiningOp<SubOp>();
+  if (!xMul || !biasSub) return failure();
+  if (!hasSingleUser(out.getInputs()[0], out.getOperation()) ||
+      !hasSingleUser(out.getInputs()[1], out.getOperation())) {
+    return failure();
+  }
+  if (biasSub.getX().getDefiningOp<ConstantOp>() == nullptr) return failure();
+  if (biasSub.getY().getDefiningOp<MulOp>() == nullptr) return failure();
+  if (!hasSingleUser(biasSub.getResult(), out.getOperation())) return failure();
+
+  Value beta = biasSub.getX();
+  Value meanGTerm = biasSub.getY();
+  auto meanMul = meanGTerm.getDefiningOp<MulOp>();
+  if (!isConstF32(beta, 1)) return failure();
+  if (!hasSingleUser(meanGTerm, biasSub.getOperation())) return failure();
+
+  // x* 与 mean* 乘的是同一个 g = Mul(rsqrt, gamma)。
+  Value x = xMul.getX();
+  Value g = xMul.getY();
+  if (x.getDefiningOp<MulOp>() && !g.getDefiningOp<MulOp>()) {
+    std::swap(x, g);
+  }
+  auto gMul = g.getDefiningOp<MulOp>();
+  if (!gMul) return failure();
+  if (meanMul.getX() != g && meanMul.getY() != g) return failure();
+  Value mean = (meanMul.getX() == g) ? meanMul.getY() : meanMul.getX();
+  if (!allUsersIn(g, {xMul.getOperation(), meanMul.getOperation()})) {
+    return failure();
+  }
+
+  // g = Mul(rsqrt, gamma)，gamma 是常量因子。
+  Value rsqrt = gMul.getX();
+  Value gamma = gMul.getY();
+  if (rsqrt.getDefiningOp<ConstantOp>() && !gamma.getDefiningOp<ConstantOp>()) {
+    std::swap(rsqrt, gamma);
+  }
+  if (!isConstF32(gamma, 1)) return failure();
+  if (!hasSingleUser(gamma, gMul.getOperation())) return failure();
+
+  // rsqrt = Reciprocal(Sqrt(Add(var, eps)))
+  auto reciprocal = rsqrt.getDefiningOp<ReciprocalOp>();
+  if (!reciprocal || !hasSingleUser(rsqrt, gMul.getOperation())) {
+    return failure();
+  }
+  Value sqrt = reciprocal.getX();
+  auto sqrtOp = sqrt.getDefiningOp<SqrtOp>();
+  if (!sqrtOp || !hasSingleUser(sqrt, reciprocal.getOperation())) {
+    return failure();
+  }
+  Value add = sqrtOp.getX();
+  auto addOp = add.getDefiningOp<AddOp>();
+  if (!addOp || addOp.getInputs().size() != 2 ||
+      !hasSingleUser(add, sqrtOp.getOperation())) {
+    return failure();
+  }
+  if (addOp.getDoRelu() || addOp.getScalar()) return failure();
+  Value variance, eps;
+  if (addOp.getInputs()[0].getDefiningOp<ConstantOp>()) {
+    eps = addOp.getInputs()[0];
+    variance = addOp.getInputs()[1];
+  } else {
+    variance = addOp.getInputs()[0];
+    eps = addOp.getInputs()[1];
+  }
+  if (!isConstF32(eps, 0)) return failure();
+
+  // variance = ReduceMean(Mul(d, d));  d = Sub(x, mean);  mean = ReduceMean(x)
+  auto varianceMean = variance.getDefiningOp<ReduceMeanOp>();
+  if (!varianceMean || !hasSingleUser(variance, addOp.getOperation())) {
+    return failure();
+  }
+  Value squared = varianceMean.getInput();
+  auto squaredMul = squared.getDefiningOp<MulOp>();
+  if (!squaredMul || !hasSingleUser(squared, varianceMean.getOperation())) {
+    return failure();
+  }
+  Value d = squaredMul.getX();
+  if (squaredMul.getY() != d) return failure();  // Mul(d, d)
+  auto sub = d.getDefiningOp<SubOp>();
+  if (!sub || !hasSingleUser(d, squaredMul.getOperation())) return failure();
+  if (sub.getX() != x) return failure();  // Sub(x, mean)
+  Value meanValue = sub.getY();
+  if (meanValue != mean) return failure();
+  auto meanOp = meanValue.getDefiningOp<ReduceMeanOp>();
+  if (!meanOp) return failure();
+  // mean 只喂减法和 mean*g 两项。
+  if (!allUsersIn(meanValue, {sub.getOperation(), meanMul.getOperation()})) {
+    return failure();
+  }
+
+  auto xType = dyn_cast<atir::TensorType>(x.getType());
+  if (!xType || xType.getShape().size() != 2) return failure();
+  if (!xType.getElementType().isF32()) return failure();
+  const int64_t rank = 2;
+  if (!isLastAxisMean(meanOp, rank) || !isLastAxisMean(varianceMean, rank)) {
+    return failure();
+  }
+  // 归约轴 keepdims，且类型上必须是 1，逐元素广播才对得上。
+  auto meanType = dyn_cast<atir::TensorType>(meanValue.getType());
+  if (!meanType || meanType.getShape().size() != 2) return failure();
+  if (meanType.getShape()[1] != 1) return failure();
+  if (meanOp.getInput() != x) return failure();
+  // x 是边界输入：站点外的消费者继续读它没问题（融合节点以实参取 x）；
+  // 不能逃逸的是链上的中间值，逐个在上面查过。
+
+  LayerNormMatch match;
+  match.input = x;
+  match.gamma = gamma;
+  match.beta = beta;
+  match.eps = eps;
+  match.output = out.getResult();
+  match.outputBuffer = outputBuffer;
+  match.chainOps = {out.getOperation(),          xMul.getOperation(),
+                    biasSub.getOperation(),      meanMul.getOperation(),
+                    gMul.getOperation(),         reciprocal.getOperation(),
+                    sqrtOp.getOperation(),       addOp.getOperation(),
+                    varianceMean.getOperation(), squaredMul.getOperation(),
+                    sub.getOperation(),          meanOp.getOperation()};
+  return match;
+}
+
+// Execution v2 的 kernel 函数：(execution, input, gamma, beta, eps) -> output，
+// 体内一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
+static atir::CustomOpSchema getLayerNormSchema() {
+  return atir::CustomOpSchema::get("LayerNorm")
+      .TypeVar("T")
+      .MemRefArg("input", 2, "T")
+      .MemRefArg("gamma", 1, "T")
+      .MemRefArg("beta", 1, "T")
+      .MemRefArg("eps", 0, "T")
+      .Result("output", 2, "T");
+}
+
+static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
+                                              PatternRewriter &rewriter,
+                                              StringRef kernelName,
+                                              const LayerNormMatch &match) {
+  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
+    return existing;
+  }
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+
+  SmallVector<Type> inputTypes = {
+      LLVM::LLVMPointerType::get(rewriter.getContext()), match.input.getType(),
+      match.gamma.getType(), match.beta.getType(), match.eps.getType()};
+  auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
+  auto func =
+      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
+  func.setPrivate();
+  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+  func->setAttr("annc.kernel", rewriter.getUnitAttr());
+  func->setAttr("fusion.pattern", rewriter.getStringAttr("layer_norm"));
+
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  auto customCall = rewriter.create<atir::CustomizeOp>(
+      func.getLoc(), TypeRange{match.output.getType()},
+      ValueRange{entry->getArgument(1), entry->getArgument(2),
+                 entry->getArgument(3), entry->getArgument(4)},
+      rewriter.getStringAttr("LayerNorm"),
+      getLayerNormSchema().toMetadata(rewriter.getContext()));
+  rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
+  return func;
+}
+
+struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
+  // benefit 3：同一 Add 上还有通用逐元素融合（以及 masked_mul 的落点在
+  // Mul 上），本形态最具体，先试。
+  explicit FuseLayerNormAsFuncCallPattern(MLIRContext *context)
+      : OpRewritePattern<AddOp>(context, /*benefit=*/3) {}
+
+  LogicalResult matchAndRewrite(AddOp addOp,
+                                PatternRewriter &rewriter) const override {
+    auto match = matchLayerNorm(addOp);
+    if (failed(match)) return failure();
+    ModuleOp module = addOp->getParentOfType<ModuleOp>();
+    if (!module) return failure();
+    // 站点本轮只服务 ONNX 导入（同 FTDMM / masked_mul）。
+    if (!module->hasAttr("annc.contract_version")) return failure();
+
+    // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    auto schema = getLayerNormSchema();
+    SmallVector<Type> schemaInputTypes = {
+        match->input.getType(), match->gamma.getType(), match->beta.getType(),
+        match->eps.getType()};
+    auto inferred = atir::inferTypeConstraintsFromSchema(
+        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
+        TypeRange{match->output.getType()});
+    if (!inferred) {
+      llvm::consumeError(inferred.takeError());
+      return failure();
+    }
+    annc::kernels::KernelResolveRequest request;
+    request.op_type = "LayerNorm";
+    request.abi = "annc_execution_v2";
+    request.type_constraints = std::move(*inferred);
+    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
+
+    SmallVector<Operation *, 16> fusedOps(match->chainOps.begin(),
+                                          match->chainOps.end());
+    SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
+    if (escaping.size() != 1 || escaping[0] != match->output) return failure();
+
+    std::string anchorName = getTfName(match->output.getDefiningOp());
+    std::string kernelName = uniquifySymbolName(
+        module, getStableFusionKernelName(anchorName, "layer_norm"));
+    std::string clusterName = uniquifyFusionName(
+        module, sanitizeName(anchorName + "/layer_norm"));
+
+    auto kernelFunc =
+        createLayerNormKernelFunc(module, rewriter, kernelName, *match);
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
+
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr(
+        "fusion.pattern", rewriter.getStringAttr("layer_norm")));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
+    SmallVector<FusionArgSpec> args;
+    args.push_back(
+        {"dynamic", getValueName(match->input), match->input.getType()});
+    args.push_back(
+        {"fixed", getValueName(match->gamma), match->gamma.getType()});
+    args.push_back({"fixed", getValueName(match->beta), match->beta.getType()});
+    args.push_back({"fixed", getValueName(match->eps), match->eps.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "args", makeFusionArgArray(rewriter.getContext(), args)));
+    SmallVector<FusionArgSpec> outputs;
+    outputs.push_back({"output", getFusionOutputName(match->output),
+                       match->output.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("annc_execution_v2")));
+    // 输出由 kernel 经执行上下文分配，不在调用参数里。
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
+                                             rewriter.getStringAttr("")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "member_node_names",
+        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+    kernelFunc->setAttr("fusion.metadata",
+                        DictionaryAttr::get(rewriter.getContext(), metadata));
+
+    for (Operation *op : fusedOps) {
+      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+    }
+    return success();
+  }
+};
+
+// ══ FusedBatchedMatMulAdd（execution v2，ONNX 站点）═════════════════════════
+//
+// ONNX 的 rank-3 MatMul + 广播 bias Add：
+//
+//   MatMul(data [d0, d1, K], W [1, K, N]) -> Add(., bias [1, 1, N])
+//
+// 权重与 bias 的前导维都是 1，融合后就是逐行的小 GEMM 加 bias 初值
+// （annc/lib/Kernel/builtin_kernels/batched_matmul_add_*）：
+//
+//   out[i, j, n] = bias[0, 0, n] + sum_k data[i, j, k] * W[0, k, n]
+//
+// bias 在 k 求和之后加，与源链的顺序一致。
+//
+// 匹配条件对齐 ORT 的 FusedBatchedMatMulAdd（annc_opt 0003/0006，
+// batched-matmul-add-patch::FuseMatMulAdd）；本线暂只支持 rank-3 常量权重
+// 与 [1,1,N] bias 这一形态，ORT patch 另支持的前置常量仿射折叠与
+// rank-4/批量权重形态属后续覆盖工作（见任务 20261013-019 的命中数差异表）。
+
+struct BatchedMatMulAddMatch {
+  Value data;          // rank-3 f32 lhs
+  Value weight;        // rank-3 f32 常量 [1, K, N]
+  Value bias;          // rank-3 f32 常量 [1, 1, N]
+  Value output;        // Add 的结果（站点输出）
+  Value outputBuffer;  // Add 的输出缓冲
+  Value matmulResult;  // 与 Add 一起进站点
+};
+
+// 前导维等于 leadingDims 的 rank-3 f32 常量；返回其类型或空。
+static atir::TensorType matchBatchedConst(Value value,
+                                          ArrayRef<int64_t> leadingDims) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType || tensorType.getShape().size() != 3) return {};
+  if (!tensorType.getElementType().isF32()) return {};
+  if (!value.getDefiningOp<ConstantOp>()) return {};
+  if (!tensorType.getCacheData()) return {};
+  for (size_t axis = 0; axis < leadingDims.size(); ++axis) {
+    if (tensorType.getShape()[axis] != leadingDims[axis]) return {};
+  }
+  return tensorType;
+}
+
+static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
+  if (add->hasAttr("annc.fusion_materialized")) return failure();
+
+  Value outputBuffer = add.getOutput();
+  Operation *bufferOp = outputBuffer ? outputBuffer.getDefiningOp() : nullptr;
+  if (!bufferOp || !isa<BufferOp>(bufferOp)) return failure();
+  if (add.getResult().getType() != outputBuffer.getType()) return failure();
+
+  auto outputType = dyn_cast<atir::TensorType>(add.getResult().getType());
+  if (!outputType || outputType.getShape().size() != 3) return failure();
+  if (!outputType.getElementType().isF32()) return failure();
+
+  // 两操作数一个是 MatMul 结果，另一个是 bias 常量。
+  if (add.getInputs().size() != 2) return failure();
+  Value bias;
+  Value matmulResult;
+  atir::TensorType biasType = matchBatchedConst(add.getInputs()[1], {1, 1});
+  if (biasType) {
+    bias = add.getInputs()[1];
+    matmulResult = add.getInputs()[0];
+  } else {
+    biasType = matchBatchedConst(add.getInputs()[0], {1, 1});
+    if (!biasType) return failure();
+    bias = add.getInputs()[0];
+    matmulResult = add.getInputs()[1];
+  }
+  const int64_t outputDim = biasType.getShape()[2];
+  if (outputDim <= 0 || outputType.getShape()[2] != outputDim) return failure();
+
+  auto matmul = matmulResult.getDefiningOp<MatMulOp>();
+  if (!matmul || matmul.getResult() != matmulResult) return failure();
+  // 与既有 matmul 融合相同的白名单：任何 transpose / start-size 标注 /
+  // rhs_format 都会改变 kernel 的计算。
+  if (matmul.getWithBias() || matmul.getDoRelu() ||
+      matmul.getRightTranspose() || matmul.getLeftTranspose() ||
+      matmul.getOutputTranspose() || matmul.getMStart() || matmul.getNStart() ||
+      matmul.getKStart() || matmul.getMSize() || matmul.getNSize() ||
+      matmul.getKSize() || matmul->getAttr("rhs_format") || add.getDoRelu() ||
+      add.getScalar()) {
+    return failure();
+  }
+
+  // MatMul 只喂这个 Add；折叠进第二个消费者会悄悄重算它的输入。
+  for (Operation *user : matmulResult.getUsers()) {
+    if (user != add.getOperation()) return failure();
+  }
+
+  atir::TensorType weightType = matchBatchedConst(matmul.getRhs(), {1});
+  if (!weightType) return failure();
+  const int64_t contractDim = weightType.getShape()[1];
+  if (contractDim <= 0 || weightType.getShape()[2] != outputDim) {
+    return failure();
+  }
+
+  auto dataType = dyn_cast<atir::TensorType>(matmul.getLhs().getType());
+  if (!dataType || dataType.getShape().size() != 3) return failure();
+  if (!dataType.getElementType().isF32()) return failure();
+  if (dataType.getShape()[2] >= 0 && dataType.getShape()[2] != contractDim) {
+    return failure();
+  }
+  if (dataType.getShape()[2] == 0) return failure();
+
+  BatchedMatMulAddMatch match;
+  match.data = matmul.getLhs();
+  match.weight = matmul.getRhs();
+  match.bias = bias;
+  match.output = add.getResult();
+  match.outputBuffer = outputBuffer;
+  match.matmulResult = matmulResult;
+  return match;
+}
+
+// Execution v2 的 kernel 函数：(execution, data, weight, bias) -> output，体内
+// 一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
+static atir::CustomOpSchema getBatchedMatMulAddSchema() {
+  return atir::CustomOpSchema::get("BatchedMatMulAdd")
+      .TypeVar("T")
+      .MemRefArg("data", 3, "T")
+      .MemRefArg("weight", 3, "T")
+      .MemRefArg("bias", 3, "T")
+      .Result("output", 3, "T");
+}
+
+static func::FuncOp createBatchedMatMulAddKernelFunc(
+    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
+    const BatchedMatMulAddMatch &match) {
+  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
+    return existing;
+  }
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+
+  SmallVector<Type> inputTypes = {
+      LLVM::LLVMPointerType::get(rewriter.getContext()), match.data.getType(),
+      match.weight.getType(), match.bias.getType()};
+  auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
+  auto func =
+      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
+  func.setPrivate();
+  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+  func->setAttr("annc.kernel", rewriter.getUnitAttr());
+  func->setAttr("fusion.pattern",
+                rewriter.getStringAttr("batched_matmul_add"));
+
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  auto customCall = rewriter.create<atir::CustomizeOp>(
+      func.getLoc(), TypeRange{match.output.getType()},
+      ValueRange{entry->getArgument(1), entry->getArgument(2),
+                 entry->getArgument(3)},
+      rewriter.getStringAttr("BatchedMatMulAdd"),
+      getBatchedMatMulAddSchema().toMetadata(rewriter.getContext()));
+  rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
+  return func;
+}
+
+struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
+  // benefit 2：同一 Add 上通用逐元素融合也可能匹配，本形态更具体。
+  // LayerNorm 是 benefit 3，先于本 pattern 试。
+  explicit FuseBatchedMatMulAddAsFuncCallPattern(MLIRContext *context)
+      : OpRewritePattern<AddOp>(context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(AddOp addOp,
+                                PatternRewriter &rewriter) const override {
+    auto match = matchBatchedMatMulAdd(addOp);
+    if (failed(match)) return failure();
+    ModuleOp module = addOp->getParentOfType<ModuleOp>();
+    if (!module) return failure();
+    // 站点本轮只服务 ONNX 导入（同 FTDMM / masked_mul / layer_norm）。
+    if (!module->hasAttr("annc.contract_version")) return failure();
+
+    // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    auto schema = getBatchedMatMulAddSchema();
+    SmallVector<Type> schemaInputTypes = {
+        match->data.getType(), match->weight.getType(), match->bias.getType()};
+    auto inferred = atir::inferTypeConstraintsFromSchema(
+        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
+        TypeRange{match->output.getType()});
+    if (!inferred) {
+      llvm::consumeError(inferred.takeError());
+      return failure();
+    }
+    annc::kernels::KernelResolveRequest request;
+    request.op_type = "BatchedMatMulAdd";
+    request.abi = "annc_execution_v2";
+    request.type_constraints = std::move(*inferred);
+    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
+
+    SmallVector<Operation *, 4> fusedOps = {
+        addOp.getOperation(), match->matmulResult.getDefiningOp()};
+    SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
+    if (escaping.size() != 1 || escaping[0] != match->output) return failure();
+
+    std::string anchorName = getTfName(match->output.getDefiningOp());
+    std::string kernelName = uniquifySymbolName(
+        module, getStableFusionKernelName(anchorName, "batched_matmul_add"));
+    std::string clusterName = uniquifyFusionName(
+        module, sanitizeName(anchorName + "/batched_matmul_add"));
+
+    auto kernelFunc = createBatchedMatMulAddKernelFunc(module, rewriter,
+                                                       kernelName, *match);
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
+
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr(
+        "fusion.pattern", rewriter.getStringAttr("batched_matmul_add")));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
+    SmallVector<FusionArgSpec> args;
+    args.push_back(
+        {"dynamic", getValueName(match->data), match->data.getType()});
+    args.push_back(
+        {"fixed", getValueName(match->weight), match->weight.getType()});
+    args.push_back({"fixed", getValueName(match->bias), match->bias.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "args", makeFusionArgArray(rewriter.getContext(), args)));
+    SmallVector<FusionArgSpec> outputs;
+    outputs.push_back({"output", getFusionOutputName(match->output),
+                       match->output.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("annc_execution_v2")));
+    // 输出由 kernel 经执行上下文分配，不在调用参数里。
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
+                                             rewriter.getStringAttr("")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "member_node_names",
+        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+    kernelFunc->setAttr("fusion.metadata",
+                        DictionaryAttr::get(rewriter.getContext(), metadata));
+
+    for (Operation *op : fusedOps) {
+      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+    }
+    return success();
+  }
+};
+
 }  // namespace
 
 namespace atir {
@@ -3677,6 +4783,9 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
     patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
     patterns.add<FuseTensordotMatMulAsFuncCallPattern>(&getContext());
+    patterns.add<FuseMaskedMulAsFuncCallPattern>(&getContext());
+    patterns.add<FuseLayerNormAsFuncCallPattern>(&getContext());
+    patterns.add<FuseBatchedMatMulAddAsFuncCallPattern>(&getContext());
     patterns.add<FuseKpEmbeddingActionIdGatherAsFuncCallPattern>(
         &getContext());
     patterns.add<FuseKpTargetBehaviorInteractionAsFuncCallPattern>(

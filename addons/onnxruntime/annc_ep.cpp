@@ -42,6 +42,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -181,6 +182,63 @@ std::vector<const OrtValueInfo*> NodeOutputs(const OrtNode* node) {
   return outputs;
 }
 
+// The graph's own name for a value (empty when ORT has none). This is the
+// original model's tensor name -- exactly what the site report's names are
+// translated back to at claim time.
+std::string ValueNameOf(const OrtValueInfo* value) {
+  if (value == nullptr) return {};
+  const char* name = nullptr;
+  (void)g_api->GetValueInfoName(value, &name);
+  return name ? name : "";
+}
+
+std::vector<std::string> NodeInputNames(const OrtNode* node) {
+  size_t count = 0;
+  if (node == nullptr ||
+      g_api->Node_GetNumInputs(node, &count) != nullptr) {
+    return {};
+  }
+  std::vector<const OrtValueInfo*> inputs(count, nullptr);
+  if (count != 0 &&
+      g_api->Node_GetInputs(node, inputs.data(), count) != nullptr) {
+    return {};
+  }
+  std::vector<std::string> names;
+  names.reserve(count);
+  for (const OrtValueInfo* value : inputs) names.push_back(ValueNameOf(value));
+  return names;
+}
+
+std::vector<std::string> NodeOutputNames(const OrtNode* node) {
+  std::vector<const OrtValueInfo*> outputs = NodeOutputs(node);
+  std::vector<std::string> names;
+  names.reserve(outputs.size());
+  for (const OrtValueInfo* value : outputs) names.push_back(ValueNameOf(value));
+  return names;
+}
+
+// The report names the exported model's tensors ("t<i>_<p>" / "in_<k>" /
+// "w_<k>"); Compile() sees the original graph. Translating at claim time (the
+// only place with the rename table) lets Compile() bind kernel arguments and
+// outputs by the graph's own names -- the only way to tell apart arguments the
+// rank/type rule cannot separate. Returns the translated copy, or std::nullopt
+// when any name is missing from the table.
+std::optional<annc_ep::Site> TranslatedSite(const annc_ep::Site& site,
+                                            const annc_ep::NameMaps& maps) {
+  annc_ep::Site translated = site;
+  for (annc_ep::Site::Arg& arg : translated.args) {
+    auto it = maps.renamed_to_tensor.find(arg.name);
+    if (it == maps.renamed_to_tensor.end()) return std::nullopt;
+    arg.name = it->second;
+  }
+  for (annc_ep::Site::Arg& output : translated.outputs) {
+    auto it = maps.renamed_to_tensor.find(output.name);
+    if (it == maps.renamed_to_tensor.end()) return std::nullopt;
+    output.name = it->second;
+  }
+  return translated;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -196,10 +254,13 @@ struct ComputeState {
   std::vector<int64_t> arg_ranks;
   std::vector<AnncElementType> arg_types;
   std::vector<annc_ep::OutputContract> outputs;
-  // Input index each context argument resolves to, resolved on the first call
-  // and guarded by `context_mutex`: ORT may run the same node concurrently.
+  // Input index each context argument resolves to. Name-resolved sites carry
+  // theirs from Compile; the rest are filled on the first call, guarded by
+  // `context_mutex` because ORT may run the same node concurrently.
   std::mutex context_mutex;
   std::vector<int64_t> arg_indices;
+  // Declared output slot -> the fused node's output index (empty = identity).
+  std::vector<uint32_t> output_slots;
   // The fused node's input layout is fixed for the lifetime of the session, so
   // the operand scan only has to run once; afterwards the two indices are used
   // directly.
@@ -285,6 +346,11 @@ struct AnncNodeComputeInfo : OrtNodeComputeInfo {
   std::vector<int64_t> arg_ranks;
   std::vector<AnncElementType> arg_types;
   std::vector<annc_ep::OutputContract> outputs;
+  // Sites whose arguments or outputs the rank rule cannot identify get their
+  // mapping resolved here, by name (empty = resolve at first Compute).
+  std::vector<int64_t> arg_indices;
+  // Declared output slot -> the fused node's output index (empty = identity).
+  std::vector<uint32_t> output_slots;
 };
 
 // ---------------------------------------------------------------------------
@@ -417,6 +483,7 @@ OrtStatus* ComputeContextSite(ComputeState* state,
   call.arg_ranks = state->arg_ranks;
   call.arg_types = state->arg_types;
   call.outputs = state->outputs;
+  call.output_slots = state->output_slots;
   {
     std::lock_guard<std::mutex> lock(state->context_mutex);
     if (state->arg_indices.empty()) {
@@ -445,6 +512,10 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
   state->arg_ranks = info->arg_ranks;
   state->arg_types = info->arg_types;
   state->outputs = info->outputs;
+  state->output_slots = info->output_slots;
+  // Name-resolved sites arrive with their argument mapping already fixed; the
+  // rest resolve on the first Compute by rank and element type.
+  state->arg_indices = info->arg_indices;
   *compute_state = state;
   return nullptr;
 }
@@ -753,7 +824,26 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
 
   std::unordered_set<std::string> claimed_names;
   size_t claimed = 0, dropped = 0;
-  for (const annc_ep::Site& site : report.sites) {
+  for (const annc_ep::Site& reported : report.sites) {
+    // Translate the report's names back to the graph's own names (the report
+    // speaks the exported model's). A site whose names are not all in the
+    // table can still be claimed when the rank/type rule identifies its
+    // arguments on its own; one that needs names is dropped here rather than
+    // failing later at Compile (which can only fail the whole session).
+    annc_ep::Site site = reported;
+    site.namesResolved = false;
+    if (auto translated = TranslatedSite(reported, maps)) {
+      site = *translated;
+      site.namesResolved = true;
+    }
+    if (annc_ep::SiteNeedsResolvedNames(site) && !site.namesResolved) {
+      ++dropped;
+      std::fprintf(stderr,
+                   "[annc-ep] drop site '%s': its argument/output names are "
+                   "not in the exported model's rename table\n",
+                   site.kernelName.c_str());
+      continue;
+    }
     std::vector<const OrtNode*> to_fuse;
     bool valid = true;
     for (const std::string& member : site.memberNodes) {
@@ -876,7 +966,17 @@ std::vector<size_t> SubgraphNodeIds(const OrtGraph* graph) {
 // declared output slots must be exactly the fused subgraph's outputs, and
 // every argument/output element type must be one the EP can describe, or the
 // kernel would misinterpret the buffers it is handed.
+//
+// Sites the rank/type rule cannot identify (masked_mul: several rank-3 data
+// operands, and one output per chain Mul) are pinned here instead, by tensor
+// name: the claim translated the report's names back to the graph's own, so
+// each declared argument names one of the fused node's inputs and each
+// declared output one of its outputs. Anything that does not line up is a
+// contract disagreement and refuses the whole session (Compile has no
+// per-node refusal) -- correctly, because running the kernel against the
+// wrong buffers would be silent corruption.
 bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
+                         const OrtNode* fused_node,
                          AnncNodeComputeInfo* info) {
   size_t graph_outputs = 0;
   if (g_api->Graph_GetNumOutputs(graph, &graph_outputs) != nullptr) return false;
@@ -907,6 +1007,37 @@ bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
     if (!to_element_type(output.dtype, &type)) return false;
     info->outputs.push_back(annc_ep::OutputContract{output.rank, type});
   }
+
+  const bool by_name =
+      annc_ep::SiteNeedsResolvedNames(site) && site.namesResolved;
+  if (by_name) {
+    const std::vector<std::string> input_names = NodeInputNames(fused_node);
+    const std::vector<std::string> output_names = NodeOutputNames(fused_node);
+    if (output_names.size() != site.outputs.size()) return false;
+    info->arg_indices.assign(site.args.size(), -1);
+    for (size_t arg = 0; arg < site.args.size(); ++arg) {
+      for (size_t input = 0; input < input_names.size(); ++input) {
+        if (input_names[input] != site.args[arg].name) continue;
+        // Two arguments claiming the same input means the contract does not
+        // describe this fused node; refuse instead of reusing a buffer.
+        if (std::find(info->arg_indices.begin(), info->arg_indices.end(),
+                      static_cast<int64_t>(input)) != info->arg_indices.end()) {
+          return false;
+        }
+        info->arg_indices[arg] = static_cast<int64_t>(input);
+        break;
+      }
+      if (info->arg_indices[arg] < 0) return false;
+    }
+    info->output_slots.assign(site.outputs.size(), 0);
+    for (size_t slot = 0; slot < site.outputs.size(); ++slot) {
+      auto it = std::find(output_names.begin(), output_names.end(),
+                          site.outputs[slot].name);
+      if (it == output_names.end()) return false;
+      info->output_slots[slot] =
+          static_cast<uint32_t>(it - output_names.begin());
+    }
+  }
   return true;
 }
 
@@ -931,13 +1062,13 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
         info->library = ep->kernel_library;
         info->abi = site->abi;
         if (site->abi == "annc_execution_v2" &&
-            !FillContextContract(*site, graphs[i], info)) {
+            !FillContextContract(*site, graphs[i], fused_nodes[i], info)) {
           // A contract that disagrees with the fused subgraph would run the
           // kernel against the wrong buffers; refuse the node loudly instead.
           ++unresolved;
           std::fprintf(stderr,
                        "[annc-ep] context site '%s' does not match the fused "
-                       "subgraph (outputs/ranks/types)\n",
+                       "subgraph (outputs/ranks/types/names)\n",
                        site->kernelName.c_str());
         }
       } else {
