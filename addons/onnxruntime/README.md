@@ -76,6 +76,15 @@ export ANNC_EP_CACHE_DIR=/abs/path/cache                    # 缺省：$XDG_CACH
 （例如包含 `crtbeginS.o`、`libstdc++` 和 `libgcc` 的目录）；pipeline 会将该变量
 传递给内部编译子进程。
 
+## 最小端到端验证
+
+配置 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 且使用含 `onnx`、`numpy`、`onnxruntime`
+的 Python 环境后，运行 `ctest -R 'AnncEp(SiteValidation|AotFixture)' --output-on-failure`。
+`AnncEpAotFixture` 构建一个单节点 MatMul 模型，通过真实 ORT EP 完成图导出、
+site 校验、缓存、融合节点、kernel 加载和数值执行；测试 kernel 的调用标记用于
+区分 ANNC 执行与 CPU 回退。fixture 仅代替当前 JIT 专用的 MatMul 代码生成，
+不代表真实 `annc-onnx-pipeline` 已能生成 AOT MatMul kernel。
+
 调试与测量开关：
 
 | 变量 | 作用 |

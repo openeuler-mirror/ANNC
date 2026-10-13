@@ -426,6 +426,11 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
       stage_error = report_error;
       break;
     }
+    if (!report->sites.empty() &&
+        !FileExists(g_work_dir + "/" + kKernelLibraryName)) {
+      stage_error = "compile driver reported sites without a kernel library";
+      break;
+    }
     // Publish atomically: clear any partial entry, rename the work dir into
     // place, then write the marker readers check for.
     {

@@ -76,6 +76,7 @@ set_target_properties(annc_ep PROPERTIES
 
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   include(GoogleTest)
   add_executable(annc-ep-compile-test
       annc_ep_compile_test.cpp
@@ -88,6 +89,13 @@ if(BUILD_TESTING)
   set_target_properties(annc-ep-compile-test PROPERTIES CXX_STANDARD 17
       CXX_STANDARD_REQUIRED ON)
   gtest_discover_tests(annc-ep-compile-test)
+  foreach(mode IN ITEMS normal missing-symbol missing-library)
+    add_test(NAME AnncEpAotFixture.${mode}
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/ep_aot_fixture.py
+        --ep-library $<TARGET_FILE:annc_ep> --mode ${mode})
+    set_tests_properties(AnncEpAotFixture.${mode} PROPERTIES TIMEOUT 60)
+  endforeach()
 endif()
 
 # The ORT C++ API resolves OrtGetApiBase from the host process at load time, so
