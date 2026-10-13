@@ -210,7 +210,10 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
   std::vector<std::string> env;
   const std::string prefix = prefixOf(argv0);
   const std::string binDir = selfDir(argv0);
-  const char *keep[] = {"HOME", "LANG", "LC_ALL", "TERM"};
+  // clang is launched by the driver and needs the caller's target runtime
+  // search paths to find crtbeginS.o, libstdc++, and related files.
+  const char *keep[] = {"HOME", "LANG", "LC_ALL", "TERM", "LIBRARY_PATH",
+                        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"};
 
   std::string pathEnv;
   for (const std::string &dir : toolSearchDirs(argv0)) pathEnv += dir + ":";

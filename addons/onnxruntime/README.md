@@ -72,6 +72,9 @@ export ANNC_EP_CACHE_DIR=/abs/path/cache                    # 缺省：$XDG_CACH
 `RegisterExecutionProviderLibrary` 的路径**必须是绝对路径**：相对路径会被拼到别处
 （`ORT_LIB_DIR/./libannc_ep.so`）导致加载失败。工具链必须与该 EP 配套安装（
 `annc-onnx-pipeline` 及其兄弟工具、`ANNC_KERNEL_LIB_PATH` 指向的归档）。
+若目标 clang 依赖系统 GCC runtime，调用进程还应提供对应的 `LIBRARY_PATH`
+（例如包含 `crtbeginS.o`、`libstdc++` 和 `libgcc` 的目录）；pipeline 会将该变量
+传递给内部编译子进程。
 
 调试与测量开关：
 
