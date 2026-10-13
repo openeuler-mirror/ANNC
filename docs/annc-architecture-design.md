@@ -547,6 +547,7 @@ sequenceDiagram
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
 | `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N] [--intra_thread_count N]`（未指定时保留动态 shape；线程数写入 module 属性） | ANNC 框架对接层 | 稳定  |
 | `frontends/onnx/onnx2atir`        | ONNX 模型 → ATIR MLIR           | CLI：`annc-onnx2atir <model.onnx> [-o out.mlir] [--dump-stats JSON] [--dump-inference JSON] [--strict] [--relaxed-opset] [--quiet]`；op 覆盖为目标融合子图所需子集，不支持控制流 | ANNC 框架对接层 | 早期  |
+| `addons/onnxruntime`              | ONNX Runtime EP 插件（运行时融合回接）   | ORT：`Env::RegisterExecutionProviderLibrary` + `SessionOptions::AppendExecutionProvider_V2`；导出 `CreateEpFactories` / `ReleaseEpFactory`；开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭 | ANNC 框架对接层 | 早期  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |

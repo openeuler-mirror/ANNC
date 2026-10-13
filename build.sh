@@ -24,6 +24,8 @@ REGEN_ONNX_PROTOS="NO"
 ENABLE_TENSORFLOW="ON"
 ENABLE_TENSORFLOW_ADDON=""
 ENABLE_ONNX="ON"
+ENABLE_ONNXRUNTIME_EP="OFF"
+ANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
@@ -122,6 +124,10 @@ while [[ $# -gt 0 ]]; do
       ENABLE_ONNX="OFF"
       shift
       ;;
+    --enable-ort-ep)
+      ENABLE_ONNXRUNTIME_EP="ON"
+      shift
+      ;;
     --coverage)
       ENABLE_COVERAGE="ON"
       shift
@@ -153,6 +159,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --disable-tensorflow-addon    Disable the TensorFlow addons (annc_optimizer, annc_fused_op);"
       echo "                                the TensorFlow frontend tools are still built"
       echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
+      echo "  --enable-ort-ep               Build the ONNX Runtime EP plugin (addons/onnxruntime);"
+      echo "                                requires the ONNX frontend and ANNC_ONNXRUNTIME_INCLUDE_DIR"
+      echo "                                pointing at the ORT 1.26.0 session headers"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
       echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
       echo "                                third_party (LLVM/json) build type is unchanged"
@@ -235,6 +244,14 @@ if [ "${REGEN_TF_PROTOS}" == "YES" ] && \
    [ "${ENABLE_TENSORFLOW}" == "OFF" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
   echo "ERROR: --regen-tf-protos has no enabled frontend to regenerate:" >&2
   echo "       both the TensorFlow and ONNX frontends are disabled." >&2
+  exit 1
+fi
+
+# The EP plugin depends on the ONNX frontend; report the conflict before any
+# dependency check or proto preparation runs.
+if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --enable-ort-ep requires the ONNX frontend, which is disabled." >&2
+  echo "       The EP plugin loads the AOT kernels produced through the ONNX frontend." >&2
   exit 1
 fi
 
@@ -618,6 +635,7 @@ check_cache_consistency() {
     "ANNC_KDNN_SOURCE:${KDNN_SOURCE}"
     "ANNC_KDNN_DIR:${KDNN_DIR}"
     "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
+    "ANNC_ONNXRUNTIME_INCLUDE_DIR:${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
     "ANNC_TENSORFLOW_PRELOAD:${ANNC_TENSORFLOW_PRELOAD}"
     "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
     "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
@@ -642,12 +660,13 @@ check_cache_consistency() {
 }
 
 # Framework switches were introduced after the strings around them, so a cache
-# written by an older build.sh has no ANNC_ENABLE_TENSORFLOW[_ADDON] or
-# ANNC_ENABLE_ONNX key. Such a cache was configured with the historical default
-# combination (all three ON). Compare the requested values against that
-# combination instead of skipping missing keys: an unchanged request only needs
-# one in-place reconfigure (third-party artifacts are kept), while a request
-# that changes the default combination must not silently reuse the old build.
+# written by an older build.sh has no ANNC_ENABLE_TENSORFLOW[_ADDON],
+# ANNC_ENABLE_ONNX or ANNC_ENABLE_ONNXRUNTIME_EP key. Such a cache was
+# configured with the historical default combination (the first three ON, the
+# EP plugin OFF). Compare the requested values against that combination instead
+# of skipping missing keys: an unchanged request only needs one in-place
+# reconfigure (third-party artifacts are kept), while a request that changes
+# the default combination must not silently reuse the old build.
 check_framework_switch_cache() {
   [ -f "CMakeCache.txt" ] || return 0
 
@@ -656,6 +675,7 @@ check_framework_switch_cache() {
     "ANNC_ENABLE_TENSORFLOW:${ENABLE_TENSORFLOW}:ON"
     "ANNC_ENABLE_TENSORFLOW_ADDON:${ENABLE_TENSORFLOW_ADDON}:ON"
     "ANNC_ENABLE_ONNX:${ENABLE_ONNX}:ON"
+    "ANNC_ENABLE_ONNXRUNTIME_EP:${ENABLE_ONNXRUNTIME_EP}:OFF"
   )
   local -a mismatches=()
   local missing_keys="NO"
@@ -796,6 +816,10 @@ else
   echo "  TensorFlow Frontend: ${ENABLE_TENSORFLOW}"
   echo "  TensorFlow Addon: ${ENABLE_TENSORFLOW_ADDON}"
   echo "  ONNX Frontend: ${ENABLE_ONNX}"
+  echo "  ONNXRuntime EP: ${ENABLE_ONNXRUNTIME_EP}"
+  if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
+    echo "  ONNXRuntime Include Dir: ${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
+  fi
   echo "  Coverage: ${ENABLE_COVERAGE}"
   echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
   echo "  KDNN Source: ${KDNN_SOURCE}"
@@ -821,6 +845,8 @@ else
     -DANNC_ENABLE_TENSORFLOW="${ENABLE_TENSORFLOW}" \
     -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
     -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
+    -DANNC_ENABLE_ONNXRUNTIME_EP="${ENABLE_ONNXRUNTIME_EP}" \
+    -DANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \

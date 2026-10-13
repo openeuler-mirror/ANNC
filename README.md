@@ -68,6 +68,7 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon
 > - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建
 > - `--disable-onnx`：关闭 ONNX 前端（`annc-onnx2atir`）
+> - `--enable-ort-ep`：构建 ONNX Runtime EP 插件（`addons/onnxruntime`，默认关闭）；需 ONNX 前端可用，并把环境变量 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录
 > - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
 
 只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
@@ -138,6 +139,9 @@ ATIR MLIR
   └─→ annc-converter → TF GraphDef（ANNCFused 图重写）
 
 annc-tf-pipeline → 端到端编排上述所有步骤
+
+annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点报告 → annc-asm → annc
+                     （bytecode 中间件；一次产出模型全部站点的 kernel .so）
 ```
 
 ### 自定义方言：ATIR（AI Tensor IR）
@@ -163,6 +167,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 |------|------|
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
 | [`annc-onnx2atir`](docs/Feature/onnx-frontend-architecture-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
+| `annc-onnx-pipeline` | ONNX 模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 的运行时编译模式使用 |
 | `annc-opt` | ATIR 优化（算子融合、块融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |
 | `annc-asm` | ATIR → lowered MLIR（affine/linalg） |
@@ -188,6 +193,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 |------|------|
 | `annc/tools/` | CLI 工具（8 个） |
 | `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema 与生成脚本），按框架开关注册 |
+| `addons/onnxruntime/` | ONNX Runtime EP 插件（`annc_ep.cpp` + 清单脚本）；默认不参与根构建，`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时构建并安装 `libannc_ep.so` |
 | `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
 | `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
 | `annc/lib/Target/aarch64/` | AArch64 代码生成 |
@@ -292,6 +298,27 @@ annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
 | `--atir-op-fusion` | 算子融合 |
 | `--atir-rank-inference` | 推断未知张量秩 |
 | `--atir-gemm-epilogue-fusion` | 识别 GEMM epilogue 融合候选 |
+
+### `annc-onnx-pipeline`
+
+`annc-onnx-pipeline` 把整个 ONNX 模型编译成「一个模型一个 `.so`」的 AOT kernel 库，并同时产出
+**站点报告 `sites.json`**：每个融合站点的 kernel 名、实参/输出契约、ABI，以及该站点的**成员节点名单**
+（`member_node_names`，被融合吞并的图节点）。它供 ONNX Runtime EP 插件
+（`addons/onnxruntime/`）调用——EP 在 `GetCapability` 内导出整图、调用本工具、按报告精确申报融合区域。
+
+```shell
+annc-onnx-pipeline --model model.onnx --out-dir <dir> [--work-dir <dir>] [--verbose]
+annc-onnx-pipeline --toolchain-info     # 打印工具链指纹 JSON（缓存键用）
+```
+
+产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。中间件走 MLIR bytecode
+（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方
+应回落到 CPU 执行而不是让会话失败。
+
+前置：`annc` 链接阶段从**单一目录** `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib`）解析全部归档
+（ANNC kernel 归档 + `libLLVMSupport.a` 等 LLVM 归档），因此该目录必须来自 `ninja install` 的安装树；
+工具启动时会预检并给出明确报错。同理，`annc` 以裸名调用 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`，
+本工具会把自身 bin 目录（构建树另加 `_deps/llvm-build/bin`）前置到子进程 `PATH`。
 
 ### `annc-fusion-metadata`
 
@@ -530,6 +557,8 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
+| `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort-ep` |
+| `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |

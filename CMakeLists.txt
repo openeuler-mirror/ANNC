@@ -17,12 +17,40 @@ option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG
 option(ANNC_ENABLE_TENSORFLOW "Build the TensorFlow frontend tools (annc-tf2atir, annc-converter, annc-tf-pipeline)" ON)
 option(ANNC_ENABLE_TENSORFLOW_ADDON "Build the TensorFlow addons (annc_optimizer, annc_fused_op); requires ANNC_ENABLE_TENSORFLOW" ${ANNC_ENABLE_TENSORFLOW})
 option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protobuf sources" ON)
+# The ONNX Runtime EP plugin is opt-in: it is compiled against an external ORT
+# SDK that the default build neither needs nor downloads.
+option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
+set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
     "ANNC_ENABLE_TENSORFLOW_ADDON=ON requires ANNC_ENABLE_TENSORFLOW=ON: the "
     "TensorFlow addons are built from the TensorFlow frontend toolchain. Set "
     "ANNC_ENABLE_TENSORFLOW_ADDON=OFF or ANNC_ENABLE_TENSORFLOW=ON.")
+endif()
+
+if(ANNC_ENABLE_ONNXRUNTIME_EP AND NOT ANNC_ENABLE_ONNX)
+  message(FATAL_ERROR
+    "ANNC_ENABLE_ONNXRUNTIME_EP=ON requires ANNC_ENABLE_ONNX=ON: the plugin "
+    "loads the AOT kernels produced through the ONNX frontend. Set "
+    "ANNC_ENABLE_ONNXRUNTIME_EP=OFF or ANNC_ENABLE_ONNX=ON.")
+endif()
+
+if(ANNC_ENABLE_ONNXRUNTIME_EP)
+  if(ANNC_ONNXRUNTIME_INCLUDE_DIR STREQUAL "")
+    message(FATAL_ERROR
+      "ANNC_ENABLE_ONNXRUNTIME_EP=ON requires ANNC_ONNXRUNTIME_INCLUDE_DIR to "
+      "point at the ORT 1.26.0 session headers, e.g. "
+      "<ORT_ROOT>/include/onnxruntime/core/session. The SDK is never downloaded "
+      "automatically.")
+  endif()
+  if(NOT EXISTS "${ANNC_ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h" OR
+     NOT EXISTS "${ANNC_ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_ep_c_api.h")
+    message(FATAL_ERROR
+      "ANNC_ONNXRUNTIME_INCLUDE_DIR='${ANNC_ONNXRUNTIME_INCLUDE_DIR}' does not "
+      "contain onnxruntime_c_api.h and onnxruntime_ep_c_api.h. Point it at the "
+      "ORT 1.26.0 include/onnxruntime/core/session directory.")
+  endif()
 endif()
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 
@@ -174,7 +202,7 @@ add_compile_options(
 # Code coverage via gcov (--coverage, portable across gcc/clang). Set AFTER the
 # LLVM/MLIR sub-build so LLVM is neither recompiled nor relinked with --coverage;
 # the options apply only to directories processed afterwards (annc/, python/,
-# frontends/, tests/, ...). Both compile and link flags are required: compile flags
+# frontends/, tests/, and the enabled addons). Both compile and link flags are required: compile flags
 # instrument objects (referencing __gcov_* symbols), link flags pull in the gcov
 # runtime that resolves them — so any ANNC executable linking an instrumented
 # object (e.g. libANNCKernel) must also get the link flag, which the global
@@ -188,7 +216,7 @@ endif()
 # ANNC-scoped debug mode (--annc-debug). Set AFTER the LLVM/MLIR sub-build, for
 # the same reason as coverage above: directory-level compile options apply only
 # to targets defined afterwards (annc/, python/, frontends/, tensorflow_addons/,
-# tests/), so third-party LLVM/json compile commands are untouched and ninja does not
+# addons/onnxruntime/, tests/), so third-party LLVM/json compile commands are untouched and ninja does not
 # rebuild them. The flags are appended at the end of the compile command, so
 # -O0 overrides the Release -O3 and -UNDEBUG re-enables assert() in ANNC code
 # even when CMAKE_BUILD_TYPE=Release.
@@ -210,6 +238,11 @@ endif()
 # Framework frontends, registered after the ANNC libraries they link against.
 # frontends/CMakeLists.txt applies the per-framework switches.
 add_subdirectory(frontends)
+# Optional ORT EP plugin; entered only when explicitly enabled (the option
+# block above already rejected a missing ONNX parent or ORT SDK path).
+if(ANNC_ENABLE_ONNXRUNTIME_EP)
+  add_subdirectory(addons/onnxruntime)
+endif()
 
 if(BUILD_TESTING)
   add_subdirectory(tests)
