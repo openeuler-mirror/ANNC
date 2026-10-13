@@ -3867,6 +3867,16 @@ static bool matchMaskedMulConsumer(MulOp mul, Value mask, Value ids,
 // 同一 EP 提交的**全部**分组，所以站点根本不能申报。model1 就是这种形状：
 // 一个站点的 Mul 喂给第三个 Mul，后者自己的输出又是第四个 Mul 的 data，而第
 // 四个 Mul 吃同一个 mask。
+//
+// 2026-10-13 复验（本线，新版插件 EP API）：这道守卫**仍然必需**。
+// `onnxruntime/core/session/plugin_ep/ep_plugin_provider_interfaces.cc:396`
+// 在 `CreateSupportedPartitions` 给出的分组数 != 1 时打印
+// "set nodes that cannot be fused together" 并 `return {}`——整次 GetCapability
+// 提交的分组全部作废。实测去掉守卫后 model1 的站点从 11 涨到 20（EP 侧
+// `claimed=20 dropped=0` 只是**提交**计数），但该次会话里 0 次 kernel 调用、
+// ORT 打出 cannot-be-fused 错误，输出"与 CPU 一致"实为整图回退 CPU EP。
+// 判断 EP 是否真的执行了 kernel 不能只看 claimed，要看 Compute 侧证据
+// （`ANNC_EP_DEBUG=1` 的逐实参绑定日志）或 ORT 的 cannot-be-fused 报错。
 static bool hasHoleBetweenMembers(ArrayRef<Operation *> members) {
   SmallPtrSet<Operation *, 16> memberSet(members.begin(), members.end());
   for (Operation *member : members) {

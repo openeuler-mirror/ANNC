@@ -83,6 +83,38 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 
 // -----
 
+// 负例：站点成员之间存在"洞"（model1 的真实形状）——站点内一个 Mul 的输出喂
+// 给站点外的第三个 Mul，后者自己的输出又是同站点第二个 Mul 的 data，而第二
+// 个 Mul 吃同一个 mask。ORT 的新版插件 EP API 同样拒绝这种分组：
+// ep_plugin_provider_interfaces.cc:396 在分组不可融时 `return {}`，整次
+// GetCapability 提交的分组全部作废（2026-10-13 实测：去掉守卫后 model1
+// claimed=20 但 0 次 kernel 调用 + ORT cannot-be-fused 报错）。站点必须不成立。
+// 反向验证：把守卫的调用去掉，本用例立刻失败。
+// CHECK-LABEL: func.func @main
+// CHECK-NOT: fused_masked_mul
+module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
+  func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %x: !atir.tensor<1x4x8xf32, name = "x">, %y: !atir.tensor<1x4x8xf32, name = "y">) -> (!atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "m_b">) {
+    %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
+    %true = atir.constant "private" @"Not/true" -> <i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>
+    %eq = atir.Compare %ids, %pad {comparisonDirection = "EQ"} : (!atir.tensor<1x4xi64, name = "ids">, !atir.tensor<i64, name = "pad", data = dense<0> : tensor<i64>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">
+    %not = atir.Compare %eq, %true {comparisonDirection = "NE"} : (!atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">, !atir.tensor<i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Not:0">
+    %cast_buf = "atir.buffer"() : () -> !atir.tensor<1x4xf32, name = "Cast:0">
+    %cast = atir.Cast %cast_buf, %not : <1x4xf32, name = "Cast:0">, <1x4xi32, encoding = <"bool">, name = "Not:0"> -> <1x4xf32, name = "Cast:0">
+    %axes = atir.constant "private" @"Unsqueeze/axes" -> <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>>
+    %unsq_buf = "atir.buffer"() : () -> !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">
+    %unsq = atir.ExpandDims %unsq_buf, %cast, %axes : <1x4x1xf32, name = "Unsqueeze:0">, <1x4xf32, name = "Cast:0">, <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>> -> <1x4x1xf32, name = "Unsqueeze:0">
+    %a_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m_a">
+    %m_a = "atir.Mul"(%a_buf, %x, %unsq) : (!atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "x">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m_a">
+    %mid_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "mid">
+    %mid = "atir.Mul"(%mid_buf, %m_a, %y) : (!atir.tensor<1x4x8xf32, name = "mid">, !atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "y">) -> !atir.tensor<1x4x8xf32, name = "mid">
+    %b_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m_b">
+    %m_b = "atir.Mul"(%b_buf, %mid, %unsq) : (!atir.tensor<1x4x8xf32, name = "m_b">, !atir.tensor<1x4x8xf32, name = "mid">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m_b">
+    return %m_a, %m_b : !atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "m_b">
+  }
+}
+
+// -----
+
 // 负例：同一块但模块没有 ONNX 前端标记（annc.contract_version）——站点只服务
 // ONNX 宿主（kernel 期望 ONNX 执行上下文），TF 侧不产出。
 // CHECK-LABEL: func.func @main

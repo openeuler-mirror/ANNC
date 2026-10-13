@@ -34,6 +34,7 @@
 #include "annc_ep_compile.h"
 #include "annc_ep_execution.h"
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -221,20 +222,33 @@ std::vector<std::string> NodeOutputNames(const OrtNode* node) {
 // "w_<k>"); Compile() sees the original graph. Translating at claim time (the
 // only place with the rename table) lets Compile() bind kernel arguments and
 // outputs by the graph's own names -- the only way to tell apart arguments the
-// rank/type rule cannot separate. Returns the translated copy, or std::nullopt
-// when any name is missing from the table.
+// rank/type rule cannot separate. Outputs additionally carry the result index
+// the report appends ("t178_0:0") and the exported names never contain ':', so
+// that suffix is dropped when the full name is not in the table.
+// Returns the translated copy, or std::nullopt when a name cannot be resolved.
 std::optional<annc_ep::Site> TranslatedSite(const annc_ep::Site& site,
                                             const annc_ep::NameMaps& maps) {
+  auto lookup = [&](const std::string& name) -> const std::string* {
+    auto it = maps.renamed_to_tensor.find(name);
+    if (it != maps.renamed_to_tensor.end()) return &it->second;
+    const size_t colon = name.rfind(':');
+    if (colon == std::string::npos || colon + 1 == name.size()) return nullptr;
+    for (size_t i = colon + 1; i < name.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) return nullptr;
+    }
+    it = maps.renamed_to_tensor.find(name.substr(0, colon));
+    return it == maps.renamed_to_tensor.end() ? nullptr : &it->second;
+  };
   annc_ep::Site translated = site;
   for (annc_ep::Site::Arg& arg : translated.args) {
-    auto it = maps.renamed_to_tensor.find(arg.name);
-    if (it == maps.renamed_to_tensor.end()) return std::nullopt;
-    arg.name = it->second;
+    const std::string* original = lookup(arg.name);
+    if (original == nullptr) return std::nullopt;
+    arg.name = *original;
   }
   for (annc_ep::Site::Arg& output : translated.outputs) {
-    auto it = maps.renamed_to_tensor.find(output.name);
-    if (it == maps.renamed_to_tensor.end()) return std::nullopt;
-    output.name = it->second;
+    const std::string* original = lookup(output.name);
+    if (original == nullptr) return std::nullopt;
+    output.name = *original;
   }
   return translated;
 }
@@ -477,6 +491,23 @@ OrtStatus* ComputeContextSite(ComputeState* state,
   if (state->symbol == nullptr) {
     return g_api->CreateStatus(ORT_FAIL,
                                "ANNC EP: context kernel is not loaded");
+  }
+  // Name-resolved sites arrive with `arg_indices` already pinned, so they never
+  // reach ResolveContextInputs and its per-input log. Without a line here an
+  // executing site would look identical to one ORT dropped -- print the mapping
+  // this node was created with, once.
+  if (g_debug && !state->reported) {
+    state->reported = true;
+    std::fprintf(stderr, "[annc-ep] ctx compute: abi=%s, %zu arg(s) ->",
+                 state->abi.c_str(), state->arg_ranks.size());
+    for (size_t arg = 0; arg < state->arg_ranks.size(); ++arg) {
+      const int64_t input =
+          arg < state->arg_indices.size() ? state->arg_indices[arg] : -1;
+      std::fprintf(stderr, " [arg %zu (rank %lld) <- input %lld]", arg,
+                   static_cast<long long>(state->arg_ranks[arg]),
+                   static_cast<long long>(input));
+    }
+    std::fprintf(stderr, ", %zu output slot(s)\n", state->outputs.size());
   }
   annc_ep::ContextCall call;
   call.symbol = state->symbol;

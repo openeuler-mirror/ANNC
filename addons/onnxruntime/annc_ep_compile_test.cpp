@@ -73,10 +73,21 @@ TEST(AnncEpSiteValidation, RejectsUnknownAbi) {
 
 TEST(AnncEpSiteValidation, RejectsUnsupportedPattern) {
   Site site = ValidSite();
-  site.pattern = "layer_norm";
+  site.pattern = "kp_fused_gather";  // TF-domain pattern: not an EP site
   std::string error;
   EXPECT_FALSE(ValidateSite(site, &error));
   EXPECT_NE(error.find("pattern"), std::string::npos);
+}
+
+TEST(AnncEpContextSiteValidation, AcceptsEveryMigratedPattern) {
+  for (const char* pattern :
+       {"tensordot_matmul", "masked_mul", "layer_norm",
+        "batched_matmul_add"}) {
+    Site site = ValidContextSite();
+    site.pattern = pattern;
+    std::string error;
+    EXPECT_TRUE(ValidateSite(site, &error)) << pattern << ": " << error;
+  }
 }
 
 TEST(AnncEpSiteValidation, RejectsDuplicateMembers) {
@@ -142,13 +153,41 @@ TEST(AnncEpContextSiteValidation, RejectsContextSiteWithArgumentOrder) {
   EXPECT_NE(error.find("argument order"), std::string::npos);
 }
 
-TEST(AnncEpContextSiteValidation, RejectsDuplicateArgumentRanks) {
+// Repeated ranks are legal once every name resolved back to the graph's: the
+// mapping is then pinned by name, not by rank (masked_mul's data operands,
+// layer_norm's gamma/beta).  Without resolved names the rank rule is the only
+// one there is, so such a site must not be claimed -- that decision needs the
+// rename table, so it is stated by SiteNeedsResolvedNames and enforced by the
+// claim loop, not by ValidateSite.
+TEST(AnncEpContextSiteValidation, RepeatedRanksNeedResolvedNames) {
   Site site = ValidContextSite();
-  site.args = {{"a", "dynamic", "f32", 2, {4, 8}},
-               {"b", "fixed", "f32", 2, {8, 4}}};
+  site.pattern = "layer_norm";
+  site.args = {{"x", "dynamic", "f32", 2, {4, 8}},
+               {"gamma", "fixed", "f32", 1, {8}},
+               {"beta", "fixed", "f32", 1, {8}},
+               {"eps", "fixed", "f32", 0, {}}};
   std::string error;
-  EXPECT_FALSE(ValidateSite(site, &error));
-  EXPECT_NE(error.find("distinct ranks"), std::string::npos);
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+  EXPECT_TRUE(SiteNeedsResolvedNames(site));
+
+  Site distinct = ValidContextSite();
+  EXPECT_FALSE(SiteNeedsResolvedNames(distinct));
+
+  // More than one output: the report's order need not match ORT's numbering,
+  // so the mapping has to come from names as well.
+  distinct.outputs.push_back({"y2", "output", "f32", 3, {1, 2, 1}});
+  EXPECT_TRUE(SiteNeedsResolvedNames(distinct));
+}
+
+// The masked_mul id tensor is i64; the EP describes i64 descriptors.
+TEST(AnncEpContextSiteValidation, AcceptsIntegerMaskArgument) {
+  Site site = ValidContextSite();
+  site.pattern = "masked_mul";
+  site.args = {{"data0", "dynamic", "f32", 3, {2, 3, 4}},
+               {"ids", "fixed", "i64", 2, {2, 3}}};
+  site.namesResolved = true;
+  std::string error;
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
 }
 
 TEST(AnncEpContextSiteValidation, RejectsUnsupportedArgumentElementType) {

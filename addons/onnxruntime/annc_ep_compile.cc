@@ -202,7 +202,11 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
   site->executionMode = entry.value("execution_mode", "aot");
   site->abi = entry.value("abi", "mlir_ciface");
   site->memberNodes = entry.value("member_node_names", std::vector<std::string>{});
-  if (site->memberNodes.empty()) return false;
+  // An empty member list is not report corruption: the toolchain also reports
+  // sites of patterns that predate the member metadata (the generic JIT
+  // matmul fusion) and writes an empty list for them.  Those sites are simply
+  // unusable -- ValidateSite drops them one by one with a logged reason --
+  // and voiding the whole report over them would cost every site in it.
 
   auto readArgs = [](const nlohmann::json& value, std::vector<Site::Arg>* out) {
     if (!value.is_array()) return false;
