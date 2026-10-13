@@ -247,8 +247,7 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
       site->kernelArgOrder.push_back(value.get<int64_t>());
     }
   }
-  std::string validation_error;
-  return ValidateSite(*site, &validation_error);
+  return true;
 }
 
 }  // namespace
@@ -265,10 +264,6 @@ std::string ProcessTempDir() {
   MakeDirs(dir);
   return dir;
 }
-
-static std::string g_work_dir;  // set per Compile() call, for diagnostics
-
-std::string CurrentWorkDir() { return g_work_dir; }
 
 bool CompileDriver::LocateDriver() {
   if (located_) return available_;
@@ -319,29 +314,35 @@ bool CompileDriver::ReadReport(const std::string& path, SiteReport* report,
     *error = std::string("invalid site report: ") + e.what();
     return false;
   }
-  const std::string schema = document.value("schema", "");
-  if (schema != "annc-ep-site-report/1") {
-    *error = "unexpected site report schema '" + schema + "'";
+  try {
+    const std::string schema = document.value("schema", "");
+    if (schema != "annc-ep-site-report/1") {
+      *error = "unexpected site report schema '" + schema + "'";
+      return false;
+    }
+    report->sites.clear();
+    if (!document.contains("sites") || !document["sites"].is_array()) {
+      *error = "site report has no sites array";
+      return false;
+    }
+    size_t index = 0;
+    for (const auto& entry : document["sites"]) {
+      Site site;
+      const size_t entry_index = index++;
+      if (!ReadSite(entry, &site)) {
+        *error = "invalid site entry at index " + std::to_string(entry_index);
+        return false;
+      }
+      std::string validation_error;
+      if (!ValidateSite(site, &validation_error)) continue;
+      report->sites.push_back(std::move(site));
+    }
+  } catch (const std::exception& e) {
+    *error = std::string("invalid site report fields: ") + e.what();
+    report->sites.clear();
     return false;
-  }
-  report->sites.clear();
-  if (!document.contains("sites") || !document["sites"].is_array()) {
-    *error = "site report has no sites array";
-    return false;
-  }
-  for (const auto& entry : document["sites"]) {
-    Site site;
-    if (!ReadSite(entry, &site)) continue;  // drop the site, keep the rest
-    report->sites.push_back(std::move(site));
   }
   return true;
-}
-
-void CompileDriver::CleanupAfterCompile() {
-  if (last_work_dir_.empty() || EnvFlag("ANNC_EP_KEEP_TEMPS")) return;
-  std::error_code ignored;
-  std::filesystem::remove_all(last_work_dir_, ignored);
-  last_work_dir_.clear();
 }
 
 bool CompileDriver::Compile(const std::string& modelPath, const std::string& signature,
@@ -359,7 +360,7 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
   const std::string reportPath = entry + "/" + kReportName;
   const std::string libraryPath = entry + "/" + kKernelLibraryName;
   const std::string donePath = entry + "/" + kDoneMarker;
-  g_work_dir = entry + ".work";
+  const std::string work_dir = entry + ".work";
 
   auto loadPublished = [&]() {
     if (!FileExists(donePath) || !FileExists(reportPath)) return false;
@@ -407,12 +408,19 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
   bool ok = false;
   std::string stage_error;
   do {
-    if (!MakeDirs(g_work_dir)) {
-      stage_error = "cannot create work dir '" + g_work_dir + "'";
+    // A crashed prior compiler may have left a partial work tree behind.
+    // Start each attempt from an empty directory so stale artifacts cannot be
+    // mistaken for outputs from this invocation.
+    {
+      std::error_code ignored;
+      std::filesystem::remove_all(work_dir, ignored);
+    }
+    if (!MakeDirs(work_dir)) {
+      stage_error = "cannot create work dir '" + work_dir + "'";
       break;
     }
     std::string output;
-    const int rc = RunCaptured({driver_path_, "--model", modelPath, "--out-dir", g_work_dir},
+    const int rc = RunCaptured({driver_path_, "--model", modelPath, "--out-dir", work_dir},
                                TimeoutSeconds(), &output);
     if (rc != 0) {
       stage_error = "compile driver failed (exit " + std::to_string(rc) + ")";
@@ -422,12 +430,12 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
       break;
     }
     std::string report_error;
-    if (!ReadReport(g_work_dir + "/" + kReportName, report, &report_error)) {
+    if (!ReadReport(work_dir + "/" + kReportName, report, &report_error)) {
       stage_error = report_error;
       break;
     }
     if (!report->sites.empty() &&
-        !FileExists(g_work_dir + "/" + kKernelLibraryName)) {
+        !FileExists(work_dir + "/" + kKernelLibraryName)) {
       stage_error = "compile driver reported sites without a kernel library";
       break;
     }
@@ -437,7 +445,7 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
       std::error_code ignored;
       std::filesystem::remove_all(entry, ignored);
     }
-    if (::rename(g_work_dir.c_str(), entry.c_str()) != 0) {
+    if (::rename(work_dir.c_str(), entry.c_str()) != 0) {
       stage_error = "cannot publish cache entry '" + entry + "': " + std::strerror(errno);
       break;
     }
@@ -452,6 +460,12 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
     ok = true;
   } while (false);
 
+  // Cleanup must remain under the signature lock: the next compiler can
+  // recreate this same directory as soon as the lock is released.
+  if (!ok && !EnvFlag("ANNC_EP_KEEP_TEMPS")) {
+    std::error_code ignored;
+    std::filesystem::remove_all(work_dir, ignored);
+  }
   ::flock(lock_fd, LOCK_UN);
   ::close(lock_fd);
   if (!ok) {

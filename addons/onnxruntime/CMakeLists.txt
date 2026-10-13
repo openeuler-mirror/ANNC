@@ -89,7 +89,8 @@ if(BUILD_TESTING)
   set_target_properties(annc-ep-compile-test PROPERTIES CXX_STANDARD 17
       CXX_STANDARD_REQUIRED ON)
   gtest_discover_tests(annc-ep-compile-test)
-  foreach(mode IN ITEMS normal missing-symbol missing-library)
+  foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report concurrent
+                   cache-config missing-pipeline pipeline-failure zero-site)
     add_test(NAME AnncEpAotFixture.${mode}
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/ep_aot_fixture.py

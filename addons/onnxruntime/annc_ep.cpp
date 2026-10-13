@@ -64,6 +64,35 @@ bool g_debug = false;  // ANNC_EP_DEBUG=1
 // ---------------------------------------------------------------------------
 constexpr const char* kKernelPrefix = "_mlir_ciface_";
 
+std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
+  std::string fingerprint = driver->ToolchainInfo();
+  if (fingerprint.empty()) return {};
+
+  // The pipeline curates its child environment. These variables select
+  // matchers, compiler/linker inputs, headers, and runtime search paths, so a
+  // changed value must not reuse a previously compiled cache entry.
+  constexpr const char* config_names[] = {
+      "ANNC_EP_PIPELINE",       "ANNC_GEMM_CONFIG",    "ANNC_GEMM",
+      "ANNC_KERNEL_LIB_PATH",   "ANNC_CLANG",          "LIBRARY_PATH",
+      "CPATH",                  "C_INCLUDE_PATH",      "CPLUS_INCLUDE_PATH",
+  };
+  fingerprint += "\nannc-ep-config-v1";
+  for (const char* name : config_names) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+      fingerprint += "\n";
+      fingerprint += name;
+      fingerprint += "=unset";
+      continue;
+    }
+    fingerprint += "\n";
+    fingerprint += name;
+    fingerprint += "=" + std::to_string(std::strlen(value)) + ":";
+    fingerprint += value;
+  }
+  return fingerprint;
+}
+
 struct KernelHandle {
   void* handle = nullptr;
   void (*fn)(void*, void*, void*) = nullptr;
@@ -439,6 +468,7 @@ struct AnncEp : OrtEp {
   // compile that failed and fell back to the CPU EP).
   std::vector<ClaimedSite> sites;
   std::string kernel_library;
+  mutable std::mutex state_mutex;
 
   // Returns the site whose fused region is exactly `node_ids`, or nullptr.
   const annc_ep::Site* FindSiteByNodeIds(const std::vector<size_t>& node_ids) const {
@@ -478,6 +508,7 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
     OrtEp* this_ptr, const OrtGraph* graph,
     OrtEpGraphSupportInfo* graph_support_info) noexcept {
   auto* ep = static_cast<AnncEp*>(this_ptr);
+  std::lock_guard<std::mutex> ep_state_lock(ep->state_mutex);
 
   // Control-flow bodies arrive here too, and a nested graph cannot be exported
   // as a standalone model (outer-scope values, missing initializers).
@@ -488,20 +519,21 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
 
   // ORT may ask an EP to evaluate capability for more than one top-level graph
   // during session construction. Do not retain claims or a library from a
-  // prior graph, otherwise Compile() can match stale node ids.
+  // prior graph, otherwise Compile() can match stale node ids. The lock keeps
+  // concurrent capability calls from racing on this per-session state.
   ep->sites.clear();
   ep->kernel_library.clear();
 
-  // One driver per process: the compile memo, the disk cache and the toolchain
-  // fingerprint are all process-scoped.
-  static annc_ep::CompileDriver driver;
+  // Keep driver state local to this capability evaluation. The disk cache and
+  // per-signature flock provide sharing without exposing mutable driver state
+  // to concurrent ORT capability calls.
+  annc_ep::CompileDriver driver;
   if (!driver.Available()) {
-    static bool warned = false;
-    if (!warned) {
-      warned = true;
+    static std::once_flag warned;
+    std::call_once(warned, [&driver]() {
       std::fprintf(stderr, "[annc-ep] runtime compile disabled: %s\n",
                    driver.UnavailableReason().c_str());
-    }
+    });
     return nullptr;
   }
 
@@ -522,7 +554,7 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
     return nullptr;
   }
 
-  const std::string toolchain = driver.ToolchainInfo();
+  const std::string toolchain = CacheToolchainFingerprint(&driver);
   if (toolchain.empty()) {
     std::fprintf(stderr, "[annc-ep] cannot fingerprint the ANNC toolchain\n");
     return nullptr;
@@ -539,7 +571,6 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
     std::fprintf(stderr, "[annc-ep] runtime compile failed: %s\n", error.c_str());
     return nullptr;
   }
-  driver.CleanupAfterCompile();
 
   OrtNodeFusionOptions fusion_options = {};
   fusion_options.ort_version_supported = ORT_API_VERSION;
@@ -671,6 +702,7 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
                                     OrtNodeComputeInfo** node_compute_infos,
                                     OrtNode** ep_context_nodes) noexcept {
   auto* ep = static_cast<AnncEp*>(this_ptr);
+  std::lock_guard<std::mutex> ep_state_lock(ep->state_mutex);
   (void)ep_context_nodes;
   size_t unresolved = 0;
   for (size_t i = 0; i < count; ++i) {

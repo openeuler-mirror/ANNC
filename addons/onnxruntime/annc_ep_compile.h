@@ -126,9 +126,6 @@ class CompileDriver {
                std::string* kernelLibrary, SiteReport* report,
                std::string* error);
 
-  // Removes the work directory of the last Compile() unless KEEP_TEMPS.
-  void CleanupAfterCompile();
-
  private:
   bool LocateDriver();
   bool ReadReport(const std::string& path, SiteReport* report,
@@ -139,7 +136,6 @@ class CompileDriver {
   std::string driver_path_;
   std::string unavailable_reason_;
   std::string toolchain_info_;  // memoized, "" until queried
-  std::string last_work_dir_;
   std::string cache_key_;  // set by Compile() for CacheEntryPath()
 };
 
@@ -150,9 +146,6 @@ std::string CacheEntryPath(const std::string& signature);
 // A per-process scratch directory under the cache root (created on demand),
 // where the EP writes the exported model before compiling it.
 std::string ProcessTempDir();
-
-// The compile work directory used by the most recent Compile() call.
-std::string CurrentWorkDir();
 
 }  // namespace annc_ep
 

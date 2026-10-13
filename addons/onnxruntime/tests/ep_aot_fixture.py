@@ -8,12 +8,15 @@ the real plugin.
 
 import argparse
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 import numpy as np
 import onnx
@@ -63,6 +66,10 @@ def run_pipeline(args):
     if args.toolchain_info:
         print("annc-ep-aot-fixture-v1")
         return
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") == "pipeline-failure":
+        with open(os.environ["ANNC_EP_FIXTURE_COMPILE_LOG"], "a") as log:
+            log.write("compile\n")
+        raise SystemExit(2)
     model = onnx.load(args.model)
     onnx.checker.check_model(model)
     nodes = list(model.graph.node)
@@ -70,29 +77,46 @@ def run_pipeline(args):
         raise ValueError("fixture requires exactly one exported MatMul named n0")
     output = Path(args.out_dir)
     output.mkdir(parents=True, exist_ok=True)
-    (output / "kernel.c").write_text(KERNEL)
-    if os.environ.get("ANNC_EP_FIXTURE_MODE") != "missing-library":
+    kernel_name = "fixture_matmul"
+    columns = model.graph.initializer[0].dims[1]
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") == "concurrent":
+        kernel_name += f"_{columns}"
+        # Keep both independent compiler calls in flight long enough for the
+        # test's two session threads to overlap their cache work.
+        time.sleep(0.25)
+    (output / "kernel.c").write_text(KERNEL.replace("fixture_matmul", kernel_name))
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") not in {"missing-library", "zero-site"}:
         subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-o",
                         str(output / "libannc_kernels.so"), str(output / "kernel.c")],
                        check=True)
     site = {
         "pattern": "matmul", "execution_mode": "aot", "abi": "mlir_ciface",
-        "kernel_name": "fixture_matmul", "member_node_names": ["n0"],
+        "kernel_name": kernel_name, "member_node_names": ["n0"],
         "kernel_arg_order": [0, 1, 2],
         "args": [
             {"tf_name": nodes[0].input[0], "role": "dynamic", "rank": 3,
              "shape": [2, 3, 4]},
             {"tf_name": nodes[0].input[1], "role": "fixed", "rank": 2,
-             "shape": [4, 5]},
+             "shape": [4, columns]},
         ],
         "outputs": [{"tf_name": nodes[0].output[0], "role": "output",
-                     "rank": 3, "shape": [2, 3, 5]}],
+                     "rank": 3, "shape": [2, 3, columns]}],
     }
     if os.environ.get("ANNC_EP_FIXTURE_MODE") == "missing-symbol":
         site["kernel_name"] = "absent_matmul"
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") == "malformed-report":
+        # Valid JSON, but a wrong field type. The EP must reject this cache
+        # entry and fall back to CPU instead of terminating the host process.
+        site["member_node_names"] = "n0"
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") == "zero-site":
+        sites = []
+    elif os.environ.get("ANNC_EP_FIXTURE_MODE") == "malformed-report":
+        sites = ["not-an-object"]
+    else:
+        sites = [site]
     (output / "sites.json").write_text(json.dumps({
         "schema": "annc-ep-site-report/1", "contract_version": "1.0.0",
-        "sites": [site],
+        "sites": sites,
     }))
     with open(os.environ["ANNC_EP_FIXTURE_COMPILE_LOG"], "a") as log:
         log.write("compile\n")
@@ -133,8 +157,77 @@ def run_test(args):
         "ANNC_EP_FIXTURE_MODE": args.mode,
         "ANNC_EP_DEBUG": "1",
     })
+    if args.mode == "missing-pipeline":
+        os.environ["ANNC_EP_PIPELINE"] = str(work / "missing-pipeline")
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4) / 11
     expected = session(model, ["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    if args.mode in {"missing-pipeline", "pipeline-failure", "zero-site"}:
+        session_count = 2 if args.mode == "pipeline-failure" else 1
+        for _ in range(session_count):
+            actual = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
+                None, {"x": x})[0]
+            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
+        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        assert not list((work / "cache").glob("v1/*/*.work"))
+        assert not (work / "compute.log").exists()
+        if args.mode == "zero-site":
+            assert len(entries) == 1, entries
+            assert not (entries[0].parent / "libannc_kernels.so").exists()
+            assert (work / "compile.log").read_text().splitlines() == ["compile"]
+            print("Zero sites: published cache without kernel; CPU fallback")
+        else:
+            assert not entries, entries
+            if args.mode == "pipeline-failure":
+                assert (work / "compile.log").read_text().splitlines() == ["compile", "compile"]
+            print(f"{args.mode}: CPU fallback; no cache entry")
+        return
+    if args.mode == "concurrent":
+        other = work / "other.onnx"
+        other_proto = onnx.load(model)
+        other_proto.graph.initializer[0].CopyFrom(
+            numpy_helper.from_array(np.arange(24, dtype=np.float32).reshape(4, 6) / 7, "w"))
+        other_proto.graph.output[0].type.tensor_type.shape.dim[2].dim_value = 6
+        onnx.save(other_proto, other)
+        expected_other = session(other, ["CPUExecutionProvider"]).run(
+            None, {"x": x})[0]
+        start = threading.Barrier(2)
+
+        def run_one(path, input_name, reference):
+            start.wait(timeout=15)
+            for _ in range(2):
+                actual = session(path, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
+                    None, {input_name: x})[0]
+                np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run_one, model, "x", expected),
+                       pool.submit(run_one, other, "x", expected_other)]
+            for future in futures:
+                future.result()
+        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        assert len(entries) == 2, entries
+        names = {json.loads((entry.parent / "sites.json").read_text())["sites"][0]["kernel_name"]
+                 for entry in entries}
+        assert names == {"fixture_matmul_5", "fixture_matmul_6"}, names
+        assert (work / "compile.log").read_text().splitlines() == ["compile"] * 2
+        assert (work / "compute.log").read_text().splitlines() == ["compute"] * 4
+        assert not list((work / "cache").glob("v1/*/*.work"))
+        print("Concurrent different models: overlapping compilers, isolated caches, warm hits")
+        return
+    if args.mode == "cache-config":
+        first = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
+        actual = first.run(None, {"x": x})[0]
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
+        os.environ["ANNC_GEMM_CONFIG"] = "alternative"
+        second = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
+        actual = second.run(None, {"x": x})[0]
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
+        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        assert len(entries) == 2, entries
+        assert (work / "compile.log").read_text().splitlines() == ["compile", "compile"]
+        assert (work / "compute.log").read_text().splitlines() == ["compute", "compute"]
+        print("Different GEMM config: separate cache entries and kernels")
+        return
     for attempt in range(2):
         actual = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
             None, {"x": x})[0]
@@ -142,10 +235,17 @@ def run_test(args):
                                    equal_nan=True)
         print(f"session {attempt + 1}: numeric match")
     entries = list((work / "cache").glob("v1/*/*/DONE"))
+    assert not list((work / "cache").glob("v1/*/*.work")), "work directories were not cleaned"
     if args.mode == "missing-library":
         assert not entries, "incomplete cache must not be published"
         assert not (work / "compute.log").exists()
         print("Missing kernel library: CPU fallback; no DONE marker")
+        return
+    if args.mode == "malformed-report":
+        assert not entries, "malformed report must not be published"
+        assert not (work / "compute.log").exists()
+        assert (work / "compile.log").read_text().splitlines() == ["compile", "compile"]
+        print("Malformed report: CPU fallback; no DONE marker")
         return
     assert len(entries) == 1, entries
     assert (work / "compile.log").read_text().splitlines() == ["compile"]
@@ -175,7 +275,9 @@ def main():
     parser.add_argument("--ep-library")
     parser.add_argument("--work-dir")
     parser.add_argument("--mode", choices=["normal", "missing-symbol",
-                                            "missing-library"],
+                                            "missing-library", "malformed-report", "concurrent",
+                                            "cache-config", "missing-pipeline",
+                                            "pipeline-failure", "zero-site"],
                         default="normal")
     args = parser.parse_args()
     if args.toolchain_info or args.model:
