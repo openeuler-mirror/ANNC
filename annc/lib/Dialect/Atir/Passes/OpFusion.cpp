@@ -67,6 +67,35 @@ static std::string getTfName(Operation *op) {
   return "";
 }
 
+static std::string getTfOp(Operation *op) {
+  if (!op) return "";
+  if (auto dict = op->getAttrOfType<DictionaryAttr>("metadata")) {
+    if (auto attr = dyn_cast_or_null<StringAttr>(dict.get("tf.op"))) {
+      return attr.str();
+    }
+  }
+  return "";
+}
+
+// 站点成员名单（EP 运行时编译的站点报告用）：被这次融合吞并的图节点名。
+// ONNX 前端把 ONNX 节点名写在 metadata.tf.name；Constant / Input 是例外
+// （它们写的是张量名，对应 ORT 的 initializer / 图输入，不在节点表里），
+// 故按 tf.op 排除。名单必须与消费方看到的图命名一致，否则消费方无法把
+// 它映射回自己的节点、只能整站点回落。
+static SmallVector<Attribute> collectMemberNodeNames(
+    PatternRewriter &rewriter, ArrayRef<Operation *> ops) {
+  SmallVector<Attribute> names;
+  for (Operation *op : ops) {
+    if (!op || isa<ConstantOp, BufferOp>(op)) continue;
+    std::string kind = getTfOp(op);
+    if (kind == "Constant" || kind == "Input") continue;
+    std::string name = getTfName(op);
+    if (name.empty()) continue;
+    names.push_back(rewriter.getStringAttr(name));
+  }
+  return names;
+}
+
 static std::string getValueName(Value value) {
   if (auto tensorType = dyn_cast<atir::TensorType>(value.getType())) {
     std::string name = tensorType.getValueOfName();
@@ -3194,6 +3223,416 @@ struct FuseKpSparseSelectAsFuncCallPattern
 };
 
 
+// ══ FusedTensordotMatMul（execution v2，ONNX 站点）═════════════════════════
+//
+// ONNX 的 Tensordot 导出为固定形态的块，ATIR 上共 16 个算子：恒等 perm 的
+// Transpose、10 个算子的 shape 链（Shape/Cast/2×Gather/2×Prod/2×ExpandDims/
+// Concat/Cast）算出 [prod(free), contract]、展平 Reshape、MatMul（rank 2 常量
+// 权重）、反展平目标的 Concat+Cast、反展平 Reshape。（ORT 侧口径记作
+// "14 节点"，其编号不含反展平的 Cast 与 Reshape。）
+//
+// row-major 下展平前导维不搬数据，除 MatMul 外的 15 个算子又都是纯元数据操作
+// ——其中 13 个（Shape/Gather/Prod/ExpandDims/Cast/Transpose/Reshape）在
+// annc/lib/Conversion 下根本没有 lowering，另 2 个是 atir.Concat——因此整块
+// 等价于「按前导维展平后与末维做矩阵乘」，落成单个自定义算子最省。
+//
+// 匹配条件对齐 ORT 的 FusedTensordotMatMulFusion，但收紧一条：free 轴必须恰为
+// 前导维。ORT 只校验 contract 轴是末维（fused_tensordot_matmul_fusion.cc:
+// 328-330），free 轴取 shape 链里 Gather 常量原值；两侧 kernel 都按连续
+// row-major 线性读取输入，free 不是前导维时会算错而 ORT 不检查。
+//
+// execution v2 形态（本线版本）：kernel 函数首参为执行上下文，输出由 kernel
+// 经上下文回调分配（不再有输出 memref 形参），线程池由上下文携带；主图区域
+// 只标记 annc.fusion_materialized、不重写，AOT 裁剪会丢弃主图。
+
+struct TensordotMatMulMatch {
+  Value input;         // 被展平张量 x（rank 3）
+  Value weight;        // rank 2 常量权重 W
+  Value output;        // 反展平 Reshape 的结果
+  Value outputBuffer;  // 反展平 Reshape 的输出缓冲
+};
+
+// 形状链里的 Cast 可有可无：ORT 侧 Concat 出口既可能是 Cast 也可能是 Concat
+// 本身（fused_tensordot_matmul_fusion.cc:303-311），ATIR 侧同形。
+static Value skipFtdmmCast(Value value) {
+  if (auto cast = value.getDefiningOp<CastOp>()) return cast.getInput();
+  return value;
+}
+
+static bool isFtdmmConstInts(Value value, ArrayRef<int64_t> expected) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType || !value.getDefiningOp<ConstantOp>()) return false;
+  auto data = dyn_cast_or_null<DenseElementsAttr>(tensorType.getCacheData());
+  if (!data || data.getNumElements() != static_cast<int64_t>(expected.size()) ||
+      !data.getElementType().isIntOrIndex()) {
+    return false;
+  }
+  size_t index = 0;
+  for (const APInt &element : data.getValues<APInt>()) {
+    if (element.getSExtValue() != expected[index++]) return false;
+  }
+  return true;
+}
+
+// value 是否由 Shape(data) 经（可选）Cast 得到。
+static bool isFtdmmShapeOf(Value value, Value data) {
+  auto shape = skipFtdmmCast(value).getDefiningOp<ShapeOp>();
+  return shape && shape.getInput() == data;
+}
+
+// value == Gather(Shape(data), axis=0, indices == axes)。
+static bool isFtdmmAxesGatherOf(Value value, Value data,
+                                ArrayRef<int64_t> axes) {
+  auto gather = skipFtdmmCast(value).getDefiningOp<GatherOp>();
+  if (!gather) return false;
+  if (!isFtdmmConstInts(gather.getAxis(), {0})) return false;
+  if (!isFtdmmShapeOf(gather.getParams(), data)) return false;
+  return isFtdmmConstInts(gather.getIndices(), axes);
+}
+
+// value == ExpandDims(Prod(Gather(Shape(data), indices == axes), axis=0), 0)。
+//
+// Unsqueeze 的轴恒为 0：被扩的是 ReduceProd 产生的 0 维标量，ONNX 对 0 维
+// 输入的合法轴是 [-1, 0]——轴 1 连 onnxruntime 的 shape inference 都拒绝。
+static bool isFtdmmAxesProdExpandDimsOf(Value value, Value data,
+                                        ArrayRef<int64_t> axes) {
+  auto expand = value.getDefiningOp<ExpandDimsOp>();
+  if (!expand) return false;
+  if (!isFtdmmConstInts(expand.getAxis(), {0})) return false;
+  auto prod = expand.getInput().getDefiningOp<ProdOp>();
+  if (!prod) return false;
+  if (!isFtdmmConstInts(prod.getIndices(), {0})) return false;
+  return isFtdmmAxesGatherOf(prod.getInput(), data, axes);
+}
+
+static SmallVector<int64_t> ftdmmLeadingAxes(int64_t rank) {
+  SmallVector<int64_t> axes;
+  for (int64_t axis = 0; axis + 1 < rank; ++axis) axes.push_back(axis);
+  return axes;
+}
+
+static SmallVector<int64_t> ftdmmIdentityPerm(int64_t rank) {
+  SmallVector<int64_t> perm;
+  for (int64_t axis = 0; axis < rank; ++axis) perm.push_back(axis);
+  return perm;
+}
+
+// 展平目标形状 [prod(free), contract]。
+static bool isFtdmmFlattenShapeTarget(Value target, Value data,
+                                      int64_t rank) {
+  auto concat = skipFtdmmCast(target).getDefiningOp<ConcatOp>();
+  if (!concat || concat.getAxis() != 0) return false;
+  auto inputs = concat.getInputs();
+  if (inputs.size() != 2) return false;
+  return isFtdmmAxesProdExpandDimsOf(inputs[0], data, ftdmmLeadingAxes(rank)) &&
+         isFtdmmAxesProdExpandDimsOf(inputs[1], data, {rank - 1});
+}
+
+// 反展平目标形状 [free 维..., N]。
+static bool isFtdmmUnflattenShapeTarget(Value target, Value data, int64_t rank,
+                                        int64_t outputDim) {
+  auto concat = skipFtdmmCast(target).getDefiningOp<ConcatOp>();
+  if (!concat || concat.getAxis() != 0) return false;
+  auto inputs = concat.getInputs();
+  if (inputs.size() != 2) return false;
+  return isFtdmmAxesGatherOf(inputs[0], data, ftdmmLeadingAxes(rank)) &&
+         isFtdmmConstInts(inputs[1], {outputDim});
+}
+
+// 恒等 perm 的 Transpose；perm 操作数若为常量则一并核对。
+static bool isFtdmmIdentityTranspose(TransposeOp transpose, int64_t rank) {
+  auto permutation = transpose.getPermutation();
+  if (!permutation || static_cast<int64_t>(permutation.size()) != rank) {
+    return false;
+  }
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    auto element = dyn_cast<IntegerAttr>(permutation[axis]);
+    if (!element || element.getInt() != axis) return false;
+  }
+  if (transpose.getPerm().getDefiningOp<ConstantOp>()) {
+    return isFtdmmConstInts(transpose.getPerm(), ftdmmIdentityPerm(rank));
+  }
+  return true;
+}
+
+// Shape gate for the FTDMM sites.  The fused kernel is ANNC's own scalar
+// loop (~1.05 GMAC/s), so it beats ORT's MatMul (MLAS, multithreaded) only
+// while the site's matrix-multiply work is negligible.  Work is m*k*n, and m
+// (batch * sequence) is dynamic at this point, so the gate bounds k*n -- the
+// statically known factor -- and m has to be argued separately:
+//   * profile1's sites carry k*n <= 512 with m <= 6, i.e. <= ~3K MAC per call:
+//     the sites win (the fusion's real saving is the ~15 metadata ops around
+//     the MatMul);
+//   * model4's smallest site is k*n = 1024 and its rows run into the thousands
+//     at batch 32 (m*k*n ~ 1.6M-3.3M MAC, ~2-3 ms per call against a 52 ms
+//     whole-model baseline), which is why an earlier 2048 bound measured
+//     -2.6% end to end: the bound must stay below anything model4 can offer.
+// Above the bound the unfused ORT MatMul wins, so the site is left alone.
+// Follow-up: replace this bound with a per-shape kernel-vs-ORT table (or route
+// the site through the AArch64 GEMM pipeline) before raising it.
+constexpr int64_t kMaxFusedTensordotWeightElements = 512;
+
+// value 的消费者必须恰为唯一一个且类型为 OpT。
+template <typename OpT>
+static OpT ftdmmSingleConsumerOf(Value value) {
+  OpT result;
+  for (Operation *user : value.getUsers()) {
+    if (auto typed = dyn_cast<OpT>(user)) {
+      if (result) return OpT();  // 多个同类消费者，放弃
+      result = typed;
+      continue;
+    }
+    return OpT();  // 存在其它类型的消费者
+  }
+  return result;
+}
+
+static FailureOr<TensordotMatMulMatch> matchTensordotMatMul(MatMulOp matmul) {
+  if (matmul->hasAttr("annc.fusion_materialized")) return failure();
+  if (matmul.getWithBias() || matmul.getDoRelu()) return failure();
+  // 比 dev 版多一条：显式拒绝带转置的 MatMul。dev 不查，而 kernel 按连续
+  // row-major 读两侧操作数——转置旗标一旦出现就会静默算错。ONNX 前端把
+  // Transpose 显式降成 atir.Transpose（不产生这些属性），TF 前端则会把
+  // transpose_a/transpose_b 映射到 left/right_transpose（Builder/Transformers/
+  // Matrix.cpp）；本 pattern 目前被 annc.contract_version 门限制在 ONNX 模块，
+  // 这条拒绝作为契约守卫保留，不改变现有站点的匹配结果。
+  if (matmul.getLeftTranspose() || matmul.getRightTranspose() ||
+      matmul.getOutputTranspose()) {
+    return failure();
+  }
+
+  TensordotMatMulMatch match;
+
+  // (1) 权重：rank 2 的 f32 常量，两维静态且为正。
+  auto weightType = dyn_cast<atir::TensorType>(matmul.getRhs().getType());
+  if (!weightType || weightType.getShape().size() != 2) return failure();
+  if (!weightType.getElementType().isF32()) return failure();
+  if (!matmul.getRhs().getDefiningOp<ConstantOp>()) return failure();
+  if (!weightType.getCacheData()) return failure();
+  const int64_t contractDim = weightType.getShape()[0];
+  const int64_t outputDim = weightType.getShape()[1];
+  if (contractDim <= 0 || outputDim <= 0) return failure();
+  // Sites whose matrix multiply dominates are not profitable for this kernel
+  // (see kMaxFusedTensordotWeightElements); leave them to the framework.
+  if (contractDim * outputDim > kMaxFusedTensordotWeightElements) {
+    return failure();
+  }
+
+  // (2) lhs 由 Reshape 产出，且该 Reshape 的结果只喂给本 MatMul。
+  auto flattenReshape = matmul.getLhs().getDefiningOp<ReshapeOp>();
+  if (!flattenReshape || flattenReshape.getResult() != matmul.getLhs()) {
+    return failure();
+  }
+  if (!ftdmmSingleConsumerOf<MatMulOp>(flattenReshape.getResult())) {
+    return failure();
+  }
+
+  // (3) 展平的数据输入来自恒等 perm 的 Transpose，rank 固定为 3。
+  auto transpose = flattenReshape.getInput().getDefiningOp<TransposeOp>();
+  if (!transpose || transpose.getResult() != flattenReshape.getInput()) {
+    return failure();
+  }
+  Value input = transpose.getInput();
+  auto inputType = dyn_cast<atir::TensorType>(input.getType());
+  if (!inputType || inputType.getShape().size() != 3) return failure();
+  if (!inputType.getElementType().isF32()) return failure();
+  constexpr int64_t kRank = 3;
+  if (!isFtdmmIdentityTranspose(transpose, kRank)) return failure();
+  const int64_t inputContractDim = inputType.getShape()[kRank - 1];
+  if (inputContractDim >= 0 && inputContractDim != contractDim) return failure();
+
+  // (4) 展平目标形状必须是 [prod(前导维), 末维]。
+  if (!isFtdmmFlattenShapeTarget(flattenReshape.getTargetShape(), input,
+                                 kRank)) {
+    return failure();
+  }
+
+  // (5) MatMul 的唯一消费者是反展平 Reshape，其目标形状必须是 [前导维..., N]。
+  auto unfoldReshape = ftdmmSingleConsumerOf<ReshapeOp>(matmul.getResult());
+  if (!unfoldReshape) return failure();
+  if (!isFtdmmUnflattenShapeTarget(unfoldReshape.getTargetShape(), input, kRank,
+                                   outputDim)) {
+    return failure();
+  }
+  if (unfoldReshape.getNumOperands() == 0) return failure();
+  Operation *outputBuffer = unfoldReshape.getOperand(0).getDefiningOp();
+  if (!outputBuffer || !isa<BufferOp>(outputBuffer)) return failure();
+
+  match.input = input;
+  match.weight = matmul.getRhs();
+  match.output = unfoldReshape.getResult();
+  match.outputBuffer = unfoldReshape.getOperand(0);
+  return match;
+}
+
+// Execution v2 的 kernel 函数：(execution, input, weight) -> output，体内只有
+// 一次 atir.CustomizeOp；CustomizeCallLowering 把首参（!llvm.ptr）透传给手写
+// kernel `TensordotMatMul`（annc/lib/Kernel/builtin_kernels/tensordot_matmul_*），
+// 输出由 kernel 经上下文分配后作为 CustomizeOp 的结果返回。
+static atir::CustomOpSchema getTensordotMatMulSchema() {
+  return atir::CustomOpSchema::get("TensordotMatMul")
+      .TypeVar("T")
+      .MemRefArg("input", 3, "T")
+      .MemRefArg("weight", 2, "T")
+      .Result("output", 3, "T");
+}
+
+static func::FuncOp createTensordotMatMulKernelFunc(
+    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
+    const TensordotMatMulMatch &match) {
+  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
+    return existing;
+  }
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+
+  SmallVector<Type> inputTypes = {
+      LLVM::LLVMPointerType::get(rewriter.getContext()), match.input.getType(),
+      match.weight.getType()};
+  auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
+  auto func =
+      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
+  func.setPrivate();
+  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+  func->setAttr("annc.kernel", rewriter.getUnitAttr());
+  func->setAttr("fusion.pattern",
+                rewriter.getStringAttr("tensordot_matmul"));
+
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  auto customCall = rewriter.create<atir::CustomizeOp>(
+      func.getLoc(), TypeRange{match.output.getType()},
+      ValueRange{entry->getArgument(1), entry->getArgument(2)},
+      rewriter.getStringAttr("TensordotMatMul"),
+      getTensordotMatMulSchema().toMetadata(rewriter.getContext()));
+  rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
+  return func;
+}
+
+struct FuseTensordotMatMulAsFuncCallPattern
+    : public OpRewritePattern<MatMulOp> {
+  // benefit 2 > FuseMatMulAsFuncCallPattern 的默认 1：同一 MatMul 上两者都
+  // 可能匹配（后者是 jit 的通用 MatMul fusion），本 pattern 的形态更具体、
+  // 且是 AOT 站点，必须先试。
+  explicit FuseTensordotMatMulAsFuncCallPattern(MLIRContext *context)
+      : OpRewritePattern<MatMulOp>(context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(MatMulOp matmulOp,
+                                PatternRewriter &rewriter) const override {
+    auto match = matchTensordotMatMul(matmulOp);
+    if (failed(match)) return failure();
+    ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
+    if (!module) return failure();
+
+    // 站点本轮只服务 ONNX 导入：ONNX 前端在模块上留 annc.contract_version
+    // （全仓唯一写入点），据此把本 pattern 限定在 ONNX 模块，TF 侧的融合行为
+    // 保持不变。TF 宿主其实也能执行本 kernel——它构造的上下文池为空，
+    // resolveThreadPool 回落 TLS——限定的目的是不改动 TF 侧的融合配置，
+    // 而不是兼容性问题；将来要让 TF 也用上这个站点，去掉这道门即可。
+    if (!module->hasAttr("annc.contract_version")) return failure();
+
+    // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    auto schema = getTensordotMatMulSchema();
+    SmallVector<Type> schemaInputTypes = {match->input.getType(),
+                                          match->weight.getType()};
+    auto inferred = atir::inferTypeConstraintsFromSchema(
+        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
+        TypeRange{match->output.getType()});
+    if (!inferred) {
+      llvm::consumeError(inferred.takeError());
+      return failure();
+    }
+    annc::kernels::KernelResolveRequest request;
+    request.op_type = "TensordotMatMul";
+    request.abi = "annc_execution_v2";
+    request.type_constraints = std::move(*inferred);
+    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
+
+    // 被融合的算子：反展平 Reshape 往上游回溯，边界是 x 与 W。
+    SmallVector<Value, 2> boundaryInputs = {match->input, match->weight};
+    SmallVector<Operation *> fusedOps;
+    SmallPtrSet<Operation *, 32> visited;
+    collectDefiningOpsPostOrder(match->output.getDefiningOp(), boundaryInputs,
+                                visited, fusedOps);
+    if (fusedOps.empty()) return failure();
+
+    // 站点只有一路输出：除反展平结果外不得有结果逃逸，否则成员名单与融合
+    // 节点的输出对不上（EP 在 Compile 阶段还会按输出数核对一次）。站点间
+    // 共享的常量/缓冲不算逃逸——它们既不是成员（Constant/Input 不入名单），
+    // 也不参与内核调用。
+    llvm::SmallPtrSet<Operation *, 32> fusedSet(fusedOps.begin(),
+                                                fusedOps.end());
+    SmallVector<Value> escaping;
+    for (Operation *op : fusedOps) {
+      if (isa<ConstantOp, BufferOp>(op)) continue;
+      for (Value result : op->getResults()) {
+        if (llvm::any_of(result.getUsers(), [&](Operation *user) {
+              return !fusedSet.contains(user);
+            })) {
+          escaping.push_back(result);
+        }
+      }
+    }
+    if (escaping.size() != 1 || escaping[0] != match->output) return failure();
+
+    std::string anchorName = getTfName(match->output.getDefiningOp());
+    std::string kernelName = uniquifySymbolName(
+        module, getStableFusionKernelName(anchorName, "tensordot_matmul"));
+    std::string clusterName = uniquifyFusionName(
+        module, sanitizeName(anchorName + "/tensordot_matmul"));
+
+    auto kernelFunc =
+        createTensordotMatMulKernelFunc(module, rewriter, kernelName, *match);
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
+
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr(
+        "fusion.pattern", rewriter.getStringAttr("tensordot_matmul")));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "tf.name", rewriter.getStringAttr(clusterName)));
+    // args 按 kernel 调用顺序：v2 的形参是 (input, weight)；输出由 kernel 经
+    // 执行上下文分配，不在调用参数里，故 kernel_arg_order 为空。
+    SmallVector<FusionArgSpec> args;
+    args.push_back(
+        {"dynamic", getValueName(match->input), match->input.getType()});
+    args.push_back(
+        {"fixed", getValueName(match->weight), match->weight.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "args", makeFusionArgArray(rewriter.getContext(), args)));
+    SmallVector<FusionArgSpec> outputs;
+    outputs.push_back({"output", getFusionOutputName(match->output),
+                       match->output.getType()});
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("annc_execution_v2")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
+                                             rewriter.getStringAttr("")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "member_node_names",
+        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+    kernelFunc->setAttr("fusion.metadata",
+                        DictionaryAttr::get(rewriter.getContext(), metadata));
+
+    // execution v2 的主图区域保留原样（AOT 裁剪丢弃主图函数），只做标记，
+    // 避免通用 MatMul fusion 在同一区域上再建站点。
+    for (Operation *op : fusedOps) {
+      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+    }
+    return success();
+  }
+};
+
 }  // namespace
 
 namespace atir {
@@ -3237,6 +3676,7 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
     patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
+    patterns.add<FuseTensordotMatMulAsFuncCallPattern>(&getContext());
     patterns.add<FuseKpEmbeddingActionIdGatherAsFuncCallPattern>(
         &getContext());
     patterns.add<FuseKpTargetBehaviorInteractionAsFuncCallPattern>(

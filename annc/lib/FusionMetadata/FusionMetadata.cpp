@@ -73,6 +73,18 @@ std::vector<int64_t> intArrayAttr(DictionaryAttr dict, StringRef key) {
   return values;
 }
 
+std::vector<std::string> stringArrayAttr(DictionaryAttr dict, StringRef key) {
+  std::vector<std::string> values;
+  if (!dict) return values;
+  Attribute raw = dict.get(key);
+  auto arr = raw ? dyn_cast<ArrayAttr>(raw) : ArrayAttr();
+  if (!arr) return values;
+  for (Attribute attr : arr) {
+    if (auto s = dyn_cast<StringAttr>(attr)) values.push_back(s.str());
+  }
+  return values;
+}
+
 std::string trim(std::string value) {
   auto first =
       std::find_if_not(value.begin(), value.end(),
@@ -204,6 +216,21 @@ std::vector<int64_t> parseIntegerArray(StringRef value) {
   return result;
 }
 
+std::vector<std::string> parseStringArray(StringRef value) {
+  std::vector<std::string> result;
+  size_t open = value.find('[');
+  size_t close = value.rfind(']');
+  if (open == StringRef::npos || close == StringRef::npos || close <= open) {
+    return result;
+  }
+  for (const std::string &part :
+       splitTopLevel(value.slice(open + 1, close), ',')) {
+    std::string parsed = parseQuotedString(StringRef(part));
+    if (!parsed.empty()) result.push_back(parsed);
+  }
+  return result;
+}
+
 std::map<std::string, std::string> parseMetadataDictionary(StringRef body) {
   std::map<std::string, std::string> entries;
   for (const std::string &entry : splitTopLevel(body, ',')) {
@@ -276,6 +303,7 @@ FusionInfo fusionInfoFromMetadataEntries(
   info.templateFingerprint = stringValue("template_fingerprint");
   info.args = fusionArgArrayFromMetadata(rawValue("args"));
   info.outputs = fusionArgArrayFromMetadata(rawValue("outputs"));
+  info.memberNodeNames = parseStringArray(rawValue("member_node_names"));
   info.abi = stringValue("abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayValue("dynamic_dims");
@@ -429,6 +457,7 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   info.templateFingerprint = stringAttr(metadata, "template_fingerprint");
   info.args = fusionArgArrayAttr(metadata, "args");
   info.outputs = fusionArgArrayAttr(metadata, "outputs");
+  info.memberNodeNames = stringArrayAttr(metadata, "member_node_names");
   info.abi = stringAttr(metadata, "abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayAttr(metadata, "dynamic_dims");
