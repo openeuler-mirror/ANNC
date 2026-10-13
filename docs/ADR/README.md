@@ -41,6 +41,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-009 | GEMM intra 线程数改为运行时 JIT 特化维度 | accepted | [decisions.md#adr-009](decisions.md#adr-009) |
 | ADR-010 | TF 控制流镜像转换（mirror，不做语义重建） | accepted | [decisions.md#adr-010](decisions.md#adr-010) |
 | ADR-011 | ONNX 前端接入与"不可表达即降级"契约 | accepted | [decisions.md#adr-011](decisions.md#adr-011) |
+| ADR-012 | ORT EP 由 pipeline 报告驱动申报与运行时编译缓存 | implemented | [decisions.md#adr-012](decisions.md#adr-012) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

@@ -21,7 +21,7 @@ export ANNC_ONNXRUNTIME_INCLUDE_DIR=<ORT_ROOT>/include/onnxruntime/core/session
 > 构建，本插件的开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭。
 
 > 状态：**运行时编译是唯一形态**（2026-09-29 起）。当前 MR2 接入切片只接受
-> `pattern=matmul`、`abi=mlir_ciface`、AOT site，并按固定 3D lhs + 2D rhs + 3D output
+> `pattern=matmul/tensordot_matmul`、`abi=mlir_ciface`、AOT site，并按固定 3D lhs + 2D rhs + 3D output
 > 调用；`layer_norm`、`masked_mul`、`batched_matmul_add` 和其他 ABI 必须先完成独立
 > kernel/metadata/Compute 契约后才能申报。四模型性能数据不属于本切片验收。
 
@@ -79,11 +79,15 @@ export ANNC_EP_CACHE_DIR=/abs/path/cache                    # 缺省：$XDG_CACH
 ## 最小端到端验证
 
 配置 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 且使用含 `onnx`、`numpy`、`onnxruntime`
-的 Python 环境后，运行 `ctest -R 'AnncEp(SiteValidation|AotFixture)' --output-on-failure`。
+的 Python 环境后，运行 `ctest -R 'AnncEp(SiteValidation|AotFixture|FtdmmAotE2e)' --output-on-failure`。
 `AnncEpAotFixture` 构建一个单节点 MatMul 模型，通过真实 ORT EP 完成图导出、
 site 校验、缓存、融合节点、kernel 加载和数值执行；测试 kernel 的调用标记用于
 区分 ANNC 执行与 CPU 回退。fixture 仅代替当前 JIT 专用的 MatMul 代码生成，
 不代表真实 `annc-onnx-pipeline` 已能生成 AOT MatMul kernel。
+
+真实 `AnncEpFtdmmAotE2e` 使用 16 节点 ONNX 子图，通过真实 pipeline 生成
+`tensordot_matmul` AOT kernel，并验证冷/热 session 与 CPU EP 的数值一致。
+架构、缓存配置隔离和失败路径见 [特性设计文档](../../docs/Feature/annc-ort-ep-pipeline-adaptation-design.md)。
 
 调试与测量开关：
 

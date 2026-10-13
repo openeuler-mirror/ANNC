@@ -11,6 +11,8 @@
 
 ## 1 概述
 
+> ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](Feature/annc-ort-ep-pipeline-adaptation-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
+
 ### 1.1 目的
 
 本文档用于定义 **ANNC（Accelerated Neural Network Compiler）** 的架构设计，明确产品定位、特性需求、需求场景、功能实现原理、可靠性/安全/非功能质量属性设计，以及需求分解与信息需求。本文档是 ANNC 产品开发、测试、部署、运维的架构基线，供项目团队成员、架构评审人员及相关利益方使用。

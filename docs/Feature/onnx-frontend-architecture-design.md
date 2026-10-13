@@ -40,6 +40,8 @@ MR2 实现默认域 `ai.onnx`、opset 13、无子图属性的 DAG 导入，覆�
 - 新的 lowering 路径、目标后端或公共 Python API。
 - 将 `atir.opaque` 当作可执行的 ONNX fallback；opaque 在本前端中用于保留图结构。
 
+MR2 之后已增加独立的 ONNX Runtime EP 运行时编译接入层：它复用本文描述的 ONNX 前端，将 ORT `OrtGraph` 导出为自包含 ModelProto，再由 pipeline 生成 site 报告和 AOT kernel。该接入层的设计、缓存和回退契约见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](annc-ort-ep-pipeline-adaptation-design.md)。
+
 ## 2 总体方案
 
 ### 2.1 架构与数据流
