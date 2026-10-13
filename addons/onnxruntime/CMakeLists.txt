@@ -96,6 +96,11 @@ if(BUILD_TESTING)
         --ep-library $<TARGET_FILE:annc_ep> --mode ${mode})
     set_tests_properties(AnncEpAotFixture.${mode} PROPERTIES TIMEOUT 60)
   endforeach()
+  add_test(NAME AnncEpFtdmmAotE2e
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/ftdmm_aot_e2e.py
+      --ep-library $<TARGET_FILE:annc_ep>)
+  set_tests_properties(AnncEpFtdmmAotE2e PROPERTIES TIMEOUT 300)
 endif()
 
 # The ORT C++ API resolves OrtGetApiBase from the host process at load time, so

@@ -11,7 +11,9 @@ bool ValidateSite(const Site& site, std::string* error) {
     return false;
   };
   if (site.kernelName.empty()) return fail("site has no kernel name");
-  if (site.pattern != "matmul") {
+  const bool matmul = site.pattern == "matmul";
+  const bool tensordot = site.pattern == "tensordot_matmul";
+  if (!matmul && !tensordot) {
     return fail("site pattern is not supported by the current EP ABI");
   }
   if (site.executionMode != "aot") {
@@ -40,12 +42,14 @@ bool ValidateSite(const Site& site, std::string* error) {
     }
     return true;
   };
-  if (!validateArg(site.args[0], "dynamic") ||
-      !validateArg(site.args[1], "fixed") ||
+  const Site::Arg& dynamic = site.args[matmul ? 0 : 1];
+  const Site::Arg& fixed = site.args[matmul ? 1 : 0];
+  if (!validateArg(dynamic, "dynamic") ||
+      !validateArg(fixed, "fixed") ||
       !validateArg(site.outputs[0], "output")) {
     return false;
   }
-  if (site.args[0].rank != 3 || site.args[1].rank != 2 ||
+  if (dynamic.rank != 3 || fixed.rank != 2 ||
       site.outputs[0].rank != 3) {
     return fail("matmul site has unsupported argument ranks");
   }
@@ -57,6 +61,12 @@ bool ValidateSite(const Site& site, std::string* error) {
     if (index < 0 || index >= 3 || !order.insert(index).second) {
       return fail("site kernel argument order is not a permutation");
     }
+  }
+  const std::vector<int64_t> expected_order = matmul
+      ? std::vector<int64_t>{0, 1, 2}
+      : std::vector<int64_t>{1, 0, 2};
+  if (site.kernelArgOrder != expected_order) {
+    return fail("site kernel argument order does not match the EP call ABI");
   }
   if (site.flattenXIndex < -1 || site.weightIndex < -1) {
     return fail("site operand index is negative");

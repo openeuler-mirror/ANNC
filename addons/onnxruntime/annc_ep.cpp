@@ -66,7 +66,7 @@ constexpr const char* kKernelPrefix = "_mlir_ciface_";
 
 struct KernelHandle {
   void* handle = nullptr;
-  int32_t (*fn)(void*, void*, void*) = nullptr;
+  void (*fn)(void*, void*, void*) = nullptr;
 };
 
 // Keyed by (library path, kernel name) rather than by kernel name alone: the
@@ -108,7 +108,7 @@ class KernelTable {
     }
     if (shared == nullptr) return false;
     const std::string symbol = kKernelPrefix + kernel_name;
-    out->fn = reinterpret_cast<int32_t (*)(void*, void*, void*)>(
+    out->fn = reinterpret_cast<void (*)(void*, void*, void*)>(
         dlsym(shared, symbol.c_str()));
     if (!out->fn) {
       std::fprintf(stderr, "[annc-ep] no symbol %s in %s\n", symbol.c_str(), library.c_str());
@@ -153,7 +153,7 @@ std::vector<const OrtValueInfo*> NodeOutputs(const OrtNode* node) {
 // Compute state
 // ---------------------------------------------------------------------------
 struct ComputeState {
-  int32_t (*fn)(void*, void*, void*) = nullptr;  // resolved once in CreateState
+  void (*fn)(void*, void*, void*) = nullptr;  // resolved once in CreateState
   // The fused node's input layout is fixed for the lifetime of the session, so
   // the operand scan only has to run once; afterwards the two indices are used
   // directly.
@@ -364,7 +364,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
                                "ANNC EP: kernel for this fused node did not "
                                "resolve from the compiled library");
   }
-  int32_t (*fn)(void*, void*, void*) = state->fn;
+  void (*fn)(void*, void*, void*) = state->fn;
   const auto t_output_start = timing ? std::chrono::steady_clock::now()
                                      : std::chrono::steady_clock::time_point{};
 
@@ -402,7 +402,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
   }
   const auto t_kernel_start = timing ? std::chrono::steady_clock::now()
                                      : std::chrono::steady_clock::time_point{};
-  const int32_t rc = fn(&x_ref, &w_ref, &y_ref);
+  fn(&x_ref, &w_ref, &y_ref);
   if (timing) {
     const auto t_end = std::chrono::steady_clock::now();
     NodeTiming& t = Timing();
@@ -414,9 +414,6 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
                               t_kernel_start - t_output_start).count());
     t.kernel_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                               t_end - t_kernel_start).count());
-  }
-  if (rc != 0) {
-    return g_api->CreateStatus(ORT_FAIL, "ANNC EP: kernel returned non-zero status");
   }
   return nullptr;
 }

@@ -27,6 +27,26 @@ TEST(AnncEpSiteValidation, AcceptsValidSite) {
   EXPECT_TRUE(ValidateSite(ValidSite(), &error)) << error;
 }
 
+TEST(AnncEpSiteValidation, AcceptsAotTensordotMatMul) {
+  Site site = ValidSite();
+  site.pattern = "tensordot_matmul";
+  site.args = {{"w", "fixed", 2, {4, 8}},
+               {"x", "dynamic", 3, {1, 2, 4}}};
+  site.kernelArgOrder = {1, 0, 2};
+  std::string error;
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+}
+
+TEST(AnncEpSiteValidation, RejectsWrongTensordotKernelOrder) {
+  Site site = ValidSite();
+  site.pattern = "tensordot_matmul";
+  site.args = {{"w", "fixed", 2, {4, 8}},
+               {"x", "dynamic", 3, {1, 2, 4}}};
+  std::string error;
+  EXPECT_FALSE(ValidateSite(site, &error));
+  EXPECT_NE(error.find("order"), std::string::npos);
+}
+
 TEST(AnncEpSiteValidation, RejectsUnknownAbi) {
   Site site = ValidSite();
   site.abi = "unknown";
