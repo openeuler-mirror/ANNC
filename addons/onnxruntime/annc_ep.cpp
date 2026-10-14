@@ -34,6 +34,8 @@
 #include "annc_ep_compile.h"
 #include "annc_ep_execution.h"
 
+#include <filesystem>
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -92,6 +94,38 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
     fingerprint += name;
     fingerprint += "=" + std::to_string(std::strlen(value)) + ":";
     fingerprint += value;
+  }
+
+  // The kernel archives themselves are *inputs* to the link step, and the
+  // pipeline reads them from ANNC_KERNEL_LIB_PATH -- whose value above is only
+  // the directory name.  Without their identity in the key, rebuilding a
+  // kernel leaves every cached entry valid and the EP keeps running the old
+  // library (hit while porting masked_mul: the kernel-side grain change was
+  // invisible until the caches were wiped).  Size+mtime of every archive in
+  // that directory is enough to catch a rebuild; hashing contents would mean
+  // reading hundreds of megabytes per session.
+  if (const char* lib_dir = std::getenv("ANNC_KERNEL_LIB_PATH")) {
+    std::vector<std::string> entries;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(lib_dir, error)) {
+      if (error) break;
+      if (entry.path().extension() != ".a") continue;
+      std::error_code stat_error;
+      const auto size = std::filesystem::file_size(entry.path(), stat_error);
+      if (stat_error) continue;
+      const auto stamp = std::filesystem::last_write_time(entry.path(), stat_error);
+      if (stat_error) continue;
+      entries.push_back(entry.path().filename().string() + ":" +
+                        std::to_string(size) + ":" +
+                        std::to_string(
+                            static_cast<int64_t>(stamp.time_since_epoch().count())));
+    }
+    std::sort(entries.begin(), entries.end());
+    fingerprint += "\nannc-ep-kernel-libs-v1";
+    for (const std::string& entry : entries) {
+      fingerprint += "\n";
+      fingerprint += entry;
+    }
   }
   return fingerprint;
 }
@@ -517,23 +551,6 @@ OrtStatus* ComputeContextSite(ComputeState* state,
     return g_api->CreateStatus(ORT_FAIL,
                                "ANNC EP: context kernel is not loaded");
   }
-  // Name-resolved sites arrive with `arg_indices` already pinned, so they never
-  // reach ResolveContextInputs and its per-input log. Without a line here an
-  // executing site would look identical to one ORT dropped -- print the mapping
-  // this node was created with, once.
-  if (g_debug && !state->reported) {
-    state->reported = true;
-    std::fprintf(stderr, "[annc-ep] ctx compute: abi=%s, %zu arg(s) ->",
-                 state->abi.c_str(), state->arg_ranks.size());
-    for (size_t arg = 0; arg < state->arg_ranks.size(); ++arg) {
-      const int64_t input =
-          arg < state->arg_indices.size() ? state->arg_indices[arg] : -1;
-      std::fprintf(stderr, " [arg %zu (rank %lld) <- input %lld]", arg,
-                   static_cast<long long>(state->arg_ranks[arg]),
-                   static_cast<long long>(input));
-    }
-    std::fprintf(stderr, ", %zu output slot(s)\n", state->outputs.size());
-  }
   const bool timing = std::getenv("ANNC_EP_TIMING") != nullptr;
   const auto t_entry = timing ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
@@ -551,6 +568,23 @@ OrtStatus* ComputeContextSite(ComputeState* state,
       }
     }
     call.arg_indices = state->arg_indices;
+  }
+  // Name-resolved sites arrive with `arg_indices` already pinned, so they never
+  // reach ResolveContextInputs and its per-input log. Without a line here an
+  // executing site would look identical to one ORT dropped -- print the
+  // resolved mapping, once per node.
+  if (g_debug && !state->reported) {
+    state->reported = true;
+    std::fprintf(stderr, "[annc-ep] ctx compute: abi=%s, %zu arg(s) ->",
+                 state->abi.c_str(), state->arg_ranks.size());
+    for (size_t arg = 0; arg < state->arg_ranks.size(); ++arg) {
+      const int64_t input =
+          arg < state->arg_indices.size() ? state->arg_indices[arg] : -1;
+      std::fprintf(stderr, " [arg %zu (rank %lld) <- input %lld]", arg,
+                   static_cast<long long>(state->arg_ranks[arg]),
+                   static_cast<long long>(input));
+    }
+    std::fprintf(stderr, ", %zu output slot(s)\n", state->outputs.size());
   }
   OrtStatus* status = annc_ep::ComputeWithContext(g_api, kernel_context, call);
   if (timing) {
