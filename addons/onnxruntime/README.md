@@ -146,7 +146,7 @@ ABI、参数绑定规则与失败形态见
 | `ANNC_EP_DEBUG=1` | 编译诊断：签名/缓存命中、逐站点申报与丢弃原因、每融合节点的锚点名与 kernel 名、每节点首次操作数形状 |
 | `ANNC_EP_TIMING=1` | 进程退出时打印每节点的开销拆分（输入识别 / 输出分配 / kernel） |
 | `ANNC_EP_NOOP=1` | `Compute` 只分配输出不做计算——测量辅助，不是运行模式 |
-| `ANNC_EP_SHARDS=<n>` | 调优用：把单个 ANNC 并行区的 ORT 分片数上限压到 n（默认由 kernel 的 grain 决定，见 `annc/lib/Kernel/builtin_kernels/parallel_grain.h`）|
+| `ANNC_EP_SHARDS=<n>` | 调优用：把单个 ANNC 并行区的 ORT 分片数上限压到 n（默认由 kernel 上报的代价按 ORT 自己的规则算出，见 `annc/include/Support/ThreadPool/RowParallel.h`）|
 | `ANNC_EP_COMPILE=0` | 完全禁用运行时编译（等价于不注册 EP，用于对照） |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 子进程超时，默认 600 |
 | `ANNC_EP_KEEP_TEMPS=1` | 保留编译工作目录 |

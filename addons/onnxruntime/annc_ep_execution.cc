@@ -99,11 +99,15 @@ struct Shard {
 void ORT_API_CALL InvokeShard(void* user_data, size_t index) {
   auto* shard = static_cast<Shard*>(user_data);
   ParallelRegionGuard guard;
+  // The shard-to-range mapping ORT itself uses to split `total` units into
+  // `num_batches` batches (TryBatchParallelFor -> PartitionWork): the first
+  // `total % shards` shards carry one extra unit.
+  const std::int64_t per = shard->total_units / shard->shards;
+  const std::int64_t extra = shard->total_units % shard->shards;
+  const std::int64_t i = static_cast<std::int64_t>(index);
   const std::int64_t begin =
-      static_cast<std::int64_t>(index) * shard->total_units / shard->shards;
-  const std::int64_t end =
-      (static_cast<std::int64_t>(index) + 1) * shard->total_units /
-      shard->shards;
+      i < extra ? i * (per + 1) : extra * (per + 1) + (i - extra) * per;
+  const std::int64_t end = begin + per + (i < extra ? 1 : 0);
   (*shard->fn)(begin, end);
 }
 
@@ -182,6 +186,67 @@ ArgumentBinding BindArgumentsToInputs(
 // Thread pool
 // ---------------------------------------------------------------------------
 
+// ANNC_EP_DEBUG=1: the first decisions this process made -- what the kernel
+// reported and how many shards that bought.  shards=1 means the range ran on
+// the calling thread, which is what ORT's own kernels do below the cost
+// model's threshold.
+void LogPoolDecision(std::int64_t total,
+                     const annc::threadpool::ParallelForOptions& options,
+                     std::int64_t shards) {
+  if (std::getenv("ANNC_EP_DEBUG") == nullptr) return;
+  static std::atomic<int> printed{0};
+  if (printed.fetch_add(1) >= 12) return;
+  std::fprintf(stderr,
+               "[annc-ep] pool: units=%lld cost=%lld grain=%lld shards=%lld\n",
+               static_cast<long long>(total),
+               static_cast<long long>(options.cost_per_unit.value_or(0)),
+               static_cast<long long>(options.grain_size.value_or(0)),
+               static_cast<long long>(shards));
+}
+
+std::int64_t DivCeil(std::int64_t a, std::int64_t b) {
+  return (a + b - 1) / b;
+}
+
+// Port of concurrency::ThreadPool::CalculateParallelForBlock
+// (onnxruntime/core/common/threadpool.cc), the rule that sizes the blocks
+// ThreadPool::ParallelFor hands to the pool: no block below kTaskSize cycles of
+// work, no more than four blocks per thread, then grown coarser while doing so
+// keeps the block count dividing evenly across the pool.
+std::int64_t CalculateParallelForBlock(std::int64_t n, double cost_per_unit,
+                                       std::int64_t num_threads) {
+  constexpr std::int64_t kTaskSize = 40000;  // Eigen TensorCostModel
+  constexpr std::int64_t kMaxOvershardingFactor = 4;
+  const auto efficiency = [num_threads](std::int64_t block_count) {
+    return static_cast<double>(block_count) /
+           static_cast<double>(DivCeil(block_count, num_threads) * num_threads);
+  };
+
+  const std::int64_t task_block = std::max<std::int64_t>(
+      1, static_cast<std::int64_t>(kTaskSize / cost_per_unit));
+  std::int64_t block = std::min<std::int64_t>(
+      n, std::max<std::int64_t>(
+             DivCeil(n, kMaxOvershardingFactor * num_threads), task_block));
+  const std::int64_t max_block = std::min<std::int64_t>(n, 2 * block);
+
+  std::int64_t block_count = DivCeil(n, block);
+  double max_efficiency = efficiency(block_count);
+  for (std::int64_t prev = block_count; max_efficiency < 1.0 && prev > 1;) {
+    const std::int64_t coarser = DivCeil(n, prev - 1);
+    if (coarser > max_block) break;  // reached the max block size
+    const std::int64_t coarser_count = DivCeil(n, coarser);
+    prev = coarser_count;
+    const double coarser_efficiency = efficiency(coarser_count);
+    if (coarser_efficiency + 0.01 >= max_efficiency) {
+      block = coarser;
+      if (max_efficiency < coarser_efficiency) {
+        max_efficiency = coarser_efficiency;
+      }
+    }
+  }
+  return block;
+}
+
 int OrtThreadPool::num_threads() const {
   const unsigned hardware = std::thread::hardware_concurrency();
   if (hardware <= 1) return 2;
@@ -197,30 +262,71 @@ void OrtThreadPool::parallel_for(
     const std::function<void(std::int64_t, std::int64_t)>& fn) {
   if (total <= 0) return;
 
+  // The scheduling decision belongs to the framework in ORT's own kernels:
+  // they call ThreadPool::TryParallelFor(total, TensorOpCost, fn), whose
+  // ParallelFor step (core/common/threadpool.cc) consults Eigen's cost model
+  // and either runs the whole range on the caller or cuts it into
+  // CalculateParallelForBlock-sized blocks for the pool.  A plugin EP only
+  // gets the public KernelContext_ParallelFor, whose header puts that sizing on
+  // the caller ("Pitfall: Caller should cap num_batches to a reasonable value
+  // based on the cost of fn and the value of total":
+  // include/onnxruntime/core/platform/threadpool.h).  So this adapter applies
+  // the framework's own rule -- the same Eigen model and the same block
+  // calculation -- to the cost the kernel reports in ORT's units
+  // (include/Support/ThreadPool/RowParallel.h).  Eigen's constants
+  // (unsupported/Eigen/CXX11/src/Tensor/TensorCostModel.h): kStartupCycles =
+  // kPerThreadCycles = 100000.
+  //
+  // A kernel that reports only grain_size asks for fixed-size blocks instead:
+  // that is the TF adapter's kFixedBlockSize path, honoured verbatim.  With
+  // neither signal the range is split like the in-tree pool splits an
+  // optionless call (Support/ThreadPool/Parallel.cpp defaults grain_size to 1,
+  // one unit per block) and like ORT itself splits it when the caller passes
+  // num_batches <= 0 ("it will be replaced to the value of
+  // DegreeOfParallelism()", include/onnxruntime/core/platform/threadpool.h) --
+  // our num_threads() stands in for that degree, see below.
   const std::int64_t grain =
-      std::max<std::int64_t>(options.grain_size.value_or(1), 1);
-  std::int64_t batches = (total + grain - 1) / grain;
-  batches = std::min<std::int64_t>(batches, std::max(1, num_threads()));
-  // How many shards to ask for is the *kernel's* decision: annc::threadpool::
-  // parallel_for only reaches this adapter after Parallel.cpp decided the
-  // range is worth parallelising, and the kernels pass a grain_size sized to
-  // their own work (Kernel/builtin_kernels/parallel_grain.h).  ANNC_EP_SHARDS
-  // overrides the count for tuning.
+      std::max<std::int64_t>(options.grain_size.value_or(0), 0);
+  std::int64_t batches = 0;
+  if (options.cost_per_unit.has_value()) {
+    constexpr double kStartupCycles = 100000.0;
+    constexpr double kPerThreadCycles = 100000.0;
+    const double cost_per_unit =
+        static_cast<double>(std::max<std::int64_t>(*options.cost_per_unit, 1));
+    const double cost = static_cast<double>(total) * cost_per_unit;
+    const double threads = (cost - kStartupCycles) / kPerThreadCycles + 0.9;
+    // ORT's own cap is DegreeOfParallelism(pool) = pool threads + the calling
+    // thread, which no public API exposes; num_threads() is the advisory bound
+    // (the hardware_concurrency fallback an in-tree EP adapter uses too, see
+    // providers/dnnl/dnnl_threadpool.h).  It only binds for ranges past ~25M
+    // cycles of work, far above any site these kernels see.
+    if (threads < 1.0) {
+      batches = 1;  // CostModel::numThreads() == 1: run on the caller
+    } else {
+      const std::int64_t block =
+          CalculateParallelForBlock(total, cost_per_unit, num_threads());
+      batches = DivCeil(total, block);
+    }
+  } else if (grain > 0) {
+    batches = DivCeil(total, grain);
+  } else {
+    batches = std::min<std::int64_t>(total, num_threads());
+  }
+  batches =
+      std::min<std::int64_t>(std::max<std::int64_t>(batches, 1), num_threads());
+  if (batches <= 1) {
+    // Below the framework's parallelisation threshold: run the whole range
+    // here, the way ThreadPool::ParallelFor does with f(0, n).
+    LogPoolDecision(total, options, /*shards=*/1);
+    fn(0, total);
+    return;
+  }
+  // ANNC_EP_SHARDS caps the count for tuning without a rebuild.
   if (const char* override_shards = std::getenv("ANNC_EP_SHARDS")) {
     batches = std::min<std::int64_t>(
         batches, std::max<std::int64_t>(1, std::atoll(override_shards)));
   }
-
-  if (std::getenv("ANNC_EP_DEBUG") != nullptr) {
-    static std::atomic<int> printed{0};
-    if (printed.fetch_add(1) < 12) {
-      std::fprintf(stderr,
-                   "[annc-ep] pool: units=%lld grain=%lld shards=%lld\n",
-                   static_cast<long long>(total),
-                   static_cast<long long>(grain),
-                   static_cast<long long>(batches));
-    }
-  }
+  LogPoolDecision(total, options, batches);
   // One ORT batch per shard: ORT calls the shim once per batch index, and the
   // shim turns that index into the row range it covers (see InvokeShard).
   Shard shard{&fn, total, batches};

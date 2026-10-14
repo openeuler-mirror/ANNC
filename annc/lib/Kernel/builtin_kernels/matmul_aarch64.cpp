@@ -1,6 +1,7 @@
 #include "Support/ThreadPool/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
+#include "Support/ThreadPool/RowParallel.h"
 
 namespace {
 
@@ -16,7 +17,13 @@ void matmul_aarch64_impl(annc::threadpool::AnncThreadPool* thread_pool,
     int64_t N = output->sizes[1];
     int64_t K = lhs->sizes[1];
 
-    annc::threadpool::parallel_for(thread_pool, M, [&](int64_t begin, int64_t end) {
+    // A row is N dot products of length K, reported so the hosts that size
+    // blocks from cost treat this kernel like the rest; the in-tree pool keeps
+    // its own default.
+    auto options = annc::threadpool::rowOptions(
+        annc::threadpool::cost::dotRow(K, N), /*elements_per_row=*/K * N);
+    annc::threadpool::parallel_for(
+        thread_pool, M, options, [&](int64_t begin, int64_t end) {
         for (int64_t i = begin; i < end; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 float sum = 0.0f;

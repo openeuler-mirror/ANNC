@@ -1,7 +1,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
-#include "parallel_grain.h"
+#include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -90,10 +90,11 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
   // load+store per FMA.  The tail (n % 16) uses the plain element-at-a-time
   // path, which keeps the kernel correct for any N.
   constexpr int64_t kBlock = 16;
-  // A row costs k*n multiply-accumulates, so the grain is much smaller than
-  // for the elementwise kernels; small sites still stay serial.
-  annc::threadpool::ParallelForOptions options;
-  options.grain_size = annc::kernels::grainForRowWork(k * n);
+  // One row is a k-length dot per output element: the 16-wide blocking keeps
+  // the inner loop near one cycle per MAC, and the row work k*n stays well
+  // below the elementwise kernels' -- small sites keep running serial.
+  auto options = annc::threadpool::rowOptions(
+      annc::threadpool::cost::dotRow(k, n), /*elements_per_row=*/k * n);
   ::annc::threadpool::parallel_for(
       thread_pool, rows, options,
       [&](int64_t begin, int64_t end) {

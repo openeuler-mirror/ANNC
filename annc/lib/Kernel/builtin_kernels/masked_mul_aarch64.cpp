@@ -2,7 +2,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
-#include "parallel_grain.h"
+#include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -153,8 +153,12 @@ annc::kernels::KernelStatus maskedMulImpl(
   for (size_t site = 1; site < NumSites; ++site) {
     elementsPerRow = std::max(elementsPerRow, siteN[site]);
   }
-  annc::threadpool::ParallelForOptions options;
-  options.grain_size = annc::kernels::grainForRowWork(elementsPerRow);
+  // One row is an elementwise masked multiply: a compare and a multiply per
+  // element, reading f32 data and an i64 id per element.
+  auto options = annc::threadpool::rowOptions(
+      annc::threadpool::cost::elementRow(elementsPerRow, /*cycles=*/2,
+                                         /*bytes_read=*/12),
+      elementsPerRow);
   ::annc::threadpool::parallel_for(
       thread_pool, totalRows, options,
       [&](int64_t begin, int64_t end) {

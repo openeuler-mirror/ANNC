@@ -1,7 +1,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
-#include "parallel_grain.h"
+#include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -91,11 +91,11 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
   // Rows of the collapsed [m, K] view are independent, so the row loop is the
   // natural parallel split (same shape as the builtin MatMul kernel in
   // matmul_aarch64.cpp).  M is tiny at the sites this fusion targets
-  // (batch * sequence), so the grain stays at a whole row.
-  // A row costs k*n multiply-accumulates; the grain keeps one thread on the
-  // sites whose k*n is small instead of paying the host pool's dispatch.
-  annc::threadpool::ParallelForOptions options;
-  options.grain_size = annc::kernels::grainForRowWork(k * n);
+  // (batch * sequence), so the reported row cost -- the same as
+  // batched_matmul_add's, a k-length dot per output element -- keeps one
+  // thread on the sites whose k*n is small instead of paying for a dispatch.
+  auto options = annc::threadpool::rowOptions(
+      annc::threadpool::cost::dotRow(k, n), /*elements_per_row=*/k * n);
   ::annc::threadpool::parallel_for(
       thread_pool, m, options,
       [&](int64_t begin, int64_t end) {

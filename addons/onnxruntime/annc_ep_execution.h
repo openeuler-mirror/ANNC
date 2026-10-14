@@ -48,7 +48,10 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
   bool in_parallel_region() const override;
 
   // Maps ANNC's range callback onto KernelContext_ParallelFor's per-index
-  // callback; grain_size becomes the batch granularity.
+  // callback.  cost_per_unit is fed through ORT's own rule -- Eigen's cost
+  // model, the one ThreadPool::TryParallelFor applies inside ORT's kernels --
+  // to size the batch count, with grain_size as the fixed-block alternative
+  // for kernels that report no cost.
   void parallel_for(
       std::int64_t total, const annc::threadpool::ParallelForOptions& options,
       const std::function<void(std::int64_t, std::int64_t)>& fn) override;
