@@ -1,6 +1,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "parallel_grain.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -91,8 +92,13 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
   // natural parallel split (same shape as the builtin MatMul kernel in
   // matmul_aarch64.cpp).  M is tiny at the sites this fusion targets
   // (batch * sequence), so the grain stays at a whole row.
+  // A row costs k*n multiply-accumulates; the grain keeps one thread on the
+  // sites whose k*n is small instead of paying the host pool's dispatch.
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = annc::kernels::grainForRowWork(k * n);
   ::annc::threadpool::parallel_for(
-      thread_pool, m, [&](int64_t begin, int64_t end) {
+      thread_pool, m, options,
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float* xRow = x + row * k;
           float* outRow = out + row * n;

@@ -410,15 +410,29 @@ TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
     shard_sizes.push_back(end - begin);
   });
 
-  // Each per-index ORT callback arrives as the one-element range it is, the
-  // nesting gate is up while they run and down afterwards, and grain_size
-  // drove the batch count (min(ceil(4/2), num_threads()) = 2 <= the pool's
-  // advisory size).
-  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{1, 1, 1, 1}));
+  // One ORT batch per shard: the callback receives a batch index and turns it
+  // into the range it covers, so grain_size 2 over 4 units arrives as the two
+  // half ranges -- not four one-unit callbacks (which is what ORT's per-unit
+  // dispatch would do, and what cost ~1.4us of dispatch per unit on the target
+  // models).  The nesting gate is up while the callbacks run and down after.
+  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{2, 2}));
   EXPECT_TRUE(in_region_during_callbacks);
   EXPECT_FALSE(pool.in_parallel_region());
-  EXPECT_EQ(fake_.last_parallel_total, 4u);
+  EXPECT_EQ(fake_.last_parallel_total, 2u);
   EXPECT_EQ(fake_.last_parallel_batches, 2u);
+}
+
+// ANNC_EP_SHARDS caps the shard count for tuning without a rebuild.
+TEST_F(ExecutionContextFailureTest, ParallelForShardOverrideCapsTheCount) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  ::setenv("ANNC_EP_SHARDS", "1", 1);
+  std::vector<int64_t> shard_sizes;
+  pool.parallel_for(64, annc::threadpool::ParallelForOptions{},
+                    [&](int64_t begin, int64_t end) {
+                      shard_sizes.push_back(end - begin);
+                    });
+  ::unsetenv("ANNC_EP_SHARDS");
+  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{64}));
 }
 
 TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {

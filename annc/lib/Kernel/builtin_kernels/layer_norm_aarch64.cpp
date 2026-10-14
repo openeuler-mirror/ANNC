@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "parallel_grain.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -82,8 +83,14 @@ annc::kernels::KernelStatus layerNormImpl(
 
   // Rows are independent; each row is read twice (mean, variance) and written
   // once, all within one cache-resident line set at the sizes this targets.
+  // Each row is read twice and written once, so its cost is ~3*cols element
+  // ops; the grain keeps a shard on the right side of the host pool's
+  // dispatch cost.
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = annc::kernels::grainForRowWork(3 * cols);
   ::annc::threadpool::parallel_for(
-      thread_pool, rows, [&](int64_t begin, int64_t end) {
+      thread_pool, rows, options,
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float* xRow = x + row * cols;
           float* outRow = out + row * cols;

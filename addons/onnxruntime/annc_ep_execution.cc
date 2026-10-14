@@ -1,6 +1,8 @@
 #include "annc_ep_execution.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,17 +27,84 @@ class ParallelRegionGuard {
   ParallelRegionGuard& operator=(const ParallelRegionGuard&) = delete;
 };
 
+// ANNC_EP_TIMING=1: per-call split of the context path -- "prepare" (read the
+// fused node's inputs, build their memref descriptors, copy the contract)
+// versus "kernel" (the shared-library entry: allocate the outputs through the
+// callbacks, then the arithmetic, including the host-pool dispatch).  The
+// residual against the profiler's per-node time is ORT's dispatch.
+bool TimingEnabled() {
+  static const bool enabled = std::getenv("ANNC_EP_TIMING") != nullptr;
+  return enabled;
+}
+
+struct ContextTiming {
+  std::atomic<int64_t> calls{0};
+  std::atomic<int64_t> prepare_ns{0};
+  std::atomic<int64_t> kernel_ns{0};
+  std::atomic<int64_t> min_prepare_ns{INT64_MAX};
+  std::atomic<int64_t> min_kernel_ns{INT64_MAX};
+
+  void Note(int64_t prepare, int64_t kernel) {
+    calls.fetch_add(1);
+    prepare_ns.fetch_add(prepare);
+    kernel_ns.fetch_add(kernel);
+    int64_t current = min_prepare_ns.load();
+    while (prepare < current &&
+           !min_prepare_ns.compare_exchange_weak(current, prepare)) {
+    }
+    current = min_kernel_ns.load();
+    while (kernel < current &&
+           !min_kernel_ns.compare_exchange_weak(current, kernel)) {
+    }
+  }
+
+  ~ContextTiming() {
+    const int64_t n = calls.load();
+    if (n == 0) return;
+    const double per = 1.0 / static_cast<double>(n);
+    std::fprintf(stderr,
+                 "[annc-ep] context timing over %lld calls (mean/min us): "
+                 "prepare=%.3f/%.3f kernel+alloc=%.3f/%.3f\n",
+                 static_cast<long long>(n),
+                 prepare_ns.load() * per / 1000.0,
+                 min_prepare_ns.load() / 1000.0,
+                 kernel_ns.load() * per / 1000.0,
+                 min_kernel_ns.load() / 1000.0);
+  }
+};
+
+ContextTiming& ContextTimer() {
+  static ContextTiming timing;
+  return timing;
+}
+
 // User data for one KernelContext_ParallelFor dispatch. The shard is consumed
 // synchronously: ORT's parallel-for joins before returning.
+//
+// ANNC hands over *ranges* (begin, end); KernelContext_ParallelFor hands over
+// one unit index at a time.  The shim therefore asks ORT for one batch per
+// shard -- total = shard count, so ORT's batch loop calls back once per shard
+// -- and each callback converts its batch index into the row range it covers.
+// The naive mapping (num_batch = shard count, total = row count) makes ORT
+// invoke the callback once per *row*, and for the 30-1000 row sites these
+// models have that per-row std::function + TLS-guard cost dominated the
+// kernel: 44 us mean against a 12 us floor, i.e. most of the per-node gap to
+// ORT's own patched kernels (task 20261013-019, phase 2).
 struct Shard {
   const std::function<void(std::int64_t, std::int64_t)>* fn;
+  std::int64_t total_units;
+  std::int64_t shards;
 };
 
 void ORT_API_CALL InvokeShard(void* user_data, size_t index) {
   auto* shard = static_cast<Shard*>(user_data);
   ParallelRegionGuard guard;
-  (*shard->fn)(static_cast<std::int64_t>(index),
-               static_cast<std::int64_t>(index) + 1);
+  const std::int64_t begin =
+      static_cast<std::int64_t>(index) * shard->total_units / shard->shards;
+  const std::int64_t end =
+      (static_cast<std::int64_t>(index) + 1) * shard->total_units /
+      shard->shards;
+  (*shard->fn)(begin, end);
 }
 
 size_t ElementSize(AnncElementType type) {
@@ -132,10 +201,31 @@ void OrtThreadPool::parallel_for(
       std::max<std::int64_t>(options.grain_size.value_or(1), 1);
   std::int64_t batches = (total + grain - 1) / grain;
   batches = std::min<std::int64_t>(batches, std::max(1, num_threads()));
+  // How many shards to ask for is the *kernel's* decision: annc::threadpool::
+  // parallel_for only reaches this adapter after Parallel.cpp decided the
+  // range is worth parallelising, and the kernels pass a grain_size sized to
+  // their own work (Kernel/builtin_kernels/parallel_grain.h).  ANNC_EP_SHARDS
+  // overrides the count for tuning.
+  if (const char* override_shards = std::getenv("ANNC_EP_SHARDS")) {
+    batches = std::min<std::int64_t>(
+        batches, std::max<std::int64_t>(1, std::atoll(override_shards)));
+  }
 
-  Shard shard{&fn};
+  if (std::getenv("ANNC_EP_DEBUG") != nullptr) {
+    static std::atomic<int> printed{0};
+    if (printed.fetch_add(1) < 12) {
+      std::fprintf(stderr,
+                   "[annc-ep] pool: units=%lld grain=%lld shards=%lld\n",
+                   static_cast<long long>(total),
+                   static_cast<long long>(grain),
+                   static_cast<long long>(batches));
+    }
+  }
+  // One ORT batch per shard: ORT calls the shim once per batch index, and the
+  // shim turns that index into the row range it covers (see InvokeShard).
+  Shard shard{&fn, total, batches};
   OrtStatus* status = api_->KernelContext_ParallelFor(
-      kernel_context_, &InvokeShard, static_cast<size_t>(total),
+      kernel_context_, &InvokeShard, static_cast<size_t>(batches),
       static_cast<size_t>(batches), &shard);
   if (status != nullptr) {
     // No pool behind the context (or an unusable one): run the whole range on
@@ -426,6 +516,9 @@ void BuildMemRefDescriptor(int64_t rank, const int64_t* dims, void* data,
 OrtStatus* ComputeWithContext(const OrtApi* api,
                               OrtKernelContext* kernel_context,
                               const ContextCall& request) {
+  const bool timing = TimingEnabled();
+  const auto t_start = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
   OnnxExecutionContext context(api, kernel_context, request.outputs,
                                request.output_slots);
 
@@ -488,7 +581,17 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
     args.push_back(storage[i].bytes);
   }
 
+  const auto t_prepared = timing ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   const std::int32_t status_code = CallContextKernel(request.symbol, args);
+  if (timing) {
+    const auto t_end = std::chrono::steady_clock::now();
+    ContextTimer().Note(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_prepared - t_start)
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_end - t_prepared)
+            .count());
+  }
   if (OrtStatus* error = context.TakeError()) return error;
   if (status_code != 0) {
     char message[128];

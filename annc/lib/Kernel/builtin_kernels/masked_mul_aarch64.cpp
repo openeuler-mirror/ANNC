@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "parallel_grain.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -145,8 +146,18 @@ annc::kernels::KernelStatus maskedMulImpl(
   }
   if (totalRows == 0) return annc::kernels::KernelStatus::Success;
 
+  // A shard carries rows worth ~kElementsPerShard element ops; the smallest
+  // site in the target models is 320 rows x 8 columns, far below that, so it
+  // stays on one thread instead of paying the host pool's dispatch.
+  int64_t elementsPerRow = siteN[0];
+  for (size_t site = 1; site < NumSites; ++site) {
+    elementsPerRow = std::max(elementsPerRow, siteN[site]);
+  }
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = annc::kernels::grainForRowWork(elementsPerRow);
   ::annc::threadpool::parallel_for(
-      thread_pool, totalRows, [&](int64_t begin, int64_t end) {
+      thread_pool, totalRows, options,
+      [&](int64_t begin, int64_t end) {
         // The site holding row `begin`; zero-row sites are skipped because the
         // advance condition holds for them too.
         size_t site = 0;

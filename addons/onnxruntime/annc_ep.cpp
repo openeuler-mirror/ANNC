@@ -309,7 +309,32 @@ struct NodeTiming {
     }
   }
 
+  // Context-ABI sites: the EP's own view of one Compute call, entry to return.
+  // Comparing this with the profiler's per-node time splits the cost into
+  // "ORT around the node" versus "the EP (prepare + kernel)".
+  std::atomic<int64_t> context_calls{0};
+  std::atomic<int64_t> context_ns{0};
+  std::atomic<int64_t> min_context_ns{INT64_MAX};
+
+  void NoteContextCall(int64_t nanos) {
+    context_calls.fetch_add(1);
+    context_ns.fetch_add(nanos);
+    int64_t current = min_context_ns.load();
+    while (nanos < current &&
+           !min_context_ns.compare_exchange_weak(current, nanos)) {
+    }
+  }
+
   ~NodeTiming() {
+    if (context_calls.load() != 0) {
+      const int64_t calls = context_calls.load();
+      std::fprintf(stderr,
+                   "[annc-ep] context ComputeImpl over %lld calls (mean/min "
+                   "us): total=%.3f/%.3f\n",
+                   static_cast<long long>(calls),
+                   context_ns.load() / static_cast<double>(calls) / 1000.0,
+                   min_context_ns.load() / 1000.0);
+    }
     const int64_t n = calls.load();
     if (n == 0) return;
     const double per = 1.0 / static_cast<double>(n);
@@ -509,6 +534,9 @@ OrtStatus* ComputeContextSite(ComputeState* state,
     }
     std::fprintf(stderr, ", %zu output slot(s)\n", state->outputs.size());
   }
+  const bool timing = std::getenv("ANNC_EP_TIMING") != nullptr;
+  const auto t_entry = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
   annc_ep::ContextCall call;
   call.symbol = state->symbol;
   call.arg_ranks = state->arg_ranks;
@@ -524,7 +552,14 @@ OrtStatus* ComputeContextSite(ComputeState* state,
     }
     call.arg_indices = state->arg_indices;
   }
-  return annc_ep::ComputeWithContext(g_api, kernel_context, call);
+  OrtStatus* status = annc_ep::ComputeWithContext(g_api, kernel_context, call);
+  if (timing) {
+    const auto t_end = std::chrono::steady_clock::now();
+    Timing().NoteContextCall(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_end - t_entry)
+            .count());
+  }
+  return status;
 }
 
 OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
