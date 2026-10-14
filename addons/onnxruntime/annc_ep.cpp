@@ -1370,6 +1370,17 @@ OrtStatus* ORT_API_CALL CreateEpFactories(const char* /*registration_name*/,
   g_api = ort_api_base->GetApi(ORT_API_VERSION);
   g_ep_api = g_api->GetEpApi();
   g_debug = std::getenv("ANNC_EP_DEBUG") != nullptr;
+#if defined(ANNC_EP_NATIVE_POOL)
+  // The native-pool path's private ABI is only valid for one ORT release;
+  // the adapter falls back to the public KernelContext_ParallelFor path in
+  // any other host (annc_ep_native_pool.h).
+  annc_ep::native::CheckHostVersion(ort_api_base);
+  if (g_debug && !annc_ep::native::PoolAvailable()) {
+    std::fprintf(stderr,
+                 "[annc-ep] native pool unavailable (host version or "
+                 "ANNC_EP_NATIVE_POOL=0); using the public adapter\n");
+  }
+#endif
   if (max_factories < 1) {
     return g_api->CreateStatus(ORT_INVALID_ARGUMENT, "need room for at least one factory");
   }

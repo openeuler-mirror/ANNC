@@ -22,6 +22,8 @@
 #include "Kernel/ExecutionContext.h"
 #include "Support/ThreadPool/ThreadPool.h"
 
+#include "annc_ep_native_pool.h"
+
 namespace annc_ep {
 
 // Declared shape of one site output, in slot order. The sizes are runtime
@@ -32,26 +34,33 @@ struct OutputContract {
 };
 
 // Carries ORT's thread pool into ANNC's parallel regions. One per Compute
-// call, handed to the kernel through the execution context.
+// call, handed to the kernel through the execution context.  When the
+// plugin was built with the native pool (ANNC_EP_NATIVE_POOL) and the host
+// is the ORT release it was verified against, the region is backed by
+// ORT's own operator pool and the scheduling decision is the framework's.
 class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
  public:
-  OrtThreadPool(const OrtApi* api, OrtKernelContext* kernel_context)
-      : api_(api), kernel_context_(kernel_context) {}
+  OrtThreadPool(const OrtApi* api, OrtKernelContext* kernel_context);
 
-  // ORT's C API exposes no pool-size query, so this is an advisory upper bound
-  // that only gates ANNC's serial/parallel decision
-  // (Support/ThreadPool/Parallel.cpp). The actual degree is ORT's scheduling
-  // decision: with intra-op=1 KernelContext_ParallelFor runs the work inline.
+  // ORT's C API exposes no pool-size query, so without the native pool this
+  // is an advisory upper bound that only gates ANNC's serial/parallel
+  // decision (Support/ThreadPool/Parallel.cpp). The actual degree is ORT's
+  // scheduling decision: with intra-op=1 KernelContext_ParallelFor runs the
+  // work inline.  With the native pool it is the real degree of parallelism
+  // (ThreadPool::DegreeOfParallelism; 1 for a null pool).
   int num_threads() const override;
 
   // True while this thread is inside a callback this pool dispatched.
   bool in_parallel_region() const override;
 
-  // Maps ANNC's range callback onto KernelContext_ParallelFor's per-index
-  // callback.  cost_per_unit is fed through ORT's own rule -- Eigen's cost
-  // model, the one ThreadPool::TryParallelFor applies inside ORT's kernels --
-  // to size the batch count, with grain_size as the fixed-block alternative
-  // for kernels that report no cost.
+  // Maps ANNC's range callback onto the host's parallel dispatch.  With the
+  // native pool, a kernel reporting cost_per_unit goes to
+  // ThreadPool::TryParallelFor: ORT's own cost model decides serial versus
+  // parallel and the block size, exactly as it does for the patched kernels
+  // this EP mirrors.  grain_size without a cost maps to ORT's fixed-block
+  // entry.  Without the native pool the range is mapped onto
+  // KernelContext_ParallelFor's per-index callback, with the batch count
+  // sized by ANNC's port of ORT's rules.
   void parallel_for(
       std::int64_t total, const annc::threadpool::ParallelForOptions& options,
       const std::function<void(std::int64_t, std::int64_t)>& fn) override;
@@ -59,6 +68,15 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
  private:
   const OrtApi* api_;
   OrtKernelContext* kernel_context_;
+#if defined(ANNC_EP_NATIVE_POOL)
+  // ORT's own operator pool behind kernel_context_, read once per Compute
+  // call when the native path is available (annc_ep_native_pool.h).  Null is
+  // legal and not a validity flag -- ORT leaves the slot null for an
+  // intra-op=1 session, and its native entries treat null as serial --
+  // native_enabled_ says whether the path is taken at all.
+  onnxruntime::concurrency::ThreadPool* native_ = nullptr;
+  bool native_enabled_ = false;
+#endif
 };
 
 // The per-call context plus its state.

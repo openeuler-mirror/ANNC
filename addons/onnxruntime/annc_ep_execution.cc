@@ -248,9 +248,46 @@ std::int64_t CalculateParallelForBlock(std::int64_t n, double cost_per_unit,
 }
 
 int OrtThreadPool::num_threads() const {
+#if defined(ANNC_EP_NATIVE_POOL)
+  if (native_enabled_) {
+    // The real degree of the session's operator pool (its own users' query,
+    // so the common layer's serial/parallel gate now sees what ORT's kernels
+    // see).  DegreeOfParallelism itself answers 1 for a null pool.
+    const int dop =
+        onnxruntime::concurrency::ThreadPool::DegreeOfParallelism(native_);
+    return dop > 0 ? dop : 1;
+  }
+#endif
   const unsigned hardware = std::thread::hardware_concurrency();
   if (hardware <= 1) return 2;
   return static_cast<int>(std::min<unsigned>(hardware, 256));
+}
+
+OrtThreadPool::OrtThreadPool(const OrtApi* api, OrtKernelContext* kernel_context)
+    : api_(api), kernel_context_(kernel_context) {
+#if defined(ANNC_EP_NATIVE_POOL)
+  native_enabled_ = native::PoolAvailable();
+  if (native_enabled_) native_ = native::PoolOf(kernel_context);
+#endif
+}
+
+// ANNC_EP_DEBUG=1: what the native dispatch actually did.  `shards` counts
+// range callbacks -- the shard count ORT chose, serial included (1 = it ran
+// the whole range on the caller) -- and is not the number of threads that
+// executed them.
+void LogNativePoolDecision(
+    std::int64_t total, const annc::threadpool::ParallelForOptions& options,
+    std::int64_t shards) {
+  if (std::getenv("ANNC_EP_DEBUG") == nullptr) return;
+  static std::atomic<int> printed{0};
+  if (printed.fetch_add(1) >= 12) return;
+  std::fprintf(stderr,
+               "[annc-ep] pool: native units=%lld cost=%lld grain=%lld "
+               "shards=%lld\n",
+               static_cast<long long>(total),
+               static_cast<long long>(options.cost_per_unit.value_or(0)),
+               static_cast<long long>(options.grain_size.value_or(0)),
+               static_cast<long long>(shards));
 }
 
 bool OrtThreadPool::in_parallel_region() const {
@@ -261,6 +298,65 @@ void OrtThreadPool::parallel_for(
     std::int64_t total, const annc::threadpool::ParallelForOptions& options,
     const std::function<void(std::int64_t, std::int64_t)>& fn) {
   if (total <= 0) return;
+
+#if defined(ANNC_EP_NATIVE_POOL)
+  if (native_enabled_) {
+    const std::int64_t grain =
+        std::max<std::int64_t>(options.grain_size.value_or(0), 0);
+    if (options.cost_per_unit.has_value()) {
+      // The framework's own decision: TryParallelFor applies Eigen's cost
+      // model against the pool's real degree of parallelism and either runs
+      // fn(0, total) on the caller or hands out CalculateParallelForBlock-
+      // sized ranges -- the rule ORT's own patched kernels run under, so the
+      // shard count is no longer ANNC's to estimate (the estimate was the
+      // source of the 8x per-node dispatch gap and of 17-shard dispatches on
+      // two-thread pools; task 20261013-019).  ANNC's cost units are already
+      // TensorOpCost's compute-cycles scale (Support/ThreadPool/
+      // RowParallel.h), so the number passes through.  A null pool (intra-
+      // op=1) is serial inside TryParallelFor itself.
+      const double cost_per_unit = static_cast<double>(
+          std::max<std::int64_t>(*options.cost_per_unit, 1));
+      const onnxruntime::TensorOpCost tensor_cost{0.0, 0.0, cost_per_unit};
+      std::atomic<std::int64_t> shards{0};
+      onnxruntime::concurrency::ThreadPool::TryParallelFor(
+          native_, static_cast<std::ptrdiff_t>(total), tensor_cost,
+          [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+            ParallelRegionGuard guard;
+            shards.fetch_add(1, std::memory_order_relaxed);
+            fn(static_cast<std::int64_t>(first),
+               static_cast<std::int64_t>(last));
+          });
+      LogNativePoolDecision(total, options, shards.load());
+      return;
+    }
+    if (grain > 0) {
+      // A kernel that reports only grain_size asks for fixed-size blocks:
+      // ORT's own fixed-block entry, with the grain as the block size.  The
+      // serial case (total <= grain) is handled inside; a null pool has no
+      // member to call, and serial is the only thing it could mean.
+      if (native_ == nullptr) {
+        LogNativePoolDecision(total, options, 1);
+        fn(0, total);
+        return;
+      }
+      std::atomic<std::int64_t> shards{0};
+      native_->ParallelForFixedBlockSizeScheduling(
+          static_cast<std::ptrdiff_t>(total),
+          static_cast<std::ptrdiff_t>(grain),
+          [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+            ParallelRegionGuard guard;
+            shards.fetch_add(1, std::memory_order_relaxed);
+            fn(static_cast<std::int64_t>(first),
+               static_cast<std::int64_t>(last));
+          });
+      LogNativePoolDecision(total, options, shards.load());
+      return;
+    }
+    // No signal at all: fall through to the public path below, whose
+    // num_batches default now equals TryBatchParallelFor(..., 0) because
+    // num_threads() is the real degree of parallelism.
+  }
+#endif
 
   // The scheduling decision belongs to the framework in ORT's own kernels:
   // they call ThreadPool::TryParallelFor(total, TensorOpCost, fn), whose

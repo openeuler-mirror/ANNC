@@ -21,6 +21,9 @@ option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protob
 # SDK that the default build neither needs nor downloads.
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
 set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
+option(ANNC_EP_NATIVE_POOL "Back the EP plugin's thread pool with ORT's native operator pool, so the scheduling decision is ORT's own (private ABI: verified context layout + ORT build-tree archives; see addons/onnxruntime/annc_ep_native_pool.h); requires ANNC_EP_ORT_BUILD_TREE" OFF)
+set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for ANNC_EP_NATIVE_POOL; an install/SDK tree does not carry them")
+set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the native-pool context layout and archives were verified against; the adapter refuses the native path in any other host and falls back to the public KernelContext_ParallelFor adapter")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
