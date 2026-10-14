@@ -237,13 +237,19 @@ TEST(AnncEpContextSiteValidation, RejectsTooManyArguments) {
                          shape});
   }
   std::string error;
-  // Eight arguments exceed the V2 input limit.
+  // Four more carry the site to the limit, the eleventh one past it: the
+  // kernel-call dispatch table in annc_ep_execution.cc has one cast per
+  // argument count, and the validation carries the same bound.
   site.args.push_back({"x", "dynamic", "f32", 2, {1, 1}});
   site.args.push_back({"y", "dynamic", "f32", 3, {1, 1, 1}});
   site.args.push_back({"z", "dynamic", "f32", 1, {1}});
   site.args.push_back({"q", "dynamic", "f32", 1, {1}});
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+  for (int i = 0; i < 11; ++i) {
+    site.args.push_back({"e" + std::to_string(i), "dynamic", "f32", 1, {1}});
+  }
   EXPECT_FALSE(ValidateSite(site, &error));
-  EXPECT_NE(error.find("seven"), std::string::npos);
+  EXPECT_NE(error.find("fourteen"), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <cstring>
+
 using llvm::ArrayRef;
 using llvm::SHA256;
 using llvm::SmallPtrSet;
@@ -3629,18 +3631,28 @@ struct FuseTensordotMatMulAsFuncCallPattern
 // ONNX 的掩码乘链，每站点 6~7 个算子：
 //
 //   ids ─ Equal(pad) → Not → Cast(f32) → Unsqueeze(末轴) → [Tile] ─┐
-//   data ───────────────────────────────────────────────────────── Mul → y
+//   data_i ─────────────────────────────────────────────────────── Mul_i → y_i
 //
 // ids 为 i64 rank2、data 为 f32 rank3，Tile 只沿末维重复（纯广播、不搬信息）。
 // 链的语义就是逐行取因子再缩放 data 的末维：
 //
 //   y[b, t, n] = data[b, t, n] * (ids[b, t] != pad ? 1.0f : 0.0f)
 //
-// 一条链可喂 1~4 个 Mul，且这些 Mul 与链必须同生共死——链只要留下就没有收益，
-// 而链的每个中间结果都不允许有别的消费者，否则融合后链仍要执行。故一个站点
-// 带 k 个输出；execution v2 的 kernel C 签名按符号固定，据此按元数拆成
-// MaskedMul1..MaskedMul4 四个符号（同 KPFusedSparseDynamicStitchN* 的多符号
-// 方案），四个符号共享一份实现。
+// 站点是「这条链 + 链喂的全部 Mul」这一整块子图，融合节点的输出就是子图对外
+// 提供的全部值：每个 Mul 的结果，加上链上仍被图外读的值（model3 的
+// `Shape/Expand` 读的 Cast 输出）。Mul 之间若夹着逐元素路径（model1 的
+// `Sum`（前端降成多输入 atir.Add）→ `RealDiv` 除常量），这些节点也一并进站点、
+// 由 kernel 算掉：成员之间不允许夹组外节点，否则 ORT 会作废整次提交
+// （onnxruntime/core/session/plugin_ep/ep_plugin_provider_interfaces.cc:396）。
+//
+// kernel 逐元素计算（p = 直接吃外部 data 的 Mul 数，q = 吃站点内 d 的 Mul 数）：
+//
+//   f      = (ids != pad) ? 1.0f : 0.0f
+//   y_i    = x_i * f              i < p；x_i 来自 data 实参（见 argMap 属性）
+//   S      = Σ y_i + Σ e_j        Sum 的输入：上面的结果 + 站点的其它实参
+//   d      = S / c                c = Div 的常量初值（divisorBits 属性）
+//   y_fed  = d * f
+//   [可选] flat = f               链外消费者读的 Cast 输出
 //
 // 匹配条件对齐 ORT 的 FusedMaskedMul（annc_opt 0005，
 // masked-mul-patch/0005-add-fused-masked-mul.patch::MatchMaskedMul）。
@@ -3648,25 +3660,39 @@ struct FuseTensordotMatMulAsFuncCallPattern
 // 上下文、输出由 kernel 经上下文回调分配（不再有输出 memref 形参），主图区域
 // 只标记 annc.fusion_materialized、不重写，AOT 裁剪会丢弃主图。
 
+// 站点里的一个 Mul。
 struct MaskedMulSite {
-  MulOp mul;           // 吃掉链的 Mul（一个站点对应一个输出）
-  Value data;          // Mul 的 data 操作数
+  MulOp mul;
   Value output;        // Mul 的结果
   Value outputBuffer;  // Mul 的输出缓冲（BufferOp 结果）
+  Value data;          // 非 fed 的 Mul 的 data 源（可能是另一个 Mul 的源）
+  bool fed = false;    // data 是站点内算出的 d（Sum/Div 的产出）
 };
 
 struct MaskedMulMatch {
   Value ids;                     // Equal 的 rank-2 i64 输入
   int64_t padding = 0;           // Equal 折叠出的常量
   int64_t tileLastMultiple = 0;  // 无 Tile 时为 0
-  // Tile?, ExpandDims, Cast, Compare(NE), Compare(EQ)，由外向内。
+  // 成员：链（由外向内：Tile?, ExpandDims, Cast, Compare(NE), Compare(EQ)）
+  // + 吸收的逐元素节点（Sum/Div）。
   SmallVector<Operation *, 6> chain;
-  SmallVector<MaskedMulSite, 2> sites;  // 链的全部 Mul 消费者
+  SmallVector<Operation *, 4> absorbed;
+  SmallVector<MaskedMulSite, 4> sites;  // raw 在前、fed 在后
+  // data 实参（每个不同的源一个）+ Sum 的其它输入；前 rawCount 个是 ×f 的 data。
+  SmallVector<Value, 4> args;
+  int64_t rawCount = 0;
+  int64_t fedCount = 0;
+  // 每个 Mul（raw 部分）用第几个 data 实参，4 bit 一个（同源的两个 Mul 共用，
+  // 融合节点的实参不能重复指向同一个输入，EP 会拒绝）。
+  int64_t argMap = 0;
+  // 哪些 raw Mul 的结果进了中间那个逐元素节点（按 raw 站点顺序一个 bit）:
+  // model1 有 3 个 raw Mul 而 Sum 只吃其中 2 个的链。
+  int64_t sumMask = 0;
+  // 中间节点的算子：0 = Sum（逐元素相加），1 = 乘积。
+  int64_t interiorKind = 0;
+  float divisor = 1.0f;  // Div 的常量（无 Div 时为 1）
+  Value flatMask;        // 逃出的 Cast 输出，无则空
 };
-
-// 一个站点的最大 Mul 数：链的消费者再多就不融（ORT 侧同样有上限语义，
-// 站点内的 Mul 会一起申报成同一个融合节点，元数越大收益越低、风险越高）。
-static constexpr size_t kMaxMaskedMulSites = 4;
 
 // 读取整数常量张量的元素（splat 展开）。非 atir.constant 或非整数 cacheData
 // 一律失败。
@@ -3695,6 +3721,24 @@ static bool readConstScalar(Value value, int64_t *out) {
     if (candidate != values[0]) return false;
   }
   *out = values[0];
+  return true;
+}
+
+// f32 的位模式（Div 的除数用 i64 属性传给 kernel；ABI 只有 i64 属性）。
+static int64_t f32Bits(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return static_cast<int64_t>(bits);
+}
+
+// 单元素 f32 常量（0 维或 rank-1 长 1），用于 Div 的除数。
+static bool readConstF32Scalar(Value value, float *out) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  if (!tensorType || !tensorType.getElementType().isF32()) return false;
+  if (!value.getDefiningOp<ConstantOp>()) return false;
+  auto data = dyn_cast_or_null<DenseElementsAttr>(tensorType.getCacheData());
+  if (!data || data.getNumElements() != 1) return false;
+  *out = data.getSplatValue<APFloat>().convertToFloat();
   return true;
 }
 
@@ -3816,58 +3860,16 @@ static LogicalResult matchMaskChain(Value mask, MaskedMulMatch *match) {
   return success();
 }
 
-// mul 是否以 mask 为其操作数、且构成合法站点：data 为 rank-3 f32、前缀与 ids
-// 对齐、写进缓冲。
-static bool matchMaskedMulConsumer(MulOp mul, Value mask, Value ids,
-                                   MaskedMulSite *site) {
-  if (mul->hasAttr("annc.fusion_materialized")) return false;
-  Value data;
-  if (mul.getY() == mask) {
-    data = mul.getX();
-  } else if (mul.getX() == mask) {
-    data = mul.getY();
-  } else {
-    return false;
-  }
-  auto dataType = dyn_cast<atir::TensorType>(data.getType());
-  if (!dataType || dataType.getShape().size() != 3) return false;
-  if (!dataType.getElementType().isF32()) return false;
-  auto idsType = dyn_cast<atir::TensorType>(ids.getType());
-  if (!idsType) return false;
-  // 前缀形状必须对齐（kernel 按行索引 ids）；动态维留给运行时校验。
-  for (int64_t axis = 0; axis < 2; ++axis) {
-    const int64_t dataDim = dataType.getShape()[axis];
-    const int64_t idsDim = idsType.getShape()[axis];
-    if (dataDim >= 0 && idsDim >= 0 && dataDim != idsDim) return false;
-  }
-  if (dataType.getShape()[2] == 0) return false;
-
-  Value outputBuffer = mul.getOutput();
-  Operation *bufferOp = outputBuffer ? outputBuffer.getDefiningOp() : nullptr;
-  if (!bufferOp || !isa<BufferOp>(bufferOp)) return false;
-  if (mul.getResult().getType() != outputBuffer.getType()) return false;
-
-  site->mul = mul;
-  site->data = data;
-  site->output = mul.getResult();
-  site->outputBuffer = outputBuffer;
-  return true;
-}
-
 // 两个成员之间是否存在"绕出去"的路径。这种组合 ORT 会拒绝，而且会连带丢弃
-// 同一 EP 提交的**全部**分组，所以站点根本不能申报。model1 就是这种形状：
-// 一个站点的 Mul 喂给第三个 Mul，后者自己的输出又是第四个 Mul 的 data，而第
-// 四个 Mul 吃同一个 mask。
+// 同一 EP 提交的**全部**分组，所以站点根本不能申报。
 //
-// 2026-10-13 复验（本线，新版插件 EP API）：这道守卫**仍然必需**。
+// 2026-10-13 复验（本线，新版插件 EP API）：这道守卫仍然必需。
 // `onnxruntime/core/session/plugin_ep/ep_plugin_provider_interfaces.cc:396`
 // 在 `CreateSupportedPartitions` 给出的分组数 != 1 时打印
 // "set nodes that cannot be fused together" 并 `return {}`——整次 GetCapability
-// 提交的分组全部作废。实测去掉守卫后 model1 的站点从 11 涨到 20（EP 侧
-// `claimed=20 dropped=0` 只是**提交**计数），但该次会话里 0 次 kernel 调用、
-// ORT 打出 cannot-be-fused 错误，输出"与 CPU 一致"实为整图回退 CPU EP。
-// 判断 EP 是否真的执行了 kernel 不能只看 claimed，要看 Compute 侧证据
-// （`ANNC_EP_DEBUG=1` 的逐实参绑定日志）或 ORT 的 cannot-be-fused 报错。
+// 提交的分组全部作废。判断 EP 是否真的执行了 kernel 不能只看 claimed，要看
+// Compute 侧证据（`ANNC_EP_DEBUG=1` 的逐实参绑定日志）或 ORT 的 cannot-be-fused
+// 报错。
 static bool hasHoleBetweenMembers(ArrayRef<Operation *> members) {
   SmallPtrSet<Operation *, 16> memberSet(members.begin(), members.end());
   for (Operation *member : members) {
@@ -3892,8 +3894,46 @@ static bool hasHoleBetweenMembers(ArrayRef<Operation *> members) {
   return false;
 }
 
-// 以 anchor 为起点匹配整个站点：链 + 链的每个 Mul。任何链值有非站点 Mul 的
-// 消费者即失败（链会活下来），超过 kMaxMaskedMulSites 个 Mul 也失败。
+// 站点里的一个 Mul：mask 必须是链的最外层值，data 为 rank-3 f32、前缀与 ids
+// 对齐、写进缓冲。
+static bool maskedMulOperands(MulOp mul, Value mask, Value ids, Value *data,
+                              Value *output, Value *outputBuffer) {
+  if (mul->hasAttr("annc.fusion_materialized")) return false;
+  Value other;
+  if (mul.getY() == mask) {
+    other = mul.getX();
+  } else if (mul.getX() == mask) {
+    other = mul.getY();
+  } else {
+    return false;
+  }
+  auto dataType = dyn_cast<atir::TensorType>(other.getType());
+  if (!dataType || dataType.getShape().size() != 3) return false;
+  if (!dataType.getElementType().isF32()) return false;
+  auto idsType = dyn_cast<atir::TensorType>(ids.getType());
+  if (!idsType) return false;
+  // 前缀形状必须对齐（kernel 按行索引 ids）；动态维留给运行时校验。
+  for (int64_t axis = 0; axis < 2; ++axis) {
+    const int64_t dataDim = dataType.getShape()[axis];
+    const int64_t idsDim = idsType.getShape()[axis];
+    if (dataDim >= 0 && idsDim >= 0 && dataDim != idsDim) return false;
+  }
+  if (dataType.getShape()[2] == 0) return false;
+
+  Value out = mul.getOutput();
+  Operation *bufferOp = out ? out.getDefiningOp() : nullptr;
+  if (!bufferOp || !isa<BufferOp>(bufferOp)) return false;
+  if (mul.getResult().getType() != out.getType()) return false;
+
+  *data = other;
+  *output = mul.getResult();
+  *outputBuffer = out;
+  return true;
+}
+
+// 以 anchor 为起点匹配整块子图：链 + 链喂的全部 Mul（+ 它们之间的逐元素路径）。
+// 链上每个值的链外消费者只能是「最外层值」（就是那些 Mul）或「Cast 输出」
+// （f32 mask 被 Shape/Expand 之类读）；其它逃逸都表达不了。
 static FailureOr<MaskedMulMatch> matchMaskedMul(MulOp anchor) {
   MaskedMulMatch match;
   Value mask;
@@ -3908,70 +3948,254 @@ static FailureOr<MaskedMulMatch> matchMaskedMul(MulOp anchor) {
     }
   }
 
+  // 链已经被别的 anchor 认下（一条链一个站点）：本 anchor 不再成站。
+  for (Operation *op : match.chain) {
+    if (op->hasAttr("annc.fusion_materialized")) return failure();
+  }
+
+  SmallVector<MulOp, 4> muls;
+  SmallVector<Value, 4> mulOutputs;
+  SmallVector<Value, 4> mulData;
+  bool anchorListed = false;
+  bool flatEscapes = false;
+  // 已钉住的 data 末维（-1 = 未钉住）：kernel 按同一个 n 读写全部实参与
+  // 输出，同一条链喂的 Mul 末维必须一致。
+  int64_t dataLastDim = -1;
   for (Operation *op : match.chain) {
     for (Value result : op->getResults()) {
       for (Operation *user : result.getUsers()) {
         if (llvm::is_contained(match.chain, user)) continue;
         auto mul = dyn_cast<MulOp>(user);
-        if (!mul) return failure();
-        if (std::any_of(match.sites.begin(), match.sites.end(),
-                        [&](const MaskedMulSite &site) {
-                          return site.mul == mul;
-                        })) {
+        if (mul && result == mask) {
+          if (llvm::is_contained(muls, mul)) continue;
+          Value data, output, buffer;
+          if (!maskedMulOperands(mul, mask, match.ids, &data, &output,
+                                 &buffer)) {
+            return failure();
+          }
+          // Tile 必须恰好广播到 data 的末维（已知时逐个消费者核对）。
+          auto dataType = cast<atir::TensorType>(data.getType());
+          const int64_t lastDim = dataType.getShape()[2];
+          if (match.tileLastMultiple != 0 && lastDim >= 0 &&
+              lastDim != match.tileLastMultiple) {
+            return failure();
+          }
+          // 末维一致性：无 Tile 时 mask [d0,d1,1] 能广播到任意 n，末维不同
+          // 的 Mul 会匹配成功、却要到 kernel 运行时才被实参同形检查拒掉
+          //（session 失败而不是回退），故在匹配期拒绝；动态维留给运行时核对。
+          if (lastDim >= 0) {
+            if (dataLastDim >= 0 && dataLastDim != lastDim) return failure();
+            dataLastDim = lastDim;
+          }
+          muls.push_back(mul);
+          mulOutputs.push_back(output);
+          mulData.push_back(data);
+          anchorListed |= (mul == anchor);
           continue;
         }
-        if (match.sites.size() >= kMaxMaskedMulSites) return failure();
-        MaskedMulSite site;
-        if (!matchMaskedMulConsumer(mul, result, match.ids, &site)) {
-          return failure();
+        // Cast 输出（未 Unsqueeze 的 f32 mask）可以逃出去给形状类消费者，
+        // 它就是站点的一个输出；别的任何逃逸都表达不了。
+        if (isa<CastOp>(op) && result == op->getResult(0) && !mul) {
+          flatEscapes = true;
+          continue;
         }
-        // Tile 必须恰好广播到 data 的末维（已知时逐个消费者核对）。
-        auto dataType = dyn_cast<atir::TensorType>(site.data.getType());
-        const int64_t lastDim = dataType.getShape()[2];
-        if (match.tileLastMultiple != 0 && lastDim >= 0 &&
-            lastDim != match.tileLastMultiple) {
-          return failure();
-        }
-        // kernel 的 data 实参全部来自区域外，data 由本站点另一个 Mul 产出的
-        // 链（mask → Mul → Mul）在这里表达不了。
-        for (const MaskedMulSite &other : match.sites) {
-          if (other.data == site.data) return failure();
-        }
-        match.sites.push_back(site);
+        return failure();
       }
     }
   }
-  if (match.sites.empty()) return failure();
+  if (!anchorListed || muls.empty()) return failure();
+  if (flatEscapes) {
+    for (Operation *op : match.chain) {
+      if (isa<CastOp>(op)) match.flatMask = op->getResult(0);
+    }
+    if (!match.flatMask) return failure();
+  }
+
+  // data 来源分类：外部实参 / 站点内 Mul 的源（幂等，见下）/ 站点内算出的 d。
+  //   mask ⊙ (mask ⊙ x) == mask ⊙ x：mask 的取值恰是 0/1，所以下游那个 Mul 与
+  //   上游同源，两者共用同一个实参（EP 不接受两个实参指向同一个输入）。
+  SmallVector<Value, 4> extras;
+  SmallVector<Value, 4> sumMembers;
+  SmallVector<MaskedMulSite, 4> rawSites;
+  SmallVector<MaskedMulSite, 4> fedSites;
+  SmallPtrSet<Operation *, 2> absorbed;
+  for (size_t i = 0; i < muls.size(); ++i) {
+    MaskedMulSite site;
+    site.mul = muls[i];
+    site.output = mulOutputs[i];
+    site.outputBuffer = muls[i].getOutput();
+
+    Value source = mulData[i];
+    for (int guard = 0; guard < 8; ++guard) {
+      auto producer = source.getDefiningOp<MulOp>();
+      if (!producer || !llvm::is_contained(muls, producer)) break;
+      source = producer.getX() == mask ? producer.getY() : producer.getX();
+    }
+
+    // Sum（多输入 Add）/ Div(Sum, 常量)：吸收进站点，本 Mul 吃算出来的 d。
+    Operation *producer = source.getDefiningOp();
+    RealDivOp div;
+    AddOp sum;
+    MulOp interiorMul;
+    if (producer) {
+      if (auto maybeDiv = dyn_cast<RealDivOp>(producer)) {
+        div = maybeDiv;
+        sum = div.getX().getDefiningOp<AddOp>();
+        float constant = 0.0f;
+        if (!sum || !readConstF32Scalar(div.getY(), &constant)) {
+          return failure();
+        }
+        match.divisor = constant;
+      } else if (auto maybeAdd = dyn_cast<AddOp>(producer)) {
+        sum = maybeAdd;
+      } else if (auto maybeMul = dyn_cast<MulOp>(producer);
+                 maybeMul && producer != anchor.getOperation() &&
+                 !llvm::is_contained(muls, maybeMul) &&
+                 maybeMul.getY() != mask && maybeMul.getX() != mask) {
+        // 中间是一个普通逐元素乘（model1 的 NotEqual 链：两个 masked 结果相乘，
+        // 积再乘 mask）。两侧可以是本站点的 Mul 结果或外部张量。
+        interiorMul = maybeMul;
+        match.interiorKind = 1;
+      }
+    }
+    if (!sum && !interiorMul) {
+      site.data = source;
+      rawSites.push_back(site);
+      continue;
+    }
+
+    // 中间节点的产出只能喂这个 Div（若有）或本站点的 Mul；Div 的产出只能喂本站
+    // 点的 Mul——否则那些值逃出分组，而 kernel 不产出它们。
+    Operation *interior = sum ? sum.getOperation()
+                              : interiorMul.getOperation();
+    for (Operation *user : interior->getResult(0).getUsers()) {
+      if (div && user == div.getOperation()) continue;
+      if (auto userMul = dyn_cast<MulOp>(user);
+          userMul && llvm::is_contained(muls, userMul)) {
+        continue;
+      }
+      return failure();
+    }
+    if (div) {
+      for (Operation *user : div.getResult().getUsers()) {
+        auto userMul = dyn_cast<MulOp>(user);
+        if (!userMul || !llvm::is_contained(muls, userMul)) return failure();
+      }
+    }
+    // 一个站点只承载一个中间节点：kernel 的 ABI 只有一份 sumMask /
+    // interiorKind / divisorBits，且把同一个 d 写进全部 fed 输出。第二个
+    // 不同的中间节点（各自的输入集合或除数不同）会被算成同一个值而无任何
+    // 报错——宁可不融。
+    if (!absorbed.contains(interior) && !absorbed.empty()) return failure();
+    // 中间节点的输入：站点内 Mul 的结果（kernel 里已经算了，直接进和式/乘积）
+    // 或外部张量（额外实参）。
+    if (absorbed.insert(interior).second) {
+      match.absorbed.push_back(interior);
+      if (div) match.absorbed.push_back(div.getOperation());
+      SmallVector<Value, 4> interiorInputs;
+      if (sum) {
+        interiorInputs.append(sum.getInputs().begin(), sum.getInputs().end());
+      } else {
+        interiorInputs.push_back(interiorMul.getX());
+        interiorInputs.push_back(interiorMul.getY());
+      }
+      for (Value value : interiorInputs) {
+        if (llvm::is_contained(mulOutputs, value)) {
+          if (!llvm::is_contained(sumMembers, value)) sumMembers.push_back(value);
+          continue;
+        }
+        auto type = dyn_cast<atir::TensorType>(value.getType());
+        if (!type || type.getShape().size() != 3 ||
+            !type.getElementType().isF32()) {
+          return failure();
+        }
+        // 与 data 实参同要求：kernel 把所有实参按同形 [d0,d1,n] 读，前缀
+        // 对齐 ids、末维对齐已钉住的 n，形状不符在匹配期回退（动态维留给
+        // kernel 的运行时同形检查）。
+        auto idsType = cast<atir::TensorType>(match.ids.getType());
+        for (int64_t axis = 0; axis < 2; ++axis) {
+          const int64_t dim = type.getShape()[axis];
+          const int64_t idsDim = idsType.getShape()[axis];
+          if (dim >= 0 && idsDim >= 0 && dim != idsDim) return failure();
+        }
+        if (type.getShape()[2] >= 0 && dataLastDim >= 0 &&
+            type.getShape()[2] != dataLastDim) {
+          return failure();
+        }
+        if (!llvm::is_contained(extras, value)) extras.push_back(value);
+      }
+    }
+    site.fed = true;
+    fedSites.push_back(site);
+  }
+  if (rawSites.empty()) return failure();
+
+  // 实参表：每个不同的 data 源一个（前 rawCount 个），随后是 Sum 的其它输入。
+  for (const MaskedMulSite &site : rawSites) {
+    if (!llvm::is_contained(match.args, site.data)) {
+      match.args.push_back(site.data);
+    }
+  }
+  match.rawCount = static_cast<int64_t>(match.args.size());
+  for (Value extra : extras) match.args.push_back(extra);
+  // 同源的两个 Mul 共用同一个实参：4 bit 一个下标。
+  for (const MaskedMulSite &site : rawSites) {
+    const int64_t index =
+        static_cast<int64_t>(llvm::find(match.args, site.data) -
+                             match.args.begin());
+    match.argMap |= index << (4 * match.sites.size());
+    match.sites.push_back(site);
+  }
+  for (Value value : sumMembers) {
+    const auto it = llvm::find_if(rawSites, [&](const MaskedMulSite &site) {
+      return site.output == value;
+    });
+    if (it == rawSites.end()) return failure();
+    match.sumMask |= int64_t{1} << (it - rawSites.begin());
+  }
+  for (const MaskedMulSite &site : fedSites) match.sites.push_back(site);
+  match.fedCount = static_cast<int64_t>(fedSites.size());
   return match;
 }
 
-// kernel 算子名按元数区分（MaskedMul1..MaskedMul4），与 kernel 符号一致。
-static std::string getMaskedMulOpName(size_t sites) {
-  return "MaskedMul" + std::to_string(sites);
+// kernel 算子名：实参个数（data + Sum 的其它输入）+ 是否多写一个 flat 输出。
+static std::string getMaskedMulOpName(const MaskedMulMatch &match) {
+  std::string name = "MaskedMul" + std::to_string(match.args.size());
+  if (match.flatMask) name += "Flat";
+  return name;
 }
 
-// 实参顺序 (data..., ids)（动态在前、常量在后），输出在 kernel 侧经上下文按
-// 槽位分配，故不在调用参数里。
-static atir::CustomOpSchema getMaskedMulSchema(size_t sites, int64_t padding) {
+// 实参顺序 (data..., extras..., ids)；padding / argMap / divisorBits 是属性，
+// 输出在 kernel 侧经上下文按槽位分配，故不在调用参数里。
+static atir::CustomOpSchema getMaskedMulSchema(const MaskedMulMatch &match) {
   auto schema =
-      atir::CustomOpSchema::get(getMaskedMulOpName(sites))
+      atir::CustomOpSchema::get(getMaskedMulOpName(match))
           .TypeVar("T")
           .TypeVar("TMask");
-  for (size_t i = 0; i < sites; ++i) {
-    schema.MemRefArg("data" + std::to_string(i), 3, "T");
+  for (size_t i = 0; i < match.args.size(); ++i) {
+    schema.MemRefArg("arg" + std::to_string(i), 3, "T");
   }
   schema.MemRefArg("ids", 2, "TMask");
-  for (size_t i = 0; i < sites; ++i) {
+  for (size_t i = 0; i < match.sites.size(); ++i) {
     schema.Result("output" + std::to_string(i), 3, "T");
   }
-  schema.I64AttrArg("padding", padding);
+  if (match.flatMask) schema.Result("flat", 2, "T");
+  schema.I64AttrArg("dataArgs", match.rawCount);
+  schema.I64AttrArg("rawMuls", static_cast<int64_t>(match.sites.size()) - match.fedCount);
+  schema.I64AttrArg("fedMuls", match.fedCount);
+  schema.I64AttrArg("argMap", match.argMap);
+  schema.I64AttrArg("sumMask", match.sumMask);
+  schema.I64AttrArg("interiorKind", match.interiorKind);
+  schema.I64AttrArg("divisorBits", f32Bits(match.divisor));
+  schema.I64AttrArg("padding", match.padding);
   return schema;
 }
 
-// Execution v2 的 kernel 函数：(execution, data..., ids) -> (output...)，体内
-// 只有一次 atir.CustomizeOp；CustomizeCallLowering 把首参（!llvm.ptr）透传给
-// 手写 kernel（annc/lib/Kernel/builtin_kernels/masked_mul_*），k 个输出由
-// kernel 经上下文按槽位分配后作为 CustomizeOp 的结果返回（槽位 = 站点下标）。
+// Execution v2 的 kernel 函数：(execution, data..., extras..., ids) ->
+// (output...[, flat])，体内只有一次 atir.CustomizeOp；CustomizeCallLowering 把
+// 首参（!llvm.ptr）透传给手写 kernel（annc/lib/Kernel/builtin_kernels/
+// masked_mul_*），输出由 kernel 经上下文按槽位分配后作为 CustomizeOp 的结果
+// 返回（槽位顺序 = sites 顺序，最后是 flat）。
 static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
                                               PatternRewriter &rewriter,
                                               StringRef kernelName,
@@ -3983,17 +4207,15 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
 
-  const size_t siteCount = match.sites.size();
   SmallVector<Type> inputTypes = {
       LLVM::LLVMPointerType::get(rewriter.getContext())};
-  for (const MaskedMulSite &site : match.sites) {
-    inputTypes.push_back(site.data.getType());
-  }
+  for (Value arg : match.args) inputTypes.push_back(arg.getType());
   inputTypes.push_back(match.ids.getType());
   SmallVector<Type> resultTypes;
   for (const MaskedMulSite &site : match.sites) {
     resultTypes.push_back(site.output.getType());
   }
+  if (match.flatMask) resultTypes.push_back(match.flatMask.getType());
 
   auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
   auto func =
@@ -4006,15 +4228,14 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
   SmallVector<Value> operands;
-  for (size_t i = 0; i < siteCount; ++i) {
+  for (size_t i = 0; i < match.args.size(); ++i) {
     operands.push_back(entry->getArgument(i + 1));
   }
-  operands.push_back(entry->getArgument(siteCount + 1));
+  operands.push_back(entry->getArgument(match.args.size() + 1));
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange(resultTypes), ValueRange(operands),
-      rewriter.getStringAttr(getMaskedMulOpName(siteCount)),
-      getMaskedMulSchema(siteCount, match.padding)
-          .toMetadata(rewriter.getContext()));
+      rewriter.getStringAttr(getMaskedMulOpName(match)),
+      getMaskedMulSchema(match).toMetadata(rewriter.getContext()));
   rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResults());
   return func;
 }
@@ -4036,37 +4257,43 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     // 不变（kernel 本身在 TF 宿主下也能跑，池走 TLS 回退）。
     if (!module->hasAttr("annc.contract_version")) return failure();
 
-    const size_t siteCount = match->sites.size();
     SmallVector<Operation *, 8> fusedOps;
     for (const MaskedMulSite &site : match->sites) {
       fusedOps.push_back(static_cast<Operation *>(site.mul));
     }
+    fusedOps.append(match->absorbed.begin(), match->absorbed.end());
     fusedOps.append(match->chain.begin(), match->chain.end());
 
     if (hasHoleBetweenMembers(fusedOps)) return failure();
-    // data 必须来自区域外：kernel 以实参读取，区域内产出就没有值可传。
-    for (const MaskedMulSite &site : match->sites) {
-      Operation *producer = site.data.getDefiningOp();
+    // 站点实参必须来自区域外：kernel 以实参读取，区域内产出就没有值可传。
+    for (Value arg : match->args) {
+      Operation *producer = arg.getDefiningOp();
       if (producer && llvm::is_contained(fusedOps, producer)) return failure();
     }
-    // 区域里除站点输出外不得有结果逃逸：融合节点的输出必须恰是站点输出，
-    // 否则成员名单与 EP 的申报对不上。
-    SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
-    if (escaping.size() != siteCount) return failure();
+    // 区域里除站点输出（每个 Mul 的结果 + flat）外不得有结果逃逸：融合节点的
+    // 输出必须恰是这些值，否则成员名单与 EP 的申报对不上。
+    SmallVector<Value> declared;
     for (const MaskedMulSite &site : match->sites) {
-      if (!llvm::is_contained(escaping, site.output)) return failure();
+      declared.push_back(site.output);
+    }
+    if (match->flatMask) declared.push_back(match->flatMask);
+    SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
+    if (escaping.size() != declared.size()) return failure();
+    for (Value value : declared) {
+      if (!llvm::is_contained(escaping, value)) return failure();
     }
 
     // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
-    auto schema = getMaskedMulSchema(siteCount, match->padding);
+    auto schema = getMaskedMulSchema(*match);
     SmallVector<Type> schemaInputTypes;
-    for (const MaskedMulSite &site : match->sites) {
-      schemaInputTypes.push_back(site.data.getType());
-    }
+    for (Value arg : match->args) schemaInputTypes.push_back(arg.getType());
     schemaInputTypes.push_back(match->ids.getType());
     SmallVector<Type> schemaResultTypes;
     for (const MaskedMulSite &site : match->sites) {
       schemaResultTypes.push_back(site.output.getType());
+    }
+    if (match->flatMask) {
+      schemaResultTypes.push_back(match->flatMask.getType());
     }
     auto inferred = atir::inferTypeConstraintsFromSchema(
         schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
@@ -4076,7 +4303,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
       return failure();
     }
     annc::kernels::KernelResolveRequest request;
-    request.op_type = getMaskedMulOpName(siteCount);
+    request.op_type = getMaskedMulOpName(*match);
     request.abi = "annc_execution_v2";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
@@ -4101,8 +4328,8 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "tf.name", rewriter.getStringAttr(clusterName)));
     SmallVector<FusionArgSpec> args;
-    for (const MaskedMulSite &site : match->sites) {
-      args.push_back({"dynamic", getValueName(site.data), site.data.getType()});
+    for (Value arg : match->args) {
+      args.push_back({"dynamic", getValueName(arg), arg.getType()});
     }
     args.push_back({"fixed", getValueName(match->ids), match->ids.getType()});
     metadata.push_back(rewriter.getNamedAttr(
@@ -4111,6 +4338,10 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     for (const MaskedMulSite &site : match->sites) {
       outputs.push_back({"output", getFusionOutputName(site.output),
                          site.output.getType()});
+    }
+    if (match->flatMask) {
+      outputs.push_back({"output", getFusionOutputName(match->flatMask),
+                         match->flatMask.getType()});
     }
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));

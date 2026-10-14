@@ -746,6 +746,42 @@ std::int32_t CallContextKernel(void* symbol, const std::vector<void*>& args) {
                                                void*, void*, void*, void*)>(
           symbol)(args[0], args[1], args[2], args[3], args[4], args[5],
                   args[6], args[7]);
+    case 9:
+      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
+                                               void*, void*, void*, void*,
+                                               void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8]);
+    case 10:
+      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
+                                               void*, void*, void*, void*,
+                                               void*, void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8], args[9]);
+    case 11:
+      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
+                                               void*, void*, void*, void*,
+                                               void*, void*, void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8], args[9], args[10]);
+    case 12:
+      return reinterpret_cast<std::int32_t (*)(
+          void*, void*, void*, void*, void*, void*, void*, void*, void*,
+          void*, void*, void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8], args[9], args[10], args[11]);
+    case 13:
+      return reinterpret_cast<std::int32_t (*)(
+          void*, void*, void*, void*, void*, void*, void*, void*, void*,
+          void*, void*, void*, void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8], args[9], args[10], args[11], args[12]);
+    case 14:
+      return reinterpret_cast<std::int32_t (*)(
+          void*, void*, void*, void*, void*, void*, void*, void*, void*,
+          void*, void*, void*, void*, void*)>(symbol)(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          args[7], args[8], args[9], args[10], args[11], args[12], args[13]);
     default:
       return -1;
   }

@@ -77,14 +77,22 @@ bool ValidateLegacySite(const Site& site, bool matmul, std::string* error) {
 // in the report itself.
 // The outputs are a slot contract (rank/type) the callbacks check when the
 // kernel allocates.
+// Upper bound on a context-ABI site's declared arguments; mirrors the
+// arg-count dispatch table in annc_ep_execution.cc.
+static constexpr size_t kMaxContextSiteArgs = 14;
+
 bool ValidateContextSite(const Site& site, std::string* error) {
   if (!site.kernelArgOrder.empty()) {
     return Fail(error,
                 "context-ABI site must not carry a kernel argument order");
   }
-  if (site.args.empty() || site.args.size() > 7) {
+  // The kernel-call dispatch in annc_ep_execution.cc has one cast per argument
+  // count; both sides carry the same upper bound.  Fused subgraphs with several
+  // data arguments and a Sum's other inputs need more than the dev line's seven
+  // (model1's masked_mul sites reach twelve).
+  if (site.args.empty() || site.args.size() > kMaxContextSiteArgs) {
     return Fail(error,
-                "context-ABI site must have between one and seven arguments");
+                "context-ABI site must have between one and fourteen arguments");
   }
   if (site.outputs.empty()) {
     return Fail(error, "context-ABI site must declare at least one output");
