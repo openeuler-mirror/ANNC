@@ -136,3 +136,15 @@
 | **后果** | matcher 只有工具链一份实现；编译和符号失败可通过不申报保留 CPU EP。首次 session 承担冷编译成本，后续复用缓存。当前真实执行验证限于 AOT `tensordot_matmul`；普通 MatMul JIT、其他 pattern、控制流子图和 ORT 执行上下文扩展仍需独立实现。缺符号会放弃 site，不自动重编译已发布缓存。 |
 | **备选方案** | EP 自行匹配融合边界会重复 compiler 逻辑；在 ORT `Compile` 才编译会失去不申报回退的时机；完全离线编译需要额外的模型与缓存分发协议。 |
 | **源码依据** | ANNC `b3513b7d`：`GetCapabilityRuntimeCompileImpl`、`CompileDriver::Compile`、`ReadReport`、`ValidateSite`；详细设计见 [ORT EP/pipeline 特性设计](../Feature/annc-ort-ep-pipeline-adaptation-design.md)。 |
+
+<a id="adr-013"></a>
+
+## ADR-013：ONNX EP 执行上下文——线程池入上下文、TF/ONNX 共用 ABI v3
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | ONNX Runtime 侧的融合回接需要一套宿主执行状态：输出必须由 kernel 经 `KernelContext_GetOutput` 在运行中分配（输出形状常要读到输入才知道），线程池只能经 `KernelContext_ParallelFor` 逐索引回调获得，ORT 进程里没有 ANNC 的 TLS 约定。既有 `annc_execution_v2` 上下文（TF 域 pattern 已在用）没有线程池字段，TF 靠 TLS 取池；ONNX 无 TLS 可取，线程池实际拿不到——这是 dev 分支实现暴露的问题，也是本决策要解决的输入。 |
+| **决策** | (1) **ABI 扩展为 v3**：`AnncExecutionContext` 尾部新增不透明 `AnncThreadPoolHandle* thread_pool`（NULL = 未提供）；`validateContext` 同时接受 v3（`sizeof` + 版本 3）与 v2（`ANNC_EXECUTION_V2_CONTEXT_SIZE` + 版本 2）并拒绝其余错配，保证旧宿主的小结构不会被越界读。(2) **取池语义**：`threadPool(context)` 只取上下文携带的池；`resolveThreadPool(context)` 上下文池优先、回退 TLS。TF 与 ONNX **共用同一个上下文抽象**（曾评估 ONNX 私有结构体，因尺寸判别/helper/回归面成本被放弃）：TF 构造的上下文池为空 → 回退 TLS，TF 执行流与 kernel 取池方式零改动；ONNX 填池 → kernel 从上下文取。(3) **ONNX 侧执行状态**：EP 内实现 allocate_output / allocate_temp / report_error 三回调与 `OrtThreadPool`（逐索引回调转 ANNC 区间；`grain_size`→批数；`KernelContext_ParallelFor` 失败则释放状态并在本线程内联执行整段；thread_local 深度提供 `in_parallel_region` 供嵌套判定）。(4) **站点按 ABI 分发**：EP 按站点报告的 `abi` 字段选择调用路径（`mlir_ciface` 保持 017 契约；`annc_execution_v2` 走上下文路径），上下文与具体融合算子无关。(5) **契约申报前校验**：v2 站点无 `kernel_arg_order`、参数 1–7 个且 rank 互异、`dtype=f32`、输出 ≥1 且声明 rank/type；参数解析按 **rank+元素类型**（不匹配的输入忽略——融合节点的形状链常量与操作数并列暴露；两个输入命中同一参数则首次 Compute fail-closed）；契约与融合子图不符时该节点计入 unresolved、整体 Compile 失败（保守的全量失败，Compile 阶段没有单节点拒绝手段）。 |
+| **后果** | ✅ TF 语义与执行流零改动与 ONNX 拿到真实 ORT 池并存，一个 ABI 两种宿主流；✅ kernel 侧取池统一为 `resolveThreadPool`，TLS 成为兼容兜底而非唯一通道；✅ 失败模式收敛为 fail-closed 且可见（契约不符整 session 失败并打站点名、丢弃站点有日志、参数二义拒绝）；❌ EP 与 kernel 必须同源构建——`thread_pool` 句柄背后的 C++ 虚表不在尺寸/版本检查覆盖内；❌ 契约不符的代价是整 session 创建失败而非单节点降级；❌ 参数绑定是 rank+dtype 启发式，未来若出现"与参数同 rank 同类型的额外输入"会 fail-closed 拒绝（安全但保守），届时需在契约层显式扩展。 |
+| **备选方案** | (a) ONNX 私有扩展上下文结构体——kernel/EP 各自维护尺寸判别与 helper，回归面与维护成本高于收益，退回共用 ABI；(b) kernel 一律走 TLS、由 EP 用 TLS 注入 ORT 池——ORT 无此约定，且把两条宿主的池语义混为一谈；(c) 站点级单节点拒绝——ORT 的 Compile 契约只支持整批失败，做不到；(d) 参数按报告 `role`/操作数索引精确绑定——多一条上游字段信任链，当前 rank+dtype+二义拒绝已 fail-closed，留作后续演进。 |
+| **源码依据** | 本任务分支 `feature/annc-ort-ep-execution-context`：`0fc1b1c2` ABI v3、`6fa260d2` EP 执行上下文与分发、`2d9d7870` FTDMM 载体、`30457e3a` 测试；详细设计见 [执行上下文设计](../Feature/ort-ep-execution-context-architecture-design.md)。 |

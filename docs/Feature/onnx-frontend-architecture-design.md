@@ -368,3 +368,4 @@ pytest 检查 `ANNC_BUILD_DIR`，否则依次尝试 `build-v2` 与 `build`，寻
 - [前端 GTest](../../frontends/onnx/onnx2atir/test/onnx_frontend_test.cpp)与[CLI pytest](../../tests/test_onnx_frontend.py)
 - [ONNX proto 生成脚本](../../frontends/onnx/protos/onnx_protos_minimal.sh)
 - [ANNC 总体架构](../annc-architecture-design.md)与[ADR-011](../ADR/decisions.md#adr-011)
+- ONNX Runtime 侧回接见[EP 执行上下文设计](ort-ep-execution-context-architecture-design.md)与 [ADR-013](../ADR/decisions.md#adr-012)

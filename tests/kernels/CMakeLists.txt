@@ -93,6 +93,16 @@ annc_add_kernel_gtest(kernel_priority_resolver_test
 )
 target_link_libraries(kernel_priority_resolver_test PRIVATE ANNCKernel)
 
+annc_add_kernel_gtest(execution_context_test
+    execution_context_test.cpp
+)
+target_link_libraries(execution_context_test
+    PRIVATE
+    ANNCThreadPool
+    LLVMSupport
+    LLVMDemangle
+)
+
 annc_add_kernel_gtest(kernel_registry_test
     kernel_registry_test.cpp
     "${ANNC_AUTO_KERNEL_WRAPPERS_GEN}"

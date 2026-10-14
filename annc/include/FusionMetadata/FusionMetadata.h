@@ -70,6 +70,15 @@ struct FusionInfo {
   // graph edges replaced by the generated ANNCFused node.
   std::vector<FusionArg> outputs;
 
+  // Names of the graph nodes this fusion subsumes (the members of the fused
+  // region), recorded by the pattern that captured them. For ONNX imports the
+  // name is the ONNX *node* name (the frontend writes it to tf.name; Constant
+  // and Input nodes are excluded because ONNX keeps initializers and graph
+  // inputs outside the node list). Empty when the pattern does not record
+  // them. Consumers that partition a framework graph by node set (for example
+  // the ONNX Runtime EP) use this to claim exactly the fused region.
+  std::vector<std::string> memberNodeNames;
+
   // Pattern-specific, non-generic values such as embedding num_buckets.
   std::map<std::string, std::string> patternAttrs;
 

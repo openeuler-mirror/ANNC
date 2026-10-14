@@ -355,8 +355,13 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - ADR-003：两层选择算子接入策略
 - ADR-004：fork/exec 进程隔离
 - ADR-005：运行时无 fallback 决策
+- ADR-006：tf2atir 使用已解析 TF 图作为 NodeInfo 前置边界
 - ADR-007：TensorFlow 无缓存同步 JIT
 - ADR-008：TensorFlow 进程内 JIT 编译缓存
+- ADR-009：GEMM intra 线程数改为运行时 JIT 特化维度
+- ADR-010：TF 控制流镜像转换（mirror，不做语义重建）
+- ADR-011：ONNX 前端接入与"不可表达即降级"契约
+- ADR-013：ONNX EP 执行上下文——线程池入上下文、TF/ONNX 共用 ABI v3
 
 #### 4.1.5 关键接口契约
 
@@ -367,12 +372,13 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | **NodeInfo**        | C++ struct（`annc/include/Builder/MLIROpBuilder.h`） | ANNC 框架对接层前端适配 | 工具链前端（ATIR 方言构建） | `op_type`、`name`、`inputs`、`outputs` 等 | 仅用于 GraphDef → ATIR 正向路径 |
 | **Fusion Metadata** | JSON（`annc-fusion-metadata` 输出，外层 `{"fusions":[...]}`） | 工具链前端（annc-fusion-metadata 切分决策提取） | ANNC 框架对接层（annc-converter 图重写） | `name`、`pattern`、`kernel_name`、`original_nodes`、`inputs`、`input_shapes`、`output_tensor`、`output_shape`、`abi`、`n_constants`/`n_fixed`/`n_dynamic`、`num_outputs`、`output_ranks`/`input_ranks`、`dynamic_dims`、`kernel_arg_order`、`symbolic_signature`、`fallback_function` | `pattern`/`original_nodes`/`inputs`/`output_tensor` 不可变；其余字段可扩展（`shared_lib_path` 不在此 JSON，由 annc-converter 写入 GraphDef 节点属性） |
 | **Kernel C ABI**    | C 函数签名（`_mlir_ciface_*`）        | 工具链后端（annc driver 编译产出）            | ANNC 框架对接层（ANNCFusedOp 运行时回接）  | 函数名、参数列表（MemRef 描述子指针）、返回值                                                        | 函数名编码规则不可变；MemRef 布局遵循 MLIR 标准约定                                          |
+| **Kernel C ABI（执行上下文形态）** | C 函数签名（站点 `abi=annc_execution_v2`：首参 `AnncExecutionContext*`，返回 i32 状态） | 工具链后端（annc driver 编译产出） | ANNC 框架对接层（TF `ANNCFusedOp` 与 ONNX Runtime EP） | 执行上下文（输出/临时/报错回调 + v3 线程池句柄）、参数 MemRef 描述子指针、返回值 | ABI 版本规则不可变（v2/v3 双布局均接受）；输出与临时内存经上下文回调分配 |
 
 **设计要点**：
 
 - NodeInfo 是 ANNC 框架对接层向工具链前端传递计算图信息的兼容通道，而不是 TF 解析的内部表示。生产 CLI `annc-tf2atir` 依次执行 `TfModelLoader -> TfGraphParser -> TfTensorResolver -> NodeInfoAdapter -> MLIRBuilder`：前两步加载并裁剪 GraphDef，`TfNode.outputs` 显式保存输出 slot，parser 先记录边和函数输出所引用的 slot，resolver 再按签名补全完整输出列表并为每个 `TensorRef` 解析 dtype、rank 和动态维，adapter 才构造 Builder 版 NodeInfo。该路径仅依赖 protobuf，不链接 TF Runtime；`annc-converter` 的 GraphDef 重写路径直接消费 GraphDef 与 Fusion Metadata，不使用 NodeInfo。
 - Fusion Metadata 是工具链前端产出的切分决策，由ANNC 框架对接层消费以执行图重写；两者可独立迭代。
-- Kernel C ABI 是工具链后端与ANNC 框架对接层（运行时回接）之间的唯一调用约定，kernel 的内部实现（手写/MLIR 生成）对运行时透明。
+- Kernel C ABI 是工具链后端与ANNC 框架对接层（运行时回接）之间的调用约定，kernel 的内部实现（手写/MLIR 生成）对运行时透明。除 `_mlir_ciface_*` 形态外，另有执行上下文形态（`annc_execution_v2`，见 ADR-013）：kernel 首参为 `AnncExecutionContext`，输出与临时内存经上下文回调分配，v3 上下文携带宿主线程池；TF 与 ONNX 两侧的融合回接都使用该形态，EP 按站点报告的 `abi` 字段分发。
 
 ### 4.2 特性功能性设计
 
@@ -386,7 +392,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | 图重写           | 根据切分决策将融合子图替换为 ANNCFused 节点 | GraphDef + Fusion Metadata + shared library | 重写后 GraphDef |
 | ANNCOptimizer | Grappler 插件，编排编译 pipeline 并触发三层流水线        | GraphDef                          | 重写后 GraphDef              |
 | ANNCFusedOp   | 运行时加载 `.so` 并执行 kernel                    | TF Tensor                         | TF Tensor                 |
-| 线程池桥接         | 通过 TLS 将 TF ThreadPool 桥接到 ANNC kernel    | TF ThreadPool                     | AnncThreadPool            |
+| 线程池桥接         | TF：通过 TLS 将 TF ThreadPool 桥接到 ANNC kernel；ONNX EP：把 ORT 线程池放进执行上下文（ABI v3），`resolveThreadPool` 上下文优先、TLS 兜底 | TF ThreadPool / ORT `KernelContext_ParallelFor` | AnncThreadPool            |
 
 **关键设计要点**：
 
@@ -394,7 +400,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - ATIR TensorType 区分三种情况：空 shape 是标量，shape 中的 `-1` 是已知 rank 下的动态维度，`rank_known = false` 是真正的 unknown rank；unknown rank 不再编码成一维动态张量。未知元素类型使用 `!atir.unknown`，仅允许 opaque 节点保留；TensorFlow `DT_RESOURCE` 句柄使用独立的 `!atir.resource`，不伪装成数值 TensorType。标准后端 type converter 遇到未知 rank、未知元素类型或 resource handle 时拒绝 numeric lowering。dtype resolver 只使用 GraphDef 自身记录的类型事实和已有的标准节点规则，无法证明时保留 unknown，不根据消费者属性或自定义 op 名称猜测。
 - 图重写消费工具链前端产出的 Fusion Metadata，将可融合子图替换为 `ANNCFused` 节点，并在节点属性中记录 `shared_lib_path`。
 - `ANNCOptimizer` 通过 `fork/exec` 子进程调用 `annc-tf-pipeline`，实现 MLIR/LLVM 与 TF 的 ABI 隔离；任何阶段失败均返回原始 GraphDef，保证推理服务可用性。
-- `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。
+- `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。该路径保持原样：TF 构造的执行上下文不携带线程池（字段为 NULL），`resolveThreadPool` 回退 TLS；ONNX EP 路径则不经 TLS，池随执行上下文传入（ADR-013）。
 
 #### 4.2.2 ANNC 工具链前端
 
@@ -549,7 +555,7 @@ sequenceDiagram
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
 | `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N] [--intra_thread_count N]`（未指定时保留动态 shape；线程数写入 module 属性） | ANNC 框架对接层 | 稳定  |
 | `frontends/onnx/onnx2atir`        | ONNX 模型 → ATIR MLIR           | CLI：`annc-onnx2atir <model.onnx> [-o out.mlir] [--dump-stats JSON] [--dump-inference JSON] [--strict] [--relaxed-opset] [--quiet]`；op 覆盖为目标融合子图所需子集，不支持控制流 | ANNC 框架对接层 | 早期  |
-| `addons/onnxruntime`              | ONNX Runtime EP 插件（运行时融合回接）   | ORT：`Env::RegisterExecutionProviderLibrary` + `SessionOptions::AppendExecutionProvider_V2`；导出 `CreateEpFactories` / `ReleaseEpFactory`；开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭 | ANNC 框架对接层 | 早期  |
+| `addons/onnxruntime`              | ONNX Runtime EP 插件（运行时编译 + 融合回接）   | ORT：`Env::RegisterExecutionProviderLibrary` + `SessionOptions::AppendExecutionProvider_V2`；导出 `CreateEpFactories` / `ReleaseEpFactory`；支持 `mlir_ciface` 与 `annc_execution_v2` 两种站点契约，后者经执行上下文执行（输出/临时经回调分配、ORT 线程池随上下文传入，ADR-013）；开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭 | ANNC 框架对接层 | 早期  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
@@ -557,6 +563,7 @@ sequenceDiagram
 | `annc/tools/annc`                 | 编译 driver                     | CLI：`annc --shared -o kernel.so`            | 工具链后端      | 稳定  |
 | `annc/tools/annc-converter`       | GraphDef 图重写                    | CLI：`annc-converter --input_graphdef ...` | ANNC 框架对接层 | 稳定  |
 | `annc/tools/annc-tf-pipeline`     | 端到端编排                         | CLI：`annc-tf-pipeline --input_graphdef ...` | 编排         | 稳定  |
+| `annc/tools/annc-onnx-pipeline`   | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告 | CLI：`annc-onnx-pipeline --model <model.onnx> --out-dir <dir> [--execution-modes aot] [--work-dir <dir>] [--keep-temps] [--verbose]`；产出 `sites.json`（融合区域成员名单与站点契约）供 EP 运行时编译消费 | 编排         | 早期  |
 | `tensorflow_addons`               | TF Grappler 插件 + ANNCFused Op | TF CustomGraphOptimizer / OpKernel          | ANNC 框架对接层 | 稳定  |
 | `annc/lib/Kernel`                 | Kernel 注册与线程池                 | C++ API：`KernelRegistry`、`AnncThreadPool`   | 工具链后端      | 稳定  |
 
@@ -626,6 +633,9 @@ flowchart TB
 | ANNCFusedOp .so 加载             | .so 不存在/不兼容                | 推理报错          | 高   | 低   | 高   | 中    | 缓存句柄、明确错误日志                     |
 | Shape 推断失败                     | 动态维与实际输入不匹配                | 输出 shape 错误   | 高   | 低   | 中   | 中    | 多层级 fallback 推断                 |
 | 线程池 TLS 注入失败                   | kernel 无法并行                | 性能下降          | 低   | 低   | 高   | 低    | 降级为串行执行                         |
+| ONNX EP 站点契约与融合子图不符           | 输出数/rank/dtype 不匹配       | 该 session 创建失败（保守） | 高   | 低   | 高   | 低    | 申报前契约校验 + Compile 期逐站点核对；失败在 stderr 打出站点名 |
+| ONNX EP 参数绑定二义                 | 两个输入命中同一 kernel 参数      | 首次 Compute 失败   | 中   | 低   | 高   | 低    | 按 rank+元素类型绑定；二义 fail-closed，不做静默首匹配 |
+| ONNX EP 线程池回调失败               | `KernelContext_ParallelFor` 报错 | 性能下降          | 低   | 低   | 高   | 低    | 释放 ORT 状态并在本线程内联执行整段（`parallel_for` 不失败） |
 | Embedding 聚合后 shape 不匹配        | 数千个 Embedding 列 shape 组合异常 | 推理结果错误        | 高   | 低   | 中   | 中    | 融合阶段校验 shape 一致性、annc-verify 验证 |
 | 聚合后 kernel 内存超限                | 多 Embedding table 合并访问占用过大 | OOM / 性能劣化    | 中   | 低   | 中   | 低    | 限制单次融合算子数量、监控内存占用               |
 | OpFusion 结果错误                  | 融合策略语义偏差                      | 推理精度损失        | 高   | 中   | 中   | 中    | annc-verify 对比验证 |
@@ -692,6 +702,7 @@ flowchart TB
 | `.so` 加载路径              | 加载恶意共享库       | 中    | `shared_lib_path` 由 pipeline 生成并写入 GraphDef，限制为工作目录 |
 | 工作目录                    | 文件冲突/越权访问     | 低    | 默认使用独立 `work_dir`，按模型/实例隔离                          |
 | TF ThreadPool 注入        | TLS 覆盖导致线程池混乱 | 低    | `ScopedAnncThreadPool` 析构时恢复 previous               |
+| ONNX EP 运行时产物（sites.json / libannc_kernels.so） | 缓存目录被本地篡改 → 加载非预期 kernel | 低 | 报告先过 schema 与契约校验（rank/dtype/输出数/参数二义拒绝）；缓存目录默认位于用户私有目录；kernel 由本机工具链产出 |
 
 ### 6.3 敏感操作检查
 
@@ -841,6 +852,8 @@ flowchart TB
 - GEMM MLIR 优化路径的 Lowering 策略（Affine vs Linalg）尚未收敛，Linalg 路径仅 MatMul/Customize 实现完整。
 - LLM 自动生成路径和 XLA 接入路径处于开发/规划阶段。
 - ONNX 前端已实现（`frontends/onnx/onnx2atir/`），op 覆盖以目标融合子图所需子集为准，尚未做全量 op 覆盖与控制流。
+- ONNX EP 的执行上下文形态（`annc_execution_v2`，ADR-013）目前只有 `tensordot_matmul`（FTDMM）一个可达站点；其余融合（masked_mul / layer_norm / batched_matmul_add）尚未回移到 MR2 线，含这些子图的模型回退 CPU EP。输入张量按连续行主序处理，非连续视图不在支持范围。
+- ONNX EP 未做 model-level 性能承诺；ORT 并行与 ANNC 并行区叠加的过订阅只记录、未调优。
 - `ANNCOptimizer` 会向 annc-tf-pipeline 透传 `--backend` 参数，但 pipeline 当前不解析该参数（静默忽略），存在接口漂移，需对齐。
 - `ANNCOptimizer::Init()` 未实现 `pipeline_path` 启动期校验（见 5.6 节），`timeout_seconds` 等配置无范围校验，需补强。
 
@@ -862,6 +875,7 @@ flowchart TB
 | US-011 | 自定义 Kernel 注册                        | annc/lib/Kernel                          | 中   | 已实现  | AI 技术创新团队           |
 | US-013 | Embedding Lookup 聚合                  | annc-opt / Dialect/Atir                  | 高   | 已实现  | 编译器开发团队             |
 | US-014 | GEMM MLIR 优化路径收敛                     | Target/aarch64 + Conversion              | 中   | 开发中  | AI 技术创新团队           |
+| US-017 | ONNX Runtime EP 执行上下文适配（线程池入上下文）      | addons/onnxruntime + annc/lib/Kernel     | 中   | 已实现（FTDMM 单站点载体） | 编译器开发团队             |
 
 ***
 

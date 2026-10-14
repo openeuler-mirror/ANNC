@@ -32,6 +32,7 @@
 // guard of its own -- including it a second time redefines every struct in it.
 
 #include "annc_ep_compile.h"
+#include "annc_ep_execution.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -95,6 +96,10 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
 
 struct KernelHandle {
   void* handle = nullptr;
+  // Raw symbol, used by the context-ABI call path, which dispatches on the
+  // site's argument count.
+  void* symbol = nullptr;
+  // The legacy mlir_ciface signature, used by the preallocated-output path.
   void (*fn)(void*, void*, void*) = nullptr;
 };
 
@@ -137,12 +142,12 @@ class KernelTable {
     }
     if (shared == nullptr) return false;
     const std::string symbol = kKernelPrefix + kernel_name;
-    out->fn = reinterpret_cast<void (*)(void*, void*, void*)>(
-        dlsym(shared, symbol.c_str()));
-    if (!out->fn) {
+    out->symbol = dlsym(shared, symbol.c_str());
+    if (!out->symbol) {
       std::fprintf(stderr, "[annc-ep] no symbol %s in %s\n", symbol.c_str(), library.c_str());
       return false;
     }
+    out->fn = reinterpret_cast<void (*)(void*, void*, void*)>(out->symbol);
     out->handle = shared;
     return true;
   }
@@ -183,6 +188,18 @@ std::vector<const OrtValueInfo*> NodeOutputs(const OrtNode* node) {
 // ---------------------------------------------------------------------------
 struct ComputeState {
   void (*fn)(void*, void*, void*) = nullptr;  // resolved once in CreateState
+  // Context-ABI sites (annc_execution_v2): the raw kernel entry and the site's
+  // contract -- argument ranks/types in kernel call order and the declared
+  // output slots the callbacks validate against.
+  void* symbol = nullptr;
+  std::string abi;
+  std::vector<int64_t> arg_ranks;
+  std::vector<AnncElementType> arg_types;
+  std::vector<annc_ep::OutputContract> outputs;
+  // Input index each context argument resolves to, resolved on the first call
+  // and guarded by `context_mutex`: ORT may run the same node concurrently.
+  std::mutex context_mutex;
+  std::vector<int64_t> arg_indices;
   // The fused node's input layout is fixed for the lifetime of the session, so
   // the operand scan only has to run once; afterwards the two indices are used
   // directly.
@@ -263,7 +280,154 @@ struct AnncNodeComputeInfo : OrtNodeComputeInfo {
   std::string anchor_name;  // node producing the site's output (diagnostics only)
   std::string kernel_name;  // resolved ANNC kernel, empty if unresolved
   std::string library;      // shared library holding the kernel
+  // Context-ABI site contract, copied from the report at Compile time.
+  std::string abi;
+  std::vector<int64_t> arg_ranks;
+  std::vector<AnncElementType> arg_types;
+  std::vector<annc_ep::OutputContract> outputs;
 };
+
+// ---------------------------------------------------------------------------
+// Context-ABI execution (annc_execution_v2 sites)
+//
+// The kernel receives the execution context (which carries the ORT thread
+// pool) plus one ranked-memref descriptor per site argument, and allocates its
+// own outputs through the context callbacks. Each argument resolves to the
+// fused-node input whose rank and element type match the contract; distinct
+// argument ranks (enforced at claim time) make that a unique fit, and a
+// second fit for the same argument fails closed instead of picking one. The
+// mapping is cached on the first call (under the
+// state's mutex, because ORT may run the same node concurrently) since the
+// fused node's input list is fixed for the session's lifetime.
+// ---------------------------------------------------------------------------
+OrtStatus* ResolveContextInputs(ComputeState* state,
+                                OrtKernelContext* kernel_context) {
+  size_t num_inputs = 0;
+  if (OrtStatus* status =
+          g_api->KernelContext_GetInputCount(kernel_context, &num_inputs)) {
+    return status;
+  }
+  // FillContextContract pushes the contract's argument ranks and types in
+  // pairs; keep the diagnostics below from indexing a shorter type vector if
+  // that ever stops being true (BindArgumentsToInputs itself is total).
+  if (state->arg_ranks.size() != state->arg_types.size()) {
+    return g_api->CreateStatus(
+        ORT_FAIL,
+        "ANNC EP: the site contract's argument ranks and types are not in "
+        "step");
+  }
+  // Fused nodes legitimately carry more inputs than the kernel takes: the
+  // region's shape chain exposes its constants alongside the operands (the
+  // legacy path scans for its x/w the same way). The binding rule (rank +
+  // element type; extras ignored; an argument two inputs fit is refused) lives
+  // in BindArgumentsToInputs, unit-tested against the real site's input list.
+  std::vector<annc_ep::InputShapeKey> inputs;
+  inputs.reserve(num_inputs);
+  for (size_t i = 0; i < num_inputs; ++i) {
+    const OrtValue* value = nullptr;
+    if (OrtStatus* status =
+            g_api->KernelContext_GetInput(kernel_context, i, &value)) {
+      return status;
+    }
+    OrtTensorTypeAndShapeInfo* info = nullptr;
+    if (OrtStatus* status = g_api->GetTensorTypeAndShape(value, &info)) {
+      return status;
+    }
+    size_t rank = 0;
+    if (OrtStatus* status = g_api->GetDimensionsCount(info, &rank)) {
+      g_api->ReleaseTensorTypeAndShapeInfo(info);
+      return status;
+    }
+    ONNXTensorElementDataType ort_type =
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    if (OrtStatus* status = g_api->GetTensorElementType(info, &ort_type)) {
+      g_api->ReleaseTensorTypeAndShapeInfo(info);
+      return status;
+    }
+    g_api->ReleaseTensorTypeAndShapeInfo(info);
+    annc_ep::InputShapeKey key;
+    key.rank = static_cast<int64_t>(rank);
+    // 0 = no ANNC counterpart (ANNC_ELEMENT_TYPE_* start at 1), which fits no
+    // declared argument.
+    (void)annc_ep::AnncElementFromOrt(ort_type, &key.type);
+    inputs.push_back(key);
+  }
+  const annc_ep::ArgumentBinding binding = annc_ep::BindArgumentsToInputs(
+      inputs, state->arg_ranks, state->arg_types);
+  if (g_debug) {
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      int64_t bound_to = -1;
+      for (size_t arg = 0; arg < binding.indices.size(); ++arg) {
+        if (binding.indices[arg] == static_cast<int64_t>(i)) {
+          bound_to = static_cast<int64_t>(arg);
+        }
+      }
+      if (bound_to >= 0) {
+        std::fprintf(stderr,
+                     "[annc-ep] ctx input %zu (rank %lld, type %d) -> kernel "
+                     "argument %lld\n",
+                     i, static_cast<long long>(inputs[i].rank),
+                     static_cast<int>(inputs[i].type),
+                     static_cast<long long>(bound_to));
+      } else {
+        std::fprintf(stderr,
+                     "[annc-ep] ctx input %zu (rank %lld, type %d): fits no "
+                     "argument; ignored\n",
+                     i, static_cast<long long>(inputs[i].rank),
+                     static_cast<int>(inputs[i].type));
+      }
+    }
+  }
+  if (binding.ambiguous_arg >= 0) {
+    return g_api->CreateStatus(
+        ORT_FAIL,
+        ("ANNC EP: fused-node inputs " +
+         std::to_string(binding.ambiguous_inputs[0]) + " and " +
+         std::to_string(binding.ambiguous_inputs[1]) +
+         " both fit kernel argument " +
+         std::to_string(binding.ambiguous_arg))
+            .c_str());
+  }
+  // Resolve into a local vector and publish it only on success: a failed
+  // resolution must leave the cache empty, otherwise the next call would take
+  // the `arg_indices` fast path with -1 entries and fail forever.
+  for (size_t arg = 0; arg < binding.indices.size(); ++arg) {
+    if (binding.indices[arg] < 0) {
+      return g_api->CreateStatus(
+          ORT_FAIL, ("ANNC EP: no input matches kernel argument " +
+                     std::to_string(arg) + " (rank " +
+                     std::to_string(state->arg_ranks[arg]) + ", type " +
+                     std::to_string(static_cast<int>(state->arg_types[arg])) +
+                     ")")
+                        .c_str());
+    }
+  }
+  state->arg_indices = binding.indices;
+  return nullptr;
+}
+
+OrtStatus* ComputeContextSite(ComputeState* state,
+                              OrtKernelContext* kernel_context) {
+  if (state->symbol == nullptr) {
+    return g_api->CreateStatus(ORT_FAIL,
+                               "ANNC EP: context kernel is not loaded");
+  }
+  annc_ep::ContextCall call;
+  call.symbol = state->symbol;
+  call.arg_ranks = state->arg_ranks;
+  call.arg_types = state->arg_types;
+  call.outputs = state->outputs;
+  {
+    std::lock_guard<std::mutex> lock(state->context_mutex);
+    if (state->arg_indices.empty()) {
+      if (OrtStatus* status = ResolveContextInputs(state, kernel_context)) {
+        return status;
+      }
+    }
+    call.arg_indices = state->arg_indices;
+  }
+  return annc_ep::ComputeWithContext(g_api, kernel_context, call);
+}
 
 OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
                                         OrtNodeComputeContext* /*context*/,
@@ -272,8 +436,15 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
   auto* info = static_cast<AnncNodeComputeInfo*>(this_ptr);
   if (!info->kernel_name.empty()) {
     KernelHandle* handle = Kernels().Get(info->library, info->kernel_name);
-    if (handle != nullptr) state->fn = handle->fn;
+    if (handle != nullptr) {
+      state->fn = handle->fn;
+      state->symbol = handle->symbol;
+    }
   }
+  state->abi = info->abi;
+  state->arg_ranks = info->arg_ranks;
+  state->arg_types = info->arg_types;
+  state->outputs = info->outputs;
   *compute_state = state;
   return nullptr;
 }
@@ -301,6 +472,10 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
     const int64_t dims[3] = {1, 1, 1};
     OrtValue* out = nullptr;
     return g_api->KernelContext_GetOutput(kernel_context, 0, dims, 3, &out);
+  }
+
+  if (state->abi == "annc_execution_v2") {
+    return ComputeContextSite(state, kernel_context);
   }
 
   size_t num_inputs = 0;
@@ -697,6 +872,44 @@ std::vector<size_t> SubgraphNodeIds(const OrtGraph* graph) {
   return ids;
 }
 
+// Copies a validated context-ABI site contract into the compute info. The
+// declared output slots must be exactly the fused subgraph's outputs, and
+// every argument/output element type must be one the EP can describe, or the
+// kernel would misinterpret the buffers it is handed.
+bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
+                         AnncNodeComputeInfo* info) {
+  size_t graph_outputs = 0;
+  if (g_api->Graph_GetNumOutputs(graph, &graph_outputs) != nullptr) return false;
+  if (graph_outputs != site.outputs.size()) return false;
+  auto to_element_type = [](const std::string& dtype, AnncElementType* out) {
+    if (dtype == "f32") {
+      *out = ANNC_ELEMENT_TYPE_F32;
+      return true;
+    }
+    if (dtype == "i32") {
+      *out = ANNC_ELEMENT_TYPE_I32;
+      return true;
+    }
+    if (dtype == "i64") {
+      *out = ANNC_ELEMENT_TYPE_I64;
+      return true;
+    }
+    return false;
+  };
+  for (const annc_ep::Site::Arg& arg : site.args) {
+    AnncElementType type = 0;
+    if (!to_element_type(arg.dtype, &type)) return false;
+    info->arg_ranks.push_back(arg.rank);
+    info->arg_types.push_back(type);
+  }
+  for (const annc_ep::Site::Arg& output : site.outputs) {
+    AnncElementType type = 0;
+    if (!to_element_type(output.dtype, &type)) return false;
+    info->outputs.push_back(annc_ep::OutputContract{output.rank, type});
+  }
+  return true;
+}
+
 OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
                                     const OrtNode** fused_nodes, size_t count,
                                     OrtNodeComputeInfo** node_compute_infos,
@@ -716,6 +929,17 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
       if (site != nullptr) {
         info->kernel_name = site->kernelName;
         info->library = ep->kernel_library;
+        info->abi = site->abi;
+        if (site->abi == "annc_execution_v2" &&
+            !FillContextContract(*site, graphs[i], info)) {
+          // A contract that disagrees with the fused subgraph would run the
+          // kernel against the wrong buffers; refuse the node loudly instead.
+          ++unresolved;
+          std::fprintf(stderr,
+                       "[annc-ep] context site '%s' does not match the fused "
+                       "subgraph (outputs/ranks/types)\n",
+                       site->kernelName.c_str());
+        }
       } else {
         // Unreachable while GetCapability claims only reported sites and every
         // claimed kernel resolved there; loud because it means the claim and

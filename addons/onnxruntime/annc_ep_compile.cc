@@ -211,6 +211,7 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
       Site::Arg arg;
       arg.name = item.value("tf_name", "");
       arg.role = item.value("role", "");
+      arg.dtype = item.value("dtype", "");
       arg.rank = item.value("rank", int64_t{-1});
       if (item.contains("shape") && item["shape"].is_array()) {
         for (const auto& dim : item["shape"]) {
@@ -334,7 +335,13 @@ bool CompileDriver::ReadReport(const std::string& path, SiteReport* report,
         return false;
       }
       std::string validation_error;
-      if (!ValidateSite(site, &validation_error)) continue;
+      if (!ValidateSite(site, &validation_error)) {
+        // A dropped site silently costs its node(s) a claim: the run falls
+        // back to the CPU EP with no trace of why. Say it out loud.
+        std::fprintf(stderr, "[annc-ep] dropping site '%s': %s\n",
+                     site.kernelName.c_str(), validation_error.c_str());
+        continue;
+      }
       report->sites.push_back(std::move(site));
     }
   } catch (const std::exception& e) {
