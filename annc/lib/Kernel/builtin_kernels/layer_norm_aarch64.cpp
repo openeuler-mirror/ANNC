@@ -1,6 +1,10 @@
 #include <cmath>
 #include <cstdint>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "Kernel/ExecutionContextUtils.h"
 #include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
@@ -32,6 +36,74 @@ namespace {
 //   output: rank-2 [rows, cols] f32 -- allocated here through the execution
 //           context (slot 0); the row count is a runtime value, so the shape
 //           is only known after reading the input descriptor.
+#if defined(__aarch64__)
+// Vectorised row body, used once a row is long enough to amortise the setup --
+// the same gate ORT's own layer-norm kernel uses for its NEON path (256, see
+// annc_opt 0001 -> layer_norm_impl.cc ComputeJobFloatNeon, whose structure
+// this follows: four 128-bit accumulators per pass, 16-element steps, scalar
+// tail).  Same three passes and the same final factorisation as the scalar
+// path below, so the only difference is the summation order inside the vector
+// accumulators.
+constexpr int64_t kNeonMinCols = 256;
+
+void layerNormRowNeon(const float* xRow, const float* gamma, const float* beta,
+                      float* outRow, int64_t cols, float cols_f,
+                      float epsilon) {
+  float32x4_t sum0 = vdupq_n_f32(0.0f);
+  float32x4_t sum1 = vdupq_n_f32(0.0f);
+  float32x4_t sum2 = vdupq_n_f32(0.0f);
+  float32x4_t sum3 = vdupq_n_f32(0.0f);
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    sum0 = vaddq_f32(sum0, vld1q_f32(xRow + col));
+    sum1 = vaddq_f32(sum1, vld1q_f32(xRow + col + 4));
+    sum2 = vaddq_f32(sum2, vld1q_f32(xRow + col + 8));
+    sum3 = vaddq_f32(sum3, vld1q_f32(xRow + col + 12));
+  }
+  float sum = vaddvq_f32(
+      vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
+  for (; col < cols; ++col) sum += xRow[col];
+  const float mean = sum / cols_f;
+  const float32x4_t mean4 = vdupq_n_f32(mean);
+
+  float32x4_t sq0 = vdupq_n_f32(0.0f);
+  float32x4_t sq1 = vdupq_n_f32(0.0f);
+  float32x4_t sq2 = vdupq_n_f32(0.0f);
+  float32x4_t sq3 = vdupq_n_f32(0.0f);
+  col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    const float32x4_t d0 = vsubq_f32(vld1q_f32(xRow + col), mean4);
+    const float32x4_t d1 = vsubq_f32(vld1q_f32(xRow + col + 4), mean4);
+    const float32x4_t d2 = vsubq_f32(vld1q_f32(xRow + col + 8), mean4);
+    const float32x4_t d3 = vsubq_f32(vld1q_f32(xRow + col + 12), mean4);
+    sq0 = vmlaq_f32(sq0, d0, d0);
+    sq1 = vmlaq_f32(sq1, d1, d1);
+    sq2 = vmlaq_f32(sq2, d2, d2);
+    sq3 = vmlaq_f32(sq3, d3, d3);
+  }
+  float sq = vaddvq_f32(vaddq_f32(vaddq_f32(sq0, sq1), vaddq_f32(sq2, sq3)));
+  for (; col < cols; ++col) {
+    const float d = xRow[col] - mean;
+    sq += d * d;
+  }
+  const float rsqrt = 1.0f / std::sqrt(sq / cols_f + epsilon);
+  const float32x4_t rsqrt4 = vdupq_n_f32(rsqrt);
+
+  col = 0;
+  for (; col + 4 <= cols; col += 4) {
+    const float32x4_t factor = vmulq_f32(rsqrt4, vld1q_f32(gamma + col));
+    const float32x4_t y = vaddq_f32(
+        vmulq_f32(vld1q_f32(xRow + col), factor),
+        vsubq_f32(vld1q_f32(beta + col), vmulq_f32(mean4, factor)));
+    vst1q_f32(outRow + col, y);
+  }
+  for (; col < cols; ++col) {
+    const float factor = rsqrt * gamma[col];
+    outRow[col] = xRow[col] * factor + (beta[col] - mean * factor);
+  }
+}
+#endif  // __aarch64__
+
 annc::kernels::KernelStatus layerNormImpl(
     annc::threadpool::AnncThreadPool* thread_pool,
     const AnncExecutionContext* execution, AnncMemRef2DF32* input,
@@ -97,6 +169,12 @@ annc::kernels::KernelStatus layerNormImpl(
         for (int64_t row = begin; row < end; ++row) {
           const float* xRow = x + row * cols;
           float* outRow = out + row * cols;
+#if defined(__aarch64__)
+          if (cols >= kNeonMinCols) {
+            layerNormRowNeon(xRow, g, b, outRow, cols, cols_f, epsilon);
+            continue;
+          }
+#endif
 
           float sum = 0.0f;
           for (int64_t col = 0; col < cols; ++col) sum += xRow[col];

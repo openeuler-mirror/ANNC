@@ -429,6 +429,60 @@ TEST(OnnxTensorResolver, InfersDtypeAndShapeThroughAReshapeChain) {
   EXPECT_EQ(descriptor->shape, (std::vector<int64_t>{3, 2}));
 }
 
+TEST(OnnxTensorResolver, ResolvesGemmShapesForOrtOptimizedGraphs) {
+  // ORT's optimizer rewrites MatMul + Add into Gemm before a plugin EP sees the
+  // graph; the frontend keeps the node as atir.opaque but must still know its
+  // output shape, or every consumer behind the projection loses its rank
+  // (measured on model4: 19 of 27 LayerNorm chains sit behind one).
+  GraphProto graph;
+  addTensorInput(graph, "a", {4, 8});
+  addTensorInput(graph, "b", {8, 16});
+  addTensorInput(graph, "c", {16});
+  addTensorOutput(graph, "y", {4, 16});
+  addNode(graph, "Gemm", "gemm", {"a", "b", "c"}, {"y"});
+
+  PipelineResult result = runPipeline(graph);
+  ASSERT_TRUE(result.ok) << result.error;
+  const TensorDescriptor* descriptor = result.resolved.find("y");
+  ASSERT_NE(descriptor, nullptr);
+  EXPECT_TRUE(descriptor->rank_known);
+  EXPECT_EQ(descriptor->shape, (std::vector<int64_t>{4, 16}));
+
+  // transB flips B's dims: with B declared [16, 8] the contraction lines up
+  // with A's 8; transA flips A's, so K comes from A's first dim.
+  GraphProto transposed;
+  addTensorInput(transposed, "a", {8, 4});
+  addTensorInput(transposed, "b", {16, 8});
+  addTensorOutput(transposed, "y", {4, 16});
+  NodeProto* node =
+      addNode(transposed, "Gemm", "gemm", {"a", "b"}, {"y"});
+  setInt(node, "transA", 1);
+  setInt(node, "transB", 1);
+
+  PipelineResult flipped = runPipeline(transposed);
+  ASSERT_TRUE(flipped.ok) << flipped.error;
+  const TensorDescriptor* flipped_y = flipped.resolved.find("y");
+  ASSERT_NE(flipped_y, nullptr);
+  EXPECT_TRUE(flipped_y->rank_known);
+  EXPECT_EQ(flipped_y->shape, (std::vector<int64_t>{4, 16}));
+
+  // A contraction mismatch must leave the *intermediate* rank-unknown rather
+  // than publishing a shape the host would then trust (a declared graph output
+  // keeps its own annotation either way, so probe the intermediate).
+  GraphProto mismatched;
+  addTensorInput(mismatched, "a", {4, 8});
+  addTensorInput(mismatched, "b", {16, 16});
+  addNode(mismatched, "Gemm", "gemm", {"a", "b"}, {"g"});
+  addNode(mismatched, "Relu", "relu", {"g"}, {"y"});
+  addTensorOutput(mismatched, "y", {4, 16});
+
+  PipelineResult bad = runPipeline(mismatched);
+  ASSERT_TRUE(bad.ok) << bad.error;
+  const TensorDescriptor* gemm_out = bad.resolved.find("g");
+  ASSERT_NE(gemm_out, nullptr);
+  EXPECT_FALSE(gemm_out->rank_known);
+}
+
 TEST(OnnxTensorResolver, PropagatesSymbolicDimensionsAsDynamic) {
   GraphProto graph;
   addSymbolicInput(graph, "x", {-1, 4});

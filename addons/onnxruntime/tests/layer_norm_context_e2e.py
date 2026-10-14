@@ -34,16 +34,20 @@ from onnx import TensorProto, helper, numpy_helper
 import onnxruntime as ort
 import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
-ROWS, COLS = 6, 16
+# Both sides of the gate the kernel shares with ORT's own layer-norm kernel
+# (256 elements per row): the narrow case runs the scalar path, the wide one
+# the vector path, whose remainders (333 = 20*16 + 13 for the two accumulation
+# passes, 333 = 83*4 + 1 for the write pass) exercise every tail loop.
+CASES = [(6, 16), (4, 333)]
 
 
-def build_model(path):
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [ROWS, COLS])
-    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [ROWS, COLS])
+def build_model(path, rows, cols):
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [rows, cols])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [rows, cols])
     gamma = numpy_helper.from_array(
-        np.linspace(0.5, 1.5, COLS, dtype=np.float32), "gamma")
+        np.linspace(0.5, 1.5, cols, dtype=np.float32), "gamma")
     beta = numpy_helper.from_array(
-        np.linspace(-0.5, 0.5, COLS, dtype=np.float32), "beta")
+        np.linspace(-0.5, 0.5, cols, dtype=np.float32), "beta")
     eps = numpy_helper.from_array(np.array(1e-5, dtype=np.float32), "eps")
     nodes = [
         helper.make_node("ReduceMean", ["x"], ["mean"], name="n_mean",
@@ -101,7 +105,6 @@ def main():
     args = parser.parse_args()
 
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-layer-norm-"))
-    (work / "cache").mkdir(parents=True, exist_ok=True)
     merged = merge_kernel_libs(
         work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir])
     for required in ("libANNCBuiltinKernels.a", "libLLVMSupport.a",
@@ -110,16 +113,12 @@ def main():
             f"{required} missing from {merged}; build annc-onnx-pipeline, "
             "ANNCGemmSupport and make the GEMM microkernel archive available")
 
-    model_path = work / "layer_norm.onnx"
-    build_model(model_path)
-
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
     rtpy.register_execution_provider_library("AnncExecutionProvider",
                                              args.ep_library)
     env = dict(os.environ,
                ANNC_EP_PIPELINE=args.pipeline,
-               ANNC_EP_CACHE_DIR=str(work / "cache"),
                ANNC_KERNEL_LIB_PATH=str(merged))
     gcc_runtime = Path("/usr/lib/gcc/aarch64-openEuler-linux/12")
     if gcc_runtime.is_dir() and not env.get("LIBRARY_PATH"):
@@ -129,8 +128,19 @@ def main():
     os.environ.update({k: v for k, v in env.items()
                        if k.startswith("ANNC_") or k == "LIBRARY_PATH"})
 
+    # One EP registration, one session per shape.
+    for rows, cols in CASES:
+        run_case(args, work, rows, cols)
+
+
+def run_case(args, work, rows, cols):
+    model_path = work / f"layer_norm_{rows}x{cols}.onnx"
+    build_model(model_path, rows, cols)
+    cache = work / f"cache-{rows}x{cols}"
+    os.environ["ANNC_EP_CACHE_DIR"] = str(cache)
+
     rng = np.random.default_rng(7)
-    x = rng.standard_normal((ROWS, COLS)).astype(np.float32) * 3.0
+    x = rng.standard_normal((rows, cols)).astype(np.float32) * 3.0
     feed = {"x": x}
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
@@ -146,9 +156,9 @@ def main():
         actual = session.run(None, feed)[0]
         np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7,
                                    equal_nan=True)
-        print(f"session {attempt + 1}: numeric match")
+        print(f"[{rows}x{cols}] session {attempt + 1}: numeric match")
 
-    entries = [p for p in (work / "cache").glob("v1/*/*")
+    entries = [p for p in cache.glob("v1/*/*")
                if p.is_dir() and (p / "DONE").is_file()]
     assert len(entries) == 1, entries
     report = json.loads((entries[0] / "sites.json").read_text())
@@ -162,8 +172,9 @@ def main():
     assert len(site["member_node_names"]) == 12, site
     assert [arg["rank"] for arg in site["args"]] == [2, 1, 1, 0], site
     assert (entries[0] / "libannc_kernels.so").is_file()
-    print("real pipeline produced a layer_norm context-ABI site; the rank-1 "
-          "gamma/beta arguments were bound by name (cold + warm cache)")
+    print(f"[{rows}x{cols}] real pipeline produced a layer_norm context-ABI "
+          "site; the rank-1 gamma/beta arguments were bound by name "
+          "(cold + warm cache)")
 
 
 if __name__ == "__main__":
