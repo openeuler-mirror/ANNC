@@ -3355,22 +3355,18 @@ static bool isFtdmmIdentityTranspose(TransposeOp transpose, int64_t rank) {
   return true;
 }
 
-// Shape gate for the FTDMM sites.  The fused kernel is ANNC's own scalar
-// loop (~1.05 GMAC/s), so it beats ORT's MatMul (MLAS, multithreaded) only
-// while the site's matrix-multiply work is negligible.  Work is m*k*n, and m
-// (batch * sequence) is dynamic at this point, so the gate bounds k*n -- the
-// statically known factor -- and m has to be argued separately:
-//   * profile1's sites carry k*n <= 512 with m <= 6, i.e. <= ~3K MAC per call:
-//     the sites win (the fusion's real saving is the ~15 metadata ops around
-//     the MatMul);
-//   * model4's smallest site is k*n = 1024 and its rows run into the thousands
-//     at batch 32 (m*k*n ~ 1.6M-3.3M MAC, ~2-3 ms per call against a 52 ms
-//     whole-model baseline), which is why an earlier 2048 bound measured
-//     -2.6% end to end: the bound must stay below anything model4 can offer.
-// Above the bound the unfused ORT MatMul wins, so the site is left alone.
-// Follow-up: replace this bound with a per-shape kernel-vs-ORT table (or route
-// the site through the AArch64 GEMM pipeline) before raising it.
-constexpr int64_t kMaxFusedTensordotWeightElements = 512;
+// No shape gate: every site the matcher accepts is fused, so the site count
+// matches the patch's on the target models (model4: 15/15).  The kernel is
+// still ANNC's own scalar loop (~1.05 GMAC/s), which is why a k*n bound
+// (kMaxFusedTensordotWeightElements, 512) used to keep model4's large
+// projections out: at batch 32 they run m*k*n = 1.6M-3.3M MAC per call, ~2-3 ms
+// against the 52 ms baseline, and an earlier 2048 bound measured -2.6% end to
+// end.  Measured cost of the ungated state (2026-10-14, model4, same-session
+// three arms): ANNC tn5 5.68 QPS against OFF 46.13 (-87.7%) -- recorded in
+// data/20260924-ort-annc-perf/fusion-migration/align-20261014/ and accepted by
+// the requester for this milestone.  Restoring the bound is the fallback until
+// the kernel goes through a GEMM backend (MLAS route), which is the follow-up
+// that makes these sites a win instead of a loss.
 
 // value 的消费者必须恰为唯一一个且类型为 OpT。
 template <typename OpT>
@@ -3412,11 +3408,6 @@ static FailureOr<TensordotMatMulMatch> matchTensordotMatMul(MatMulOp matmul) {
   const int64_t contractDim = weightType.getShape()[0];
   const int64_t outputDim = weightType.getShape()[1];
   if (contractDim <= 0 || outputDim <= 0) return failure();
-  // Sites whose matrix multiply dominates are not profitable for this kernel
-  // (see kMaxFusedTensordotWeightElements); leave them to the framework.
-  if (contractDim * outputDim > kMaxFusedTensordotWeightElements) {
-    return failure();
-  }
 
   // (2) lhs 由 Reshape 产出，且该 Reshape 的结果只喂给本 MatMul。
   auto flattenReshape = matmul.getLhs().getDefiningOp<ReshapeOp>();
@@ -4503,41 +4494,117 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
 //
 // ONNX 的 rank-3 MatMul + 广播 bias Add：
 //
-//   MatMul(data [d0, d1, K], W [1, K, N]) -> Add(., bias [1, 1, N])
+//   MatMul(data [B, d1, K], W [B, K, N]) -> Add(., bias [B, 1, N])
 //
-// 权重与 bias 的前导维都是 1，融合后就是逐行的小 GEMM 加 bias 初值
+// bias 的前导维严格等于输出 batch；权重可以广播或按 batch 存储。
+// 融合后是逐 batch 的行级小 GEMM 加对应 bias 初值
 // （annc/lib/Kernel/builtin_kernels/batched_matmul_add_*）：
 //
-//   out[i, j, n] = bias[0, 0, n] + sum_k data[i, j, k] * W[0, k, n]
+//   out[i, j, n] = bias[i, 0, n] + sum_k data[i, j, k] * W[i, k, n]
 //
 // bias 在 k 求和之后加，与源链的顺序一致。
 //
 // 匹配条件对齐 ORT 的 FusedBatchedMatMulAdd（annc_opt 0003/0006，
-// batched-matmul-add-patch::FuseMatMulAdd）；本线暂只支持 rank-3 常量权重
-// 与 [1,1,N] bias 这一形态，ORT patch 另支持的前置常量仿射折叠与
-// rank-4/批量权重形态属后续覆盖工作（见任务 20261013-019 的命中数差异表）。
+// batched-matmul-add-patch::FuseMatMulAdd）；支持 rank-3 常量权重与
+// [B,1,N] bias，以及安全的前置常量仿射折叠；rank-4 仍不支持。
 
 struct BatchedMatMulAddMatch {
   Value data;          // rank-3 f32 lhs
-  Value weight;        // rank-3 f32 常量 [1, K, N]
-  Value bias;          // rank-3 f32 常量 [1, 1, N]
+  Value weight;        // rank-3 f32 常量 [B, K, N]
+  Value bias;          // rank-3 f32 常量 [B, 1, N]
+  Value scale;         // pre-affine scale；无该链时为空
+  Value offset;        // pre-affine offset；无该链时为空
+  Value affineResult;  // pre-affine Add 的结果；无该链时为空
+  Value scaledResult;  // pre-affine Mul 的结果；无该链时为空
   Value output;        // Add 的结果（站点输出）
   Value outputBuffer;  // Add 的输出缓冲
   Value matmulResult;  // 与 Add 一起进站点
+  DenseElementsAttr foldedWeight;
+  DenseElementsAttr foldedBias;
 };
 
 // 前导维等于 leadingDims 的 rank-3 f32 常量；返回其类型或空。
 static atir::TensorType matchBatchedConst(Value value,
-                                          ArrayRef<int64_t> leadingDims) {
+                                        ArrayRef<int64_t> leadingDims) {
   auto tensorType = dyn_cast<atir::TensorType>(value.getType());
   if (!tensorType || tensorType.getShape().size() != 3) return {};
   if (!tensorType.getElementType().isF32()) return {};
   if (!value.getDefiningOp<ConstantOp>()) return {};
   if (!tensorType.getCacheData()) return {};
   for (size_t axis = 0; axis < leadingDims.size(); ++axis) {
-    if (tensorType.getShape()[axis] != leadingDims[axis]) return {};
+    if (leadingDims[axis] >= 0 &&
+        tensorType.getShape()[axis] != leadingDims[axis]) {
+      return {};
+    }
   }
   return tensorType;
+}
+
+static bool isF32Constant(Value value) {
+  auto tensorType = dyn_cast<atir::TensorType>(value.getType());
+  return tensorType && tensorType.getElementType().isF32() &&
+         value.getDefiningOp<ConstantOp>() && tensorType.getCacheData();
+}
+
+static bool isBatchedAffineConstant(Value value, int64_t batchDim,
+                                   int64_t contractDim) {
+  auto type = dyn_cast<atir::TensorType>(value.getType());
+  if (!type || !isF32Constant(value)) return false;
+  ArrayRef<int64_t> shape = type.getShape();
+  if (shape.empty()) return true;
+  if (shape.size() == 1) return shape[0] == 1 || shape[0] == contractDim;
+  if (shape.size() == 2)
+    return shape[0] == 1 && (shape[1] == 1 || shape[1] == contractDim);
+  return shape.size() == 3 && (shape[0] == 1 || shape[0] == batchDim) &&
+         shape[1] == 1 && (shape[2] == 1 || shape[2] == contractDim);
+}
+
+static bool matchBatchedPreAffine(Value value, int64_t batchDim,
+                                 int64_t contractDim, Value &data,
+                                 Value &scale, Value &offset) {
+  auto affine = value.getDefiningOp<AddOp>();
+  if (!affine || affine.getInputs().size() != 2 || affine.getDoRelu() ||
+      affine.getScalar()) {
+    return false;
+  }
+  Value mulResult;
+  Value candidateOffset;
+  if (affine.getInputs()[0].getDefiningOp<MulOp>()) {
+    mulResult = affine.getInputs()[0];
+    candidateOffset = affine.getInputs()[1];
+  } else if (affine.getInputs()[1].getDefiningOp<MulOp>()) {
+    mulResult = affine.getInputs()[1];
+    candidateOffset = affine.getInputs()[0];
+  } else {
+    return false;
+  }
+  auto mul = mulResult.getDefiningOp<MulOp>();
+  if (!mul) return false;
+  Value candidateScale = isF32Constant(mul.getX()) ? mul.getX() : mul.getY();
+  Value candidateData = candidateScale == mul.getX() ? mul.getY() : mul.getX();
+  if (!isBatchedAffineConstant(candidateScale, batchDim, contractDim) ||
+      !isBatchedAffineConstant(candidateOffset, batchDim, contractDim) ||
+      isF32Constant(candidateData)) {
+    return false;
+  }
+  auto dataType = dyn_cast<atir::TensorType>(candidateData.getType());
+  auto affineType = dyn_cast<atir::TensorType>(value.getType());
+  auto mulType = dyn_cast<atir::TensorType>(mulResult.getType());
+  if (!dataType || !affineType || !mulType ||
+      dataType.getShape() != affineType.getShape() ||
+      dataType.getShape() != mulType.getShape() ||
+      !dataType.getElementType().isF32() ||
+      !mulType.getElementType().isF32()) {
+    return false;
+  }
+  if (!value.hasOneUse()) return false;
+  for (Operation *user : mulResult.getUsers()) {
+    if (user != affine.getOperation()) return false;
+  }
+  data = candidateData;
+  scale = candidateScale;
+  offset = candidateOffset;
+  return data && scale && offset;
 }
 
 static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
@@ -4549,25 +4616,101 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
   if (add.getResult().getType() != outputBuffer.getType()) return failure();
 
   auto outputType = dyn_cast<atir::TensorType>(add.getResult().getType());
-  if (!outputType || outputType.getShape().size() != 3) return failure();
+  if (!outputType || (outputType.getShape().size() != 3 &&
+                      outputType.getShape().size() != 4)) return failure();
   if (!outputType.getElementType().isF32()) return failure();
+
+  // rank-4 形态（model3 的 domain_2 站点）：[B0,B1,M,K] × W[W0,W1,K,N] +
+  // bias[B0,B1,1,N] -> [B0,B1,M,N]。前导两维按 numpy 广播（data/W 逐维为 1
+  // 或输出维），bias 的批量前缀必须与输出逐维一致——与 patch 的
+  // HasSupportedShapes 同口径（batched-matmul-add-patch/0006，FuseMatMulAdd）。
+  // 常量 W/bias 取 cacheData，末两维（K/N 与 M）在已知时必须自洽；M 通常
+  // 是动态维，留给 kernel 从 memref 描述符读实际值。
+  if (outputType.getShape().size() == 4) {
+    if (add.getInputs().size() != 2 || add.getDoRelu() || add.getScalar()) {
+      return failure();
+    }
+    Value matmulResult = add.getInputs()[0];
+    Value bias = add.getInputs()[1];
+    if (!matmulResult.getDefiningOp<MatMulOp>()) std::swap(matmulResult, bias);
+    auto matmul = matmulResult.getDefiningOp<MatMulOp>();
+    if (!matmul || matmul.getResult() != matmulResult) return failure();
+    if (matmul.getWithBias() || matmul.getDoRelu() ||
+        matmul.getRightTranspose() || matmul.getLeftTranspose() ||
+        matmul.getOutputTranspose() || matmul.getMStart() ||
+        matmul.getNStart() || matmul.getKStart() || matmul.getMSize() ||
+        matmul.getNSize() || matmul.getKSize() ||
+        matmul->getAttr("rhs_format")) {
+      return failure();
+    }
+    // MatMul 只喂这个 Add；折叠进第二个消费者会悄悄重算它的输入。
+    for (Operation *user : matmulResult.getUsers()) {
+      if (user != add.getOperation()) return failure();
+    }
+    auto dataType = dyn_cast<atir::TensorType>(matmul.getLhs().getType());
+    auto weightType = dyn_cast<atir::TensorType>(matmul.getRhs().getType());
+    auto biasType = dyn_cast<atir::TensorType>(bias.getType());
+    if (!dataType || !weightType || !biasType ||
+        dataType.getShape().size() != 4 || weightType.getShape().size() != 4 ||
+        biasType.getShape().size() != 4 || !dataType.getElementType().isF32() ||
+        !isF32Constant(matmul.getRhs()) || !isF32Constant(bias)) {
+      return failure();
+    }
+    ArrayRef<int64_t> dataShape = dataType.getShape();
+    ArrayRef<int64_t> weightShape = weightType.getShape();
+    ArrayRef<int64_t> biasShape = biasType.getShape();
+    ArrayRef<int64_t> outputShape = outputType.getShape();
+    const int64_t contractDim = weightShape[2];
+    const int64_t outputDim = weightShape[3];
+    if (contractDim <= 0 || outputDim <= 0 || biasShape[2] != 1 ||
+        biasShape[3] != outputDim || outputShape[3] != outputDim) {
+      return failure();
+    }
+    if (dataShape[3] >= 0 && dataShape[3] != contractDim) return failure();
+    if (dataShape[3] == 0) return failure();
+    for (size_t axis = 0; axis < 2; ++axis) {
+      const int64_t batch = outputShape[axis];
+      if (batch <= 0 || biasShape[axis] != batch) return failure();
+      if (dataShape[axis] != 1 && dataShape[axis] != batch) return failure();
+      if (weightShape[axis] != 1 && weightShape[axis] != batch)
+        return failure();
+    }
+    if (dataShape[2] >= 0 && outputShape[2] >= 0 &&
+        dataShape[2] != outputShape[2]) {
+      return failure();
+    }
+    if (dataShape[2] == 0) return failure();
+
+    BatchedMatMulAddMatch match;
+    match.data = matmul.getLhs();
+    match.weight = matmul.getRhs();
+    match.bias = bias;
+    match.output = add.getResult();
+    match.outputBuffer = outputBuffer;
+    match.matmulResult = matmulResult;
+    return match;
+  }
 
   // 两操作数一个是 MatMul 结果，另一个是 bias 常量。
   if (add.getInputs().size() != 2) return failure();
   Value bias;
   Value matmulResult;
-  atir::TensorType biasType = matchBatchedConst(add.getInputs()[1], {1, 1});
+  atir::TensorType biasType = matchBatchedConst(add.getInputs()[1], {-1, 1});
   if (biasType) {
     bias = add.getInputs()[1];
     matmulResult = add.getInputs()[0];
   } else {
-    biasType = matchBatchedConst(add.getInputs()[0], {1, 1});
+    biasType = matchBatchedConst(add.getInputs()[0], {-1, 1});
     if (!biasType) return failure();
     bias = add.getInputs()[0];
     matmulResult = add.getInputs()[1];
   }
   const int64_t outputDim = biasType.getShape()[2];
   if (outputDim <= 0 || outputType.getShape()[2] != outputDim) return failure();
+  const int64_t batchDim = biasType.getShape()[0];
+  if (batchDim <= 0 || outputType.getShape()[0] != batchDim) {
+    return failure();
+  }
 
   auto matmul = matmulResult.getDefiningOp<MatMulOp>();
   if (!matmul || matmul.getResult() != matmulResult) return failure();
@@ -4587,8 +4730,10 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
     if (user != add.getOperation()) return failure();
   }
 
-  atir::TensorType weightType = matchBatchedConst(matmul.getRhs(), {1});
+  atir::TensorType weightType = matchBatchedConst(matmul.getRhs(), {-1});
   if (!weightType) return failure();
+  const int64_t weightBatch = weightType.getShape()[0];
+  if (weightBatch != 1 && weightBatch != batchDim) return failure();
   const int64_t contractDim = weightType.getShape()[1];
   if (contractDim <= 0 || weightType.getShape()[2] != outputDim) {
     return failure();
@@ -4601,9 +4746,22 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
     return failure();
   }
   if (dataType.getShape()[2] == 0) return failure();
+  if ((dataType.getShape()[0] != 1 && dataType.getShape()[0] != batchDim) ||
+      dataType.getShape()[1] != outputType.getShape()[1]) {
+    return failure();
+  }
+  if (dataType.getShape()[0] == 1 && weightBatch != batchDim) return failure();
 
   BatchedMatMulAddMatch match;
   match.data = matmul.getLhs();
+  if (matchBatchedPreAffine(matmul.getLhs(), batchDim, contractDim,
+                           match.data, match.scale, match.offset)) {
+    match.affineResult = matmul.getLhs();
+    auto affine = cast<AddOp>(matmul.getLhs().getDefiningOp());
+    match.scaledResult = affine.getInputs()[0].getDefiningOp<MulOp>()
+                             ? affine.getInputs()[0]
+                             : affine.getInputs()[1];
+  }
   match.weight = matmul.getRhs();
   match.bias = bias;
   match.output = add.getResult();
@@ -4612,15 +4770,28 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
   return match;
 }
 
+// 站点的两个形态共用一套代码：rank-3（[B,K,N] 权重）沿用原 kernel 名，rank-4
+// 用独立符号（执行 v2 的 C 签名按符号固定，rank 无法参数化）。
+static int64_t batchedMatMulAddRank(Type type) {
+  auto tensorType = dyn_cast<atir::TensorType>(type);
+  return tensorType ? static_cast<int64_t>(tensorType.getShape().size()) : 0;
+}
+
+static const char *getBatchedMatMulAddOpName(Type type) {
+  return batchedMatMulAddRank(type) == 4 ? "BatchedMatMulAdd4"
+                                         : "BatchedMatMulAdd";
+}
+
 // Execution v2 的 kernel 函数：(execution, data, weight, bias) -> output，体内
 // 一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
-static atir::CustomOpSchema getBatchedMatMulAddSchema() {
-  return atir::CustomOpSchema::get("BatchedMatMulAdd")
+static atir::CustomOpSchema getBatchedMatMulAddSchema(int64_t rank) {
+  return atir::CustomOpSchema::get(rank == 4 ? "BatchedMatMulAdd4"
+                                             : "BatchedMatMulAdd")
       .TypeVar("T")
-      .MemRefArg("data", 3, "T")
-      .MemRefArg("weight", 3, "T")
-      .MemRefArg("bias", 3, "T")
-      .Result("output", 3, "T");
+      .MemRefArg("data", rank, "T")
+      .MemRefArg("weight", rank, "T")
+      .MemRefArg("bias", rank, "T")
+      .Result("output", rank, "T");
 }
 
 static func::FuncOp createBatchedMatMulAddKernelFunc(
@@ -4647,14 +4818,101 @@ static func::FuncOp createBatchedMatMulAddKernelFunc(
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
+  Value weight = entry->getArgument(2);
+  Value bias = entry->getArgument(3);
+  if (match.foldedWeight) {
+    // Keep original initializer arguments in the site input plan. Their
+    // names bind to real ORT inputs; the transformed payloads live inside
+    // this function and never masquerade as those initializer values.
+    auto weightType = cast<atir::TensorType>(match.weight.getType());
+    auto biasType = cast<atir::TensorType>(match.bias.getType());
+    weight = rewriter.create<ConstantOp>(
+        func.getLoc(), weightType.cloneWithCacheData(match.foldedWeight),
+        rewriter.getStringAttr("pre_affine_weight"),
+        rewriter.getStringAttr("private"));
+    bias = rewriter.create<ConstantOp>(
+        func.getLoc(), biasType.cloneWithCacheData(match.foldedBias),
+        rewriter.getStringAttr("pre_affine_bias"),
+        rewriter.getStringAttr("private"));
+  }
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange{match.output.getType()},
-      ValueRange{entry->getArgument(1), entry->getArgument(2),
-                 entry->getArgument(3)},
-      rewriter.getStringAttr("BatchedMatMulAdd"),
-      getBatchedMatMulAddSchema().toMetadata(rewriter.getContext()));
+      ValueRange{entry->getArgument(1), weight, bias},
+      rewriter.getStringAttr(getBatchedMatMulAddOpName(match.data.getType())),
+      getBatchedMatMulAddSchema(batchedMatMulAddRank(match.data.getType()))
+          .toMetadata(rewriter.getContext()));
   rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
   return func;
+}
+
+static LogicalResult foldBatchedPreAffine(BatchedMatMulAddMatch &match) {
+  if (!match.scale) return success();
+
+  auto weightType = cast<atir::TensorType>(match.weight.getType());
+  auto biasType = cast<atir::TensorType>(match.bias.getType());
+  auto weightAttr = cast<DenseElementsAttr>(weightType.getCacheData());
+  auto biasAttr = cast<DenseElementsAttr>(biasType.getCacheData());
+  auto scaleAttr = cast<DenseElementsAttr>(
+      cast<atir::TensorType>(match.scale.getType()).getCacheData());
+  auto offsetAttr = cast<DenseElementsAttr>(
+      cast<atir::TensorType>(match.offset.getType()).getCacheData());
+
+  const auto weightShape = weightType.getShape();
+  const auto biasShape = biasType.getShape();
+  if (weightShape.size() != 3 || biasShape.size() != 3) return failure();
+  const int64_t batchDim = weightShape[0];
+  const int64_t contractDim = weightShape[1];
+  const int64_t outputDim = weightShape[2];
+  if (batchDim <= 0 || contractDim <= 0 || outputDim <= 0 ||
+      biasShape[0] != batchDim || biasShape[1] != 1 ||
+      biasShape[2] != outputDim) {
+    return failure();
+  }
+
+  std::vector<float> weight(weightAttr.value_begin<float>(),
+                            weightAttr.value_end<float>());
+  std::vector<float> bias(biasAttr.value_begin<float>(),
+                         biasAttr.value_end<float>());
+  std::vector<float> scale(scaleAttr.value_begin<float>(),
+                          scaleAttr.value_end<float>());
+  std::vector<float> offset(offsetAttr.value_begin<float>(),
+                           offsetAttr.value_end<float>());
+  if (weight.size() != static_cast<size_t>(batchDim * contractDim * outputDim) ||
+      bias.size() != static_cast<size_t>(batchDim * outputDim)) {
+    return failure();
+  }
+
+  std::vector<float> foldedWeight(weight.size());
+  std::vector<float> foldedBias(bias.size());
+  for (int64_t batch = 0; batch < batchDim; ++batch) {
+    for (int64_t n = 0; n < outputDim; ++n) {
+      float value = bias[batch * outputDim + n];
+      for (int64_t k = 0; k < contractDim; ++k) {
+        const size_t index =
+            static_cast<size_t>((batch * contractDim + k) * outputDim + n);
+        auto affineIndex = [&](Value value) {
+          auto shape = cast<atir::TensorType>(value.getType()).getShape();
+          if (shape.empty()) return int64_t{0};
+          const int64_t width = shape.back();
+          const int64_t affineBatch = shape.size() == 3 ? shape[0] : 1;
+          return (affineBatch == 1 ? 0 : batch) * width +
+                 (width == 1 ? 0 : k);
+        };
+        const float scaleValue = scale[affineIndex(match.scale)];
+        const float offsetValue = offset[affineIndex(match.offset)];
+        foldedWeight[index] = scaleValue * weight[index];
+        value += offsetValue * weight[index];
+      }
+      foldedBias[batch * outputDim + n] = value;
+    }
+  }
+
+  auto f32Type = weightAttr.getElementType();
+  match.foldedWeight = DenseElementsAttr::get(
+      RankedTensorType::get(weightShape, f32Type), ArrayRef<float>(foldedWeight));
+  match.foldedBias = DenseElementsAttr::get(
+      RankedTensorType::get(biasShape, f32Type), ArrayRef<float>(foldedBias));
+  return success();
 }
 
 struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
@@ -4673,7 +4931,8 @@ struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
     if (!module->hasAttr("annc.contract_version")) return failure();
 
     // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
-    auto schema = getBatchedMatMulAddSchema();
+    auto schema =
+        getBatchedMatMulAddSchema(batchedMatMulAddRank(match->data.getType()));
     SmallVector<Type> schemaInputTypes = {
         match->data.getType(), match->weight.getType(), match->bias.getType()};
     auto inferred = atir::inferTypeConstraintsFromSchema(
@@ -4684,15 +4943,30 @@ struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
       return failure();
     }
     annc::kernels::KernelResolveRequest request;
-    request.op_type = "BatchedMatMulAdd";
+    request.op_type = getBatchedMatMulAddOpName(match->data.getType());
     request.abi = "annc_execution_v2";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
-    SmallVector<Operation *, 4> fusedOps = {
+    SmallVector<Operation *, 6> fusedOps = {
         addOp.getOperation(), match->matmulResult.getDefiningOp()};
+    if (match->affineResult) {
+      fusedOps.push_back(match->affineResult.getDefiningOp());
+      fusedOps.push_back(match->scaledResult.getDefiningOp());
+    }
     SmallVector<Value> escaping = atir::collectEscapingResults(fusedOps);
     if (escaping.size() != 1 || escaping[0] != match->output) return failure();
+
+    // Folding is pure preparation. Unsupported affine/weight broadcasting
+    // keeps the original affine result as the BMM input.
+    if (failed(foldBatchedPreAffine(*match))) {
+      match->data = cast<MatMulOp>(match->matmulResult.getDefiningOp()).getLhs();
+      match->scale = {};
+      match->offset = {};
+      match->affineResult = {};
+      match->scaledResult = {};
+      fusedOps.resize(2);
+    }
 
     std::string anchorName = getTfName(match->output.getDefiningOp());
     std::string kernelName = uniquifySymbolName(

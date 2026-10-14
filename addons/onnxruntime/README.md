@@ -84,8 +84,9 @@ session init
   回映射 ORT 节点的键（EP 导出时自命名，故可精确反查）。
 - **缓存**：`$ANNC_EP_CACHE_DIR/v1/<签名前2位>/<签名>/{sites.json,[libannc_kernels.so],DONE}`，
   零站点结果不生成共享库；非零站点必须同时存在共享库，
-  签名 = EP 版本 ‖ 工具链指纹 ‖ 宿主指纹 ‖ 模型结构签名（丢弃权重内容——kernel 把权重
-  当运行时实参）。冷缓存下一次编译（实测 profile1 约 0.6 s、profile4 约 6 s），
+  签名 = EP 版本 ‖ 工具链指纹 ‖ 宿主指纹 ‖ 模型签名。含 `Mul` 与 `MatMul`
+  的图保留 initializer 内容，避免前置常量仿射折叠复用过期 kernel；其它图的权重
+  仍作为运行时实参，签名只保留结构。冷缓存下一次编译（实测 profile1 约 0.6 s、profile4 约 6 s），
   热缓存与不注册 EP 同量级。
 
 ## 构建

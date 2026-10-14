@@ -56,8 +56,9 @@ std::string Sha256String(const std::string& data);
 
 // Structural signature of an exported model: everything that decides what the
 // ANNC pipeline will emit, with the volatile and weight-bearing parts removed
-// (producer/doc strings, graph name, and every initializer payload -- the
-// kernels this pipeline emits take the weights as runtime arguments).
+// (producer/doc strings and graph name). Initializer payloads are retained
+// when the graph contains Mul and MatMul: pre-affine folding can embed them
+// in a generated kernel. Otherwise runtime initializer inputs stay excluded.
 // `toolchainFingerprint` comes from CompileDriver::ToolchainInfo().
 std::string ModelSignature(const std::string& modelPath,
                            const std::string& toolchainFingerprint,
