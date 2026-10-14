@@ -212,8 +212,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 ## 组件使用方法
 
 ### 端到端 GraphDef 重写
-
-`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
 
 ```shell
 annc-tf-pipeline \
@@ -232,6 +231,7 @@ annc-tf-pipeline \
 | `--output_graphdef <path>` | 输出 GraphDef，必填 |
 | `--shared_lib_path <path>` | 写入 GraphDef 的运行时 `.so` 路径；不传时使用 pipeline 生成的 kernel |
 | `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
+| `--fusion-config <path>` | 外部 fusion pattern JSON；示例见 `configs/fusion/` |
 | `--work_dir <dir>` | 中间文件目录 |
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
 | `--verbose` / `-v` | 打印每一步命令 |

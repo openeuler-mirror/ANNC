@@ -36,6 +36,10 @@ struct PatternStmt {
   // Input aliases on the right-hand side; they may refer to external inputs
   // or outputs defined by preceding statements.
   SmallVector<std::string> args;
+  // Scalar constants constrained by a named argument, for example
+  // `Mul(x, scale=0.5)`.  The name remains in `args` so it continues to
+  // identify the physical operand position.
+  std::map<std::string, std::string> constantArgs;
 };
 
 // Capture an attribute from a matched op and write it to
@@ -58,6 +62,10 @@ struct PatternRule {
   // Optional backend ABI for patterns that are consumed by an existing
   // lowering path.  The default preserves the generic mlir_ciface outline.
   std::string abi = "mlir_ciface";
+  // Preserve the legacy ATIR buffer ABI by appending the output buffer of
+  // each declared output to the outlined function arguments. This is needed
+  // by existing FastCodegen patterns whose builtin kernels write in place.
+  bool bufferOutputs = false;
   int64_t priority = 0;
   SmallVector<PatternStmt> stmts;
   // Output alias -> defining graph statement index, used for reverse def-use

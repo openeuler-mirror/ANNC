@@ -1,6 +1,13 @@
 file(GLOB _srcs *.cpp Patterns/*.cpp Patterns/CustomPatterns/*.cpp Fusion/*.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherMatch.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingActionIdGatherRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingPaddingRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseDynamicStitchRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseReshapeRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseSelectRewrite.cpp)
+list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingTargetBehaviorInteractionRewrite.cpp)
 list(APPEND _srcs Patterns/FusionBoundaryUtils.cpp)
 list(REMOVE_DUPLICATES _srcs)
 

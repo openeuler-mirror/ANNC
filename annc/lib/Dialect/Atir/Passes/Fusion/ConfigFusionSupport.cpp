@@ -382,7 +382,22 @@ static bool parseGraphLine(StringRef line, PatternStmt *stmt) {
     std::string args = rhs.substr(paren + 1, close - paren - 1);
     for (const std::string &part : splitTopLevel(args, ',')) {
       std::string arg = trim(part);
-      if (!arg.empty()) stmt->args.push_back(arg);
+      if (arg.empty()) continue;
+      size_t valueEq = arg.find('=');
+      if (valueEq == std::string::npos) {
+        stmt->args.push_back(arg);
+        continue;
+      }
+      std::string name = trim(arg.substr(0, valueEq));
+      std::string value = trim(arg.substr(valueEq + 1));
+      if (name.empty() || value.empty() ||
+          stmt->constantArgs.count(name) != 0)
+        return false;
+      // Keep the operand name in the positional list while storing the
+      // literal separately.  Quoted strings are accepted for future string
+      // tensor constants; numeric validation is performed by the matcher.
+      stmt->args.push_back(name);
+      stmt->constantArgs.emplace(std::move(name), std::move(value));
     }
   }
   return true;
@@ -451,6 +466,17 @@ static llvm::Expected<int64_t> getOptionalI64Field(
   }
   return llvm::createStringError(std::errc::invalid_argument,
                                  "%s.%s must be an int64",
+                                 context.str().c_str(), field.str().c_str());
+}
+
+static llvm::Expected<bool> getOptionalBoolField(
+    const nlohmann::json &object, StringRef field, StringRef context,
+    bool defaultValue) {
+  auto it = object.find(field.str());
+  if (it == object.end()) return defaultValue;
+  if (it->is_boolean()) return it->get<bool>();
+  return llvm::createStringError(std::errc::invalid_argument,
+                                 "%s.%s must be a bool",
                                  context.str().c_str(), field.str().c_str());
 }
 
@@ -644,6 +670,9 @@ llvm::Expected<FusionConfig> parseConfigFile(const std::string &path) {
       if (!abi) return abi.takeError();
       auto priority = getOptionalI64Field(item, "priority", context, 0);
       if (!priority) return priority.takeError();
+      auto bufferOutputs =
+          getOptionalBoolField(item, "buffer_outputs", context, false);
+      if (!bufferOutputs) return bufferOutputs.takeError();
       rule.pattern = pattern->value_or(rule.name);
       rule.kernel = kernel->value_or(std::string("fused_") + rule.name);
       rule.abi = abi->value_or("mlir_ciface");
@@ -651,6 +680,13 @@ llvm::Expected<FusionConfig> parseConfigFile(const std::string &path) {
         return llvm::createStringError(
             std::errc::invalid_argument,
             "%s.abi must be 'mlir_ciface' or 'annc_execution_v2'",
+            context.c_str());
+      }
+      rule.bufferOutputs = *bufferOutputs;
+      if (rule.bufferOutputs && rule.abi != "mlir_ciface") {
+        return llvm::createStringError(
+            std::errc::invalid_argument,
+            "%s.buffer_outputs is only valid with abi 'mlir_ciface'",
             context.c_str());
       }
       rule.priority = *priority;

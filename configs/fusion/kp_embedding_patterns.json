@@ -1,0 +1,326 @@
+{
+  "version": 1,
+  "patterns": [
+    {
+      "name": "kp_embedding_padding_fast",
+      "kernel": "fused_kp_embedding_padding_fast",
+      "abi": "annc_execution_v2",
+      "priority": 200,
+      "graph": [
+        "origin_cast = Cast(origin_shape)",
+        "origin_rows = StridedSlice(origin_cast)",
+        "padding_rows = Sub(origin_rows, input_rows)",
+        "padding_shape = Pack(padding_rows, pack)",
+        "padding = Fill(padding_shape, value=0.0)",
+        "padded = ConcatV2(data, padding, axis=0)",
+        "reshaped = Reshape(padded, reshape_sizes)",
+        "reshaped_shape = Shape(reshaped)",
+        "reshape_rows = StridedSlice(reshaped_shape)"
+      ],
+      "inputs": [
+        "origin_shape",
+        "input_rows",
+        "pack",
+        "data",
+        "reshape_sizes"
+      ],
+      "outputs": ["padding_rows", "reshape_rows"],
+      "where": [
+        "origin_rows.shrinkAxisMask == 1",
+        "reshape_rows.shrinkAxisMask == 1",
+        "padding_shape.axis == 0",
+        "rank(origin_shape) == 1",
+        "rank(input_rows) == 0",
+        "rank(pack) == 0",
+        "rank(data) == 2",
+        "rank(reshape_sizes) == 1"
+      ]
+    },
+    {
+      "name": "kp_embedding_padding",
+      "kernel": "fused_kp_embedding_padding",
+      "abi": "annc_execution_v2",
+      "priority": 190,
+      "graph": [
+        "origin_cast = Cast(origin_shape)",
+        "origin_rows = StridedSlice(origin_cast)",
+        "padding_rows = Sub(origin_rows, input_rows)",
+        "padding_shape = Pack(padding_rows, pack)",
+        "padding = Fill(padding_shape, value=0.0)",
+        "padded = ConcatV2(data, padding, axis=0)",
+        "out_data = Reshape(padded, reshape_sizes)"
+      ],
+      "inputs": [
+        "origin_shape",
+        "input_rows",
+        "pack",
+        "data",
+        "reshape_sizes"
+      ],
+      "outputs": ["padding_rows", "out_data"],
+      "where": [
+        "origin_rows.shrinkAxisMask == 1",
+        "padding_shape.axis == 0",
+        "rank(origin_shape) == 1",
+        "rank(input_rows) == 0",
+        "rank(pack) == 0",
+        "rank(data) == 2",
+        "rank(reshape_sizes) == 1"
+      ]
+    },
+    {
+      "name": "kp_sparse_select",
+      "kernel": "fused_kp_sparse_select",
+      "abi": "annc_execution_v2",
+      "priority": 180,
+      "graph": [
+        "x = Reshape(a)",
+        "b_column = Reshape(b)",
+        "c_column = Reshape(c)",
+        "greater = Compare(x, gt)",
+        "greater_value = Cast(greater)",
+        "b_shape_0 = Shape(b_column)",
+        "b_fill_0 = Fill(b_shape_0)",
+        "equal_0 = Compare(b_column, eq1)",
+        "select_1 = Where(equal_0, b_fill_0, greater_value)",
+        "equal_1 = Compare(b_column, eq2)",
+        "b_shape_1 = Shape(b_column)",
+        "b_fill_1 = Fill(b_shape_1)",
+        "y = Where(equal_1, b_fill_1, select_1)",
+        "equal_2 = Compare(c_column, eq3)",
+        "c_shape_0 = Shape(c_column)",
+        "c_shape_1 = Shape(c_column)",
+        "c_fill_0 = Fill(c_shape_0)",
+        "c_fill_1 = Fill(c_shape_1)",
+        "select_2 = Where(equal_2, c_fill_1, c_fill_0)",
+        "empty = Fill()",
+        "w = ConcatV2(y, select_2, empty)"
+      ],
+      "inputs": ["a", "b", "c", "gt", "eq1", "eq2", "eq3"],
+      "outputs": ["x", "y", "w"],
+      "where": [
+        "greater.comparisonDirection == \"GT\"",
+        "equal_0.comparisonDirection == \"EQ\"",
+        "equal_1.comparisonDirection == \"EQ\"",
+        "equal_2.comparisonDirection == \"EQ\"",
+        "rank(a) == 1",
+        "rank(b) == 1",
+        "rank(c) == 1",
+        "rank(gt) == 0",
+        "rank(eq1) == 0",
+        "rank(eq2) == 0",
+        "rank(eq3) == 0"
+      ]
+    },
+    {
+      "name": "kp_sparse_reshape_dynamic_limit",
+      "kernel": "fused_kp_sparse_reshape_dynamic_limit",
+      "abi": "annc_execution_v2",
+      "priority": 160,
+      "graph": [
+        "keys_shape = Shape(keys)",
+        "rows = StridedSlice(keys_shape)",
+        "packed_shape = Pack(rows, pack_const)",
+        "input_shape = Cast(packed_shape)",
+        "keys_slice = StridedSlice(keys, begin)",
+        "keys_column = Reshape(keys_slice)",
+        "range = Range(start=0, range_limit, delta=1)",
+        "range_column = Reshape(range)",
+        "range_i64 = Cast(range_column)",
+        "indices = ConcatV2(range_i64, keys_column)",
+        "(out_indices, out_shape) = SparseReshape(indices, input_shape, new_shape)"
+      ],
+      "inputs": [
+        "keys",
+        "begin",
+        "pack_const",
+        "new_shape",
+        "range_limit"
+      ],
+      "outputs": ["out_indices", "out_shape"],
+      "where": [
+        "rows.shrinkAxisMask == 1",
+        "keys_slice.beginMask == 1",
+        "keys_slice.endMask == 1",
+        "keys_slice.shrinkAxisMask == 2",
+        "packed_shape.axis == 0",
+        "rank(keys) == 2",
+        "rank(begin) == 1",
+        "rank(pack_const) == 0",
+        "rank(new_shape) == 1",
+        "rank(range_limit) == 0"
+      ]
+    },
+    {
+      "name": "kp_sparse_reshape",
+      "kernel": "fused_kp_sparse_reshape",
+      "abi": "annc_execution_v2",
+      "priority": 170,
+      "graph": [
+        "keys_shape = Shape(keys)",
+        "rows = StridedSlice(keys_shape)",
+        "packed_shape = Pack(rows, pack_const)",
+        "input_shape = Cast(packed_shape)",
+        "keys_slice = StridedSlice(keys, begin)",
+        "keys_column = Reshape(keys_slice)",
+        "range = Range(start=0, limit=4, delta=1)",
+        "range_column = Reshape(range)",
+        "range_i64 = Cast(range_column)",
+        "indices = ConcatV2(range_i64, keys_column)",
+        "(out_indices, out_shape) = SparseReshape(indices, input_shape, new_shape)"
+      ],
+      "inputs": ["keys", "begin", "pack_const", "new_shape"],
+      "outputs": ["out_indices", "out_shape"],
+      "where": [
+        "rows.shrinkAxisMask == 1",
+        "keys_slice.beginMask == 1",
+        "keys_slice.endMask == 1",
+        "keys_slice.shrinkAxisMask == 2",
+        "packed_shape.axis == 0",
+        "rank(keys) == 2",
+        "rank(begin) == 1",
+        "rank(pack_const) == 0",
+        "rank(new_shape) == 1"
+      ]
+    },
+    {
+      "name": "kp_sparse_segment_mean",
+      "pattern": "kp_sparse_segment_reduce",
+      "kernel": "fused_kp_sparse_segment_reduce",
+      "abi": "annc_execution_v2",
+      "priority": 150,
+      "graph": [
+        "segment_ids = StridedSlice(keys, begin)",
+        "output = SparseSegmentMean(data, indices, segment_ids, num_segments=0)",
+        "output_shape = Shape(output)",
+        "slice_output = StridedSlice(output_shape, begin_1)"
+      ],
+      "inputs": ["keys", "begin", "data", "indices", "begin_1"],
+      "outputs": ["output", "slice_output"],
+      "where": [
+        "segment_ids.beginMask == 1",
+        "segment_ids.endMask == 1",
+        "segment_ids.shrinkAxisMask == 2",
+        "slice_output.shrinkAxisMask == 1",
+        "rank(keys) == 2",
+        "rank(begin) == 1",
+        "rank(data) == 2",
+        "rank(indices) == 1",
+        "rank(begin_1) == 1"
+      ]
+    },
+    {
+      "name": "kp_sparse_segment_sum",
+      "pattern": "kp_sparse_segment_reduce",
+      "kernel": "fused_kp_sparse_segment_reduce",
+      "abi": "annc_execution_v2",
+      "priority": 150,
+      "graph": [
+        "segment_ids = StridedSlice(keys, begin)",
+        "output = SparseSegmentSum(data, indices, segment_ids, num_segments=0)",
+        "output_shape = Shape(output)",
+        "slice_output = StridedSlice(output_shape, begin_1)"
+      ],
+      "inputs": ["keys", "begin", "data", "indices", "begin_1"],
+      "outputs": ["output", "slice_output"],
+      "where": [
+        "segment_ids.beginMask == 1",
+        "segment_ids.endMask == 1",
+        "segment_ids.shrinkAxisMask == 2",
+        "slice_output.shrinkAxisMask == 1",
+        "rank(keys) == 2",
+        "rank(begin) == 1",
+        "rank(data) == 2",
+        "rank(indices) == 1",
+        "rank(begin_1) == 1"
+      ]
+    },
+    {
+      "name": "kp_embedding_action_id_gather",
+      "kernel": "fused_kp_embedding_action_id_gather",
+      "abi": "mlir_ciface",
+      "buffer_outputs": true,
+      "priority": 140,
+      "graph": [
+        "inner = Gather(params, indices1, axis=0)",
+        "outer = Gather(inner, indices2, axis=0)",
+        "reshape_shape = Pack(pack_dim)",
+        "reshaped = Reshape(outer, reshape_shape)",
+        "padding_shape = Pack(pack_dim, pack)",
+        "padding = Fill(padding_shape, value=0.0)",
+        "output = ConcatV2(reshaped, padding, axis=-1)"
+      ],
+      "inputs": ["indices1", "params", "indices2", "pack_dim", "pack"],
+      "outputs": ["output"],
+      "where": [
+        "inner.batch_dims == 0",
+        "outer.batch_dims == 0",
+        "reshape_shape.axis == 0",
+        "padding_shape.axis == 0",
+        "rank(params) == 2",
+        "rank(pack_dim) == 0",
+        "rank(pack) == 0",
+        "rank(output) == 2"
+      ]
+    },
+    {
+      "name": "kp_target_behavior_interaction",
+      "kernel": "fused_kp_target_behavior_interaction",
+      "abi": "mlir_ciface",
+      "buffer_outputs": true,
+      "priority": 130,
+      "graph": [
+        "batch_matmul = BatchMatMul(batch_input, weight)",
+        "biased = Add(batch_matmul, bias)",
+        "absolute = Abs(biased)",
+        "positive_twice = Add(absolute, biased)",
+        "relu = Mul(positive_twice, scale=0.5)",
+        "tiled = Tile(tile_input)",
+        "difference = Sub(relu, tiled)",
+        "product = Mul(relu, tiled)",
+        "output = ConcatV2(relu, tiled, difference, product, axis=-1)"
+      ],
+      "inputs": ["batch_input", "weight", "bias", "tile_input"],
+      "outputs": ["output"],
+      "where": [
+        "rank(batch_input) == 3",
+        "rank(weight) == 2",
+        "rank(bias) == 1",
+        "rank(tile_input) == 3",
+        "rank(output) == 3"
+      ]
+    },
+    {
+      "name": "kp_sparse_dynamic_stitch_n2",
+      "pattern": "kp_sparse_dynamic_stitch",
+      "kernel": "fused_kp_sparse_dynamic_stitch_n2",
+      "abi": "mlir_ciface",
+      "buffer_outputs": true,
+      "priority": 120,
+      "graph": [
+        "size = Size(x)",
+        "range = Range(size)",
+        "partition_id = FloorMod(x, modulus=2)",
+        "partition_id_i32 = Cast(partition_id)",
+        "(index_0, index_1) = DynamicPartition(range, partition_id_i32)",
+        "row_id = FloorDiv(x, divisor=2)",
+        "(row_0, row_1) = DynamicPartition(row_id, partition_id_i32)",
+        "data_0 = Gather(variable_0, row_0, axis=0)",
+        "data_1 = Gather(variable_1, row_1, axis=0)",
+        "output = ParallelDynamicStitch(index_0, index_1, data_0, data_1)"
+      ],
+      "inputs": ["x", "variable_0", "variable_1"],
+      "outputs": ["output"],
+      "where": [
+        "index_0.numPartitions == 2",
+        "row_0.numPartitions == 2",
+        "data_0.batch_dims == 0",
+        "data_1.batch_dims == 0",
+        "rank(x) == 1",
+        "rank(variable_0) == 2",
+        "rank(variable_1) == 2",
+        "rank(output) == 2"
+      ]
+    }
+  ]
+}
