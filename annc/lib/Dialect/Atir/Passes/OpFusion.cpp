@@ -3358,17 +3358,10 @@ static bool isFtdmmIdentityTranspose(TransposeOp transpose, int64_t rank) {
 }
 
 // No shape gate: every site the matcher accepts is fused, so the site count
-// matches the patch's on the target models (model4: 15/15).  The kernel is
-// still ANNC's own scalar loop (~1.05 GMAC/s), which is why a k*n bound
-// (kMaxFusedTensordotWeightElements, 512) used to keep model4's large
-// projections out: at batch 32 they run m*k*n = 1.6M-3.3M MAC per call, ~2-3 ms
-// against the 52 ms baseline, and an earlier 2048 bound measured -2.6% end to
-// end.  Measured cost of the ungated state (2026-10-14, model4, same-session
-// three arms): ANNC tn5 5.68 QPS against OFF 46.13 (-87.7%) -- recorded in
-// data/20260924-ort-annc-perf/fusion-migration/align-20261014/ and accepted by
-// the requester for this milestone.  Restoring the bound is the fallback until
-// the kernel goes through a GEMM backend (MLAS route), which is the follow-up
-// that makes these sites a win instead of a loss.
+// matches the patch's on the target models (model4: 15/15). Kernel backend
+// selection is independent: ANNC_KERNEL_MLAS uses MLAS when the execution
+// context supplies a non-null native pool; otherwise the scalar row path runs.
+// The scalar fallback does not restore a matching-size limit.
 
 // value 的消费者必须恰为唯一一个且类型为 OpT。
 template <typename OpT>
