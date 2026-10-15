@@ -119,6 +119,18 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
     return annc::kernels::KernelStatus::InvalidArgument;
   }
 
+  constexpr int64_t kMaxSiteOutputs = 64;
+  constexpr int64_t kMaxSiteInputs = 32;
+  // Validate generated metadata before sizing any allocation. This is normally
+  // guaranteed by the spec generator, but keeps a malformed ABI attribute from
+  // turning into an unbounded vector allocation.
+  if (rawMuls < 1 || fedMuls < 0 ||
+      rawMuls > kMaxSiteInputs || fedMuls > kMaxSiteOutputs ||
+      rawMuls > kMaxSiteOutputs - fedMuls ||
+      rawMuls > kMaxSiteInputs ||
+      rawMuls + Arity - dataArgs > kMaxSiteInputs) {
+    return annc::kernels::KernelStatus::InvalidArgument;
+  }
   // Allocate in every case -- also when rows is zero -- because the host checks
   // that the call allocated every declared output slot.
   std::vector<float *> out(static_cast<size_t>(rawMuls + fedMuls), nullptr);
@@ -162,13 +174,9 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
   const int64_t *idValues = ANNC_MEMREF_DATA(*ids);
   // Decode site metadata once, outside the row/column loops. The sum inputs
   // retain their original order, including the initial +0 (or product 1).
-  constexpr size_t kMaxSiteInputs = 32;
   std::array<const float*, kMaxSiteInputs> rawInputs{};
   std::array<const float*, kMaxSiteInputs> sumInputs{};
   size_t sumInputCount = 0;
-  if (rawMuls < 1 || static_cast<size_t>(rawMuls) > kMaxSiteInputs ||
-      static_cast<size_t>(rawMuls + Arity - dataArgs) > kMaxSiteInputs)
-    return annc::kernels::KernelStatus::InvalidArgument;
   for (int64_t i = 0; i < rawMuls; ++i) {
     rawInputs[i] = in[maskedMulArgIndex(argMap, i)];
     if (fedMuls > 0 && ((sumMask >> i) & 1)) sumInputs[sumInputCount++] = out[i];
@@ -181,7 +189,7 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
 
   // One row is an elementwise masked multiply: a compare and a multiply per
   // element, reading f32 data and an i64 id per element.
-  // The host's cost model must see the complete fused row.  Charging one
+  // The host's cost model must see the fused row. Charging one
   // multiply underestimates a site with several raw/fed outputs and makes
   // ORT keep it on too few workers; the patched elementwise kernels charge
   // every output's memory traffic in the same way.
@@ -189,11 +197,10 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
   const int64_t sumAdds = fedMuls > 0 ? static_cast<int64_t>(sumInputCount) : 0;
   const int64_t cyclesPerElement =
       2 * rawMuls + sumAdds + (fedMuls > 0 ? 1 + fedMuls : 0);
-  const int64_t extraSumInputs =
-      fedMuls > 0
-          ? std::max<int64_t>(0, static_cast<int64_t>(sumInputCount) - rawMuls)
-          : 0;
-  const int64_t bytesReadPerElement = 8 + 4 * dataArgs + 4 * extraSumInputs;
+  const int64_t rawSumReads =
+      fedMuls > 0 ? __builtin_popcountll(static_cast<unsigned long long>(sumMask)) : 0;
+  const int64_t bytesReadPerElement =
+      8 + 4 * rawMuls + 4 * (Arity - dataArgs) + 4 * rawSumReads;
   const int64_t bytesWrittenPerElement = 4 * outputCount;
   auto options = annc::threadpool::rowOptions(
       annc::threadpool::cost::elementRow(n, cyclesPerElement,
