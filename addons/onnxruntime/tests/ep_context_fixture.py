@@ -40,6 +40,8 @@ import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
 KERNEL = r"""
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +86,22 @@ const char *KernelMode() {
 extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     const AnncExecutionContext *context, void *input_arg, void *weight_arg) {
   if (context == nullptr) return 1;
+  if (std::strcmp(KernelMode(), "same-session") == 0) {
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static int arrived = 0;
+    std::unique_lock<std::mutex> lock(mutex);
+    if (++arrived < 2) {
+      if (!cv.wait_for(lock, std::chrono::seconds(10), [] { return arrived >= 2; })) {
+        context->report_error(context->handle, ANNC_STATUS_INTERNAL,
+                              "same-session calls did not overlap");
+        return 7;
+      }
+    } else {
+      cv.notify_all();
+    }
+    AppendMarker("same-session overlap");
+  }
   MemRef3D *x = static_cast<MemRef3D *>(input_arg);
   MemRef2D *w = static_cast<MemRef2D *>(weight_arg);
   const int64_t d0 = x->sizes[0];
@@ -420,6 +438,29 @@ def run_test(args):
               "on both dispatch paths")
         return
 
+    if args.mode == "same-session":
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        # Rank-3 x and rank-2 w select lazy binding, unlike prebound BMM sites.
+        shared = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
+        cpu = session(model, ["CPUExecutionProvider"])
+        feeds = [{"x": np.full((n, 3, 4), v, np.float32)}
+                 for n, v in [(2, 0.25), (5, -0.75)]]
+        references = [cpu.run(None, feed)[0] for feed in feeds]
+        start = threading.Barrier(2)
+        def run_one(index):
+            start.wait(timeout=15)
+            return [shared.run(None, feeds[index])[0] for _ in range(12)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run_one, range(2)))
+        for index, values in enumerate(results):
+            for actual in values:
+                np.testing.assert_allclose(actual, references[index],
+                                           rtol=1e-3, atol=1e-7)
+        assert marker.read_text().count("same-session overlap") == 24
+        print("One session: overlapping lazy binding, distinct shapes and retained outputs pass")
+        return
+
     if args.mode == "concurrent":
         from concurrent.futures import ThreadPoolExecutor
         import threading
@@ -484,7 +525,7 @@ def main():
     parser.add_argument("--ep-library")
     parser.add_argument("--work-dir")
     parser.add_argument("--mode",
-                        choices=["normal", "threads", "nested", "concurrent",
+                        choices=["normal", "threads", "nested", "concurrent", "same-session",
                                  "error", "bad-slot"],
                         default="normal")
     args = parser.parse_args()

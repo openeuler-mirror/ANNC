@@ -4770,20 +4770,26 @@ static bool isF32Constant(Value value) {
          value.getDefiningOp<ConstantOp>() && tensorType.getCacheData();
 }
 
-static bool isBatchedAffineConstant(Value value, int64_t batchDim,
+// Pre-affine constants may broadcast over the batch axes and K, but never
+// over M: otherwise one folded W/bias cannot represent every output row.
+static bool isBatchedAffineConstant(Value value, ArrayRef<int64_t> batchShape,
                                    int64_t contractDim) {
   auto type = dyn_cast<atir::TensorType>(value.getType());
   if (!type || !isF32Constant(value)) return false;
   ArrayRef<int64_t> shape = type.getShape();
-  if (shape.empty()) return true;
-  if (shape.size() == 1) return shape[0] == 1 || shape[0] == contractDim;
-  if (shape.size() == 2)
-    return shape[0] == 1 && (shape[1] == 1 || shape[1] == contractDim);
-  return shape.size() == 3 && (shape[0] == 1 || shape[0] == batchDim) &&
-         shape[1] == 1 && (shape[2] == 1 || shape[2] == contractDim);
+  const size_t rank = batchShape.size() + 2;
+  if (shape.size() > rank) return false;
+  const size_t leading = rank - shape.size();
+  for (size_t i = 0; i < shape.size(); ++i) {
+    const size_t axis = leading + i;
+    const int64_t expected = axis < batchShape.size() ? batchShape[axis]
+                            : axis == rank - 1 ? contractDim : 1;
+    if (shape[i] != 1 && shape[i] != expected) return false;
+  }
+  return true;
 }
 
-static bool matchBatchedPreAffine(Value value, int64_t batchDim,
+static bool matchBatchedPreAffine(Value value, ArrayRef<int64_t> batchShape,
                                  int64_t contractDim, Value &data,
                                  Value &scale, Value &offset) {
   auto affine = value.getDefiningOp<AddOp>();
@@ -4806,8 +4812,8 @@ static bool matchBatchedPreAffine(Value value, int64_t batchDim,
   if (!mul) return false;
   Value candidateScale = isF32Constant(mul.getX()) ? mul.getX() : mul.getY();
   Value candidateData = candidateScale == mul.getX() ? mul.getY() : mul.getX();
-  if (!isBatchedAffineConstant(candidateScale, batchDim, contractDim) ||
-      !isBatchedAffineConstant(candidateOffset, batchDim, contractDim) ||
+  if (!isBatchedAffineConstant(candidateScale, batchShape, contractDim) ||
+      !isBatchedAffineConstant(candidateOffset, batchShape, contractDim) ||
       isF32Constant(candidateData)) {
     return false;
   }
@@ -4907,6 +4913,14 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
 
     BatchedMatMulAddMatch match;
     match.data = matmul.getLhs();
+    if (matchBatchedPreAffine(matmul.getLhs(), outputShape.take_front(2),
+                              contractDim, match.data, match.scale, match.offset)) {
+      match.affineResult = matmul.getLhs();
+      auto affine = cast<AddOp>(matmul.getLhs().getDefiningOp());
+      match.scaledResult = affine.getInputs()[0].getDefiningOp<MulOp>()
+                               ? affine.getInputs()[0]
+                               : affine.getInputs()[1];
+    }
     match.weight = matmul.getRhs();
     match.bias = bias;
     match.output = add.getResult();
@@ -4978,7 +4992,7 @@ static FailureOr<BatchedMatMulAddMatch> matchBatchedMatMulAdd(AddOp add) {
 
   BatchedMatMulAddMatch match;
   match.data = matmul.getLhs();
-  if (matchBatchedPreAffine(matmul.getLhs(), batchDim, contractDim,
+  if (matchBatchedPreAffine(matmul.getLhs(), ArrayRef<int64_t>{batchDim}, contractDim,
                            match.data, match.scale, match.offset)) {
     match.affineResult = matmul.getLhs();
     auto affine = cast<AddOp>(matmul.getLhs().getDefiningOp());
@@ -5083,15 +5097,20 @@ static LogicalResult foldBatchedPreAffine(BatchedMatMulAddMatch &match) {
 
   const auto weightShape = weightType.getShape();
   const auto biasShape = biasType.getShape();
-  if (weightShape.size() != 3 || biasShape.size() != 3) return failure();
-  const int64_t batchDim = weightShape[0];
-  const int64_t contractDim = weightShape[1];
-  const int64_t outputDim = weightShape[2];
-  if (batchDim <= 0 || contractDim <= 0 || outputDim <= 0 ||
-      biasShape[0] != batchDim || biasShape[1] != 1 ||
-      biasShape[2] != outputDim) {
-    return failure();
+  const size_t rank = weightShape.size();
+  if ((rank != 3 && rank != 4) || biasShape.size() != rank) return failure();
+  int64_t batchDim = 1;
+  for (size_t axis = 0; axis + 2 < rank; ++axis) {
+    // Keep broadcast weights on the original path: per-output-batch affine
+    // constants would require expanding the weight initializer's shape.
+    if (weightShape[axis] <= 0 || weightShape[axis] != biasShape[axis])
+      return failure();
+    batchDim *= weightShape[axis];
   }
+  const int64_t contractDim = weightShape[rank - 2];
+  const int64_t outputDim = weightShape[rank - 1];
+  if (contractDim <= 0 || outputDim <= 0 || biasShape[rank - 2] != 1 ||
+      biasShape[rank - 1] != outputDim) return failure();
 
   std::vector<float> weight(weightAttr.value_begin<float>(),
                             weightAttr.value_end<float>());
@@ -5117,10 +5136,19 @@ static LogicalResult foldBatchedPreAffine(BatchedMatMulAddMatch &match) {
         auto affineIndex = [&](Value value) {
           auto shape = cast<atir::TensorType>(value.getType()).getShape();
           if (shape.empty()) return int64_t{0};
-          const int64_t width = shape.back();
-          const int64_t affineBatch = shape.size() == 3 ? shape[0] : 1;
-          return (affineBatch == 1 ? 0 : batch) * width +
-                 (width == 1 ? 0 : k);
+          const size_t leading = rank - shape.size();
+          int64_t coordinates[4] = {0, 0, 0, 0};
+          coordinates[rank - 1] = k;
+          int64_t remaining = batch;
+          for (int64_t axis = static_cast<int64_t>(rank) - 3; axis >= 0; --axis) {
+            coordinates[axis] = remaining % weightShape[axis];
+            remaining /= weightShape[axis];
+          }
+          int64_t index = 0;
+          for (size_t axis = 0; axis < shape.size(); ++axis)
+            index = index * shape[axis] +
+                    (shape[axis] == 1 ? 0 : coordinates[leading + axis]);
+          return index;
         };
         const float scaleValue = scale[affineIndex(match.scale)];
         const float offsetValue = offset[affineIndex(match.offset)];

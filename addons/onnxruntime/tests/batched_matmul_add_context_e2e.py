@@ -17,6 +17,8 @@ and the numbers are checked against the CPU EP.
 
 import argparse
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import json
 import os
 from pathlib import Path
@@ -192,20 +194,175 @@ def main():
         os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
         run_rank4_case(case_work, broadcast_data)
 
+    # A one-thread ORT session has no native pool and only tests the scalar
+    # fallback. Repeat the broadcast fixtures with a real operator pool so a
+    # build with ANNC_KERNEL_MLAS exercises GEMM's bias handling as well.
+    for name, broadcast_data in (("rank4_mlas", False),
+                                 ("rank4_broadcast_data_mlas", True)):
+        case_work = work / name
+        case_work.mkdir(parents=True, exist_ok=True)
+        os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
+        run_rank4_case(case_work, broadcast_data, intra_threads=2)
+    for name, broadcast_weight in (("batched_mlas", False),
+                                   ("broadcast_weight_mlas", True)):
+        case_work = work / name
+        case_work.mkdir(parents=True, exist_ok=True)
+        os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
+        run_case(case_work, 2, False, False, broadcast_weight, False,
+                 intra_threads=2)
+    for affine_shape in [(), (4,), (1, 4), (3, 1, 4), (2, 1, 1, 4),
+                         (2, 3, 1, 4), (1, 1, 1, 1)]:
+        case_work = work / ("rank4_affine_" + str(affine_shape))
+        case_work.mkdir(exist_ok=True)
+        os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
+        run_rank4_affine_case(case_work, affine_shape)
 
-def run_rank4_case(work, broadcast_data):
+    for affine_shape, broadcast_weight in [((2, 3, 5, 4), False),
+                                             ((2, 3, 1, 4), True)]:
+        case_work = work / ("rank4_guard_" + str(broadcast_weight))
+        case_work.mkdir(exist_ok=True)
+        os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
+        run_rank4_affine_case(case_work, affine_shape, folded=False,
+                             broadcast_weight=broadcast_weight)
+
+    for rank in (3, 4):
+        case_work = work / f"cancellation_rank{rank}"
+        case_work.mkdir(parents=True, exist_ok=True)
+        os.environ["ANNC_EP_CACHE_DIR"] = str(case_work / "cache")
+        run_cancellation_case(case_work, rank)
+
+
+def run_rank4_affine_case(work, affine_shape, folded=True, broadcast_weight=False):
+    rng = np.random.default_rng(41)
+    shape, weight_shape, bias_shape = (2, 3, 5, 4), (2, 3, 4, 7), (2, 3, 1, 7)
+    if broadcast_weight:
+        weight_shape = (1, 3, 4, 7)
+    x = rng.standard_normal(shape).astype(np.float32)
+    w = rng.standard_normal(weight_shape).astype(np.float32)
+    bias = rng.standard_normal(bias_shape).astype(np.float32)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    for version in range(2):
+        scale = rng.uniform(0.75, 1.25, affine_shape).astype(np.float32)
+        offset = rng.uniform(-0.2, 0.2, affine_shape).astype(np.float32)
+        nodes = [helper.make_node("Mul", ["scale", "x"], ["scaled"]),
+                 helper.make_node("Add", ["offset", "scaled"], ["affine"]),
+                 helper.make_node("MatMul", ["affine", "w"], ["mm"]),
+                 helper.make_node("Add", ["b", "mm"], ["y"])]
+        graph = helper.make_graph(nodes, "rank4_affine", [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, (2, 3, "M", 4))], [
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, (2, 3, "M", 7))],
+            [numpy_helper.from_array(v, n) for n, v in
+             [("w", w), ("b", bias), ("scale", scale), ("offset", offset)]])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        model.ir_version = 7
+        path = work / "model.onnx"
+        onnx.save(model, path)
+        cpu = ort.InferenceSession(str(path), options,
+                                   providers=["CPUExecutionProvider"])
+        inputs = [x]
+        if folded or broadcast_weight:
+            inputs.append(rng.standard_normal((2, 3, 2, 4)).astype(np.float32))
+        references = [cpu.run(None, {"x": value})[0] for value in inputs]
+        for attempt in range(2):
+            options.enable_profiling = True
+            options.profile_file_prefix = str(work / f"affine-{version}-{attempt}")
+            session = ort.InferenceSession(str(path), options,
+                providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+            for value, reference in zip(inputs, references):
+                actual = session.run(None, {"x": value})[0]
+                np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7)
+            profile = json.loads(Path(session.end_profiling()).read_text())
+            executed = [e for e in profile if e.get("cat") == "Node" and
+                        e.get("args", {}).get("provider") == "AnncExecutionProvider"]
+            assert len(executed) == len(inputs), profile
+            options.enable_profiling = False
+        reports = [json.loads(p.read_text()) for p in (work / "cache").glob("v1/*/*/sites.json")]
+        assert len(reports) == version + 1, reports
+        for report in reports:
+            assert len(report["sites"]) == 1, report
+            site = report["sites"][0]
+            assert len(site["member_node_names"]) == (4 if folded else 2), site
+            assert [arg["rank"] for arg in site["args"]] == [4, 4, 4], site
+    print(f"rank4 affine {affine_shape}: folded={folded}, broadcast_weight={broadcast_weight}, numeric/cache pass")
+
+
+def run_cancellation_case(work, rank):
+    """Bias must follow the whole K sum, including across MLAS K tiles."""
+    prefix = [2] if rank == 3 else [2, 1]
+    shape = prefix + [2, 256]
+    x = np.zeros(shape, dtype=np.float32)
+    x[..., 0] = 2**24
+    x[..., 128] = -(2**24)
+    weight = np.ones(prefix + [256, 128], dtype=np.float32)
+    bias = np.ones(prefix + [1, 128], dtype=np.float32)
+    model = helper.make_model(helper.make_graph(
+        [helper.make_node("MatMul", ["x", "w"], ["mm"], name="mm"),
+         helper.make_node("Add", ["mm", "b"], ["y"], name="add")],
+        "multi_tile_cancellation",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, prefix + [2, 128])],
+        [numpy_helper.from_array(weight, "w"), numpy_helper.from_array(bias, "b")]),
+        opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 7
+    path = work / "model.onnx"
+    onnx.save(model, path)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    reference = ort.InferenceSession(str(path), options,
+        providers=["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    np.testing.assert_array_equal(reference, np.ones_like(reference))
+    options.enable_profiling = True
+    options.profile_file_prefix = str(work / "ep")
+    session = ort.InferenceSession(str(path), options,
+        providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+    actual = session.run(None, {"x": x})[0]
+    np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7)
+    profile = json.loads(Path(session.end_profiling()).read_text())
+    assert any(e.get("args", {}).get("provider") == "AnncExecutionProvider"
+               for e in profile), "cancellation fixture did not execute on EP"
+    print(f"rank{rank}: multi-tile cancellation retains the bias")
+
+
+def check_same_session_concurrency(session, feed, cpu_session):
+    # Distinct input buffers and a shared session exercise concurrently reading
+    # the immutable argument binding without sharing per-call output state.
+    barrier = Barrier(4)
+    def worker(index):
+        local_feed = {name: value + np.float32(index * 0.125)
+                      for name, value in feed.items()}
+        reference = cpu_session.run(None, local_feed)[0]
+        barrier.wait(timeout=30)
+        retained = []
+        for _ in range(8):
+            actual = session.run(None, local_feed)[0]
+            np.testing.assert_allclose(actual, reference, rtol=1e-3,
+                                       atol=1e-7, equal_nan=True)
+            retained.append(actual)
+        return retained, reference
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        results = list(workers.map(worker, range(4)))
+    for retained, reference in results:
+        for actual in retained:
+            np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7)
+
+
+def run_rank4_case(work, broadcast_data, intra_threads=1):
     model_path = work / "bmm_add_rank4.onnx"
     build_rank4_model(model_path, broadcast_data)
     rng = np.random.default_rng(13)
     feed = {"x": rng.standard_normal(
         (1 if broadcast_data else 2, 1, 5, 12)).astype(np.float32)}
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 1
+    options.intra_op_num_threads = intra_threads
     options.inter_op_num_threads = 1
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    reference = ort.InferenceSession(
-        str(model_path), options,
-        providers=["CPUExecutionProvider"]).run(None, feed)[0]
+    cpu_session = ort.InferenceSession(
+        str(model_path), options, providers=["CPUExecutionProvider"])
+    reference = cpu_session.run(None, feed)[0]
 
     for attempt in range(2):
         options.enable_profiling = True
@@ -213,6 +370,8 @@ def run_rank4_case(work, broadcast_data):
         session = ort.InferenceSession(
             str(model_path), options,
             providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+        if options.intra_op_num_threads > 1:
+            check_same_session_concurrency(session, feed, cpu_session)
         actual = session.run(None, feed)[0]
         np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7,
                                    equal_nan=True)
@@ -221,7 +380,7 @@ def run_rank4_case(work, broadcast_data):
                     event.get("cat") == "Node" and
                     event.get("args", {}).get("provider") ==
                     "AnncExecutionProvider"]
-        assert len(ep_nodes) == 1, profile
+        assert len(ep_nodes) == (33 if options.intra_op_num_threads > 1 else 1), profile
     options.enable_profiling = False
 
     entries = [p for p in (work / "cache").glob("v1/*/*")
@@ -237,13 +396,13 @@ def run_rank4_case(work, broadcast_data):
 
 
 def run_case(work, batch, affine, commuted, broadcast_weight, batched_affine,
-             broadcast_data=False):
+             broadcast_data=False, intra_threads=1):
     model_path = work / "bmm_add.onnx"
     rng = np.random.default_rng(11)
     feed = {"x": rng.standard_normal((1 if broadcast_data else batch, SEQ, K))
             .astype(np.float32)}
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 1
+    options.intra_op_num_threads = intra_threads
     options.inter_op_num_threads = 1
     # ORT graph fusions would otherwise hide the four-node affine chain from
     # ANNC, preventing the test from exercising compile-time folding.
@@ -256,9 +415,9 @@ def run_case(work, batch, affine, commuted, broadcast_weight, batched_affine,
 
 
 def run_model(work, model_path, options, feed, affine, version, folded):
-    reference = ort.InferenceSession(
-        str(model_path), options,
-        providers=["CPUExecutionProvider"]).run(None, feed)[0]
+    cpu_session = ort.InferenceSession(
+        str(model_path), options, providers=["CPUExecutionProvider"])
+    reference = cpu_session.run(None, feed)[0]
 
     for attempt in range(2):
         options.enable_profiling = True
@@ -266,6 +425,8 @@ def run_model(work, model_path, options, feed, affine, version, folded):
         session = ort.InferenceSession(
             str(model_path), options,
             providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+        if options.intra_op_num_threads > 1:
+            check_same_session_concurrency(session, feed, cpu_session)
         actual = session.run(None, feed)[0]
         np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7,
                                    equal_nan=True)
@@ -274,7 +435,7 @@ def run_model(work, model_path, options, feed, affine, version, folded):
                     event.get("cat") == "Node" and
                     event.get("args", {}).get("provider") ==
                     "AnncExecutionProvider"]
-        assert len(ep_nodes) == 1, profile
+        assert len(ep_nodes) == (33 if options.intra_op_num_threads > 1 else 1), profile
         print(f"session {attempt + 1}: numeric match")
     options.enable_profiling = False
 

@@ -299,21 +299,17 @@ struct ComputeState {
   // output slots the callbacks validate against.
   void* symbol = nullptr;
   std::string abi;
-  std::vector<int64_t> arg_ranks;
-  std::vector<AnncElementType> arg_types;
-  std::vector<annc_ep::OutputContract> outputs;
-  // Input index each context argument resolves to. Name-resolved sites carry
-  // theirs from Compile; the rest are filled on the first call, guarded by
-  // `context_mutex` because ORT may run the same node concurrently.
+  // Immutable after the argument binding is published. Keeping the contract
+  // here avoids copying five vectors and locking on every fused-node call.
+  annc_ep::ContextCall context_call;
   std::mutex context_mutex;
-  std::vector<int64_t> arg_indices;
-  // Declared output slot -> the fused node's output index (empty = identity).
-  std::vector<uint32_t> output_slots;
+  std::atomic<bool> context_ready{false};
   // The fused node's input layout is fixed for the lifetime of the session, so
   // the operand scan only has to run once; afterwards the two indices are used
   // directly.
   int64_t x_index = -1, w_index = -1;
-  bool reported = false;  // ANNC_EP_DEBUG: print this node's operand shapes once
+  // ANNC_EP_DEBUG: print this node's operand shapes once.
+  std::atomic<bool> reported{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -449,7 +445,8 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
   // FillContextContract pushes the contract's argument ranks and types in
   // pairs; keep the diagnostics below from indexing a shorter type vector if
   // that ever stops being true (BindArgumentsToInputs itself is total).
-  if (state->arg_ranks.size() != state->arg_types.size()) {
+  if (state->context_call.arg_ranks.size() !=
+      state->context_call.arg_types.size()) {
     return g_api->CreateStatus(
         ORT_FAIL,
         "ANNC EP: the site contract's argument ranks and types are not in "
@@ -492,7 +489,7 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
     inputs.push_back(key);
   }
   const annc_ep::ArgumentBinding binding = annc_ep::BindArgumentsToInputs(
-      inputs, state->arg_ranks, state->arg_types);
+      inputs, state->context_call.arg_ranks, state->context_call.arg_types);
   if (g_debug) {
     for (size_t i = 0; i < inputs.size(); ++i) {
       int64_t bound_to = -1;
@@ -535,13 +532,14 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
       return g_api->CreateStatus(
           ORT_FAIL, ("ANNC EP: no input matches kernel argument " +
                      std::to_string(arg) + " (rank " +
-                     std::to_string(state->arg_ranks[arg]) + ", type " +
-                     std::to_string(static_cast<int>(state->arg_types[arg])) +
+                     std::to_string(state->context_call.arg_ranks[arg]) + ", type " +
+                     std::to_string(static_cast<int>(
+                         state->context_call.arg_types[arg])) +
                      ")")
                         .c_str());
     }
   }
-  state->arg_indices = binding.indices;
+  state->context_call.arg_indices = binding.indices;
   return nullptr;
 }
 
@@ -554,39 +552,37 @@ OrtStatus* ComputeContextSite(ComputeState* state,
   const bool timing = std::getenv("ANNC_EP_TIMING") != nullptr;
   const auto t_entry = timing ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
-  annc_ep::ContextCall call;
-  call.symbol = state->symbol;
-  call.arg_ranks = state->arg_ranks;
-  call.arg_types = state->arg_types;
-  call.outputs = state->outputs;
-  call.output_slots = state->output_slots;
-  {
+  if (!state->context_ready.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lock(state->context_mutex);
-    if (state->arg_indices.empty()) {
-      if (OrtStatus* status = ResolveContextInputs(state, kernel_context)) {
-        return status;
+    if (!state->context_ready.load(std::memory_order_relaxed)) {
+      if (state->context_call.arg_indices.empty()) {
+        if (OrtStatus* status = ResolveContextInputs(state, kernel_context)) {
+          return status;  // Do not publish a failed binding; a later call retries.
+        }
       }
+      state->context_ready.store(true, std::memory_order_release);
     }
-    call.arg_indices = state->arg_indices;
   }
   // Name-resolved sites arrive with `arg_indices` already pinned, so they never
   // reach ResolveContextInputs and its per-input log. Without a line here an
   // executing site would look identical to one ORT dropped -- print the
   // resolved mapping, once per node.
-  if (g_debug && !state->reported) {
-    state->reported = true;
+  if (g_debug && !state->reported.exchange(true, std::memory_order_relaxed)) {
     std::fprintf(stderr, "[annc-ep] ctx compute: abi=%s, %zu arg(s) ->",
-                 state->abi.c_str(), state->arg_ranks.size());
-    for (size_t arg = 0; arg < state->arg_ranks.size(); ++arg) {
+                 state->abi.c_str(), state->context_call.arg_ranks.size());
+    for (size_t arg = 0; arg < state->context_call.arg_ranks.size(); ++arg) {
       const int64_t input =
-          arg < state->arg_indices.size() ? state->arg_indices[arg] : -1;
+          arg < state->context_call.arg_indices.size()
+              ? state->context_call.arg_indices[arg] : -1;
       std::fprintf(stderr, " [arg %zu (rank %lld) <- input %lld]", arg,
-                   static_cast<long long>(state->arg_ranks[arg]),
+                   static_cast<long long>(state->context_call.arg_ranks[arg]),
                    static_cast<long long>(input));
     }
-    std::fprintf(stderr, ", %zu output slot(s)\n", state->outputs.size());
+    std::fprintf(stderr, ", %zu output slot(s)\n",
+                 state->context_call.outputs.size());
   }
-  OrtStatus* status = annc_ep::ComputeWithContext(g_api, kernel_context, call);
+  OrtStatus* status = annc_ep::ComputeWithContext(
+      g_api, kernel_context, state->context_call);
   if (timing) {
     const auto t_end = std::chrono::steady_clock::now();
     Timing().NoteContextCall(
@@ -608,14 +604,17 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
       state->symbol = handle->symbol;
     }
   }
+  state->context_call.symbol = state->symbol;
   state->abi = info->abi;
-  state->arg_ranks = info->arg_ranks;
-  state->arg_types = info->arg_types;
-  state->outputs = info->outputs;
-  state->output_slots = info->output_slots;
+  state->context_call.arg_ranks = info->arg_ranks;
+  state->context_call.arg_types = info->arg_types;
+  state->context_call.outputs = info->outputs;
+  state->context_call.output_slots = info->output_slots;
   // Name-resolved sites arrive with their argument mapping already fixed; the
   // rest resolve on the first Compute by rank and element type.
-  state->arg_indices = info->arg_indices;
+  state->context_call.arg_indices = info->arg_indices;
+  state->context_ready.store(!info->arg_indices.empty(),
+                             std::memory_order_relaxed);
   *compute_state = state;
   return nullptr;
 }
@@ -765,8 +764,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
   MemRef2D w_ref{w_data, w_data, 0, {k, n}, {n, 1}};
   MemRef3D y_ref{y_data, y_data, 0, {d0, d1, n}, {d1 * n, n, 1}};
 
-  if (g_debug && !state->reported) {
-    state->reported = true;
+  if (g_debug && !state->reported.exchange(true, std::memory_order_relaxed)) {
     std::fprintf(stderr,
                  "[annc-ep] site '%s' kernel='%s': m=%lld k=%lld n=%lld "
                  "(macs=%lld)\n",

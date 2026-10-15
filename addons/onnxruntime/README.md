@@ -122,6 +122,20 @@ FTDMM/BMM 仅在编译启用 MLAS 且 `native_pool()` 非空时调用 `MlasGemmB
 标量行路径，空池（如 intra-op=1）也不执行串行 MLAS。driver 将上述归档路径写入 kernel
 链接命令；EP 与 kernel 必须同源构建。
 
+### 融合覆盖与浮点顺序
+
+BMM 的 rank-3/rank-4 入口均支持把常量 `Mul → Add` 前仿射折叠进 W/bias。
+常量按 ONNX 后对齐规则在 batch/K 轴广播，M 轴必须为1；权重发生 batch 广播时保留
+原仿射链，不扩张权重。验收须同时核对 site 数、成员节点数和实际 EP 执行事件：
+相同的50个 BMM site 可以分别覆盖100或144个原图节点，不能只按 site 数判断等价。
+仿射折叠会改变浮点运算顺序，数值验收沿用 `rtol=1e-3, atol=1e-7`，不承诺逐位一致。
+
+BMM 在当前 MLAS 单 K tile 的保守范围 `K<=128` 预填 bias 并使用 beta=1；更大 K
+保持 GEMM 完整归约后加 bias，避免 `2^24 + 1 - 2^24` 把 bias 舍掉。
+masked_mul 在 AArch64 显式使用 NEON，保持既有输入归约顺序、真实除法以及 NaN/Inf/符号零
+处理，余数列仍走标量尾部。ContextCall 在首次成功绑定后发布为只读，动态 shape、输出和
+临时分配仍在每次调用内独立创建；同 Session 首调用并发有独立回归。
+
 ## 运行
 
 ```shell

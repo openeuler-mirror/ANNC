@@ -175,7 +175,7 @@ if(BUILD_TESTING)
   endforeach()
   # annc_execution_v2 sites: the context callbacks, the pool the context
   # carries, and the failure paths of both.
-  foreach(mode IN ITEMS normal threads nested concurrent error bad-slot)
+  foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot)
     add_test(NAME AnncEpContextFixture.${mode}
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/ep_context_fixture.py

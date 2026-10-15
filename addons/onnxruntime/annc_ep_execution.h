@@ -97,8 +97,8 @@ class OnnxExecutionContext {
   // so they only agree by luck -- the EP resolves the mapping by tensor name at
   // Compile time.
   OnnxExecutionContext(const OrtApi* api, OrtKernelContext* kernel_context,
-                       std::vector<OutputContract> outputs,
-                       std::vector<uint32_t> output_slots = {});
+                       const std::vector<OutputContract>& outputs,
+                       const std::vector<uint32_t>* output_slots = nullptr);
   ~OnnxExecutionContext();
 
   OnnxExecutionContext(const OnnxExecutionContext&) = delete;
@@ -139,8 +139,10 @@ class OnnxExecutionContext {
 
   const OrtApi* api_;
   OrtKernelContext* kernel_context_;
-  std::vector<OutputContract> outputs_;
-  std::vector<uint32_t> output_slots_;
+  // The request is immutable and outlives this synchronous context. Borrowing
+  // it avoids copying the small contract vectors once per fused site.
+  const std::vector<OutputContract>* outputs_;
+  const std::vector<uint32_t>* output_slots_;
   std::vector<bool> allocated_;
   OrtStatus* error_ = nullptr;
   OrtMemoryInfo* mem_info_ = nullptr;       // lazy, released in the destructor

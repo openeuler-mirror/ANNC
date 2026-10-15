@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -39,10 +40,20 @@ inline void runMlasBatch(void* native, int64_t m, int64_t n, int64_t k,
                 /*BackendKernelSelectorConfig=*/nullptr);
 }
 
-// The bias epilogue: out[row, :] += bias[row / rowsPerBatch, :] -- the Add of
-// the source chain MatMul->Add, run after the full k sum so the rounding
-// order matches (and matches the scalar path).  Row-parallel, so the common
-// layer's gate can keep small epilogues on the caller.
+// Match ORT's fused MatMul+Add: initialize C with the broadcast bias and let
+// GEMM's beta=1 epilogue consume it. This avoids a second read/modify/write
+// pass and thread-pool dispatch. Restrict this to K <= 128, a conservative
+// single-tile bound for the current MLAS SGEMM backend: across multiple tiles beta=1 would add bias before the
+// full reduction and can lose it to cancellation (e.g. 2^24 + 1 - 2^24).
+inline void fillBiasRows(float* out, const float* bias, int64_t batches,
+                         int64_t rowsPerBatch, int64_t n) {
+  for (int64_t batch = 0; batch < batches; ++batch) {
+    const float* biasRow = bias + batch * n;
+    for (int64_t row = 0; row < rowsPerBatch; ++row)
+      std::copy_n(biasRow, n, out + (batch * rowsPerBatch + row) * n);
+  }
+}
+
 inline void addBiasRows(annc::threadpool::AnncThreadPool* thread_pool,
                         float* out, const float* bias, int64_t rows,
                         int64_t rowsPerBatch, int64_t n) {
@@ -193,6 +204,7 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
     if (void* native = thread_pool->native_pool(); native != nullptr) {
       const int64_t batchCount = out0 * out1;
       if (batchCount <= kMlasMaxBatch) {
+        const bool singleKTile = k <= 128;
         MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
         for (int64_t i = 0; i < out0; ++i) {
           for (int64_t j = 0; j < out1; ++j) {
@@ -208,10 +220,12 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
             p.ldb = static_cast<size_t>(n);
             p.C = out + batch * m * n;
             p.ldc = static_cast<size_t>(n);
+            p.beta = singleKTile ? 1.0f : 0.0f;
           }
         }
+        if (singleKTile) fillBiasRows(out, b, batchCount, m, n);
         runMlasBatch(native, m, n, k, params, batchCount);
-        addBiasRows(thread_pool, out, b, rows, /*rowsPerBatch=*/m, n);
+        if (!singleKTile) addBiasRows(thread_pool, out, b, rows, m, n);
         logMlasBmm(batchCount, m, n, k);
         return annc::kernels::KernelStatus::Success;
       }
@@ -330,6 +344,7 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
     if (void* native = thread_pool->native_pool(); native != nullptr) {
       const int64_t batchCount = d0;
       if (batchCount <= kMlasMaxBatch) {
+        const bool singleKTile = k <= 128;
         MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
         for (int64_t i = 0; i < d0; ++i) {
           MLAS_SGEMM_DATA_PARAMS& p = params[i];
@@ -339,9 +354,11 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
           p.ldb = static_cast<size_t>(n);
           p.C = out + i * d1 * n;
           p.ldc = static_cast<size_t>(n);
+          p.beta = singleKTile ? 1.0f : 0.0f;
         }
+        if (singleKTile) fillBiasRows(out, b, batchCount, d1, n);
         runMlasBatch(native, d1, n, k, params, batchCount);
-        addBiasRows(thread_pool, out, b, rows, /*rowsPerBatch=*/d1, n);
+        if (!singleKTile) addBiasRows(thread_pool, out, b, rows, d1, n);
         logMlasBmm(batchCount, d1, n, k);
         return annc::kernels::KernelStatus::Success;
       }

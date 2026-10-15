@@ -454,12 +454,13 @@ void OrtThreadPool::parallel_for(
 
 OnnxExecutionContext::OnnxExecutionContext(
     const OrtApi* api, OrtKernelContext* kernel_context,
-    std::vector<OutputContract> outputs, std::vector<uint32_t> output_slots)
+    const std::vector<OutputContract>& outputs,
+    const std::vector<uint32_t>* output_slots)
     : api_(api),
       kernel_context_(kernel_context),
-      outputs_(std::move(outputs)),
-      output_slots_(std::move(output_slots)),
-      allocated_(outputs_.size(), false),
+      outputs_(&outputs),
+      output_slots_(output_slots),
+      allocated_(outputs.size(), false),
       pool_(api, kernel_context) {
   handle_payload_.state = this;
   handle_ = reinterpret_cast<AnncExecutionHandle*>(&handle_payload_);
@@ -537,7 +538,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   if (desc == nullptr || desc->struct_size < sizeof(*desc)) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT, "output description is invalid");
   }
-  if (slot >= outputs_.size()) {
+  if (slot >= outputs_->size()) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "output slot " + std::to_string(slot) + " is out of range");
   }
@@ -546,7 +547,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
                 "output slot " + std::to_string(slot) +
                     " was allocated more than once");
   }
-  const OutputContract& contract = outputs_[slot];
+  const OutputContract& contract = (*outputs_)[slot];
   if (contract.rank != static_cast<int64_t>(desc->rank)) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "output slot " + std::to_string(slot) + " rank mismatch");
@@ -576,7 +577,9 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   // values). The EP resolves that mapping by tensor name at Compile time and
   // hands it over here; without one the orders agree.
   const uint32_t physical =
-      slot < output_slots_.size() ? output_slots_[slot] : slot;
+      output_slots_ != nullptr && slot < output_slots_->size()
+          ? (*output_slots_)[slot]
+          : slot;
   OrtValue* value = nullptr;
   if (OrtStatus* status = api_->KernelContext_GetOutput(
           kernel_context_, physical, desc->dims, desc->rank, &value)) {
@@ -587,19 +590,28 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   // The kernel states the element type it wants; ORT allocates per the node's
   // declared output type. A mismatch would mean the kernel interpreted the
   // buffer wrongly, so it is rejected here instead of silently accepted.
-  OrtTensorTypeAndShapeInfo* info = nullptr;
-  if (OrtStatus* status = api_->GetTensorTypeAndShape(value, &info)) {
-    RecordStatus(status);
-    return ANNC_STATUS_INTERNAL;
-  }
   ONNXTensorElementDataType ort_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-  if (OrtStatus* status = api_->GetTensorElementType(info, &ort_type)) {
-    // The handle is one this context just obtained; a failure here would
-    // leave the type undefined and trip the mismatch check below. Release the
-    // status instead of dropping it.
-    api_->ReleaseStatus(status);
+  if (api_->GetTensorElementTypeAndShapeDataReference != nullptr) {
+    const int64_t* shape = nullptr;
+    size_t rank = 0;
+    if (OrtStatus* status = api_->GetTensorElementTypeAndShapeDataReference(
+            value, &ort_type, &shape, &rank)) {
+      RecordStatus(status);
+      return ANNC_STATUS_INTERNAL;
+    }
+  } else {
+    OrtTensorTypeAndShapeInfo* info = nullptr;
+    if (OrtStatus* status = api_->GetTensorTypeAndShape(value, &info)) {
+      RecordStatus(status);
+      return ANNC_STATUS_INTERNAL;
+    }
+    if (OrtStatus* status = api_->GetTensorElementType(info, &ort_type)) {
+      RecordStatus(status);
+      api_->ReleaseTensorTypeAndShapeInfo(info);
+      return ANNC_STATUS_INTERNAL;
+    }
+    api_->ReleaseTensorTypeAndShapeInfo(info);
   }
-  api_->ReleaseTensorTypeAndShapeInfo(info);
   AnncElementType expected = 0;
   if (!AnncElementFromOrt(ort_type, &expected) || expected != desc->element_type) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
@@ -729,7 +741,7 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   const auto t_start = timing ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
   OnnxExecutionContext context(api, kernel_context, request.outputs,
-                               request.output_slots);
+                               &request.output_slots);
 
   std::vector<MemRefStorage> storage(request.arg_indices.size());
   std::vector<void*> args;
@@ -743,36 +755,44 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
             &value)) {
       return status;
     }
-    OrtTensorTypeAndShapeInfo* info = nullptr;
-    if (OrtStatus* status = api->GetTensorTypeAndShape(value, &info)) {
-      return status;
-    }
-    size_t rank = 0;
-    if (OrtStatus* status = api->GetDimensionsCount(info, &rank)) {
-      api->ReleaseTensorTypeAndShapeInfo(info);
-      return status;
-    }
     ONNXTensorElementDataType ort_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    if (OrtStatus* status = api->GetTensorElementType(info, &ort_type)) {
-      api->ReleaseTensorTypeAndShapeInfo(info);
-      return status;
+    const int64_t* shape = nullptr;
+    size_t rank = 0;
+    OrtTensorTypeAndShapeInfo* info = nullptr;
+    if (api->GetTensorElementTypeAndShapeDataReference != nullptr) {
+      if (OrtStatus* status = api->GetTensorElementTypeAndShapeDataReference(
+              value, &ort_type, &shape, &rank)) return status;
+    } else {
+      if (OrtStatus* status = api->GetTensorTypeAndShape(value, &info)) return status;
+      if (OrtStatus* status = api->GetDimensionsCount(info, &rank)) {
+        api->ReleaseTensorTypeAndShapeInfo(info);
+        return status;
+      }
+      if (OrtStatus* status = api->GetTensorElementType(info, &ort_type)) {
+        api->ReleaseTensorTypeAndShapeInfo(info);
+        return status;
+      }
     }
     if (static_cast<int64_t>(rank) != request.arg_ranks[i] ||
         rank > static_cast<size_t>(kMaxRank)) {
-      api->ReleaseTensorTypeAndShapeInfo(info);
+      if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
       return api->CreateStatus(
           ORT_FAIL, "ANNC EP: kernel argument rank does not match the site");
     }
     int64_t dims[kMaxRank] = {0, 0, 0, 0};
     if (rank > 0) {
-      if (OrtStatus* status = api->GetDimensions(info, dims, rank)) {
-        api->ReleaseTensorTypeAndShapeInfo(info);
-        api->ReleaseStatus(status);  // replaced by the message below
-        return api->CreateStatus(
-            ORT_FAIL, "ANNC EP: cannot read a kernel argument shape");
+      if (shape != nullptr) {
+        std::copy_n(shape, rank, dims);
+      } else {
+        if (OrtStatus* status = api->GetDimensions(info, dims, rank)) {
+          api->ReleaseTensorTypeAndShapeInfo(info);
+          api->ReleaseStatus(status);  // replaced by the message below
+          return api->CreateStatus(
+              ORT_FAIL, "ANNC EP: cannot read a kernel argument shape");
+        }
       }
     }
-    api->ReleaseTensorTypeAndShapeInfo(info);
+    if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
     AnncElementType element = 0;
     if (!AnncElementFromOrt(ort_type, &element)) {
       return api->CreateStatus(

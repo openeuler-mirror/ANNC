@@ -129,9 +129,8 @@ module attributes {module.state = "atir"} {
 // -----
 
 // Rank-4 site: fused as BatchedMatMulAdd4 with rank-4 descriptors (the rank-3
-// kernel cannot express the extra batch dim), and no pre-affine folding for
-// this rank -- the affine constants here are rank-3-shaped and would not match
-// the rank-4 weight anyway.
+// kernel cannot express the extra batch dim). This case has no pre-affine
+// chain; rank-4 affine folding is covered by the BMM context end-to-end suite.
 // CHECK-LABEL: func.func @main
 // CHECK: func.func private @fused_batched_matmul_add_
 // CHECK: atir.Customize

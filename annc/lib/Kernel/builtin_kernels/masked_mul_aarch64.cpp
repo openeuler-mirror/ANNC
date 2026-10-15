@@ -1,7 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "Kernel/ExecutionContextUtils.h"
 #include "Support/ThreadPool/RowParallel.h"
@@ -152,40 +157,93 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
   if (fedMuls > 0 && divisor == 0.0f) {
     return annc::kernels::KernelStatus::InvalidArgument;
   }
-  std::vector<const float *> in(Arity, nullptr);
+  std::array<const float*, Arity> in{};
   for (size_t i = 0; i < Arity; ++i) in[i] = ANNC_MEMREF_DATA(*data[i]);
   const int64_t *idValues = ANNC_MEMREF_DATA(*ids);
+  // Decode site metadata once, outside the row/column loops. The sum inputs
+  // retain their original order, including the initial +0 (or product 1).
+  constexpr size_t kMaxSiteInputs = 32;
+  std::array<const float*, kMaxSiteInputs> rawInputs{};
+  std::array<const float*, kMaxSiteInputs> sumInputs{};
+  size_t sumInputCount = 0;
+  if (rawMuls < 1 || static_cast<size_t>(rawMuls) > kMaxSiteInputs ||
+      static_cast<size_t>(rawMuls + Arity - dataArgs) > kMaxSiteInputs)
+    return annc::kernels::KernelStatus::InvalidArgument;
+  for (int64_t i = 0; i < rawMuls; ++i) {
+    rawInputs[i] = in[maskedMulArgIndex(argMap, i)];
+    if (fedMuls > 0 && ((sumMask >> i) & 1)) sumInputs[sumInputCount++] = out[i];
+  }
+  if (fedMuls > 0) {
+    for (int64_t j = dataArgs; j < static_cast<int64_t>(Arity); ++j)
+      sumInputs[sumInputCount++] = in[j];
+  }
+  const bool product = interiorKind == 1;
 
   // One row is an elementwise masked multiply: a compare and a multiply per
   // element, reading f32 data and an i64 id per element.
+  // The host's cost model must see the complete fused row.  Charging one
+  // multiply underestimates a site with several raw/fed outputs and makes
+  // ORT keep it on too few workers; the patched elementwise kernels charge
+  // every output's memory traffic in the same way.
+  const int64_t outputCount = rawMuls + fedMuls + (writeFlat ? 1 : 0);
+  const int64_t sumAdds = fedMuls > 0 ? static_cast<int64_t>(sumInputCount) : 0;
+  const int64_t cyclesPerElement =
+      2 * rawMuls + sumAdds + (fedMuls > 0 ? 1 + fedMuls : 0);
+  const int64_t extraSumInputs =
+      fedMuls > 0
+          ? std::max<int64_t>(0, static_cast<int64_t>(sumInputCount) - rawMuls)
+          : 0;
+  const int64_t bytesReadPerElement = 8 + 4 * dataArgs + 4 * extraSumInputs;
+  const int64_t bytesWrittenPerElement = 4 * outputCount;
   auto options = annc::threadpool::rowOptions(
-      annc::threadpool::cost::elementRow(n, /*cycles=*/2, /*bytes_read=*/12),
+      annc::threadpool::cost::elementRow(n, cyclesPerElement,
+                                          bytesReadPerElement,
+                                          bytesWrittenPerElement),
       n);
   ::annc::threadpool::parallel_for(
       thread_pool, rows, options, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float factor = (idValues[row] != padding) ? 1.0f : 0.0f;
           for (int64_t i = 0; i < rawMuls; ++i) {
-            const float *src = in[maskedMulArgIndex(argMap, i)] + row * n;
+            const float *src = rawInputs[i] + row * n;
             float *dst = out[i] + row * n;
-            for (int64_t c = 0; c < n; ++c) dst[c] = src[c] * factor;
+            int64_t c = 0;
+#if defined(__aarch64__)
+            const float32x4_t factors = vdupq_n_f32(factor);
+            for (; c + 4 <= n; c += 4)
+              vst1q_f32(dst + c, vmulq_f32(vld1q_f32(src + c), factors));
+#endif
+            for (; c < n; ++c) dst[c] = src[c] * factor;
           }
           if (fedMuls > 0) {
             // Column-wise so the row stays in cache: S needs the Sum's inputs
             // (the results just written, plus the remaining arguments), then
             // the fed results are written.
-            const bool product = interiorKind == 1;
-            for (int64_t c = 0; c < n; ++c) {
-              float sum = product ? 1.0f : 0.0f;
-              for (int64_t i = 0; i < rawMuls; ++i) {
-                if ((sumMask >> i) & 1) {
-                  sum = product ? sum * out[i][row * n + c]
-                                : sum + out[i][row * n + c];
-                }
+            int64_t c = 0;
+#if defined(__aarch64__)
+            const float32x4_t divisors = vdupq_n_f32(divisor);
+            const float32x4_t factors = vdupq_n_f32(factor);
+            for (; c + 4 <= n; c += 4) {
+              float32x4_t sum = vdupq_n_f32(product ? 1.0f : 0.0f);
+              for (size_t inputIndex = 0; inputIndex < sumInputCount; ++inputIndex) {
+                const float* input = sumInputs[inputIndex];
+                const float32x4_t value = vld1q_f32(input + row * n + c);
+                sum = product ? vmulq_f32(sum, value) : vaddq_f32(sum, value);
               }
-              for (int64_t j = dataArgs; j < static_cast<int64_t>(Arity); ++j) {
-                sum = product ? sum * in[j][row * n + c]
-                              : sum + in[j][row * n + c];
+              // Exact division, not reciprocal multiplication: preserve the
+              // source Div rounding and IEEE NaN/inf/signed-zero semantics.
+              const float32x4_t scaled =
+                  vmulq_f32(vdivq_f32(sum, divisors), factors);
+              for (int64_t l = 0; l < fedMuls; ++l)
+                vst1q_f32(out[rawMuls + l] + row * n + c, scaled);
+            }
+#endif
+            for (; c < n; ++c) {
+              float sum = product ? 1.0f : 0.0f;
+              for (size_t inputIndex = 0; inputIndex < sumInputCount; ++inputIndex) {
+                const float* input = sumInputs[inputIndex];
+                sum = product ? sum * input[row * n + c]
+                              : sum + input[row * n + c];
               }
               const float scaled = (sum / divisor) * factor;
               for (int64_t l = 0; l < fedMuls; ++l) {

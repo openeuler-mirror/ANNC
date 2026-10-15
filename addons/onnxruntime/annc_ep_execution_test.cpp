@@ -51,6 +51,8 @@ struct FakeApi {
   int made = 0;
   int released = 0;
   int get_output_calls = 0;
+  int shape_info_allocations = 0;
+  int shape_reference_calls = 0;
   std::string last_status_message;
   size_t last_output_rank = 0;
   std::vector<int64_t> last_output_dims;
@@ -73,6 +75,7 @@ struct FakeApi {
     api.ReleaseStatus = &ReleaseStatus;
     api.KernelContext_GetOutput = &GetOutput;
     api.GetTensorTypeAndShape = &GetTensorTypeAndShape;
+    api.GetTensorElementTypeAndShapeDataReference = &GetShapeReference;
     api.GetTensorElementType = &GetTensorElementType;
     api.ReleaseTensorTypeAndShapeInfo = &ReleaseTensorTypeAndShapeInfo;
     api.GetTensorMutableData = &GetTensorMutableData;
@@ -120,7 +123,19 @@ struct FakeApi {
       const OrtValue*, OrtTensorTypeAndShapeInfo** out) noexcept {
     FakeApi& self = Current();
     if (self.fail_get_tensor_type) return MakeStatus();
+    ++self.shape_info_allocations;
     *out = reinterpret_cast<OrtTensorTypeAndShapeInfo*>(0x3);
+    return nullptr;
+  }
+  static OrtStatus* ORT_API_CALL GetShapeReference(
+      const OrtValue*, ONNXTensorElementDataType* type,
+      const int64_t** dims, size_t* rank) noexcept {
+    FakeApi& self = Current();
+    ++self.shape_reference_calls;
+    if (self.fail_get_tensor_type) return MakeStatus();
+    *type = self.element_type;
+    *dims = self.last_output_dims.data();
+    *rank = self.last_output_dims.size();
     return nullptr;
   }
   static OrtStatus* ORT_API_CALL GetTensorElementType(
@@ -322,6 +337,17 @@ TEST_F(ExecutionContextFailureTest, ZeroSizeOutputPassesTheRuntimeDims) {
   EXPECT_EQ(desc.data, nullptr);  // ORT hands back a null data pointer
   EXPECT_TRUE(context.AllOutputsAllocated());
   EXPECT_EQ(context.TakeError(), nullptr);
+}
+
+TEST_F(ExecutionContextFailureTest, OutputTypeCheckBorrowsShapeMetadata) {
+  OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
+  const int64_t dims[3] = {2, 3, 5};
+  AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
+                      ANNC_ALLOCATION_NONE, dims, nullptr};
+  EXPECT_EQ(context.abi()->allocate_output(context.abi()->handle, 0, &desc),
+            ANNC_STATUS_OK);
+  EXPECT_EQ(fake_.shape_reference_calls, 1);
+  EXPECT_EQ(fake_.shape_info_allocations, 0);
 }
 
 TEST_F(ExecutionContextFailureTest, ZeroByteTemporaryNeedsNoAllocator) {
