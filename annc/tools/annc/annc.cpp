@@ -616,6 +616,13 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
+#ifdef ANNC_MLAS_ARCHIVE_ARGS
+        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
+        // thread-pool objects they run on and the CPU-feature probe that
+        // picks the kernel.  Absolute archive paths from the build config.
+        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
+                   " -Wl,--end-group -lpthread -ldl -lrt";
+#endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;
@@ -653,6 +660,13 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
+#ifdef ANNC_MLAS_ARCHIVE_ARGS
+        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
+        // thread-pool objects they run on and the CPU-feature probe that
+        // picks the kernel.  Absolute archive paths from the build config.
+        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
+                   " -Wl,--end-group -lpthread -ldl -lrt";
+#endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
         command += " -Wl,-rpath," KDNN_LIB_DIR;

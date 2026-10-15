@@ -271,6 +271,13 @@ OrtThreadPool::OrtThreadPool(const OrtApi* api, OrtKernelContext* kernel_context
 #endif
 }
 
+void* OrtThreadPool::native_pool() const {
+#if defined(ANNC_EP_NATIVE_POOL)
+  if (native_enabled_) return native_;
+#endif
+  return nullptr;
+}
+
 // ANNC_EP_DEBUG=1: what the native dispatch actually did.  `shards` counts
 // range callbacks -- the shard count ORT chose, serial included (1 = it ran
 // the whole range on the caller) -- and is not the number of threads that

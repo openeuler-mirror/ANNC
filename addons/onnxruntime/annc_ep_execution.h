@@ -65,6 +65,15 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
       std::int64_t total, const annc::threadpool::ParallelForOptions& options,
       const std::function<void(std::int64_t, std::int64_t)>& fn) override;
 
+  // ORT's operator pool object itself, for kernels that call a host-native
+  // library entry with it (MLAS's MlasGemmBatch takes this very object --
+  // mlas.h's MLAS_THREADPOOL is a type alias of
+  // onnxruntime::concurrency::ThreadPool).  Null when the native path is not
+  // active: the pool would still be reachable through the context, but only
+  // the version-gated native path vouches for the layout the kernel would
+  // touch.
+  void* native_pool() const override;
+
  private:
   const OrtApi* api_;
   OrtKernelContext* kernel_context_;

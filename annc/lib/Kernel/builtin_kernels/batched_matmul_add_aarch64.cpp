@@ -1,4 +1,15 @@
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+#if defined(ANNC_KERNEL_MLAS)
+// ORT's MLAS public header (self-contained: forward declarations only).
+// MLAS_THREADPOOL is a type alias of onnxruntime::concurrency::ThreadPool in
+// this ORT release, so the pool the execution context hands over in
+// native_pool() is the object MlasGemmBatch takes.
+#include "mlas.h"
+#endif
 
 #include "Kernel/ExecutionContextUtils.h"
 #include "Support/ThreadPool/RowParallel.h"
@@ -8,6 +19,60 @@
 #include "Support/ThreadPool/ThreadPool.h"
 
 namespace {
+
+#if defined(ANNC_KERNEL_MLAS)
+// Upper bound on the batch count the MLAS path serves from a stack array;
+// beyond it the scalar path runs (the sites this fusion targets carry bias
+// batches of one or two).
+constexpr int64_t kMlasMaxBatch = 16;
+
+// The fused matmul part through MLAS: `batchCount` SGEMMs of one [m,K]x[K,N],
+// with per-batch operand pointers.  MLAS owns the tiling, the microkernel and
+// the threading -- the same call ORT's own batched MatMul makes.
+inline void runMlasBatch(void* native, int64_t m, int64_t n, int64_t k,
+                         const MLAS_SGEMM_DATA_PARAMS* params,
+                         int64_t batchCount) {
+  MlasGemmBatch(CblasNoTrans, CblasNoTrans, static_cast<size_t>(m),
+                static_cast<size_t>(n), static_cast<size_t>(k), params,
+                static_cast<size_t>(batchCount),
+                reinterpret_cast<MLAS_THREADPOOL*>(native),
+                /*BackendKernelSelectorConfig=*/nullptr);
+}
+
+// The bias epilogue: out[row, :] += bias[row / rowsPerBatch, :] -- the Add of
+// the source chain MatMul->Add, run after the full k sum so the rounding
+// order matches (and matches the scalar path).  Row-parallel, so the common
+// layer's gate can keep small epilogues on the caller.
+inline void addBiasRows(annc::threadpool::AnncThreadPool* thread_pool,
+                        float* out, const float* bias, int64_t rows,
+                        int64_t rowsPerBatch, int64_t n) {
+  auto options = annc::threadpool::rowOptions(
+      annc::threadpool::cost::elementRow(n, 1, 8, 4), n);
+  ::annc::threadpool::parallel_for(
+      thread_pool, rows, options, [&](int64_t begin, int64_t end) {
+        for (int64_t row = begin; row < end; ++row) {
+          float* outRow = out + row * n;
+          const float* biasRow = bias + (row / rowsPerBatch) * n;
+          for (int64_t col = 0; col < n; ++col) {
+            outRow[col] += biasRow[col];
+          }
+        }
+      });
+}
+
+// ANNC_EP_DEBUG=1: what the fused site actually ran on.  Capped like the EP's
+// own pool lines; the tag marks the kernel side of the decision.
+inline void logMlasBmm(int64_t batchCount, int64_t m, int64_t n, int64_t k) {
+  if (std::getenv("ANNC_EP_DEBUG") == nullptr) return;
+  static std::atomic<int> printed{0};
+  if (printed.fetch_add(1) >= 4) return;
+  std::fprintf(stderr,
+               "[annc-kernel] bmm: MlasGemmBatch batch=%lld m=%lld n=%lld "
+               "k=%lld\n",
+               static_cast<long long>(batchCount), static_cast<long long>(m),
+               static_cast<long long>(n), static_cast<long long>(k));
+}
+#endif  // ANNC_KERNEL_MLAS
 
 // One output row: out[0..n) = bias[0..n) + sum_k xRow[k] * wRow[k * n + 0..n).
 // The 16-wide blocking keeps the accumulators in registers for the whole k
@@ -118,6 +183,42 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
   const float* w = ANNC_MEMREF_DATA(*weight);
   const float* b = ANNC_MEMREF_DATA(*bias);
 
+#if defined(ANNC_KERNEL_MLAS)
+  // The batch is small by construction (the matcher pins the fused bias to
+  // the graph's own batch dims), so one MlasGemmBatch call serves every
+  // output batch; the scalar path below stays for hosts with no native pool
+  // to hand over.  k == 0 is left to the scalar path, whose bias-only result
+  // is unambiguous.
+  if (thread_pool != nullptr && k > 0) {
+    if (void* native = thread_pool->native_pool(); native != nullptr) {
+      const int64_t batchCount = out0 * out1;
+      if (batchCount <= kMlasMaxBatch) {
+        MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
+        for (int64_t i = 0; i < out0; ++i) {
+          for (int64_t j = 0; j < out1; ++j) {
+            const int64_t batch = i * out1 + j;
+            const int64_t di = d0 == 1 ? 0 : i;
+            const int64_t dj = d1 == 1 ? 0 : j;
+            const int64_t wi = w0 == 1 ? 0 : i;
+            const int64_t wj = w1 == 1 ? 0 : j;
+            MLAS_SGEMM_DATA_PARAMS& p = params[batch];
+            p.A = x + ((di * d1 + dj) * m) * k;
+            p.lda = static_cast<size_t>(k);
+            p.B = w + (wi * w1 + wj) * k * n;
+            p.ldb = static_cast<size_t>(n);
+            p.C = out + batch * m * n;
+            p.ldc = static_cast<size_t>(n);
+          }
+        }
+        runMlasBatch(native, m, n, k, params, batchCount);
+        addBiasRows(thread_pool, out, b, rows, /*rowsPerBatch=*/m, n);
+        logMlasBmm(batchCount, m, n, k);
+        return annc::kernels::KernelStatus::Success;
+      }
+    }
+  }
+#endif
+
   // Same row contract as the rank-3 driver: one row is a k-length dot per
   // output element, and the row work k*n stays well below the elementwise
   // kernels' -- small sites keep running serial.
@@ -219,6 +320,34 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
   const float* x = ANNC_MEMREF_DATA(*data);
   const float* w = ANNC_MEMREF_DATA(*weight);
   const float* b = ANNC_MEMREF_DATA(*bias);
+
+#if defined(ANNC_KERNEL_MLAS)
+  // One GEMM per output batch through MLAS (data and weight broadcast their
+  // batch dim, so the operand pointers resolve per batch); the scalar path
+  // below stays for hosts with no native pool.  k == 0 goes to the scalar
+  // path, whose bias-only result is unambiguous.
+  if (thread_pool != nullptr && k > 0) {
+    if (void* native = thread_pool->native_pool(); native != nullptr) {
+      const int64_t batchCount = d0;
+      if (batchCount <= kMlasMaxBatch) {
+        MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
+        for (int64_t i = 0; i < d0; ++i) {
+          MLAS_SGEMM_DATA_PARAMS& p = params[i];
+          p.A = x + (dataBatch == 1 ? 0 : i * d1 * k);
+          p.lda = static_cast<size_t>(k);
+          p.B = w + (weightBatch == 1 ? 0 : i * k * n);
+          p.ldb = static_cast<size_t>(n);
+          p.C = out + i * d1 * n;
+          p.ldc = static_cast<size_t>(n);
+        }
+        runMlasBatch(native, d1, n, k, params, batchCount);
+        addBiasRows(thread_pool, out, b, rows, /*rowsPerBatch=*/d1, n);
+        logMlasBmm(batchCount, d1, n, k);
+        return annc::kernels::KernelStatus::Success;
+      }
+    }
+  }
+#endif
 
   // Rows are independent; the row work k*n stays well below the elementwise
   // kernels', so small sites keep running serial.
