@@ -439,7 +439,11 @@ int runPipeline(int argc, char **argv, const Options &opts) {
                 "-o", aotModule.string()},
                cwd, env, opts.verbose);
   if (rc != 0) return rc;
-  rc = runTool({anncAsm, aotModule.string(), "--atir-fast-codegen",
+  std::string fastCodegenPass = "--atir-fast-codegen";
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+  fastCodegenPass = "--atir-fast-codegen=enable-kdnn=true";
+#endif
+  rc = runTool({anncAsm, aotModule.string(), fastCodegenPass,
                 "--annc-aarch64-gemm-pipeline", "-o", loweredModule.string()},
                cwd, env, opts.verbose);
   if (rc != 0) return rc;

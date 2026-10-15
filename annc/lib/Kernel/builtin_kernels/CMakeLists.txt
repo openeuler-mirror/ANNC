@@ -73,6 +73,8 @@ target_include_directories(ANNCBuiltinKernels PRIVATE
 )
 
 if(ANNC_ENABLE_KDNN_ADAPTOR)
+    target_compile_definitions(ANNCBuiltinKernels PRIVATE
+        KDNN_CPU_THREADING_RUNTIME=KDNN_RUNTIME_THREADPOOL)
     if(TARGET KDNN::kdnn)
         target_link_libraries(ANNCBuiltinKernels PUBLIC KDNN::kdnn)
     elseif(KDNN_INCLUDE_DIR AND KDNN_LIBRARY)
