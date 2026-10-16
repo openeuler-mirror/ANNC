@@ -93,7 +93,7 @@ flowchart TD
 | 共享引擎，框架表与适配独立 | 复用已有机制，同时把语义差异留在前端，采用 |
 | 首期支持多个 opset 的分版本规格表 | 扩大维护与验证范围，留待后续需求驱动 |
 
-长期决策见 [ADR-011](../ADR/decisions.md#adr-011)；本文补充具体实现契约与现阶段限制。
+长期决策见 [ADR-011](../decisions/decisions.md#adr-011)；本文补充具体实现契约与现阶段限制。
 
 ## 3 模型、张量与图边界
 
@@ -367,5 +367,5 @@ pytest 检查 `ANNC_BUILD_DIR`，否则依次尝试 `build-v2` 与 `build`，寻
 - [共享 builder 接口](../../annc/include/Builder/MLIROpBuilder.h)与[实现](../../annc/lib/Builder/MLIROpBuilder.cpp)
 - [前端 GTest](../../frontends/onnx/onnx2atir/test/onnx_frontend_test.cpp)与[CLI pytest](../../tests/test_onnx_frontend.py)
 - [ONNX proto 生成脚本](../../frontends/onnx/protos/onnx_protos_minimal.sh)
-- [ANNC 总体架构](../annc-architecture-design.md)与[ADR-011](../ADR/decisions.md#adr-011)
-- ONNX Runtime 侧回接见[EP 执行上下文设计](ort-ep-execution-context-architecture-design.md)与 [ADR-013](../ADR/decisions.md#adr-012)
+- [ANNC 总体架构](../architecture/overview.md)与[ADR-011](../decisions/decisions.md#adr-011)
+- ONNX Runtime 侧回接见[EP 执行上下文设计](ort-ep-execution-context-architecture-design.md)与 [ADR-013](../decisions/decisions.md#adr-012)

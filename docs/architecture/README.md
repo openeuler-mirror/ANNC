@@ -4,9 +4,9 @@
 
 ## 现有文档
 
-| 文档 | 当前位置 | 计划落点 |
-| --- | --- | --- |
-| ANNC 总体架构设计 | [../annc-architecture-design.md](../annc-architecture-design.md) | 本目录 `overview.md` |
+| 文档 | 位置 |
+| --- | --- |
+| ANNC 总体架构设计 | [overview.md](overview.md) |
 
 ## 规划内容
 

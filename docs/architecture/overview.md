@@ -11,7 +11,7 @@
 
 ## 1 概述
 
-> ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](Feature/annc-ort-ep-pipeline-adaptation-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
+> ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](../Feature/annc-ort-ep-pipeline-adaptation-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
 
 ### 1.1 目的
 
@@ -343,10 +343,10 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 
 #### 4.1.4 关键架构决策记录
 
-项目关键架构决策统一维护在 `docs/ADR/` 目录：
+项目关键架构决策统一维护在 `docs/decisions/` 目录：
 
-- 索引与机制说明：`docs/ADR/README.md`
-- 详细决策内容：`docs/ADR/decisions.md`
+- 索引与机制说明：`docs/decisions/README.md`
+- 详细决策内容：`docs/decisions/decisions.md`
 
 当前已记录的决策包括：
 

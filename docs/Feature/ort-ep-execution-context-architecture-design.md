@@ -233,5 +233,5 @@ pattern 要求模块携带 ONNX 前端的 `annc.contract_version` 标记，TF �
 - [ONNX 执行状态与线程池适配](../../addons/onnxruntime/annc_ep_execution.cc)与[EP 分发](../../addons/onnxruntime/annc_ep.cpp)
 - [站点契约校验](../../addons/onnxruntime/annc_ep_site.cc)、[运行时编译驱动](../../addons/onnxruntime/annc_ep_compile.cc)、[EP README（v2 站点章节）](../../addons/onnxruntime/README.md)
 - [FTDMM pattern](../../annc/lib/Dialect/Atir/Passes/OpFusion.cpp)与[kernel spec/实现](../../annc/lib/Kernel/builtin_kernels/tensordot_matmul_kernel_specs.inc)
-- 上游：[ONNX → ATIR 前端设计文档](onnx-frontend-architecture-design.md)；[ANNC 总体架构](../annc-architecture-design.md)与 [ADR-013](../ADR/decisions.md#adr-012)
+- 上游：[ONNX → ATIR 前端设计文档](onnx-frontend-architecture-design.md)；[ANNC 总体架构](../architecture/overview.md)与 [ADR-013](../decisions/decisions.md#adr-012)
 - 实现提交（分支 `feature/annc-ort-ep-execution-context`，落在 `upstream/dev` @ `1f1197aa` 之上）：`0fc1b1c2` ABI v3、`6fa260d2` EP 执行上下文与分发、`2d9d7870` FTDMM 载体、`30457e3a` 测试、`207f4d32` EP README；本设计文档与总体架构/ADR 的同步修改随其后一次文档提交引入。同特性另有 6 轮交叉检视与 3 轮确认记录（含一处"按输入数相等加守卫被真实 e2e 证伪"的教训），检视留痕在团队任务库，不在本仓。
