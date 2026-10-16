@@ -51,6 +51,8 @@ struct FakeApi {
   int made = 0;
   int released = 0;
   int get_output_calls = 0;
+  int shape_info_allocations = 0;
+  int shape_reference_calls = 0;
   std::string last_status_message;
   size_t last_output_rank = 0;
   std::vector<int64_t> last_output_dims;
@@ -73,6 +75,7 @@ struct FakeApi {
     api.ReleaseStatus = &ReleaseStatus;
     api.KernelContext_GetOutput = &GetOutput;
     api.GetTensorTypeAndShape = &GetTensorTypeAndShape;
+    api.GetTensorElementTypeAndShapeDataReference = &GetShapeReference;
     api.GetTensorElementType = &GetTensorElementType;
     api.ReleaseTensorTypeAndShapeInfo = &ReleaseTensorTypeAndShapeInfo;
     api.GetTensorMutableData = &GetTensorMutableData;
@@ -120,7 +123,19 @@ struct FakeApi {
       const OrtValue*, OrtTensorTypeAndShapeInfo** out) noexcept {
     FakeApi& self = Current();
     if (self.fail_get_tensor_type) return MakeStatus();
+    ++self.shape_info_allocations;
     *out = reinterpret_cast<OrtTensorTypeAndShapeInfo*>(0x3);
+    return nullptr;
+  }
+  static OrtStatus* ORT_API_CALL GetShapeReference(
+      const OrtValue*, ONNXTensorElementDataType* type,
+      const int64_t** dims, size_t* rank) noexcept {
+    FakeApi& self = Current();
+    ++self.shape_reference_calls;
+    if (self.fail_get_tensor_type) return MakeStatus();
+    *type = self.element_type;
+    *dims = self.last_output_dims.data();
+    *rank = self.last_output_dims.size();
     return nullptr;
   }
   static OrtStatus* ORT_API_CALL GetTensorElementType(
@@ -324,6 +339,17 @@ TEST_F(ExecutionContextFailureTest, ZeroSizeOutputPassesTheRuntimeDims) {
   EXPECT_EQ(context.TakeError(), nullptr);
 }
 
+TEST_F(ExecutionContextFailureTest, OutputTypeCheckBorrowsShapeMetadata) {
+  OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
+  const int64_t dims[3] = {2, 3, 5};
+  AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
+                      ANNC_ALLOCATION_NONE, dims, nullptr};
+  EXPECT_EQ(context.abi()->allocate_output(context.abi()->handle, 0, &desc),
+            ANNC_STATUS_OK);
+  EXPECT_EQ(fake_.shape_reference_calls, 1);
+  EXPECT_EQ(fake_.shape_info_allocations, 0);
+}
+
 TEST_F(ExecutionContextFailureTest, ZeroByteTemporaryNeedsNoAllocator) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
   AnncExecutionContext* abi = context.abi();
@@ -382,7 +408,12 @@ TEST_F(ExecutionContextFailureTest, ParallelForFailureRunsTheRangeInline) {
   std::vector<int64_t> begins;
   std::vector<int64_t> ends;
 
-  pool.parallel_for(64, {}, [&](int64_t begin, int64_t end) {
+  // Cost well past Eigen's startup+per-thread cycles, so the range really is
+  // handed to the pool -- otherwise the adapter would run it inline and never
+  // exercise the failure path.
+  annc::threadpool::ParallelForOptions options;
+  options.cost_per_unit = 1;
+  pool.parallel_for(300000, options, [&](int64_t begin, int64_t end) {
     begins.push_back(begin);
     ends.push_back(end);
   });
@@ -392,8 +423,54 @@ TEST_F(ExecutionContextFailureTest, ParallelForFailureRunsTheRangeInline) {
   EXPECT_EQ(fake_.parallel_for_calls, 1);
   ASSERT_EQ(begins.size(), 1u);
   EXPECT_EQ(begins[0], 0);
-  EXPECT_EQ(ends[0], 64);
+  EXPECT_EQ(ends[0], 300000);
   EXPECT_EQ(fake_.released, 1);
+}
+
+// The shim sizes the batches the way ORT sizes the blocks of its own kernels:
+// (total * cost - 100000) / 100000 + 0.9 decides whether to parallelise at all
+// and 1 means the range runs on the calling thread with no dispatch.
+TEST_F(ExecutionContextFailureTest, CostBelowTheStartupThresholdRunsInline) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  annc::threadpool::ParallelForOptions options;
+  options.cost_per_unit = 8;  // e.g. 1600 rows x 8 columns of a masked mul
+  std::vector<int64_t> begins;
+  std::vector<int64_t> ends;
+
+  pool.parallel_for(1600, options, [&](int64_t begin, int64_t end) {
+    begins.push_back(begin);
+    ends.push_back(end);
+  });
+
+  EXPECT_EQ(fake_.parallel_for_calls, 0);  // 12800 cycles < kStartupCycles
+  EXPECT_EQ(begins, (std::vector<int64_t>{0}));
+  EXPECT_EQ(ends, (std::vector<int64_t>{1600}));
+}
+
+TEST_F(ExecutionContextFailureTest, CostAboveTheThresholdSetsTheShardCount) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  annc::threadpool::ParallelForOptions options;
+  options.cost_per_unit = 128;
+  std::vector<int64_t> shard_sizes;
+
+  // 4096 * 128 = 524288 cycles > kStartupCycles, so the range is cut into
+  // blocks the way ThreadPool::CalculateParallelForBlock cuts it: no block
+  // below kTaskSize/cost = 40000/128 = 312 units, and 342 is the coarsest
+  // block whose count still divides as evenly across the pool -> 12 shards.
+  pool.parallel_for(4096, options, [&](int64_t begin, int64_t end) {
+    shard_sizes.push_back(end - begin);
+  });
+
+  EXPECT_EQ(fake_.parallel_for_calls, 1);
+  EXPECT_EQ(fake_.last_parallel_total, 12u);
+  EXPECT_EQ(fake_.last_parallel_batches, 12u);
+  ASSERT_EQ(shard_sizes.size(), 12u);
+  int64_t covered = 0;
+  for (int64_t size : shard_sizes) {
+    EXPECT_GE(size, 312);  // kTaskSize cycles of work per block, at least
+    covered += size;
+  }
+  EXPECT_EQ(covered, 4096);  // every unit lands in exactly one shard
 }
 
 TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
@@ -410,15 +487,46 @@ TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
     shard_sizes.push_back(end - begin);
   });
 
-  // Each per-index ORT callback arrives as the one-element range it is, the
-  // nesting gate is up while they run and down afterwards, and grain_size
-  // drove the batch count (min(ceil(4/2), num_threads()) = 2 <= the pool's
-  // advisory size).
-  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{1, 1, 1, 1}));
+  // One ORT batch per shard: the callback receives a batch index and turns it
+  // into the range it covers, so grain_size 2 over 4 units arrives as the two
+  // half ranges -- not four one-unit callbacks (which is what ORT's per-unit
+  // dispatch would do, and what cost ~1.4us of dispatch per unit on the target
+  // models).  The nesting gate is up while the callbacks run and down after.
+  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{2, 2}));
   EXPECT_TRUE(in_region_during_callbacks);
   EXPECT_FALSE(pool.in_parallel_region());
-  EXPECT_EQ(fake_.last_parallel_total, 4u);
+  EXPECT_EQ(fake_.last_parallel_total, 2u);
   EXPECT_EQ(fake_.last_parallel_batches, 2u);
+}
+
+// ANNC_EP_SHARDS caps the shard count for tuning without a rebuild.
+TEST_F(ExecutionContextFailureTest, ParallelForShardOverrideCapsTheCount) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  ::setenv("ANNC_EP_SHARDS", "2", 1);
+  std::vector<int64_t> shard_sizes;
+  annc::threadpool::ParallelForOptions options;
+  options.cost_per_unit = 128;  // 12 shards unclamped, see the test above
+  pool.parallel_for(4096, options, [&](int64_t begin, int64_t end) {
+    shard_sizes.push_back(end - begin);
+  });
+  ::unsetenv("ANNC_EP_SHARDS");
+  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{2048, 2048}));
+  EXPECT_EQ(fake_.last_parallel_batches, 2u);
+}
+
+// With neither signal the range is split the way the in-tree pool's grain
+// default (1) and ORT's own num_batches<=0 default split it: one unit per
+// block, bounded by the pool's degree.
+TEST_F(ExecutionContextFailureTest, NoCostSignalGetsOneUnitPerShard) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  std::vector<int64_t> shard_sizes;
+  pool.parallel_for(64, annc::threadpool::ParallelForOptions{},
+                    [&](int64_t begin, int64_t end) {
+                      shard_sizes.push_back(end - begin);
+                    });
+  EXPECT_EQ(fake_.parallel_for_calls, 1);
+  EXPECT_EQ(shard_sizes.size(), 64u);
+  EXPECT_EQ(fake_.last_parallel_batches, 64u);
 }
 
 TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {

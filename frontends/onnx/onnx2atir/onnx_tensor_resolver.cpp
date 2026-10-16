@@ -444,6 +444,41 @@ bool OnnxTensorResolver::resolve(const OnnxGraph& graph,
         outs[0].rank_known = false;
       }
       inheritDtype(first);
+    } else if (op == "Gemm") {
+      // A plugin EP is handed ORT's *optimized* graph, where the optimizer has
+      // already rewritten MatMul + Add(bias) into Gemm; the frontend imports
+      // that node as atir.opaque (no ATIR form yet), so without a shape rule
+      // here its output stays rank-unknown and every consumer fails its rank
+      // checks -- measured on model4: 19 of 27 LayerNorm chains sit behind a
+      // Gemm projection and were lost this way.  Only the shape is resolved;
+      // the node's execution stays with the host.
+      int64_t trans_a = 0;
+      int64_t trans_b = 0;
+      getAttrInt(proto, "transA", trans_a);
+      getAttrInt(proto, "transB", trans_b);
+      if (ins.size() >= 2 && ins[0] && ins[1] && ins[0]->rank_known &&
+          ins[1]->rank_known) {
+        const Dims& a = ins[0]->shape;
+        const Dims& b = ins[1]->shape;
+        Dims out_shape;
+        bool ok = true;
+        if (a.size() != 2 || b.size() != 2) {
+          ok = false;  // ONNX defines Gemm on rank-2 operands only
+        } else {
+          const int64_t m = trans_a ? a[1] : a[0];
+          const int64_t k1 = trans_a ? a[0] : a[1];
+          const int64_t k2 = trans_b ? b[1] : b[0];
+          const int64_t n = trans_b ? b[0] : b[1];
+          if (!isDynamic(k1) && !isDynamic(k2) && k1 != k2) ok = false;
+          if (ok) out_shape = {m, n};
+        }
+        outs[0].rank_known = ok;
+        if (ok) outs[0].shape = out_shape;
+      } else {
+        outs[0].rank_known = false;
+      }
+      // C broadcasts into the [M, N] result, so it never changes the shape.
+      inheritDtype(first);
     } else if (op == "Reshape") {
       const TensorDescriptor* shape_desc = ins.size() >= 2 ? ins[1] : nullptr;
       int64_t allowzero = 0;

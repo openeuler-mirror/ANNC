@@ -20,12 +20,12 @@ export ANNC_ONNXRUNTIME_INCLUDE_DIR=<ORT_ROOT>/include/onnxruntime/core/session
 > 与 `tensorflow_addons/` 的差异：TF addon 由 `ANNC_ENABLE_TENSORFLOW_ADDON` 控制且默认
 > 构建，本插件的开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭。
 
-> 状态：**运行时编译是唯一形态**（2026-09-29 起）。当前 MR2 接入切片接受两类站点：
+> 状态：**运行时编译是唯一形态**（2026-09-29 起）。当前 EP 接受两类站点：
 > `abi=mlir_ciface`（固定 3D lhs + 2D rhs + 3D output 的预分配输出调用）与
 > `abi=annc_execution_v2`（首参为执行上下文，输出经回调分配，线程池随上下文传入，
-> 见下节）；两者都要求 `pattern=matmul|tensordot_matmul`、`execution_mode=aot`。
-> `layer_norm`、`masked_mul`、`batched_matmul_add` 和其他 ABI 必须先完成独立
-> kernel/metadata/Compute 契约后才能申报。四模型性能数据不属于本切片验收。
+> 见下节）。context-ABI 站点覆盖 `tensordot_matmul`、`masked_mul`、`layer_norm` 和
+> `batched_matmul_add`；其 pattern、成员节点和输出集合必须由 ANNC pipeline 报告，EP
+> 只做契约校验和整体申报。
 
 ## 会话初始化时发生什么
 
@@ -61,31 +61,32 @@ session init
 | `allocate_output(handle, slot, desc)` | `KernelContext_GetOutput` + 张量类型复核 | slot 必须在站点声明的输出数内、不得重复分配；rank 与站点契约一致；元素类型与图声明一致（否则记录错误并拒绝） |
 | `allocate_temp(handle, desc)` | `KernelContext_GetAllocator` + `AllocatorAlloc`（`ANNC_ALLOCATION_ZERO` 置零） | 逐 Compute 分配、Compute 结束 `AllocatorFree`；allocator 句柄最后 `ReleaseAllocator` |
 | `report_error(handle, status, msg)` | 记录首个错误，Compute 返回时转 `OrtStatus` | 不会 terminate 宿主；失败即该次 Run 失败，不静默 |
-| `thread_pool` | `OrtThreadPool`（`KernelContext_ParallelFor`） | ANNC 的区间回调按索引转接；`grain_size` 映射为批数、上限为建议值；调用失败回退本线程；嵌套由 thread_local 深度判定 |
+| `thread_pool` | `OrtThreadPool`（可选原生池，默认公开 API） | 原生路径按 cost/grain 派发；公开路径每 shard 回调一次并映射为区间；公开调用失败回退本线程；嵌套由 thread_local 深度判定 |
 
 调用约定（kernel 侧 spec 见 `annc/lib/Kernel/builtin_kernels/*_kernel_specs.inc`）：
 
-- `site.args` 是 kernel 的**输入**参数表（按调用顺序），EP 按 **rank + dtype** 把它
-  解析到融合节点的输入上（rank 必须互异，站点契约强制；元素类型与报告 `dtype` 必须
-  一致）。融合节点的输入**可以多于**参数：形状链的常量与操作数并列暴露（legacy 路径
-  同样按 rank+type 扫描），不匹配任何参数的输入被忽略；反之，若**两个输入同时命中
-  同一参数**，绑定 fail-closed（首个 Compute 报错），不做首匹配。
+- `site.args` 是 kernel 的**输入**参数表（按调用顺序）。EP 优先使用报告中的张量名绑定；
+  名称不可用时才按 **rank + dtype** 解析，并对二义性 fail-closed。融合节点的输入**可以多于**
+  参数：形状链的常量与操作数并列暴露，不匹配任何参数的输入被忽略；同一参数被多个输入命中
+  时拒绝绑定。context-ABI 站点最多 14 个参数（rank 0–4，f32/i64），输出为 f32；重复 rank
+  或多输出站点必须成功解析名称，否则在申报前丢弃。
 - 输出不在调用参数里：kernel 用 `allocate_output` 申请槽位后自行计算形状（例如
   FTDMM 的输出 `[d0, d1, N]` 只有读到输入描述符才知道），Compute 结束时 EP 校验
   所有声明槽位都已分配。
 - `kernel_arg_order` 必须为空；输出槽数与融合子图的输出数必须一致（Compile 期核对）。
 - 站点由 ANNC 侧的 fusion pattern 产出，本轮只对 ONNX 导入生效（pattern 要求模块带
   ONNX 前端的 `annc.contract_version` 标记）；TF 侧图不产出该站点，融合行为不变。
-- 线程池的实际并行度由 ORT 决定：`num_threads()` 只是 ANNC 串/并行门限的建议上界
-  （ORT C API 无池尺寸查询），intra-op=1 时 `KernelContext_ParallelFor` 内联串行。
+- 原生池路径的 `num_threads()` 读取真实 `DegreeOfParallelism`（空池为 1）；公开 API
+  路径使用硬件并发数限定的建议上界，因为 C API 不提供池尺寸查询。实际执行由 ORT 调度。
 
 - **谁决定融合边界**：ANNC 工具链（`annc-opt --atir-op-fusion`），EP 不做任何 pattern
   匹配。EP 按报告里的成员节点名单整体申报，`sites.json` 的 `outputs[0].tf_name` 是
   回映射 ORT 节点的键（EP 导出时自命名，故可精确反查）。
 - **缓存**：`$ANNC_EP_CACHE_DIR/v1/<签名前2位>/<签名>/{sites.json,[libannc_kernels.so],DONE}`，
   零站点结果不生成共享库；非零站点必须同时存在共享库，
-  签名 = EP 版本 ‖ 工具链指纹 ‖ 宿主指纹 ‖ 模型结构签名（丢弃权重内容——kernel 把权重
-  当运行时实参）。冷缓存下一次编译（实测 profile1 约 0.6 s、profile4 约 6 s），
+  签名 = EP 版本 ‖ 工具链指纹 ‖ 宿主指纹 ‖ 模型签名。含 `Mul` 与 `MatMul`
+  的图保留 initializer 内容，避免前置常量仿射折叠复用过期 kernel；其它图的权重
+  仍作为运行时实参，签名只保留结构。冷缓存下一次编译（实测 profile1 约 0.6 s、profile4 约 6 s），
   热缓存与不注册 EP 同量级。
 
 ## 构建
@@ -95,6 +96,45 @@ ONNX protobuf；正常路径是上面的根构建（`--enable-ort-ep`）。
 
 **只 include `onnxruntime_c_api.h`**：它内含 `onnxruntime_ep_c_api.h`，而后者没有自己的
 include guard，重复 include 会让其中每个结构体重复定义。
+
+### 可选原生线程池与 MLAS
+
+两项优化均默认关闭，用根 CMake 配置启用。构建树指宿主 ORT 构建的 `Release/` 目录，
+不是 SDK 安装目录：
+
+| CMake 选项 | 启用配置 |
+|---|---|
+| `ANNC_EP_NATIVE_POOL` | `ON`，同时启用 `ANNC_ENABLE_ONNXRUNTIME_EP` |
+| `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 common/cpuinfo 归档 |
+| `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
+| `ANNC_KERNEL_MLAS` | `ON`，与原生池配套 |
+| `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
+| `ANNC_MLAS_BUILD_TREE` | 同一宿主构建树，提供 MLAS/KleidiAI/common/cpuinfo 归档 |
+
+原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
+不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配或运行时
+`ANNC_EP_NATIVE_POOL=0` 时回落公开 API；原生路径的空池表示串行。
+
+原生路径有 cost 时调用 `TryParallelFor`，只有 grain 时固定块调度，两者都没有时使用
+公开 API。`ANNC_EP_SHARDS` 仅限制公开 API 路径，不限制原生 cost/grain 调度或 MLAS。
+
+FTDMM/BMM 仅在编译启用 MLAS 且 `native_pool()` 非空时调用 `MlasGemmBatch`；否则执行
+标量行路径，空池（如 intra-op=1）也不执行串行 MLAS。driver 将上述归档路径写入 kernel
+链接命令；EP 与 kernel 必须同源构建。
+
+### 融合覆盖与浮点顺序
+
+BMM 的 rank-3/rank-4 入口均支持把常量 `Mul → Add` 前仿射折叠进 W/bias。
+常量按 ONNX 后对齐规则在 batch/K 轴广播，M 轴必须为1；权重发生 batch 广播时保留
+原仿射链，不扩张权重。验收须同时核对 site 数、成员节点数和实际 EP 执行事件：
+相同的50个 BMM site 可以分别覆盖100或144个原图节点，不能只按 site 数判断等价。
+仿射折叠会改变浮点运算顺序，数值验收沿用 `rtol=1e-3, atol=1e-7`，不承诺逐位一致。
+
+BMM 在当前 MLAS 单 K tile 的保守范围 `K<=128` 预填 bias 并使用 beta=1；更大 K
+保持 GEMM 完整归约后加 bias，避免 `2^24 + 1 - 2^24` 把 bias 舍掉。
+masked_mul 在 AArch64 显式使用 NEON，保持既有输入归约顺序、真实除法以及 NaN/Inf/符号零
+处理，余数列仍走标量尾部。ContextCall 在首次成功绑定后发布为只读，动态 shape、输出和
+临时分配仍在每次调用内独立创建；同 Session 首调用并发有独立回归。
 
 ## 运行
 
@@ -118,7 +158,7 @@ export ANNC_EP_CACHE_DIR=/abs/path/cache                    # 缺省：$XDG_CACH
 
 配置 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 且使用含 `onnx`、`numpy`、`onnxruntime`
 的 Python 环境后，运行
-`ctest -R 'AnncEp(SiteValidation|ContextSiteValidation|AotFixture|ContextFixture|FtdmmAotE2e|FtdmmContextE2e)' --output-on-failure`。
+`ctest -R 'AnncEp' --output-on-failure`。
 `AnncEpAotFixture` 构建一个单节点 MatMul 模型，通过真实 ORT EP 完成图导出、
 site 校验、缓存、融合节点、kernel 加载和数值执行；测试 kernel 的调用标记用于
 区分 ANNC 执行与 CPU 回退。fixture 仅代替当前 JIT 专用的 MatMul 代码生成，
@@ -146,6 +186,8 @@ ABI、参数绑定规则与失败形态见
 | `ANNC_EP_DEBUG=1` | 编译诊断：签名/缓存命中、逐站点申报与丢弃原因、每融合节点的锚点名与 kernel 名、每节点首次操作数形状 |
 | `ANNC_EP_TIMING=1` | 进程退出时打印每节点的开销拆分（输入识别 / 输出分配 / kernel） |
 | `ANNC_EP_NOOP=1` | `Compute` 只分配输出不做计算——测量辅助，不是运行模式 |
+| `ANNC_EP_SHARDS=<n>` | 限制公开 API 路径的分片数；不影响原生 cost/grain 调度或 MLAS |
+| `ANNC_EP_NATIVE_POOL=0` | 禁用原生池并回落公开 API；MLAS 因无原生池而回落标量 |
 | `ANNC_EP_COMPILE=0` | 完全禁用运行时编译（等价于不注册 EP，用于对照） |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 子进程超时，默认 600 |
 | `ANNC_EP_KEEP_TEMPS=1` | 保留编译工作目录 |

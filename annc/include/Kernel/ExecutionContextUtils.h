@@ -227,6 +227,13 @@ inline Expected<AnncMemRef3DF32> allocateOutput3DF32(
   return allocate<AnncMemRef3DF32>(context, slot, ANNC_ELEMENT_TYPE_F32, 3, dims,
                                    flags);
 }
+inline Expected<AnncMemRef4DF32> allocateOutput4DF32(
+    const AnncExecutionContext* context, uint32_t slot, int64_t dim0,
+    int64_t dim1, int64_t dim2, int64_t dim3, AnncAllocationFlags flags) {
+  const int64_t dims[] = {dim0, dim1, dim2, dim3};
+  return allocate<AnncMemRef4DF32>(context, slot, ANNC_ELEMENT_TYPE_F32, 4, dims,
+                                   flags);
+}
 inline Expected<AnncMemRef2DI32> allocateOutput2DI32(
     const AnncExecutionContext* context, uint32_t slot, int64_t dim0,
     int64_t dim1, AnncAllocationFlags flags) {

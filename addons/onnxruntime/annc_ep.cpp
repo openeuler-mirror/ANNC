@@ -34,6 +34,9 @@
 #include "annc_ep_compile.h"
 #include "annc_ep_execution.h"
 
+#include <filesystem>
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +45,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -90,6 +94,38 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
     fingerprint += name;
     fingerprint += "=" + std::to_string(std::strlen(value)) + ":";
     fingerprint += value;
+  }
+
+  // The kernel archives themselves are *inputs* to the link step, and the
+  // pipeline reads them from ANNC_KERNEL_LIB_PATH -- whose value above is only
+  // the directory name.  Without their identity in the key, rebuilding a
+  // kernel leaves every cached entry valid and the EP keeps running the old
+  // library (hit while porting masked_mul: the kernel-side grain change was
+  // invisible until the caches were wiped).  Size+mtime of every archive in
+  // that directory is enough to catch a rebuild; hashing contents would mean
+  // reading hundreds of megabytes per session.
+  if (const char* lib_dir = std::getenv("ANNC_KERNEL_LIB_PATH")) {
+    std::vector<std::string> entries;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(lib_dir, error)) {
+      if (error) break;
+      if (entry.path().extension() != ".a") continue;
+      std::error_code stat_error;
+      const auto size = std::filesystem::file_size(entry.path(), stat_error);
+      if (stat_error) continue;
+      const auto stamp = std::filesystem::last_write_time(entry.path(), stat_error);
+      if (stat_error) continue;
+      entries.push_back(entry.path().filename().string() + ":" +
+                        std::to_string(size) + ":" +
+                        std::to_string(
+                            static_cast<int64_t>(stamp.time_since_epoch().count())));
+    }
+    std::sort(entries.begin(), entries.end());
+    fingerprint += "\nannc-ep-kernel-libs-v1";
+    for (const std::string& entry : entries) {
+      fingerprint += "\n";
+      fingerprint += entry;
+    }
   }
   return fingerprint;
 }
@@ -181,6 +217,76 @@ std::vector<const OrtValueInfo*> NodeOutputs(const OrtNode* node) {
   return outputs;
 }
 
+// The graph's own name for a value (empty when ORT has none). This is the
+// original model's tensor name -- exactly what the site report's names are
+// translated back to at claim time.
+std::string ValueNameOf(const OrtValueInfo* value) {
+  if (value == nullptr) return {};
+  const char* name = nullptr;
+  (void)g_api->GetValueInfoName(value, &name);
+  return name ? name : "";
+}
+
+std::vector<std::string> NodeInputNames(const OrtNode* node) {
+  size_t count = 0;
+  if (node == nullptr ||
+      g_api->Node_GetNumInputs(node, &count) != nullptr) {
+    return {};
+  }
+  std::vector<const OrtValueInfo*> inputs(count, nullptr);
+  if (count != 0 &&
+      g_api->Node_GetInputs(node, inputs.data(), count) != nullptr) {
+    return {};
+  }
+  std::vector<std::string> names;
+  names.reserve(count);
+  for (const OrtValueInfo* value : inputs) names.push_back(ValueNameOf(value));
+  return names;
+}
+
+std::vector<std::string> NodeOutputNames(const OrtNode* node) {
+  std::vector<const OrtValueInfo*> outputs = NodeOutputs(node);
+  std::vector<std::string> names;
+  names.reserve(outputs.size());
+  for (const OrtValueInfo* value : outputs) names.push_back(ValueNameOf(value));
+  return names;
+}
+
+// The report names the exported model's tensors ("t<i>_<p>" / "in_<k>" /
+// "w_<k>"); Compile() sees the original graph. Translating at claim time (the
+// only place with the rename table) lets Compile() bind kernel arguments and
+// outputs by the graph's own names -- the only way to tell apart arguments the
+// rank/type rule cannot separate. Outputs additionally carry the result index
+// the report appends ("t178_0:0") and the exported names never contain ':', so
+// that suffix is dropped when the full name is not in the table.
+// Returns the translated copy, or std::nullopt when a name cannot be resolved.
+std::optional<annc_ep::Site> TranslatedSite(const annc_ep::Site& site,
+                                            const annc_ep::NameMaps& maps) {
+  auto lookup = [&](const std::string& name) -> const std::string* {
+    auto it = maps.renamed_to_tensor.find(name);
+    if (it != maps.renamed_to_tensor.end()) return &it->second;
+    const size_t colon = name.rfind(':');
+    if (colon == std::string::npos || colon + 1 == name.size()) return nullptr;
+    for (size_t i = colon + 1; i < name.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) return nullptr;
+    }
+    it = maps.renamed_to_tensor.find(name.substr(0, colon));
+    return it == maps.renamed_to_tensor.end() ? nullptr : &it->second;
+  };
+  annc_ep::Site translated = site;
+  for (annc_ep::Site::Arg& arg : translated.args) {
+    const std::string* original = lookup(arg.name);
+    if (original == nullptr) return std::nullopt;
+    arg.name = *original;
+  }
+  for (annc_ep::Site::Arg& output : translated.outputs) {
+    const std::string* original = lookup(output.name);
+    if (original == nullptr) return std::nullopt;
+    output.name = *original;
+  }
+  return translated;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -193,18 +299,17 @@ struct ComputeState {
   // output slots the callbacks validate against.
   void* symbol = nullptr;
   std::string abi;
-  std::vector<int64_t> arg_ranks;
-  std::vector<AnncElementType> arg_types;
-  std::vector<annc_ep::OutputContract> outputs;
-  // Input index each context argument resolves to, resolved on the first call
-  // and guarded by `context_mutex`: ORT may run the same node concurrently.
+  // Immutable after the argument binding is published. Keeping the contract
+  // here avoids copying five vectors and locking on every fused-node call.
+  annc_ep::ContextCall context_call;
   std::mutex context_mutex;
-  std::vector<int64_t> arg_indices;
+  std::atomic<bool> context_ready{false};
   // The fused node's input layout is fixed for the lifetime of the session, so
   // the operand scan only has to run once; afterwards the two indices are used
   // directly.
   int64_t x_index = -1, w_index = -1;
-  bool reported = false;  // ANNC_EP_DEBUG: print this node's operand shapes once
+  // ANNC_EP_DEBUG: print this node's operand shapes once.
+  std::atomic<bool> reported{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -234,7 +339,32 @@ struct NodeTiming {
     }
   }
 
+  // Context-ABI sites: the EP's own view of one Compute call, entry to return.
+  // Comparing this with the profiler's per-node time splits the cost into
+  // "ORT around the node" versus "the EP (prepare + kernel)".
+  std::atomic<int64_t> context_calls{0};
+  std::atomic<int64_t> context_ns{0};
+  std::atomic<int64_t> min_context_ns{INT64_MAX};
+
+  void NoteContextCall(int64_t nanos) {
+    context_calls.fetch_add(1);
+    context_ns.fetch_add(nanos);
+    int64_t current = min_context_ns.load();
+    while (nanos < current &&
+           !min_context_ns.compare_exchange_weak(current, nanos)) {
+    }
+  }
+
   ~NodeTiming() {
+    if (context_calls.load() != 0) {
+      const int64_t calls = context_calls.load();
+      std::fprintf(stderr,
+                   "[annc-ep] context ComputeImpl over %lld calls (mean/min "
+                   "us): total=%.3f/%.3f\n",
+                   static_cast<long long>(calls),
+                   context_ns.load() / static_cast<double>(calls) / 1000.0,
+                   min_context_ns.load() / 1000.0);
+    }
     const int64_t n = calls.load();
     if (n == 0) return;
     const double per = 1.0 / static_cast<double>(n);
@@ -285,6 +415,11 @@ struct AnncNodeComputeInfo : OrtNodeComputeInfo {
   std::vector<int64_t> arg_ranks;
   std::vector<AnncElementType> arg_types;
   std::vector<annc_ep::OutputContract> outputs;
+  // Sites whose arguments or outputs the rank rule cannot identify get their
+  // mapping resolved here, by name (empty = resolve at first Compute).
+  std::vector<int64_t> arg_indices;
+  // Declared output slot -> the fused node's output index (empty = identity).
+  std::vector<uint32_t> output_slots;
 };
 
 // ---------------------------------------------------------------------------
@@ -310,7 +445,8 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
   // FillContextContract pushes the contract's argument ranks and types in
   // pairs; keep the diagnostics below from indexing a shorter type vector if
   // that ever stops being true (BindArgumentsToInputs itself is total).
-  if (state->arg_ranks.size() != state->arg_types.size()) {
+  if (state->context_call.arg_ranks.size() !=
+      state->context_call.arg_types.size()) {
     return g_api->CreateStatus(
         ORT_FAIL,
         "ANNC EP: the site contract's argument ranks and types are not in "
@@ -353,7 +489,7 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
     inputs.push_back(key);
   }
   const annc_ep::ArgumentBinding binding = annc_ep::BindArgumentsToInputs(
-      inputs, state->arg_ranks, state->arg_types);
+      inputs, state->context_call.arg_ranks, state->context_call.arg_types);
   if (g_debug) {
     for (size_t i = 0; i < inputs.size(); ++i) {
       int64_t bound_to = -1;
@@ -396,13 +532,14 @@ OrtStatus* ResolveContextInputs(ComputeState* state,
       return g_api->CreateStatus(
           ORT_FAIL, ("ANNC EP: no input matches kernel argument " +
                      std::to_string(arg) + " (rank " +
-                     std::to_string(state->arg_ranks[arg]) + ", type " +
-                     std::to_string(static_cast<int>(state->arg_types[arg])) +
+                     std::to_string(state->context_call.arg_ranks[arg]) + ", type " +
+                     std::to_string(static_cast<int>(
+                         state->context_call.arg_types[arg])) +
                      ")")
                         .c_str());
     }
   }
-  state->arg_indices = binding.indices;
+  state->context_call.arg_indices = binding.indices;
   return nullptr;
 }
 
@@ -412,21 +549,47 @@ OrtStatus* ComputeContextSite(ComputeState* state,
     return g_api->CreateStatus(ORT_FAIL,
                                "ANNC EP: context kernel is not loaded");
   }
-  annc_ep::ContextCall call;
-  call.symbol = state->symbol;
-  call.arg_ranks = state->arg_ranks;
-  call.arg_types = state->arg_types;
-  call.outputs = state->outputs;
-  {
+  const bool timing = std::getenv("ANNC_EP_TIMING") != nullptr;
+  const auto t_entry = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+  if (!state->context_ready.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lock(state->context_mutex);
-    if (state->arg_indices.empty()) {
-      if (OrtStatus* status = ResolveContextInputs(state, kernel_context)) {
-        return status;
+    if (!state->context_ready.load(std::memory_order_relaxed)) {
+      if (state->context_call.arg_indices.empty()) {
+        if (OrtStatus* status = ResolveContextInputs(state, kernel_context)) {
+          return status;  // Do not publish a failed binding; a later call retries.
+        }
       }
+      state->context_ready.store(true, std::memory_order_release);
     }
-    call.arg_indices = state->arg_indices;
   }
-  return annc_ep::ComputeWithContext(g_api, kernel_context, call);
+  // Name-resolved sites arrive with `arg_indices` already pinned, so they never
+  // reach ResolveContextInputs and its per-input log. Without a line here an
+  // executing site would look identical to one ORT dropped -- print the
+  // resolved mapping, once per node.
+  if (g_debug && !state->reported.exchange(true, std::memory_order_relaxed)) {
+    std::fprintf(stderr, "[annc-ep] ctx compute: abi=%s, %zu arg(s) ->",
+                 state->abi.c_str(), state->context_call.arg_ranks.size());
+    for (size_t arg = 0; arg < state->context_call.arg_ranks.size(); ++arg) {
+      const int64_t input =
+          arg < state->context_call.arg_indices.size()
+              ? state->context_call.arg_indices[arg] : -1;
+      std::fprintf(stderr, " [arg %zu (rank %lld) <- input %lld]", arg,
+                   static_cast<long long>(state->context_call.arg_ranks[arg]),
+                   static_cast<long long>(input));
+    }
+    std::fprintf(stderr, ", %zu output slot(s)\n",
+                 state->context_call.outputs.size());
+  }
+  OrtStatus* status = annc_ep::ComputeWithContext(
+      g_api, kernel_context, state->context_call);
+  if (timing) {
+    const auto t_end = std::chrono::steady_clock::now();
+    Timing().NoteContextCall(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_end - t_entry)
+            .count());
+  }
+  return status;
 }
 
 OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
@@ -441,10 +604,17 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
       state->symbol = handle->symbol;
     }
   }
+  state->context_call.symbol = state->symbol;
   state->abi = info->abi;
-  state->arg_ranks = info->arg_ranks;
-  state->arg_types = info->arg_types;
-  state->outputs = info->outputs;
+  state->context_call.arg_ranks = info->arg_ranks;
+  state->context_call.arg_types = info->arg_types;
+  state->context_call.outputs = info->outputs;
+  state->context_call.output_slots = info->output_slots;
+  // Name-resolved sites arrive with their argument mapping already fixed; the
+  // rest resolve on the first Compute by rank and element type.
+  state->context_call.arg_indices = info->arg_indices;
+  state->context_ready.store(!info->arg_indices.empty(),
+                             std::memory_order_relaxed);
   *compute_state = state;
   return nullptr;
 }
@@ -594,8 +764,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
   MemRef2D w_ref{w_data, w_data, 0, {k, n}, {n, 1}};
   MemRef3D y_ref{y_data, y_data, 0, {d0, d1, n}, {d1 * n, n, 1}};
 
-  if (g_debug && !state->reported) {
-    state->reported = true;
+  if (g_debug && !state->reported.exchange(true, std::memory_order_relaxed)) {
     std::fprintf(stderr,
                  "[annc-ep] site '%s' kernel='%s': m=%lld k=%lld n=%lld "
                  "(macs=%lld)\n",
@@ -753,7 +922,26 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
 
   std::unordered_set<std::string> claimed_names;
   size_t claimed = 0, dropped = 0;
-  for (const annc_ep::Site& site : report.sites) {
+  for (const annc_ep::Site& reported : report.sites) {
+    // Translate the report's names back to the graph's own names (the report
+    // speaks the exported model's). A site whose names are not all in the
+    // table can still be claimed when the rank/type rule identifies its
+    // arguments on its own; one that needs names is dropped here rather than
+    // failing later at Compile (which can only fail the whole session).
+    annc_ep::Site site = reported;
+    site.namesResolved = false;
+    if (auto translated = TranslatedSite(reported, maps)) {
+      site = *translated;
+      site.namesResolved = true;
+    }
+    if (annc_ep::SiteNeedsResolvedNames(site) && !site.namesResolved) {
+      ++dropped;
+      std::fprintf(stderr,
+                   "[annc-ep] drop site '%s': its argument/output names are "
+                   "not in the exported model's rename table\n",
+                   site.kernelName.c_str());
+      continue;
+    }
     std::vector<const OrtNode*> to_fuse;
     bool valid = true;
     for (const std::string& member : site.memberNodes) {
@@ -876,7 +1064,17 @@ std::vector<size_t> SubgraphNodeIds(const OrtGraph* graph) {
 // declared output slots must be exactly the fused subgraph's outputs, and
 // every argument/output element type must be one the EP can describe, or the
 // kernel would misinterpret the buffers it is handed.
+//
+// Sites the rank/type rule cannot identify (masked_mul: several rank-3 data
+// operands, and one output per chain Mul) are pinned here instead, by tensor
+// name: the claim translated the report's names back to the graph's own, so
+// each declared argument names one of the fused node's inputs and each
+// declared output one of its outputs. Anything that does not line up is a
+// contract disagreement and refuses the whole session (Compile has no
+// per-node refusal) -- correctly, because running the kernel against the
+// wrong buffers would be silent corruption.
 bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
+                         const OrtNode* fused_node,
                          AnncNodeComputeInfo* info) {
   size_t graph_outputs = 0;
   if (g_api->Graph_GetNumOutputs(graph, &graph_outputs) != nullptr) return false;
@@ -907,6 +1105,37 @@ bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
     if (!to_element_type(output.dtype, &type)) return false;
     info->outputs.push_back(annc_ep::OutputContract{output.rank, type});
   }
+
+  const bool by_name =
+      annc_ep::SiteNeedsResolvedNames(site) && site.namesResolved;
+  if (by_name) {
+    const std::vector<std::string> input_names = NodeInputNames(fused_node);
+    const std::vector<std::string> output_names = NodeOutputNames(fused_node);
+    if (output_names.size() != site.outputs.size()) return false;
+    info->arg_indices.assign(site.args.size(), -1);
+    for (size_t arg = 0; arg < site.args.size(); ++arg) {
+      for (size_t input = 0; input < input_names.size(); ++input) {
+        if (input_names[input] != site.args[arg].name) continue;
+        // Two arguments claiming the same input means the contract does not
+        // describe this fused node; refuse instead of reusing a buffer.
+        if (std::find(info->arg_indices.begin(), info->arg_indices.end(),
+                      static_cast<int64_t>(input)) != info->arg_indices.end()) {
+          return false;
+        }
+        info->arg_indices[arg] = static_cast<int64_t>(input);
+        break;
+      }
+      if (info->arg_indices[arg] < 0) return false;
+    }
+    info->output_slots.assign(site.outputs.size(), 0);
+    for (size_t slot = 0; slot < site.outputs.size(); ++slot) {
+      auto it = std::find(output_names.begin(), output_names.end(),
+                          site.outputs[slot].name);
+      if (it == output_names.end()) return false;
+      info->output_slots[slot] =
+          static_cast<uint32_t>(it - output_names.begin());
+    }
+  }
   return true;
 }
 
@@ -931,13 +1160,13 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
         info->library = ep->kernel_library;
         info->abi = site->abi;
         if (site->abi == "annc_execution_v2" &&
-            !FillContextContract(*site, graphs[i], info)) {
+            !FillContextContract(*site, graphs[i], fused_nodes[i], info)) {
           // A contract that disagrees with the fused subgraph would run the
           // kernel against the wrong buffers; refuse the node loudly instead.
           ++unresolved;
           std::fprintf(stderr,
                        "[annc-ep] context site '%s' does not match the fused "
-                       "subgraph (outputs/ranks/types)\n",
+                       "subgraph (outputs/ranks/types/names)\n",
                        site->kernelName.c_str());
         }
       } else {
@@ -1139,6 +1368,17 @@ OrtStatus* ORT_API_CALL CreateEpFactories(const char* /*registration_name*/,
   g_api = ort_api_base->GetApi(ORT_API_VERSION);
   g_ep_api = g_api->GetEpApi();
   g_debug = std::getenv("ANNC_EP_DEBUG") != nullptr;
+#if defined(ANNC_EP_NATIVE_POOL)
+  // The native-pool path's private ABI is only valid for one ORT release;
+  // the adapter falls back to the public KernelContext_ParallelFor path in
+  // any other host (annc_ep_native_pool.h).
+  annc_ep::native::CheckHostVersion(ort_api_base);
+  if (g_debug && !annc_ep::native::PoolAvailable()) {
+    std::fprintf(stderr,
+                 "[annc-ep] native pool unavailable (host version or "
+                 "ANNC_EP_NATIVE_POOL=0); using the public adapter\n");
+  }
+#endif
   if (max_factories < 1) {
     return g_api->CreateStatus(ORT_INVALID_ARGUMENT, "need room for at least one factory");
   }

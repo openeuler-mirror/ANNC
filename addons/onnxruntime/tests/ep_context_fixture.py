@@ -40,6 +40,8 @@ import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
 KERNEL = r"""
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +86,22 @@ const char *KernelMode() {
 extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     const AnncExecutionContext *context, void *input_arg, void *weight_arg) {
   if (context == nullptr) return 1;
+  if (std::strcmp(KernelMode(), "same-session") == 0) {
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static int arrived = 0;
+    std::unique_lock<std::mutex> lock(mutex);
+    if (++arrived < 2) {
+      if (!cv.wait_for(lock, std::chrono::seconds(10), [] { return arrived >= 2; })) {
+        context->report_error(context->handle, ANNC_STATUS_INTERNAL,
+                              "same-session calls did not overlap");
+        return 7;
+      }
+    } else {
+      cv.notify_all();
+    }
+    AppendMarker("same-session overlap");
+  }
   MemRef3D *x = static_cast<MemRef3D *>(input_arg);
   MemRef2D *w = static_cast<MemRef2D *>(weight_arg);
   const int64_t d0 = x->sizes[0];
@@ -129,74 +147,112 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
   std::vector<std::thread::id> workers;
   int nested_calls = 0;
   int nested_in_region = -1;
+  int64_t nested_rows = 0;
   std::vector<std::thread::id> nested_ids;
-  pool->parallel_for(
-      m, annc::threadpool::ParallelForOptions{},
-      [&](int64_t begin, int64_t end) {
-        {
-          std::lock_guard<std::mutex> lock(mutex);
-          const std::thread::id id = std::this_thread::get_id();
-          if (std::find(workers.begin(), workers.end(), id) == workers.end()) {
-            workers.push_back(id);
-          }
-        }
-        if (std::strcmp(KernelMode(), "nested") == 0) {
-          // Emulate the gate ANNC's own parallel_for applies (Parallel.cpp):
-          // inside a region it runs the whole range serially. The fixture
-          // does not link the ANNC runtime, so the gate is spelled out here;
-          // what it demonstrates is that in_parallel_region() reports true
-          // while this callback runs. The nested range is deliberately large
-          // so that a missing gate would visibly fan out, and the distinct
-          // threads it ran on are recorded.
-          const bool in_region = pool->in_parallel_region();
+  int cost_calls = 0;
+  int cost_in_region = -1;
+  int64_t cost_rows = 0;
+  std::vector<std::thread::id> cost_ids;
+
+  // One pass over the m rows.  `options` selects the adapter's dispatch: the
+  // optionless call takes the public KernelContext_ParallelFor mapping, the
+  // cost-bearing one the adapter's cost-model path (what every production
+  // kernel's rowOptions() reaches).  The nested-mode recording is per pass so
+  // the driver can pin the in_parallel_region() report of each path
+  // separately, and covers the rows each callback saw so it can pin the
+  // partition (every row exactly once) without pinning a block count the
+  // framework owns.
+  auto dispatch = [&](const annc::threadpool::ParallelForOptions &options,
+                      int *calls, int *in_region, int64_t *rows,
+                      std::vector<std::thread::id> *ids) {
+    pool->parallel_for(
+        m, options,
+        [&, calls, in_region, rows, ids](int64_t begin, int64_t end) {
           {
             std::lock_guard<std::mutex> lock(mutex);
-            if (nested_in_region < 0) nested_in_region = in_region ? 1 : 0;
-            ++nested_calls;
-          }
-          auto nested_body = [&](int64_t, int64_t) {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (std::find(nested_ids.begin(), nested_ids.end(),
-                          std::this_thread::get_id()) == nested_ids.end()) {
-              nested_ids.push_back(std::this_thread::get_id());
+            const std::thread::id id = std::this_thread::get_id();
+            if (std::find(workers.begin(), workers.end(), id) ==
+                workers.end()) {
+              workers.push_back(id);
             }
-          };
-          if (in_region) {
-            nested_body(0, 4096);
-          } else {
-            pool->parallel_for(4096, annc::threadpool::ParallelForOptions{},
-                               nested_body);
           }
-        }
-        for (int64_t row = begin; row < end; ++row) {
-          const int64_t i = d1 > 0 ? row / d1 : 0;
-          const int64_t j = d1 > 0 ? row % d1 : 0;
-          const float *xr = x->aligned + x->offset + i * x->strides[0] +
-                            j * x->strides[1];
-          float *sr = scratch + row * n;
-          for (int64_t col = 0; col < n; ++col) {
-            float sum = 0.0f;
-            for (int64_t t = 0; t < k; ++t) {
-              sum += xr[t * x->strides[2]] *
-                     w->aligned[w->offset + t * w->strides[0] +
-                                col * w->strides[1]];
+          if (std::strcmp(KernelMode(), "nested") == 0) {
+            // Emulate the gate ANNC's own parallel_for applies (Parallel.cpp):
+            // inside a region it runs the whole range serially. The fixture
+            // does not link the ANNC runtime, so the gate is spelled out here;
+            // what it demonstrates is that in_parallel_region() reports true
+            // while this callback runs. The nested range is deliberately large
+            // so that a missing gate would visibly fan out, and the distinct
+            // threads it ran on are recorded.
+            const bool in_region_now = pool->in_parallel_region();
+            {
+              std::lock_guard<std::mutex> lock(mutex);
+              if (*in_region < 0) *in_region = in_region_now ? 1 : 0;
+              ++*calls;
+              *rows += end - begin;
             }
-            sr[col] = sum;
+            auto nested_body = [&](int64_t, int64_t) {
+              std::lock_guard<std::mutex> lock(mutex);
+              if (std::find(ids->begin(), ids->end(),
+                            std::this_thread::get_id()) == ids->end()) {
+                ids->push_back(std::this_thread::get_id());
+              }
+            };
+            if (in_region_now) {
+              nested_body(0, 4096);
+            } else {
+              pool->parallel_for(4096, annc::threadpool::ParallelForOptions{},
+                                 nested_body);
+            }
           }
-        }
-      });
+          for (int64_t row = begin; row < end; ++row) {
+            const int64_t i = d1 > 0 ? row / d1 : 0;
+            const int64_t j = d1 > 0 ? row % d1 : 0;
+            const float *xr = x->aligned + x->offset + i * x->strides[0] +
+                              j * x->strides[1];
+            float *sr = scratch + row * n;
+            for (int64_t col = 0; col < n; ++col) {
+              float sum = 0.0f;
+              for (int64_t t = 0; t < k; ++t) {
+                sum += xr[t * x->strides[2]] *
+                       w->aligned[w->offset + t * w->strides[0] +
+                                  col * w->strides[1]];
+              }
+              sr[col] = sum;
+            }
+          }
+        });
+  };
+
+  dispatch(annc::threadpool::ParallelForOptions{}, &nested_calls,
+           &nested_in_region, &nested_rows, &nested_ids);
+  if (std::strcmp(KernelMode(), "nested") == 0) {
+    // The second pass carries a cost, so it reaches the adapter's cost-model
+    // path.  The cost is inflated for the m rows here: the point is the
+    // dispatch path, and a cost of the production kernels' scale (tens of
+    // cycles per row) would leave this six-row range below the framework's
+    // parallelisation threshold and prove nothing about a region.
+    annc::threadpool::ParallelForOptions cost_options;
+    cost_options.cost_per_unit = 100000;
+    dispatch(cost_options, &cost_calls, &cost_in_region, &cost_rows,
+             &cost_ids);
+  }
 
   float *out = static_cast<float *>(out_desc.data);
   if (m > 0 && n > 0) {
     std::memcpy(out, scratch, static_cast<size_t>(m) * n * sizeof(float));
   }
 
-  char line[160];
+  char line[200];
   std::snprintf(line, sizeof(line),
-                "compute dims=%lld,%lld,%lld threads=%zu nested=%d,%d,%zu",
+                "compute dims=%lld,%lld,%lld threads=%zu nested=%d,%d,%zu,%lld "
+                "cost_nested=%d,%d,%zu,%lld",
                 static_cast<long long>(d0), static_cast<long long>(d1),
                 static_cast<long long>(n), workers.size(), nested_calls,
-                nested_in_region, nested_ids.size());
+                nested_in_region, nested_ids.size(),
+                static_cast<long long>(nested_rows), cost_calls,
+                cost_in_region, cost_ids.size(),
+                static_cast<long long>(cost_rows));
   AppendMarker(line);
   return 0;
 }
@@ -272,7 +328,12 @@ def session(model, providers, threads=1):
 def run_test(args):
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ep-context-"))
     work.mkdir(parents=True, exist_ok=True)
-    batch = 128 if args.mode == "threads" else 2
+    # The optionless dispatch is cut into min(rows, DoP) blocks, so the
+    # threads mode needs rows heavy enough that a block outlasts the pool's
+    # worker wake-up latency -- otherwise the caller thread legitimately
+    # absorbs all four blocks of a trivial matmul and no worker is ever
+    # observed (ORT's own schedulers run cheap work on the caller too).
+    batch = 16384 if args.mode == "threads" else 2
     model = work / "matmul.onnx"
     make_model(model, batch)
     x = np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4) / 11
@@ -347,15 +408,57 @@ def run_test(args):
         session(model, ["AnncExecutionProvider", "CPUExecutionProvider"],
                 threads=4).run(None, {"x": x})
         line = marker.read_text().splitlines()[-1]
-        nested_calls, nested_in_region, nested_workers = (
-            int(part) for part in line.split("nested=", 1)[1].split(","))
-        # One nested region per row; each reports in_parallel_region() == true,
-        # and the gated nested range of 4096 items ran on a single thread --
-        # a missing gate would have fanned it out like the outer region.
-        assert nested_calls == batch * 3, line
+        nested_calls, nested_in_region, nested_workers, nested_rows = (
+            int(part) for part in
+            line.split("nested=", 1)[1].split(" ", 1)[0].split(","))
+        cost_calls, cost_in_region, cost_workers, cost_rows = (
+            int(part) for part in line.split("cost_nested=", 1)[1].split(","))
+        # Both passes report in_parallel_region() == true inside every
+        # callback, and the emulated nested range of 4096 items ran on a
+        # single thread when the gate held -- a missing gate (or a callback
+        # outside a region) would have fanned it out like the outer region.
+        # The partition is pinned by rows, not by a block count: how many
+        # blocks the dispatch is cut into is the framework's decision (the
+        # optionless pass takes the pool's real degree of parallelism, the
+        # cost pass the cost model -- counts differ between the native pool
+        # and the fallback replica, both legitimate), but every pass must
+        # cover each of the batch*3 rows exactly once.
+        assert 1 <= nested_calls <= batch * 3, line
         assert nested_in_region == 1, line
         assert nested_workers == 1, line
-        print("Nested parallel region: reported and run without fanning out")
+        assert nested_rows == batch * 3, line
+        # The second dispatch carries a cost, so it reaches the adapter's
+        # cost-model path -- what every production kernel's rowOptions()
+        # dispatches through.
+        assert 1 <= cost_calls <= batch * 3, line
+        assert cost_in_region == 1, line
+        assert cost_workers == 1, line
+        assert cost_rows == batch * 3, line
+        print("Nested parallel region: reported and run without fanning out "
+              "on both dispatch paths")
+        return
+
+    if args.mode == "same-session":
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        # Rank-3 x and rank-2 w select lazy binding, unlike prebound BMM sites.
+        shared = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
+        cpu = session(model, ["CPUExecutionProvider"])
+        feeds = [{"x": np.full((n, 3, 4), v, np.float32)}
+                 for n, v in [(2, 0.25), (5, -0.75)]]
+        references = [cpu.run(None, feed)[0] for feed in feeds]
+        start = threading.Barrier(2)
+        def run_one(index):
+            start.wait(timeout=15)
+            return [shared.run(None, feeds[index])[0] for _ in range(12)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run_one, range(2)))
+        for index, values in enumerate(results):
+            for actual in values:
+                np.testing.assert_allclose(actual, references[index],
+                                           rtol=1e-3, atol=1e-7)
+        assert marker.read_text().count("same-session overlap") == 24
+        print("One session: overlapping lazy binding, distinct shapes and retained outputs pass")
         return
 
     if args.mode == "concurrent":
@@ -422,7 +525,7 @@ def main():
     parser.add_argument("--ep-library")
     parser.add_argument("--work-dir")
     parser.add_argument("--mode",
-                        choices=["normal", "threads", "nested", "concurrent",
+                        choices=["normal", "threads", "nested", "concurrent", "same-session",
                                  "error", "bad-slot"],
                         default="normal")
     args = parser.parse_args()

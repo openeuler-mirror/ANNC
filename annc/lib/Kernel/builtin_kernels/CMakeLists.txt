@@ -89,6 +89,17 @@ if(ANNC_ENABLE_KDNN_ADAPTOR)
     endif()
 endif()
 
+# MLAS-backed GEMM kernels (ANNC_KERNEL_MLAS): the sources' MLAS path compiles
+# against the ORT source tree's mlas.h (self-contained; forward declarations
+# only).  The archives that path needs are added where kernel shared libraries
+# are linked -- the annc driver bakes their absolute paths -- so this target's
+# link interface stays free of ORT archives.
+if(ANNC_KERNEL_MLAS)
+    target_include_directories(ANNCBuiltinKernels SYSTEM PRIVATE
+        "${ANNC_MLAS_INCLUDE_DIR}")
+    target_compile_definitions(ANNCBuiltinKernels PRIVATE ANNC_KERNEL_MLAS=1)
+endif()
+
 target_link_libraries(ANNCBuiltinKernels PUBLIC
     ANNCKernel
     ANNCThreadPool

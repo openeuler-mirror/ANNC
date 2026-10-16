@@ -71,6 +71,43 @@ if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
 endif()
 target_link_libraries(annc_ep PRIVATE ${CMAKE_THREAD_LIBS_INIT})
 
+# Back the EP's thread pool with ORT's native operator pool
+# (ANNC_EP_NATIVE_POOL): the scheduling decision (serial versus parallel,
+# block size, real degree of parallelism) moves from ANNC's port of Eigen's
+# cost model to ORT's own TryParallelFor, through build-tree archives of the
+# *same* ORT build that hosts the plugin.  Private-ABI coupling; see
+# annc_ep_native_pool.h for the layout pin and the fallback conditions.
+if(ANNC_EP_NATIVE_POOL)
+  set(ANNC_EP_ORT_COMMON_ARCHIVE
+      "${ANNC_EP_ORT_BUILD_TREE}/libonnxruntime_common.a")
+  set(ANNC_EP_ORT_CPUINFO_ARCHIVE
+      "${ANNC_EP_ORT_BUILD_TREE}/_deps/pytorch_cpuinfo-build/libcpuinfo.a")
+  foreach(archive IN ITEMS "${ANNC_EP_ORT_COMMON_ARCHIVE}"
+                           "${ANNC_EP_ORT_CPUINFO_ARCHIVE}")
+    if(NOT EXISTS "${archive}")
+      message(FATAL_ERROR
+        "ANNC_EP_NATIVE_POOL=ON needs ${archive}: point ANNC_EP_ORT_BUILD_TREE "
+        "at the ORT build tree (not the install tree) of the runtime that "
+        "will host the plugin.")
+    endif()
+  endforeach()
+  target_compile_definitions(annc_ep PRIVATE
+      ANNC_EP_NATIVE_POOL=1
+      ANNC_EP_NATIVE_POOL_ORT_VERSION="${ANNC_EP_NATIVE_POOL_ORT_VERSION}")
+  target_link_libraries(annc_ep PRIVATE
+      "-Wl,--start-group"
+      "${ANNC_EP_ORT_COMMON_ARCHIVE}"
+      "${ANNC_EP_ORT_CPUINFO_ARCHIVE}"
+      "-Wl,--end-group")
+  # Keep the archives' ORT symbols out of the plugin's dynamic symbol table:
+  # the host resolves exactly two entry points from this library
+  # (onnxruntime/core/session/plugin_ep/ep_library_plugin.cc), and an
+  # exported copy of ORT's thread pool could interpose on other dynamically
+  # loaded libraries binding the same names.
+  target_link_options(annc_ep PRIVATE
+      "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/annc_ep.map")
+endif()
+
 set_target_properties(annc_ep PROPERTIES
     PREFIX "lib"
     OUTPUT_NAME "annc_ep"
@@ -82,14 +119,34 @@ if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   include(GoogleTest)
+  # ModelSignature (annc_ep_graph_export.cc) is part of the contract this
+  # suite pins: the disk cache must not serve one model's folded constants to
+  # another, so the signature tests link the export translation unit and the
+  # generated ONNX protobuf code it reads models through.
   add_executable(annc-ep-compile-test
       annc_ep_compile_test.cpp
-      annc_ep_site.cc)
+      annc_ep_graph_export.cc
+      annc_ep_site.cc
+      ${ONNX_PROTO_SRCS})
   target_include_directories(annc-ep-compile-test PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${CMAKE_SOURCE_DIR}/frontends/onnx/protos/gen_code"
+      "${Protobuf_INCLUDE_DIRS}"
       "${CMAKE_SOURCE_DIR}/third_party/json/include")
+  target_include_directories(annc-ep-compile-test SYSTEM PRIVATE
+      "${ANNC_ONNXRUNTIME_INCLUDE_DIR}")
+  if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
+    target_include_directories(annc-ep-compile-test SYSTEM PRIVATE
+        ${ABSL_LOG_INCLUDE_DIRS}
+        ${ABSL_CHECK_OP_INCLUDE_DIRS}
+        ${ABSL_BASE_INCLUDE_DIRS})
+    target_link_libraries(annc-ep-compile-test PRIVATE
+        ${ABSL_LOG_LIBRARIES}
+        ${ABSL_CHECK_OP_LIBRARIES})
+  endif()
   target_link_libraries(annc-ep-compile-test PRIVATE
-      GTest::gtest_main ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+      GTest::gtest_main ${Protobuf_LIBRARIES} ${CMAKE_DL_LIBS}
+      ${CMAKE_THREAD_LIBS_INIT})
   set_target_properties(annc-ep-compile-test PROPERTIES CXX_STANDARD 17
       CXX_STANDARD_REQUIRED ON)
   gtest_discover_tests(annc-ep-compile-test)
@@ -118,7 +175,7 @@ if(BUILD_TESTING)
   endforeach()
   # annc_execution_v2 sites: the context callbacks, the pool the context
   # carries, and the failure paths of both.
-  foreach(mode IN ITEMS normal threads nested concurrent error bad-slot)
+  foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot)
     add_test(NAME AnncEpContextFixture.${mode}
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/ep_context_fixture.py
@@ -156,6 +213,37 @@ if(BUILD_TESTING)
         ${AnncEpFtdmmContextE2eLlvmLibArg}
         ${AnncEpFtdmmContextE2eExtraLibArgs})
     set_tests_properties(AnncEpFtdmmContextE2e PROPERTIES TIMEOUT 600)
+    # masked_mul: a site whose arguments need name binding and whose two
+    # outputs need the report->fused-node permutation.
+    add_test(NAME AnncEpMaskedMulContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/masked_mul_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpMaskedMulContextE2e PROPERTIES TIMEOUT 600)
+    # layer_norm: rank-1 gamma/beta force name binding, eps is rank-0.
+    add_test(NAME AnncEpLayerNormContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_norm_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpLayerNormContextE2e PROPERTIES TIMEOUT 600)
+    # batched_matmul_add: all three arguments are rank-3 f32 (name binding).
+    add_test(NAME AnncEpBatchedMatMulAddContextE2e
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/batched_matmul_add_context_e2e.py
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpFtdmmContextE2eLlvmLibArg}
+        ${AnncEpFtdmmContextE2eExtraLibArgs})
+    set_tests_properties(AnncEpBatchedMatMulAddContextE2e PROPERTIES TIMEOUT 600)
   endif()
 endif()
 

@@ -32,7 +32,7 @@ ONNX Runtime 侧无法套用这两件事：
 ### 1.3 范围与非目标
 
 - 覆盖 ONNX 侧执行上下文、EP 分发、站点契约与 FTDMM 载体；不做 model-level 性能承诺（过订阅与 CPU 占用另测）。
-- 不做其余融合（masked_mul / layer_norm / batched_matmul_add）向本线的回移；含这些子图的模型回退 CPU EP。
+- task019 已将 masked_mul / layer_norm / batched_matmul_add 迁入同一上下文协议；下文同步当前参数与调度契约，算子模式实现见 `OpFusion.cpp`。
 - 不做 ORT EPContext（预编译上下文）、不改 TF 的 TLS 注入路径与 TF 域 kernel 的取池方式。
 
 ## 2 总体方案
@@ -44,14 +44,14 @@ flowchart TD
   Model[ONNX 模型] --> ORT[ORT Session 创建]
   ORT -->|GetCapability| EP[libannc_ep.so]
   EP -->|运行时编译| Pipeline[annc-onnx-pipeline]
-  Pipeline --> Fusion[OpFusion：tensordot_matmul 站点]
+  Pipeline --> Fusion[OpFusion：FTDMM / masked_mul / layer_norm / BMM 站点]
   Fusion --> KernelLib[libannc_kernels.so]
   Fusion --> Report[sites.json 站点报告]
   Report --> EP
   KernelLib --> EP
   EP -->|Compile| Contract[契约对齐：abi/参数/输出/成员]
   ORT -->|Compute| Ctx[AnncExecutionContext v3<br/>输出回调 + 临时回调 + 报错回调 + 线程池]
-  Ctx --> K1[FTDMM kernel]
+  Ctx --> K1[四类 context-ABI kernel]
   Ctx -. 回退 TLS（池为 NULL） .-> TF[TF 域 kernel · 既有路径]
 ```
 
@@ -125,10 +125,12 @@ typedef struct {
 
 `OrtThreadPool` 实现 ANNC 的 `AnncThreadPool` 接口：
 
-- `parallel_for(total, options, fn)` → `KernelContext_ParallelFor`：ORT 逐索引回调在 shim 中转换为 ANNC 的区间回调 `[i, i+1)`；`num_batch = min(ceil(total / grain_size), num_threads())`，把 `grain_size` 映射为分批粒度。
-- `num_threads()`：ORT C API 无池尺寸查询，返回 `min(hardware_concurrency, 256)` 且不小于 2 的**建议上界**，只影响 ANNC 串/并行门限，不参与任何分配或形状决策；实际并行度由 ORT 调度决定（intra-op=1 时 `KernelContext_ParallelFor` 内联串行）。
+- `parallel_for(total, options, fn)`：启用且通过版本校验的原生路径，有 `cost_per_unit` 时调用 ORT 原生池的 `TryParallelFor`；只有 `grain_size` 时使用固定块调度；没有信号时回落到公开 `KernelContext_ParallelFor`。默认公开 API 路径按 cost/grain 估计批数，每 shard 回调一次并转成 ANNC 区间。
+- `num_threads()`：原生池路径读取 ORT operator pool 的真实并行度；版本不匹配或 `ANNC_EP_NATIVE_POOL=0` 时禁用原生路径，公开路径使用硬件并发数限定的建议上界。已通过版本校验的空池返回并行度 1、直接串行。
 - **降级**：`KernelContext_ParallelFor` 返回失败时释放该状态并在本线程内联执行整段 `fn(0, total)`——`parallel_for` 不允许失败。
 - **嵌套**：thread_local 深度计数提供 `in_parallel_region()`；ANNC 的 `Parallel.cpp` 语义下，区内再次发起的 `parallel_for` 整段串行，不扇出。
+
+原生池使用锁定版本的私有 ABI，必须链接宿主同源构建的归档。FTDMM/BMM 的可选 MLAS 路径仅在 `native_pool()` 非空时执行，其余情况为标量行路径。完整配置与回落条件见 [EP README](../../addons/onnxruntime/README.md)。
 
 ### 4.3 装配与调用
 
@@ -151,15 +153,15 @@ MemRef 描述子按 `allocated == aligned == ORT 张量数据指针、offset = 0
 | ABI | 契约要求 |
 |---|---|
 | `mlir_ciface`（017 既有） | 输出 memref 参与调用、`kernel_arg_order` 指定参数顺序 |
-| `annc_execution_v2`（本特性） | 无输出参数、`kernel_arg_order` 必须为空；参数 1–7 个、rank 0–4 且互异、`dtype=f32`；输出 ≥1 个且声明 rank/type（回调据此校验）；声明输出数必须等于融合子图输出数 |
+| `annc_execution_v2`（本特性） | 无输出参数、`kernel_arg_order` 必须为空；参数 1–14 个、rank 0–4，重复 rank 或多输出要求名称已解析；输入 f32/i64、输出 f32；输出 ≥1 个且声明 rank/type（回调据此校验）；声明输出数必须等于融合子图输出数 |
 
-EP 的 pattern 白名单当前为 `matmul`、`tensordot_matmul`；新增 pattern 只需产出满足上表的报告并在白名单登记，不改上下文层。
+EP 的 pattern 白名单为 `matmul`、`tensordot_matmul`、`masked_mul`、`layer_norm`、`batched_matmul_add`，并要求 `execution_mode=aot`；新增 pattern 只需产出满足上表的报告并在白名单登记，不改上下文层。
 
 ### 5.2 参数解析
 
-融合节点的输入**可以多于** kernel 参数：形状链的常量与操作数并列暴露（16 节点 FTDMM 站点实测 6 个输入：操作数 rank3/rank2 + 三个 rank1 i32 与一个 rank1 i64 形状常量）。解析规则：
+融合节点的输入**可以多于** kernel 参数：形状链的常量与操作数并列暴露。解析规则：
 
-- 按 **rank + 元素类型**匹配（`BindArgumentsToInputs`，纯函数、有单测）；不匹配任何参数的输入忽略；
+- 申报时先将导出名称回映射到原图；重复 rank 或多输出要求名称全部可解析，否则拒绝申报。Compile 按名称建立参数与输出槽置换；允许无名称的站点按 **rank + 元素类型**匹配（`BindArgumentsToInputs`，纯函数、有单测）；不匹配任何参数的输入忽略；
 - **两个输入命中同一参数 = 契约无法履行**，首次 Compute 即 fail-closed，不做静默首匹配；
 - 契约的参数 rank/类型向量长度不一致时直接拒绝（防御性，正常构造下不可达）。
 
@@ -206,7 +208,7 @@ pattern 要求模块携带 ONNX 前端的 `annc.contract_version` 标记，TF �
 | 层 | 用例 | 断言要点 |
 |---|---|---|
 | ABI 布局 | `tests/kernels/execution_context_test.cpp` | v3 带池取池、v2 布局拒绝读池、`resolveThreadPool` 回退顺序、尺寸/版本错配拒绝 |
-| 站点契约 | `annc_ep_compile_test.cpp` | v2 正例 + 负例（非空 arg order、rank 重复/越界、输出缺失、dtype 非 f32） |
+| 站点契约 | `annc_ep_compile_test.cpp` | v2 正例 + 负例（非空 arg order、重复 rank 需名称、rank 越界、输出缺失、输入类型不支持、输出非 f32） |
 | 上下文回调 | `annc_ep_execution_test.cpp`（假 OrtApi，无 ORT 宿主） | 首错语义与状态释放、slot/rank/dtype 校验、临时分配与释放、free 失败分支、参数绑定规则（真实 6 输入形态 / 类型消歧 / 二义拒绝）、线程池逐索引映射与失败内联降级 |
 | EP 全路径 fixture | `ep_context_fixture.py`（合成站点 + 真实 EP） | 运行时决定输出形状、intra-op=1/4 的工作线程数、嵌套不扇出、同进程并发两模型、内核报错→OrtStatus 且宿主完好、越界 slot 拒绝 |
 | 真实端到端 | `ftdmm_context_e2e.py` | 本树 pipeline 编译 16 节点模型 → 站点（abi/成员数/arg_order 断言）→ EP 执行 → 与 CPU EP 数值一致；冷编译 + 热缓存 |
@@ -219,8 +221,8 @@ pattern 要求模块携带 ONNX 前端的 `annc.contract_version` 标记，TF �
 - **线程池不可用即串行**：`KernelContext_ParallelFor` 失败、池未提供、嵌套区内——三条路径都收敛为串行执行，不失败、不影响正确性。
 - **fail-closed 优先于静默**：契约不符 → 整 session 失败；参数二义 → 首次 Compute 拒绝；站点被丢弃 → 有诊断日志。宁可拒绝也不让 kernel 读到未声明张量。
 - **已知限制**：
-  1. 上下文 ABI 目前只有 FTDMM 一个 ONNX 载体；其余三个融合未回移，相关模型回退 CPU EP；
-  2. 未做 model-level 性能指标；过订阅（ORT 并行与 ANNC 并行区叠加）仅记录、未调优；
+  1. 四类融合均已迁入；未被 matcher 接受或找不到对应 kernel 的形态留给 CPU EP；
+  2. 原生池与 MLAS 默认关闭，私有布局和归档需随宿主版本重新验证；默认标量路径不具有 MLAS 路径的性能结论；
   3. 输入张量假设连续行主序（见 4.3）；
   4. 内核抛 C++ 异常会终止宿主（ORT EP 边界本身是 noexcept；内置 kernel 为 C 风格不抛）；
   5. 旧 `mlir_ciface` 路径上既有的状态丢弃问题不属本特性范围，另行处理。

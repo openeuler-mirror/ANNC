@@ -1,6 +1,20 @@
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+#if defined(ANNC_KERNEL_MLAS)
+// ORT's MLAS public header.  It is self-contained (forward declarations only:
+// no ORT thread-pool headers, no Eigen), and in this ORT release
+// MLAS_THREADPOOL is a type alias of onnxruntime::concurrency::ThreadPool, so
+// the pool the execution context hands over in native_pool() *is* the object
+// MlasGemmBatch wants.  The build supplies this include directory and the
+// archives (annc/lib/Kernel/builtin_kernels/CMakeLists.txt).
+#include "mlas.h"
+#endif
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
 #include "Support/ThreadPool/Parallel.h"
@@ -87,12 +101,55 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
   const float* x = ANNC_MEMREF_DATA(*input);
   const float* w = ANNC_MEMREF_DATA(*weight);
 
+#if defined(ANNC_KERNEL_MLAS)
+  // The host's native pool, when it has one to hand over (the ORT EP does:
+  // ORT's operator pool, which is the object MlasGemmBatch takes).  One SGEMM
+  // over the collapsed [m, K] x [K, N] view -- the same call shape ORT's own
+  // FusedTensordotMatMul makes through math::MatMul with
+  // GetOperatorThreadPool() -- so MLAS owns the tiling, the kernel choice and
+  // the threading.  Without a native pool (the scalar-only build, another
+  // host, or the version gate refusing) the row-parallel scalar path below
+  // still runs.
+  if (thread_pool != nullptr) {
+    if (void* native = thread_pool->native_pool(); native != nullptr) {
+      MLAS_SGEMM_DATA_PARAMS gemm;
+      gemm.A = x;
+      gemm.lda = static_cast<size_t>(k);
+      gemm.B = w;
+      gemm.ldb = static_cast<size_t>(n);
+      gemm.C = out;
+      gemm.ldc = static_cast<size_t>(n);
+      MlasGemmBatch(CblasNoTrans, CblasNoTrans, static_cast<size_t>(m),
+                    static_cast<size_t>(n), static_cast<size_t>(k), &gemm,
+                    /*BatchSize=*/1,
+                    reinterpret_cast<MLAS_THREADPOOL*>(native),
+                    /*BackendKernelSelectorConfig=*/nullptr);
+      if (std::getenv("ANNC_EP_DEBUG") != nullptr) {
+        static std::atomic<int> printed{0};
+        if (printed.fetch_add(1) < 4) {
+          std::fprintf(stderr,
+                       "[annc-kernel] ftdmm: MlasGemmBatch m=%lld n=%lld "
+                       "k=%lld\n",
+                       static_cast<long long>(m), static_cast<long long>(n),
+                       static_cast<long long>(k));
+        }
+      }
+      return annc::kernels::KernelStatus::Success;
+    }
+  }
+#endif
+
   // Rows of the collapsed [m, K] view are independent, so the row loop is the
   // natural parallel split (same shape as the builtin MatMul kernel in
   // matmul_aarch64.cpp).  M is tiny at the sites this fusion targets
-  // (batch * sequence), so the grain stays at a whole row.
+  // (batch * sequence), so the reported row cost -- the same as
+  // batched_matmul_add's, a k-length dot per output element -- keeps one
+  // thread on the sites whose k*n is small instead of paying for a dispatch.
+  auto options = annc::threadpool::rowOptions(
+      annc::threadpool::cost::dotRow(k, n), /*elements_per_row=*/k * n);
   ::annc::threadpool::parallel_for(
-      thread_pool, m, [&](int64_t begin, int64_t end) {
+      thread_pool, m, options,
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float* xRow = x + row * k;
           float* outRow = out + row * n;

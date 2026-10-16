@@ -81,6 +81,14 @@ typedef struct {
 } AnncMemRef3DF32;
 
 typedef struct {
+    float*   allocated;
+    float*   aligned;
+    int64_t  offset;
+    int64_t  sizes[4];
+    int64_t  strides[4];
+} AnncMemRef4DF32;
+
+typedef struct {
     int32_t* allocated;
     int32_t* aligned;
     int64_t  offset;

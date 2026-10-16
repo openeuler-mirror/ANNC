@@ -253,10 +253,19 @@ std::string ModelSignature(const std::string& modelPath,
     }
   }
 
-  // Drop everything that does not decide what ANNC emits: producer metadata
-  // varies per export, and initializer payloads are runtime arguments of the
-  // kernels this pipeline generates (the FTDMM matcher only checks that the
-  // weight is a rank-2 f32 constant with a static shape).
+  // Graphs containing Mul and MatMul can fold a constant pre-affine chain
+  // into a BMM kernel. Retain initializer values for those graphs so models
+  // with different folded values cannot share an artifact. Other graphs
+  // retain the existing structural cache key for runtime initializer inputs.
+  bool hasMul = false;
+  bool hasMatMul = false;
+  for (const auto& node : model.graph().node()) {
+    if (node.domain().empty() || node.domain() == "ai.onnx") {
+      hasMul |= node.op_type() == "Mul";
+      hasMatMul |= node.op_type() == "MatMul";
+    }
+  }
+  const bool mayFoldInitializers = hasMul && hasMatMul;
   model.clear_producer_name();
   model.clear_producer_version();
   model.clear_doc_string();
@@ -265,16 +274,17 @@ std::string ModelSignature(const std::string& modelPath,
   if (model.has_graph()) {
     model.mutable_graph()->clear_name();
     model.mutable_graph()->clear_doc_string();
-    for (int i = 0; i < model.graph().initializer_size(); ++i) {
-      onnx::TensorProto* initializer = model.mutable_graph()->mutable_initializer(i);
-      initializer->clear_raw_data();
-      initializer->clear_double_data();
-      initializer->clear_float_data();
-      initializer->clear_int32_data();
-      initializer->clear_int64_data();
-      initializer->clear_string_data();
-      initializer->clear_external_data();
-      initializer->set_data_location(onnx::TensorProto::DEFAULT);
+    if (!mayFoldInitializers) {
+      for (auto& initializer : *model.mutable_graph()->mutable_initializer()) {
+        initializer.clear_raw_data();
+        initializer.clear_double_data();
+        initializer.clear_float_data();
+        initializer.clear_int32_data();
+        initializer.clear_int64_data();
+        initializer.clear_string_data();
+        initializer.clear_external_data();
+        initializer.set_data_location(onnx::TensorProto::DEFAULT);
+      }
     }
   }
 

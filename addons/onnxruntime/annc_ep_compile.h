@@ -56,8 +56,9 @@ std::string Sha256String(const std::string& data);
 
 // Structural signature of an exported model: everything that decides what the
 // ANNC pipeline will emit, with the volatile and weight-bearing parts removed
-// (producer/doc strings, graph name, and every initializer payload -- the
-// kernels this pipeline emits take the weights as runtime arguments).
+// (producer/doc strings and graph name). Initializer payloads are retained
+// when the graph contains Mul and MatMul: pre-affine folding can embed them
+// in a generated kernel. Otherwise runtime initializer inputs stay excluded.
 // `toolchainFingerprint` comes from CompileDriver::ToolchainInfo().
 std::string ModelSignature(const std::string& modelPath,
                            const std::string& toolchainFingerprint,
@@ -87,6 +88,11 @@ struct Site {
   std::vector<int64_t> kernelArgOrder;
   int64_t flattenXIndex = -1;  // index of the dynamic (rank-3) input, if known
   int64_t weightIndex = -1;    // index of the fixed (rank-2) input, if known
+  // True when every argument/output name was translated back to the original
+  // graph's tensor names at claim time. Only then can Compile() bind the
+  // kernel arguments by name; otherwise the EP falls back to binding by
+  // rank+element type, which needs distinct argument ranks.
+  bool namesResolved = false;
 };
 
 struct SiteReport {
@@ -97,6 +103,12 @@ struct SiteReport {
 // suitable for diagnostics; invalid sites must be ignored before capability
 // registration or cache publication.
 bool ValidateSite(const Site& site, std::string* error);
+
+// True when the site cannot be executed with the rank-based fallback binding:
+// repeated argument ranks (masked_mul's data operands) or more than one output
+// whose order the report cannot pin down. Such a site may only be claimed when
+// its argument/output names resolved back to the graph's own names.
+bool SiteNeedsResolvedNames(const Site& site);
 
 // Invokes `annc-onnx-pipeline` (the tool that runs the ANNC stages and writes
 // the site report) and reads its output back.

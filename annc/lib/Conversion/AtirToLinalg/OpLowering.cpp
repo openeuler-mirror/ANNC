@@ -249,6 +249,63 @@ void ConstantLoweringToLinalg::Lowering(PatternRewriter& rewriter,
   }
   auto tensorType =
       RankedTensorType::get(type.getShape(), type.getElementType());
+
+  // A constant that lives inside a kernel function is the payload a fused
+  // site carries itself -- today the folded pre-affine weight/bias of a
+  // batched_matmul_add site (OpFusion's foldBatchedPreAffine).  An
+  // arith.constant would be hoisted to a READ-ONLY global and, because the
+  // kernel's parameters are writable memrefs, the bufferizer would then copy
+  // the whole constant into a fresh buffer on every call (memref.alloc +
+  // memref.copy, no dealloc: a per-Compute leak of the constant's size).
+  // Materializing it as a module-level buffer referenced through a writable
+  // to_tensor gives the bufferizer a buffer it may hand to the call as-is:
+  // one allocation for the lifetime of the module, no per-call copy.  The
+  // kernel never writes its inputs, so the buffer is never mutated.
+  if (tensorType.hasStaticShape()) {
+    if (auto parentFunc = op->getParentOfType<func::FuncOp>()) {
+      if (parentFunc->hasAttr("annc.kernel")) {
+        if (auto module = parentFunc->getParentOfType<ModuleOp>()) {
+          auto memrefType = MemRefType::get(tensorType.getShape(),
+                                            tensorType.getElementType());
+          // One global per constant value per module: reuse keeps repeated
+          // lowering of the same payload (and re-runs of the pass) from
+          // duplicating the data.
+          memref::GlobalOp global;
+          for (memref::GlobalOp existing : module.getOps<memref::GlobalOp>()) {
+            if (existing.getType() == memrefType &&
+                existing.getInitialValue() == type.getCacheData()) {
+              global = existing;
+              break;
+            }
+          }
+          if (!global) {
+            size_t index = 0;
+            for (memref::GlobalOp existing : module.getOps<memref::GlobalOp>())
+              ++index;
+            std::string name;
+            do {
+              name = "__annc_site_const_" + std::to_string(index++);
+            } while (module.lookupSymbol<memref::GlobalOp>(name));
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointToStart(module.getBody());
+            global = rewriter.create<memref::GlobalOp>(
+                op.getLoc(), name, rewriter.getStringAttr("private"),
+                memrefType, type.getCacheData(), /*constant=*/false,
+                IntegerAttr());
+          }
+          rewriter.setInsertionPoint(op);
+          auto buffer = rewriter.create<memref::GetGlobalOp>(
+              op.getLoc(), memrefType, global.getSymName());
+          auto tensor = rewriter.create<bufferization::ToTensorOp>(
+              op.getLoc(), tensorType, buffer, /*restrict=*/true,
+              /*writable=*/true);
+          rewriter.replaceOp(op, tensor.getResult());
+          return;
+        }
+      }
+    }
+  }
+
   rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, tensorType,
                                                  type.getCacheData());
 }
