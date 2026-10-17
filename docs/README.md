@@ -2,7 +2,7 @@
 
 本目录是 ANNC 文档的唯一来源。文档与源码同仓、同评审、同发布；导航由**目录结构 + 各级 `README.md`** 承担（不使用静态站点生成器）。
 
-> **迁移进行中**：架构、设计与 ADR 文档已迁入新目录；ONNX/ORT 文档集待迁。目标结构与迁移计划见内部提案 `docs/superpowers/docs-restructure-proposal.md`（该目录已 gitignore）。
+> **迁移状态**：架构、设计、ADR 与 ONNX 文档集均已迁入新目录结构；原 `docs/Feature/`、`docs/ADR/` 目录已移除。目标结构与迁移计划见内部提案 `docs/superpowers/docs-restructure-proposal.md`（该目录已 gitignore）。
 
 ## 按受众的阅读路径
 
@@ -27,11 +27,9 @@
 | [contributing/](contributing/README.md) | 开发环境、测试、规范与流程 | 规划中 |
 | [assets/](assets/README.md) | 图片与图表源文件 | 已就位 |
 
-## 待迁移文档
+## 迁移状态
 
-| 文档 | 当前位置 | 计划落点 |
-| --- | --- | --- |
-| ONNX/ORT 文档集（前端 / 融合 / EP） | [Feature/](Feature/) | `design/onnx-support/` |
+历史文档已全部迁入新结构：架构总览（[architecture/](architecture/README.md)）、JIT 常量折叠与 ONNX 支持（[design/](design/README.md)）、架构决策（[decisions/](decisions/README.md)）。原 `docs/Feature/`、`docs/ADR/` 目录已移除。
 
 ## 编写约定
 
