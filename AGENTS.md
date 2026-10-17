@@ -235,8 +235,8 @@ annc-tf-pipeline → 端到端编排上述所有步骤
 
 ## 11. 文档同步规则
 
-- 影响整体架构的变更（如新增 lowering 路径、新增后端 target、修改编译流水线）必须同步更新 `docs/annc-architecture-design.md`。
-- 重大设计决策必须同步记录到 `docs/ADR/decisions.md`，并在 `docs/ADR/README.md` 索引中登记。
+- 影响整体架构的变更（如新增 lowering 路径、新增后端 target、修改编译流水线）必须同步更新 `docs/architecture/overview.md`。
+- 重大设计决策必须同步记录到 `docs/decisions/decisions.md`，并在 `docs/decisions/README.md` 索引中登记。
 - CLI 工具参数变更必须同步更新源码中的 `--help` help string；若参数被写入使用文档或 README，也需同步。
 - Python API（`annc.builder` / `annc.ops` / `annc.types` 等）变更必须同步更新对应示例与文档。
 - `docs/api/` 为 CLI / Python API 参考文档预留位置，未来填充时应保持与代码一致。

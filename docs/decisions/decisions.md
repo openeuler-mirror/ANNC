@@ -1,6 +1,6 @@
 # ANNC 架构决策详情
 
-本文件记录 ANNC 已接受的架构决策。新增决策请按编号递增顺序追加到文件末尾，并在 `README.md` 索引中登记。
+本文件记录 ANNC 已接受及待评审的架构决策；待评审条目标为 proposed，不表示已经采纳。新增决策请按编号递增顺序追加到文件末尾，并在 `README.md` 索引中登记。
 
 <a id="adr-001"></a>
 
@@ -121,7 +121,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **上下文** | 需要把 ONNX 模型接入既有 ATIR 优化与后端，而不是另起一套框架专属优化。可复用的部分只有 ATIR 与共享 builder 引擎（`MLIRBuilder`）：TF 与 ONNX 对**同名算子**语义不同（ONNX `Sum` 是变参逐元素加、TF `Sum` 是归约；ONNX `Gather` 的 axis 是 attribute、TF `GatherV2` 是第三个 operand），直接共用一张 op 规格表必然静默错译。此外 ONNX 的算子 schema 随 opset 漂移（`Squeeze`/`ReduceSum` 的 axes 在 opset 13 从 attribute 变 operand、`Softmax` 的默认 axis 从 1 变 -1），而 ATIR 当前的数值语义是 float32 优先（`Interpret/` 的元素级实现统一走 `getFloatValues`，`Target/aarch64` 无整型算术路径），两者之间存在无法靠 op 名对齐的表达差距。 |
-| **决策** | (1) **位置**：新框架前端放 `frontends/<framework>/`，由 `frontends/CMakeLists.txt` 按 `ANNC_ENABLE_<FRAMEWORK>` 注册，不进 `annc/tools/`（避免核心目录膨胀，新增框架不改其它框架的构建路径）。(2) **复用接缝**：前端继承 `MLIRBuilder`，只替换两处虚接缝——`lookupSpec`（ONNX 专表，与 TF 表分离）与 `shouldLowerToOpaque`（逐节点降级判定）；节点校验、op 构造、属性映射、metadata、诊断全部继承。(3) **opset**：只支持 `ai.onnx` opset 13，其它版本默认整体拒绝（表按一个 opset 建立，换版本会静默错译）；`--relaxed-opset` 时按算子敏感表逐节点降级并以 `OP_SET_MISMATCH` 记录。(4) **降级契约**：任何无法忠实表达的节点（无表行、变参 arity 超出表行、不支持的属性/元素类型、rank 未知、opset 漂移）一律降级为 `atir.opaque`，并写入机器可读 reason；配套 provenance 逐节点审计、`nodes_accounted`/`opaque_nodes_match` 守恒校验、`--strict` 与退出码 0/2/1。前端内部状态（降级标记、归一化后的 Slice 窗口）以 `NodeInfo::attrs` 中前导下划线的私有属性传递，构建器保证其**不进入** emitted metadata。(5) **边界**：不做控制流（含 GRAPH 属性的模型整体拒绝而非部分导入，否则守恒账目会出现缺口）；不支持 float8/int4 等 ATIR 无法承载的元素类型（普通节点降级为 `UNSUPPORTED_DTYPE`，initializer 因 payload 无法解码而响亮失败）。(6) **dtype 门禁**：ATIR 数值路径为 float32 优先，因此对 `Div/Pow/Sqrt/Reciprocal/Abs/Min/Max/Mod/Equal/Greater/Less` 的整型输入逐节点降级为 `UNSUPPORTED_DTYPE`；`Add/Sub/Mul/Tile` 等索引与形状算术**暂不设门禁**（同受 float32 约束，但只在 |v| > 2^24 时失真），作为已知缺口记录，待 ATIR 补齐整型内核后统一放开。 |
+| **决策** | (1) **位置**：新框架前端放 `frontends/<framework>/`，由 `frontends/CMakeLists.txt` 按 `ANNC_ENABLE_<FRAMEWORK>` 注册，不进 `annc/tools/`（避免核心目录膨胀，新增框架不改其它框架的构建路径）。(2) **复用接缝**：前端继承 `MLIRBuilder`，只替换两处虚接缝——`lookupSpec`（ONNX 专表，与 TF 表分离）与 `shouldLowerToOpaque`（逐节点降级判定）；节点校验、op 构造、属性映射、metadata、诊断全部继承。(3) **opset**：只支持 `ai.onnx` opset 13，其它版本默认整体拒绝（表按一个 opset 建立，换版本会静默错译）；`--relaxed-opset` 时按算子敏感表逐节点降级并以 `OP_SET_MISMATCH` 记录。(4) **降级契约**：任何无法忠实表达的节点（无表行、变参 arity 超出表行、不支持的属性/元素类型、rank 未知、opset 漂移）一律降级为 `atir.opaque`，并写入机器可读 reason；配套 provenance 逐节点审计、`nodes_accounted`/`opaque_nodes_match` 守恒校验、`--strict` 与退出码 0/2/1。前端内部状态（降级标记、归一化后的 Slice 窗口）以 `NodeInfo::attrs` 中前导下划线的私有属性传递，构建器保证其**不进入** emitted metadata。(5) **边界**：不做控制流（含 GRAPH 属性的模型整体拒绝而非部分导入，否则守恒账目会出现缺口）；不支持 float8/int4 等 ATIR 无法承载的元素类型（普通节点降级为 `UNSUPPORTED_DTYPE`，initializer 因 payload 无法解码而响亮失败）。(6) **dtype 门禁**：ATIR 数值路径为 float32 优先，因此对 `Div/Pow/Sqrt/Reciprocal/Abs/Min/Max/Mod/Equal/Greater/Less` 的整型输入逐节点降级为 `UNSUPPORTED_DTYPE`；`Add/Sub/Mul/Tile` 等索引与形状算术**暂不设门禁**（同受 float32 约束，但只在绝对值大于 2^24 时失真），作为已知缺口记录，待 ATIR 补齐整型内核后统一放开。 |
 | **后果** | ✅ ONNX 前端复用 ATIR 优化与 AArch64 后端，新增框架的成本收敛为"一张表 + 一个适配器 + 一组 transformer"；✅ 没有静默漏节点：每个模型节点、initializer 与图输出都有 provenance 行，覆盖率报告可审计，退出码区分"全映射/有降级/硬错误"；✅ 同名算子语义分歧（`Sum`、`Gather`）被表分离结构性隔离。❌ op 覆盖是目标融合子图所需的**子集**，子图之外的模型会大量落到 `atir.opaque` 或被整体拒绝；❌ 保守的 dtype 门禁牺牲整型模型的映射率（整型 `Min`/`Max`/`Div` 等可直接降级）；❌ `Add/Sub/Mul` 的整型路径仍是潜在静默失真点，需要 ADR 之外的工作（ATIR 整型内核）才能真正闭合；❌ opset 13 之外的模型需要重跑或显式放宽。 |
 | **备选方案** | (a) 与 TF 共用一张 op 规格表——同名不同义（`Sum`/`Gather`）会静默错译，正是拆表的理由；(b) 无表行的节点直接报错——与"逐节点降级、绝不整体拒绝"的架构目标冲突，且单点缺失会放大为全模型不可导入；(c) 把 ONNX 前端放进 `annc/tools/`——与 §8「核心模块膨胀控制」冲突，且会把框架差异渗进 TF 前端；(d) 支持多 opset 自适应——需要按 opset 分版本建表，属未来工作。 |
 
@@ -133,9 +133,9 @@
 | --- | --- |
 | **上下文** | MR2 提供 ONNX→ATIR 前端，但 ORT 的图分区需要确定融合成员、参数 ABI 和可加载 kernel。EP 若重复实现 matcher，或先申报再尝试编译，容易与编译器的融合边界不一致，并把可回退的错误变成 session 失败。 |
 | **决策** | 由 EP 导出自包含 ONNX，由 `annc-onnx-pipeline` 生成 `sites.json` 和 AOT 库。EP 在 `GetCapability` 内验证报告结构、当前 ABI、成员映射和 kernel 符号后才申报。磁盘缓存按模型结构、工具链和影响编译的配置隔离，同签名 `flock` 单飞，工作目录 rename 后写入 `DONE`。结构损坏与编译失败不发布成功缓存；零站点允许成功缓存且无需共享库。 |
-| **后果** | matcher 只有工具链一份实现；编译和符号失败可通过不申报保留 CPU EP。首次 session 承担冷编译成本，后续复用缓存。当前真实执行验证限于 AOT `tensordot_matmul`；普通 MatMul JIT、其他 pattern、控制流子图和 ORT 执行上下文扩展仍需独立实现。缺符号会放弃 site，不自动重编译已发布缓存。 |
+| **后果** | matcher 只有工具链一份实现；编译和符号失败可通过不申报保留 CPU EP。首次 session 承担冷编译成本，后续复用缓存。当前真实执行验证覆盖 AOT 四个上下文站点（`tensordot_matmul`、`masked_mul`、`layer_norm`、`batched_matmul_add`，均随 `!249` 合入）；普通 MatMul JIT、其他 pattern、控制流子图和 ORT 执行上下文扩展仍需独立实现。缺符号会放弃 site，不自动重编译已发布缓存。 |
 | **备选方案** | EP 自行匹配融合边界会重复 compiler 逻辑；在 ORT `Compile` 才编译会失去不申报回退的时机；完全离线编译需要额外的模型与缓存分发协议。 |
-| **源码依据** | ANNC `b3513b7d`：`GetCapabilityRuntimeCompileImpl`、`CompileDriver::Compile`、`ReadReport`、`ValidateSite`；详细设计见 [ORT EP/pipeline 特性设计](../Feature/annc-ort-ep-pipeline-adaptation-design.md)。 |
+| **源码依据** | ANNC `b3513b7d`：`GetCapabilityRuntimeCompileImpl`、`CompileDriver::Compile`、`ReadReport`、`ValidateSite`；详细设计见 [EP 接入与执行设计](../design/onnx-support/ep-design.md)。 |
 
 <a id="adr-013"></a>
 
@@ -144,7 +144,36 @@
 | 项目 | 内容 |
 | --- | --- |
 | **上下文** | ONNX Runtime 侧的融合回接需要一套宿主执行状态：输出必须由 kernel 经 `KernelContext_GetOutput` 在运行中分配（输出形状常要读到输入才知道），线程池只能经 `KernelContext_ParallelFor` 逐索引回调获得，ORT 进程里没有 ANNC 的 TLS 约定。既有 `annc_execution_v2` 上下文（TF 域 pattern 已在用）没有线程池字段，TF 靠 TLS 取池；ONNX 无 TLS 可取，线程池实际拿不到——这是 dev 分支实现暴露的问题，也是本决策要解决的输入。 |
-| **决策** | (1) **ABI 扩展为 v3**：`AnncExecutionContext` 尾部新增不透明 `AnncThreadPoolHandle* thread_pool`（NULL = 未提供）；`validateContext` 同时接受 v3（`sizeof` + 版本 3）与 v2（`ANNC_EXECUTION_V2_CONTEXT_SIZE` + 版本 2）并拒绝其余错配，保证旧宿主的小结构不会被越界读。(2) **取池语义**：`threadPool(context)` 只取上下文携带的池；`resolveThreadPool(context)` 上下文池优先、回退 TLS。TF 与 ONNX **共用同一个上下文抽象**（曾评估 ONNX 私有结构体，因尺寸判别/helper/回归面成本被放弃）：TF 构造的上下文池为空 → 回退 TLS，TF 执行流与 kernel 取池方式零改动；ONNX 填池 → kernel 从上下文取。(3) **ONNX 侧执行状态**：EP 内实现 allocate_output / allocate_temp / report_error 三回调与 `OrtThreadPool`（逐索引回调转 ANNC 区间；`grain_size`→批数；`KernelContext_ParallelFor` 失败则释放状态并在本线程内联执行整段；thread_local 深度提供 `in_parallel_region` 供嵌套判定）。(4) **站点按 ABI 分发**：EP 按站点报告的 `abi` 字段选择调用路径（`mlir_ciface` 保持 017 契约；`annc_execution_v2` 走上下文路径），上下文与具体融合算子无关。(5) **契约申报前校验**：v2 站点无 `kernel_arg_order`、参数 1–7 个且 rank 互异、`dtype=f32`、输出 ≥1 且声明 rank/type；参数解析按 **rank+元素类型**（不匹配的输入忽略——融合节点的形状链常量与操作数并列暴露；两个输入命中同一参数则首次 Compute fail-closed）；契约与融合子图不符时该节点计入 unresolved、整体 Compile 失败（保守的全量失败，Compile 阶段没有单节点拒绝手段）。 |
-| **后果** | ✅ TF 语义与执行流零改动与 ONNX 拿到真实 ORT 池并存，一个 ABI 两种宿主流；✅ kernel 侧取池统一为 `resolveThreadPool`，TLS 成为兼容兜底而非唯一通道；✅ 失败模式收敛为 fail-closed 且可见（契约不符整 session 失败并打站点名、丢弃站点有日志、参数二义拒绝）；❌ EP 与 kernel 必须同源构建——`thread_pool` 句柄背后的 C++ 虚表不在尺寸/版本检查覆盖内；❌ 契约不符的代价是整 session 创建失败而非单节点降级；❌ 参数绑定是 rank+dtype 启发式，未来若出现"与参数同 rank 同类型的额外输入"会 fail-closed 拒绝（安全但保守），届时需在契约层显式扩展。 |
+| **决策** | (1) **ABI 扩展为 v3**：`AnncExecutionContext` 尾部新增不透明 `AnncThreadPoolHandle* thread_pool`（NULL = 未提供）；`validateContext` 同时接受 v3（`sizeof` + 版本 3）与 v2（`ANNC_EXECUTION_V2_CONTEXT_SIZE` + 版本 2）并拒绝其余错配，保证旧宿主的小结构不会被越界读。(2) **取池语义**：`threadPool(context)` 只取上下文携带的池；`resolveThreadPool(context)` 上下文池优先、回退 TLS。TF 与 ONNX **共用同一个上下文抽象**（曾评估 ONNX 私有结构体，因尺寸判别/helper/回归面成本被放弃）：TF 构造的上下文池为空 → 回退 TLS，TF 执行流与 kernel 取池方式零改动；ONNX 填池 → kernel 从上下文取。(3) **ONNX 侧执行状态**：EP 内实现 allocate_output / allocate_temp / report_error 三回调与 `OrtThreadPool`（逐索引回调转 ANNC 区间；`grain_size`→批数；`KernelContext_ParallelFor` 失败则释放状态并在本线程内联执行整段；thread_local 深度提供 `in_parallel_region` 供嵌套判定）。(4) **站点按 ABI 分发**：EP 按站点报告的 `abi` 字段选择调用路径（`mlir_ciface` 保持 017 契约；`annc_execution_v2` 走上下文路径），上下文与具体融合算子无关。(5) **契约申报前校验**：上下文站点无 `kernel_arg_order`、参数 1–14 个、rank 0–4、输入 `f32`/`i64`、输出 `f32` 且 ≥1 个并声明 rank/type；重复 rank 或多输出时要求站点名称全部可解析，否则在申报前丢弃；参数解析优先按名称置换（申报期回译原图名，`Compile` 建立参数与输出槽置换），无名称时按 **rank+元素类型** 匹配（不匹配的输入忽略——融合节点的形状链常量与操作数并列暴露；两个输入命中同一参数则首次 Compute fail-closed）；契约与融合子图不符时该节点计入 unresolved、整体 Compile 失败（保守的全量失败，Compile 阶段没有单节点拒绝手段）。 |
+| **后果** | ✅ TF 语义与执行流零改动与 ONNX 拿到真实 ORT 池并存，一个 ABI 两种宿主流；✅ kernel 侧取池统一为 `resolveThreadPool`，TLS 成为兼容兜底而非唯一通道；✅ 失败模式收敛为 fail-closed 且可见（契约不符整 session 失败并打站点名、丢弃站点有日志、参数二义拒绝）；❌ EP 与 kernel 必须同源构建——`thread_pool` 句柄背后的 C++ 虚表不在尺寸/版本检查覆盖内；❌ 契约不符的代价是整 session 创建失败而非单节点降级；❌ 无名称站点的参数绑定是 rank+dtype 启发式（命名站点已按名称置换），未来若出现"与参数同 rank 同类型的额外输入"会 fail-closed 拒绝（安全但保守），届时需在契约层显式扩展。后续 `!249` 在适配器内增加了受版本校验的原生 operator pool 路径与默认关闭的 MLAS 路径，私有布局须随宿主版本重新验证。 |
 | **备选方案** | (a) ONNX 私有扩展上下文结构体——kernel/EP 各自维护尺寸判别与 helper，回归面与维护成本高于收益，退回共用 ABI；(b) kernel 一律走 TLS、由 EP 用 TLS 注入 ORT 池——ORT 无此约定，且把两条宿主的池语义混为一谈；(c) 站点级单节点拒绝——ORT 的 Compile 契约只支持整批失败，做不到；(d) 参数按报告 `role`/操作数索引精确绑定——多一条上游字段信任链，当前 rank+dtype+二义拒绝已 fail-closed，留作后续演进。 |
-| **源码依据** | 本任务分支 `feature/annc-ort-ep-execution-context`：`0fc1b1c2` ABI v3、`6fa260d2` EP 执行上下文与分发、`2d9d7870` FTDMM 载体、`30457e3a` 测试；详细设计见 [执行上下文设计](../Feature/ort-ep-execution-context-architecture-design.md)。 |
+| **源码依据** | 本任务分支 `feature/annc-ort-ep-execution-context`：`0fc1b1c2` ABI v3、`6fa260d2` EP 执行上下文与分发、`2d9d7870` FTDMM 载体、`30457e3a` 测试；详细设计见 [EP 接入与执行设计](../design/onnx-support/ep-design.md) §6.3 与 §6.6。 |
+
+<a id="adr-014"></a>
+
+## ADR-014：框架前端与 addon 目录集中，构建按框架开关切分
+
+| 项目 | 内容 |
+| --- | --- |
+| **状态** | accepted，2026-10-15（随文档迁移提交 `a88d3d09` 进入本基线，决策内容与当时实现一致） |
+| **上下文** | 框架接入实现的位置与构建入口此前各自生长：TF 前端工具在 `annc/tools/`、TF addon 在 `tensorflow_addons/`，靠框架开关与 TensorFlow 的构建耦合隔离；ONNX 前端已按 `frontends/onnx/` 落点接入；而 ONNX Runtime 接入层完全在根构建之外——只能按 README 的手工命令编译，既没有落点也没有开关约定。后果是：接入实现游离于构建之外，无法用同一套开关做构建与安装验收；框架前端位置不对称（TF 在 `annc/tools/`，ONNX 在 `frontends/`）。 |
+| **决策** | 目录按职责集中：框架前端入 `frontends/<framework>/`（本期 ONNX：`frontends/onnx/onnx2atir/` + `frontends/onnx/protos/`），框架接入 addon 入 `addons/<framework>/`（本期 `addons/onnxruntime/`）。根 CMake 引入四个开关 `ANNC_ENABLE_TENSORFLOW`、`ANNC_ENABLE_TENSORFLOW_ADDON`、`ANNC_ENABLE_ONNX`（默认 ON）、`ANNC_ENABLE_ONNXRUNTIME_EP`（默认 OFF）：父开关控制该框架的前端工具、proto 准备与依赖检查，子开关只控制 addon；addon 依赖父开关，冲突在 configure 期报错；EP 另需 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向外部 ORT 1.26.0 头文件目录，缺失即失败、不下载 SDK。`build.sh` 提供 `--disable-tensorflow` / `--disable-tensorflow-addon` / `--disable-onnx` / `--enable-ort-ep` 与 `--regen-onnx-protos`，并把新值纳入缓存一致性检查（旧缓存缺键时：请求值等于旧默认组合则就地重配，改变默认组合要求 `--clean`）。**TF 源码、proto 路径与公共接口本期不迁移**，只改其构建入口。 |
+| **后果** | ✅ 单框架可独立构建与验收（ONNX-only 不需要 TensorFlow/Python TF，core-only 不需要 protobuf）；✅ 新增框架前端有固定落点（`frontends/CMakeLists.txt` 追加）与统一开关约定；✅ ORT EP 有了默认关闭的可选构建目标，默认构建不引入 ORT SDK 依赖；✅ 默认配置与改动前等价（工具名、`build/bin`、`install/bin` 位置与安装目标不变）。❌ 顶层多一层目录与一维开关，旧构建缓存的首次使用需要一次就地重配或 `--clean`；❌ README/AGENTS/架构文档/Jenkins 需要维护开关矩阵；❌ TF 源码仍在原处，`frontends/` 暂时只装 ONNX，两套前端位置不对称（待 TF 迁移方案另立）。 |
+| **备选方案** | (a) 一次性把 TF 前端一并迁入 `frontends/tensorflow/`——改动面覆盖 proto 生成路径与三个 TF 工具，风险与评审成本高于本期目标，拆分到后续方案；(b) 保持现状只加开关——目录职责仍不清晰，新增前端无落点，且 ORT EP 继续游离于构建之外；(c) 抽象 `cmake/AnncFrontendProto.cmake` 统一两套 proto 生成——只有 ONNX 一侧可迁移，收益不足，待 TF 到来再评估。 |
+| **源码依据** | 根 [CMakeLists.txt](../../CMakeLists.txt)（`ANNC_ENABLE_TENSORFLOW`、`ANNC_ENABLE_TENSORFLOW_ADDON`、`ANNC_ENABLE_ONNX`、`ANNC_ENABLE_ONNXRUNTIME_EP`、`ANNC_ONNXRUNTIME_INCLUDE_DIR` 及开关冲突检查）、[frontends/CMakeLists.txt](../../frontends/CMakeLists.txt)、[addons/onnxruntime/CMakeLists.txt](../../addons/onnxruntime/CMakeLists.txt)、[build.sh](../../build.sh) |
+
+<a id="adr-015"></a>
+
+## ADR-015：ONNX 共享编译器与 ORT 插件接入的整体方案
+
+| 项目 | 内容 |
+| --- | --- |
+| **状态** | proposed，2026-10-12；待架构评审后明确接受条件 |
+| **继承与新增** | 本条目**继承**以下已接受（accepted／implemented）的决策，不因本条目为 proposed 而改变其状态：三层架构与框架无关优化层（ADR-002）、ONNX 前端“不可表达即降级”契约（ADR-011）、由 pipeline 报告驱动申报与运行时编译缓存（ADR-012）、执行上下文 ABI v3 与线程池入上下文（ADR-013）、`frontends/` 与 `addons/` 目录及构建开关（ADR-014）。**新增待接受约束**限于整体方案层面的部分：首期发布范围与模式清单、缓存身份的保守方案与命名空间升级规则、发布门槛（正确性风险关闭与真实宿主验证），以及整体方案 §12.2 列出的待评审决策项。 |
+| **上下文** | ONNX 前端、公共 ATIR 融合、ONNX pipeline 和 ORT EP 已有主链路，但导入支持不等于可交付执行支持。缓存身份未覆盖 initializer 内容、EP 契约校验仍有缺口、多会话与多实例并发行为缺少验证证据等风险需要在整体方案中收敛（现状见整体方案 §12.1 与模块详细设计的差距章节）。 |
+| **建议方案** | 保持既有三层架构：ONNX 专属语义适配复用公共 Builder，公共 ATIR Pass 决定融合，独立 ORT EP 负责申报和执行。延续会话初始化编译及磁盘缓存，首期按验证后的 AOT 模式、类型、形状和 ABI 发布。 |
+| **建议约束** | 接管前检查完整区域和接口；当前执行失败不承诺 CPU 子图重试。缓存先纳入模型及全部常量语义、EP/工具链/kernel 库身份、目标和配置，再评估选择性排除权重。可靠总超时、版本校验和端到端差分为发布条件。 |
+| **后果** | 复用既有优化和后端，避免 ONNX 专属运行时及重复匹配器；首次会话编译和完整常量摘要增加初始化成本。正确性风险关闭与真实宿主测试是发布前工作，不因方案通过而视为已完成。 |
+| **备选方案** | 离线模型改写及 manifest 分发需额外产物协议，首期不恢复；独立执行整个模型的运行时覆盖与维护成本过大，不采用。 |
+| **评审输出** | 首期版本和模式清单、ABI 与动态形状条件、缓存格式及升级规则、CPU 会话切换方案、资源与性能预算，以及风险关闭责任和退出条件。 |
+| **详细方案** | [ANNC ONNX 支持整体方案设计](../design/onnx-support/overall.md)，重点见第 7、10、12 节。 |

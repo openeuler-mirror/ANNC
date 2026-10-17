@@ -166,7 +166,7 @@ ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
 | 工具 | 功能 |
 |------|------|
 | `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
-| [`annc-onnx2atir`](docs/Feature/onnx-frontend-architecture-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
+| [`annc-onnx2atir`](docs/design/onnx-support/frontend-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
 | `annc-onnx-pipeline` | ONNX 模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 的运行时编译模式使用 |
 | `annc-opt` | ATIR 优化（算子融合、块融合等） |
 | `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |

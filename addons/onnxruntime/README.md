@@ -166,7 +166,7 @@ site 校验、缓存、融合节点、kernel 加载和数值执行；测试 kern
 
 真实 `AnncEpFtdmmAotE2e` 使用 16 节点 ONNX 子图，通过真实 pipeline 生成
 `tensordot_matmul` AOT kernel，并验证冷/热 session 与 CPU EP 的数值一致。
-架构、缓存配置隔离和失败路径见 [特性设计文档](../../docs/Feature/annc-ort-ep-pipeline-adaptation-design.md)。
+架构、缓存配置隔离和失败路径见 [EP 接入与执行设计](../../docs/design/onnx-support/ep-design.md)。
 
 `AnncEpContextFixture` 用同样的方式覆盖 `annc_execution_v2` 路径：`normal` 校验
 上下文分配（输出 dims 来自运行时描述符，模型 batch 维动态）、临时缓冲与数值；
@@ -177,7 +177,7 @@ site 校验、缓存、融合节点、kernel 加载和数值执行；测试 kern
 16 节点 FTDMM 模型产出 `abi=annc_execution_v2` 站点与本树 kernel 库，EP 经执行
 上下文执行并与 CPU EP 对照（需要构建 `annc-onnx-pipeline` 目标）。执行上下文
 ABI、参数绑定规则与失败形态见
-[执行上下文设计文档](../../docs/Feature/ort-ep-execution-context-architecture-design.md)。
+[EP 接入与执行设计](../../docs/design/onnx-support/ep-design.md)。
 
 调试与测量开关：
 
