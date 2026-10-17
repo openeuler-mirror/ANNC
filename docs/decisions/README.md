@@ -23,6 +23,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 
 - **proposed**：已提出，尚未达成共识；
 - **accepted**：已接受，项目按此决策执行；
+- **implemented**：已接受，且对应实现已落地；
 - **deprecated**：已过时，但保留以供查阅；
 - **superseded**：被新的 ADR 取代，需在条目中注明替代者。
 
@@ -43,6 +44,8 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-011 | ONNX 前端接入与"不可表达即降级"契约 | accepted | [decisions.md#adr-011](decisions.md#adr-011) |
 | ADR-012 | ORT EP 由 pipeline 报告驱动申报与运行时编译缓存 | implemented | [decisions.md#adr-012](decisions.md#adr-012) |
 | ADR-013 | ONNX EP 执行上下文：线程池入上下文与 TF/ONNX 共用 ABI v3 | implemented | [decisions.md#adr-013](decisions.md#adr-013) |
+| ADR-014 | 框架前端与 addon 目录集中，构建按框架开关切分 | accepted | [decisions.md#adr-014](decisions.md#adr-014) |
+| ADR-015 | ONNX 共享编译器与 ORT 插件接入的整体方案 | proposed | [decisions.md#adr-015](decisions.md#adr-015) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

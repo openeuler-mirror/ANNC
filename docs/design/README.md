@@ -7,8 +7,7 @@
 | 文档集 | 位置 |
 | --- | --- |
 | JIT 常量折叠特性设计 | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
-
-> ONNX 文档集（前端 / 融合 / EP）后续单独迁入本目录的 `onnx-support/`。
+| ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
 
 ## 约定
 

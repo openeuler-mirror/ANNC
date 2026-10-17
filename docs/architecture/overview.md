@@ -11,7 +11,7 @@
 
 ## 1 概述
 
-> ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](../Feature/annc-ort-ep-pipeline-adaptation-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
+> ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](../design/onnx-support/ep-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
 
 ### 1.1 目的
 
