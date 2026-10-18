@@ -1,4 +1,8 @@
 // RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: env ANNC_EP_FUSION_MASKED_MUL=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
+// DISABLED: atir.Mul
+// DISABLED-NOT: custom.op_name = "MaskedMul
+// DISABLED-NOT: func.func private @fused_masked_mul_
 // FusedMaskedMul 站点（execution v2 形态）：一个站点就是「mask 链 + 链喂的全部
 // Mul」这一整块子图，融合节点的输出 = 子图对外提供的全部值（每个 Mul 的结果，
 // 加上链上仍被图外读的值）。Mul 之间夹着的逐元素路径（Sum → Div 常量）也一起

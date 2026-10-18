@@ -104,6 +104,11 @@ struct SiteReport {
 // registration or cache publication.
 bool ValidateSite(const Site& site, std::string* error);
 
+// Fusion-pattern switches (ANNC_EP_FUSION_*): "0" disables the pattern,
+// unset or any other value keeps it enabled. Unknown patterns (including
+// "matmul") have no switch and are always enabled. Read per capability query.
+bool FusionPatternEnabled(const std::string& pattern);
+
 // True when the site cannot be executed with the rank-based fallback binding:
 // repeated argument ranks (masked_mul's data operands) or more than one output
 // whose order the report cannot pin down. Such a site may only be claimed when

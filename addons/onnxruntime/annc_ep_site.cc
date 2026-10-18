@@ -1,5 +1,7 @@
 #include "annc_ep_compile.h"
 
+#include "Support/FusionSwitch.h"
+
 #include <unordered_set>
 #include <vector>
 
@@ -122,6 +124,10 @@ bool ValidateContextSite(const Site& site, std::string* error) {
 }
 
 }  // namespace
+
+bool FusionPatternEnabled(const std::string& pattern) {
+  return annc::fusionPatternEnabled(pattern);
+}
 
 bool SiteNeedsResolvedNames(const Site& site) {
   if (site.abi != "annc_execution_v2") return false;

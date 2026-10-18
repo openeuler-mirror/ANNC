@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -344,6 +345,39 @@ TEST(AnncEpModelSignature, StaysStructuralWithoutMulAndMatMul) {
   EXPECT_EQ(keyA, ModelSignature(b, "toolchain", &error));
   std::remove(a.c_str());
   std::remove(b.c_str());
+}
+
+TEST(AnncEpFusionSwitch, DefaultsToEnabledForEveryPattern) {
+  for (const char* pattern : {"tensordot_matmul", "layer_norm", "masked_mul",
+                              "batched_matmul_add", "matmul", "unknown"}) {
+    EXPECT_TRUE(FusionPatternEnabled(pattern)) << pattern;
+  }
+}
+
+TEST(AnncEpFusionSwitch, ZeroDisablesOnlyItsPattern) {
+  const char* names[] = {"ANNC_EP_FUSION_TENSORDOT_MATMUL",
+                         "ANNC_EP_FUSION_LAYER_NORM",
+                         "ANNC_EP_FUSION_MASKED_MUL",
+                         "ANNC_EP_FUSION_BATCHED_MATMUL_ADD"};
+  const char* patterns[] = {"tensordot_matmul", "layer_norm", "masked_mul",
+                            "batched_matmul_add"};
+  for (size_t i = 0; i < 4; ++i) {
+    ::setenv(names[i], "0", 1);
+    for (size_t j = 0; j < 4; ++j) {
+      EXPECT_EQ(FusionPatternEnabled(patterns[j]), i != j)
+          << names[i] << " / " << patterns[j];
+    }
+    EXPECT_TRUE(FusionPatternEnabled("matmul"));
+    ::unsetenv(names[i]);
+  }
+}
+
+TEST(AnncEpFusionSwitch, AnyNonZeroValueKeepsThePatternEnabled) {
+  ::setenv("ANNC_EP_FUSION_MASKED_MUL", "false", 1);
+  EXPECT_TRUE(FusionPatternEnabled("masked_mul"));
+  ::setenv("ANNC_EP_FUSION_MASKED_MUL", "1", 1);
+  EXPECT_TRUE(FusionPatternEnabled("masked_mul"));
+  ::unsetenv("ANNC_EP_FUSION_MASKED_MUL");
 }
 
 }  // namespace

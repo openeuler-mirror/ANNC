@@ -430,7 +430,7 @@ ORT 负责输入张量和输出缓冲区。EP 读取输入地址和维度，按�
 
 当前兼容路径的签名固定为两个输入（秩 3 与秩 2）加一个秩 3 输出；上下文站点接受 1 至 14 个 kernel 实参（外加执行上下文），输入 dtype 为 f32／i64、输出 dtype 为 f32，参数与输出 rank 为 0 至 4；重复 rank 或多输出时要求站点名称已解析，否则在申报前丢弃。输入可以包含标量，标量输出当前会在兼容路径被拒绝。输出形状的当前实现按路径分叉：上下文路径由 kernel 给出维度、EP 校验，兼容路径按 `{d0,d1,n}` 求值；两条路径都不支持一般的形状表达式或数据相关输出形状。
 
-kernel 的并行执行复用 ORT 的 intra-op 线程池：EP 在执行上下文（ABI v3）中携带线程池句柄，kernel 的并行循环经 ORT 的 `KernelContext_ParallelFor` 入口（1.17 起提供）提交到会话线程池，EP 与 kernel 不自建线程。实现另有受版本校验的可选原生池路径（按 ORT 私有布局直接取 operator pool，`ANNC_EP_NATIVE_POOL` 控制；FTDMM/BMM 在其非空时可用 MLAS，否则走标量行路径），默认关闭。现状：已实现（GAP-08 编号保留，已在新基线上闭合）。剩余风险：EP 与 kernel 必须同源构建（`thread_pool` 句柄背后的虚表不在尺寸/版本校验内，原生池的私有布局与归档须随宿主版本重新验证）；嵌套并行判定依赖 thread_local；池不可用时静默串行回退。线程数声明与并行收益在目标平台实测后固定发布配置（详见 ep-design §6.6）。
+kernel 的并行执行复用 ORT 的 intra-op 线程池：EP 在执行上下文（ABI v3）中携带线程池句柄，kernel 的并行循环经 ORT 的 `KernelContext_ParallelFor` 入口（1.17 起提供）提交到会话线程池，EP 与 kernel 不自建线程。实现另有受版本校验的可选原生池路径（按 ORT 私有布局直接取 operator pool，构建期 `ANNC_EP_NATIVE_POOL` 控制是否编译，运行时无关闭开关；FTDMM/BMM 在其非空时可用 MLAS，否则走标量行路径），默认关闭。现状：已实现（GAP-08 编号保留，已在新基线上闭合）。剩余风险：EP 与 kernel 必须同源构建（`thread_pool` 句柄背后的虚表不在尺寸/版本校验内，原生池的私有布局与归档须随宿主版本重新验证）；嵌套并行判定依赖 thread_local；池不可用时静默串行回退。线程数声明与并行收益在目标平台实测后固定发布配置（详见 ep-design §6.6）。
 
 同一会话内的形状变化只允许发生在区域已声明可变的维度上，且所有固定条件和输出关系仍成立。例如动态 batch 可以由每次请求的实际输入维度提供；固定的收缩维度或权重形状发生变化时，原调用计划失效。目标设计要求申报前筛掉无法建立形状契约的区域，执行时拒绝违约输入，业务需要改变固定条件时，应使用对应模型重建会话，或切换到已验证的 CPU 会话。违约请求按执行错误返回，逐请求 JIT 和自动 CPU 重放属于后续能力。当前完整形状与类型复核尚未实现，动态支持必须逐模式验收。
 
@@ -535,8 +535,10 @@ ONNX 图边按张量名连接，经 NodeInfo 进入公共 Builder，来源信息
 | `ANNC_EP_KEEP_TEMPS`             | 可保留工作文件                 | 限诊断使用，明确权限和清理期限          |
 | `ANNC_EP_NOOP`                   | 测量辅助，分配输出而不计算           | 生产禁用，验收配置确认未开启           |
 | `ANNC_EP_NUM_THREADS`            | 声明 intra-op 并行度，供 kernel 并行判定 | 当前实现未读取该变量，适配器按硬件并发度取值；接入后应与会话 intra_op_num_threads 一致 |
-| `ANNC_EP_NATIVE_POOL`            | 值为 0 时禁用原生池路径，回落公开 API | 原生池按 ORT 私有布局取 operator pool，默认可用；须与 `ANNC_EP_NATIVE_POOL_ORT_VERSION` 一致的宿主同源归档配套，默认关闭的 MLAS 路径亦依赖它 |
-| `ANNC_EP_SHARDS`                 | 限制公开 API 路径的分片数          | 仅影响非原生路径的批数估计，不改变正确性 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | 值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_LAYER_NORM`      | 值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_MASKED_MUL`      | 值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | 值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
 
 插件加载应使用绝对路径。安装包须同时提供 `libannc_ep.so`、配套 ANNC 工具、LLVM 工具和 kernel 归档。共享配置或 CLI 参数变化须同步 help、README、测试与版本清单。
 

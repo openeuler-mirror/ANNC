@@ -32,15 +32,14 @@
 //    carry them, and mixing builds would duplicate ORT's thread-pool state.
 //
 // PoolAvailable() refuses the path when the host is not the expected ORT
-// release (or the operator set ANNC_EP_NATIVE_POOL=0), and the adapter falls
-// back to the public KernelContext_ParallelFor path.  When the ORT version
-// moves, re-verify the slot and the archive closure and bump
-// ANNC_EP_NATIVE_POOL_ORT_VERSION together with the build tree.
+// release, and the adapter falls back to the public
+// KernelContext_ParallelFor path.  When the ORT version moves, re-verify the
+// slot and the archive closure and bump ANNC_EP_NATIVE_POOL_ORT_VERSION
+// together with the build tree.
 #ifndef ANNC_EP_NATIVE_POOL_H
 #define ANNC_EP_NATIVE_POOL_H
 
 #include <cstddef>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -117,15 +116,9 @@ inline void CheckHostVersion(const OrtApiBase* api_base) {
 }
 
 // Whether the native path may run in this host process: the host version
-// check passed and the operator did not disable it with
-// ANNC_EP_NATIVE_POOL=0.  Evaluated once per process.
+// check passed. Evaluated once per process.
 inline bool PoolAvailable() {
-  static const bool available = [] {
-    if (!HostVersionMatches()) return false;
-    const char* disabled = std::getenv("ANNC_EP_NATIVE_POOL");
-    if (disabled != nullptr && std::strcmp(disabled, "0") == 0) return false;
-    return true;
-  }();
+  static const bool available = [] { return HostVersionMatches(); }();
   return available;
 }
 

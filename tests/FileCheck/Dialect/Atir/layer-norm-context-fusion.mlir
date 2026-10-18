@@ -1,4 +1,8 @@
 // RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: env ANNC_EP_FUSION_LAYER_NORM=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
+// DISABLED: atir.ReduceMean
+// DISABLED-NOT: custom.op_name = "LayerNorm
+// DISABLED-NOT: func.func private @fused_layer_norm_
 // FusedLayerNorm 站点（execution v2 形态）：RM-LN 链的 11 个中间算子加末端
 // Add 全部融成一个站点，kernel 函数首参为执行上下文、fusion.metadata 的 abi 为
 // annc_execution_v2、kernel_arg_order 为空（输出由 kernel 经上下文按槽位 0

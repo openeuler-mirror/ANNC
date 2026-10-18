@@ -279,8 +279,11 @@ def run_pipeline(args):
                     str(output / "libannc_kernels.so"), str(source)],
                    check=True)
     columns = model.graph.initializer[0].dims[1]
+    # The fusion-toggle tests reuse this fixture as their pipeline; the
+    # pattern is selectable so one kernel can stand in for any fused site.
+    pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
     site = {
-        "pattern": "tensordot_matmul", "execution_mode": "aot",
+        "pattern": pattern, "execution_mode": "aot",
         "abi": "annc_execution_v2",
         "kernel_name": kernel_name, "member_node_names": [nodes[0].name],
         "kernel_arg_order": [],

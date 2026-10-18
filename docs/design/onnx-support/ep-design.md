@@ -294,10 +294,12 @@ sequenceDiagram
 | `ANNC_EP_DEBUG` / `ANNC_EP_TIMING`       | 诊断输出 / 执行计时                 | 关闭             |
 | `ANNC_EP_NOOP` / `ANNC_EP_KEEP_TEMPS`    | 测量辅助（分配输出但不计算）/ 保留失败编译的工作目录（§6.2.3）   | 关闭             |
 | `ANNC_EP_NUM_THREADS`                    | 声明 intra-op 并行度，供 kernel 并行判定与规模选择，不参与正确性（§6.6） | 未接线：当前实现不读取该变量，适配器按硬件并发度取值 |
-| `ANNC_EP_NATIVE_POOL`                    | 取值为 0 时禁用按 ORT 私有布局读取 operator pool 的原生池路径，回落到公开 `KernelContext_ParallelFor`（§6.6）；原生路径还要求宿主版本匹配编译期常量 `ANNC_EP_NATIVE_POOL_ORT_VERSION`（默认 `1.26.0`，非环境变量） | 启用 |
-| `ANNC_EP_SHARDS`                         | 限制公开 API 路径的分片数；不影响原生 cost/grain 调度或 MLAS | 按内部估计 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL`         | 取值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 开启 |
+| `ANNC_EP_FUSION_LAYER_NORM`               | 取值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 开启 |
+| `ANNC_EP_FUSION_MASKED_MUL`               | 取值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 开启 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD`       | 取值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 开启 |
 
-这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局；`ANNC_EP_TIMING`、`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——尤其 `ANNC_EP_NOOP` 一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（`ANNC_EP_NATIVE_POOL` 与宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
+这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 以及四个 `ANNC_EP_FUSION_*` 开关在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局；`ANNC_EP_TIMING`、`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——尤其 `ANNC_EP_NOOP` 一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（构建期是否编译 + 宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
 
 ### 4.6 契约不变量
 
@@ -433,7 +435,7 @@ EP 的编译驱动负责创建缓存条目并复用已发布产物。发布协�
 
 实现方式复用 ORT 的 intra-op 线程池。ORT 不通过公开接口暴露线程池对象，但提供借用入口 `KernelContext_ParallelFor`（自 ORT 1.17 提供，位于 1.26.0 验收基线内）：该接口把 total 个迭代调度到当前会话的 intra-op 池上动态负载均衡执行，调用返回即全部迭代完成；会话未启用 intra-op 池（如单线程会话）时在调用线程上串行完成，不构成失败。
 
-除公开入口外，实现另有**原生池路径**（`annc_ep_native_pool.h`）：按与宿主版本绑定的 ORT 私有布局直接取出 operator pool（`kThreadPoolSlot`），经版本校验（`ANNC_EP_NATIVE_POOL_ORT_VERSION`）后调用其 `TryParallelFor`／固定块调度。该路径默认启用，`ANNC_EP_NATIVE_POOL=0` 或版本不匹配时回落公开 `KernelContext_ParallelFor`。原生池使用私有 ABI，须链接宿主同源构建的归档；FTDMM/BMM 的 MLAS 路径仅在 `native_pool()` 非空时启用，其余情况走标量行路径（完整开关与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md)）。
+除公开入口外，实现另有**原生池路径**（`annc_ep_native_pool.h`）：按与宿主版本绑定的 ORT 私有布局直接取出 operator pool（`kThreadPoolSlot`），经版本校验（`ANNC_EP_NATIVE_POOL_ORT_VERSION`）后调用其 `TryParallelFor`／固定块调度。该路径在构建期启用时默认可用，宿主版本不匹配时回落公开 `KernelContext_ParallelFor`。原生池使用私有 ABI，须链接宿主同源构建的归档；FTDMM/BMM 的 MLAS 路径仅在 `native_pool()` 非空时启用，其余情况走标量行路径（完整开关与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md)）。
 
 执行器的接入流程在两条宿主路径上分别实现，取池语义相同（kernel 均经 `resolveThreadPool` 取池，上下文优先）：
 
