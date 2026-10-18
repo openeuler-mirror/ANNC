@@ -59,14 +59,10 @@ static string getMlasArchiveArgs(const string& kernelLibPath) {
         args += " \"" + archive.string() + "\"";
     }
     if (!args.empty()) return args;
-#ifdef ANNC_MLAS_ARCHIVE_ARGS
-    return " " ANNC_MLAS_ARCHIVE_ARGS;
-#else
     cerr << "ANNC_KERNEL_MLAS: set ANNC_MLAS_LIB_DIR or copy the four MLAS "
             "archives into "
          << kernelLibPath << endl;
     return "";
-#endif
 }
 #endif
 
@@ -650,9 +646,8 @@ private:
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
-        // MLAS GEMM kernels: resolve the four archives at runtime
-        // (ANNC_MLAS_LIB_DIR, then the kernel library directory), with the
-        // build-time paths as an optional fallback.
+        // MLAS GEMM kernels: resolve the four archives at link time from
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.
         const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
         if (!mlasArgs.empty()) {
             command += " -Wl,--start-group " + mlasArgs +
@@ -697,9 +692,8 @@ private:
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
-        // MLAS GEMM kernels: resolve the four archives at runtime
-        // (ANNC_MLAS_LIB_DIR, then the kernel library directory), with the
-        // build-time paths as an optional fallback.
+        // MLAS GEMM kernels: resolve the four archives at link time from
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.
         const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
         if (!mlasArgs.empty()) {
             command += " -Wl,--start-group " + mlasArgs +

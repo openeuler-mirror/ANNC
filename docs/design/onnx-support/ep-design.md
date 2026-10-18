@@ -299,7 +299,7 @@ sequenceDiagram
 | `ANNC_EP_FUSION_MASKED_MUL`               | 取值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 开启 |
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD`       | 取值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 开启 |
 
-这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 以及四个 `ANNC_EP_FUSION_*` 开关在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局；`ANNC_EP_TIMING`、`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——尤其 `ANNC_EP_NOOP` 一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（构建期是否编译 + 宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
+这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 以及四个 `ANNC_EP_FUSION_*` 开关在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局；`ANNC_EP_TIMING`、`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——尤其 `ANNC_EP_NOOP` 一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
 
 ### 4.6 契约不变量
 
