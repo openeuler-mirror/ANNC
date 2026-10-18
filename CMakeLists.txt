@@ -29,9 +29,9 @@ set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the nativ
 # straight to MlasGemmBatch.  Opt-in like the EP switch: it needs the ORT
 # source tree's mlas.h to compile and the ORT build tree's archives to link
 # into the kernel shared libraries the annc driver produces.
-option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR and ANNC_MLAS_BUILD_TREE; pair with ANNC_EP_NATIVE_POOL)" OFF)
+option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR; ANNC_MLAS_BUILD_TREE is an optional compile-time fallback; pair with ANNC_EP_NATIVE_POOL)" OFF)
 set(ANNC_MLAS_INCLUDE_DIR "" CACHE PATH "ORT source tree's onnxruntime/core/mlas/inc directory (holding mlas.h), required by ANNC_KERNEL_MLAS")
-set(ANNC_MLAS_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will load the kernels) providing libonnxruntime_mlas.a, libkleidiai.a, libonnxruntime_common.a and libcpuinfo.a for ANNC_KERNEL_MLAS")
+set(ANNC_MLAS_BUILD_TREE "" CACHE PATH "Optional ORT build tree (the Release/ directory) providing libonnxruntime_mlas.a, libkleidiai.a, libonnxruntime_common.a and libcpuinfo.a as a compile-time fallback; runtime resolution uses ANNC_MLAS_LIB_DIR or ANNC_KERNEL_LIB_PATH")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
@@ -71,23 +71,31 @@ if(ANNC_KERNEL_MLAS)
       "ANNC_KERNEL_MLAS=ON requires ANNC_MLAS_INCLUDE_DIR to point at the ORT "
       "source tree's onnxruntime/core/mlas/inc directory (holding mlas.h).")
   endif()
+  # The four archives are runtime link inputs for the kernel shared library.
+  # ANNC_MLAS_BUILD_TREE is optional: when it points at a complete ORT build
+  # tree it provides a compile-time fallback; at runtime the annc driver
+  # resolves the archives from ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
   set(ANNC_MLAS_ARCHIVES
       "${ANNC_MLAS_BUILD_TREE}/libonnxruntime_mlas.a"
       "${ANNC_MLAS_BUILD_TREE}/_deps/kleidiai-build/libkleidiai.a"
       "${ANNC_MLAS_BUILD_TREE}/libonnxruntime_common.a"
       "${ANNC_MLAS_BUILD_TREE}/_deps/pytorch_cpuinfo-build/libcpuinfo.a")
-  foreach(archive IN LISTS ANNC_MLAS_ARCHIVES)
-    if(NOT EXISTS "${archive}")
-      message(FATAL_ERROR
-        "ANNC_KERNEL_MLAS=ON needs ${archive}: point ANNC_MLAS_BUILD_TREE at "
-        "the ORT build tree (the Release/ directory, not the install tree) of "
-        "the runtime that will load the kernels.")
+  set(ANNC_MLAS_ARCHIVE_ARGS "")
+  if(NOT ANNC_MLAS_BUILD_TREE STREQUAL "")
+    set(_annc_mlas_archives_complete TRUE)
+    foreach(archive IN LISTS ANNC_MLAS_ARCHIVES)
+      if(NOT EXISTS "${archive}")
+        set(_annc_mlas_archives_complete FALSE)
+        message(STATUS
+          "ANNC_MLAS_BUILD_TREE is incomplete (${archive}); runtime "
+          "ANNC_MLAS_LIB_DIR will be required for MLAS kernel links")
+      endif()
+    endforeach()
+    if(_annc_mlas_archives_complete)
+      string(REPLACE ";" " " ANNC_MLAS_ARCHIVE_ARGS "${ANNC_MLAS_ARCHIVES}")
     endif()
-  endforeach()
-  # The annc driver bakes these paths into every kernel shared-library link,
-  # so the archives need not live in the single -L directory the driver is
-  # given (ANNC_KERNEL_LIB_PATH).
-  string(REPLACE ";" " " ANNC_MLAS_ARCHIVE_ARGS "${ANNC_MLAS_ARCHIVES}")
+    unset(_annc_mlas_archives_complete)
+  endif()
 endif()
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 

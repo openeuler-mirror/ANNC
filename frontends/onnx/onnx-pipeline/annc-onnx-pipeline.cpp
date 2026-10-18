@@ -244,7 +244,8 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
                            "ANNC_EP_FUSION_TENSORDOT_MATMUL",
                            "ANNC_EP_FUSION_LAYER_NORM",
                            "ANNC_EP_FUSION_MASKED_MUL",
-                           "ANNC_EP_FUSION_BATCHED_MATMUL_ADD"}) {
+                           "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
+                           "ANNC_MLAS_LIB_DIR"}) {
     if (const char *value = std::getenv(name)) {
       env.push_back(std::string(name) + "=" + value);
     }

@@ -99,17 +99,21 @@ include guard，重复 include 会让其中每个结构体重复定义。
 
 ### 可选原生线程池与 MLAS
 
-两项优化均默认关闭，用根 CMake 配置启用。构建树指宿主 ORT 构建的 `Release/` 目录，
-不是 SDK 安装目录：
+两项优化均默认关闭，用根 CMake 配置启用。native pool 需要宿主 ORT 构建树的
+`Release/` 归档；MLAS 构建期只需要 ORT 源码的 `mlas.h`，运行时从
+`ANNC_MLAS_LIB_DIR`（缺省回落到 `ANNC_KERNEL_LIB_PATH`）解析四个归档：
 
 | CMake 选项 | 启用配置 |
 |---|---|
 | `ANNC_EP_NATIVE_POOL` | 构建期选项：`ON`，同时启用 `ANNC_ENABLE_ONNXRUNTIME_EP`；编译进来的原生池路径没有运行时关闭入口 |
 | `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 common/cpuinfo 归档 |
 | `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
-| `ANNC_KERNEL_MLAS` | `ON`，与原生池配套 |
+| `ANNC_KERNEL_MLAS` | `ON`，与原生池配套；构建期只需要 `mlas.h` |
 | `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
-| `ANNC_MLAS_BUILD_TREE` | 同一宿主构建树，提供 MLAS/KleidiAI/common/cpuinfo 归档 |
+| `ANNC_MLAS_BUILD_TREE` | 可选：构建机本地测试的编译期 fallback；目标机用 `ANNC_MLAS_LIB_DIR` |
+
+运行时 `ANNC_MLAS_LIB_DIR` 指向同时包含 `libonnxruntime_mlas.a`、`libkleidiai.a`、
+`libonnxruntime_common.a`、`libcpuinfo.a` 的目录；未设置时用 `ANNC_KERNEL_LIB_PATH`。
 
 原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
 不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开

@@ -37,6 +37,39 @@ static string getClangPath() {
     return "clang";
 }
 
+#ifdef ANNC_KERNEL_MLAS
+static string getMlasArchiveArgs(const string& kernelLibPath) {
+    const char* envDir = getenv("ANNC_MLAS_LIB_DIR");
+    fs::path dir = (envDir && envDir[0] != '\0') ? fs::path(envDir)
+                                                 : fs::path(kernelLibPath);
+    if (dir.is_relative()) {
+        std::error_code ec;
+        fs::path absolute = fs::absolute(dir, ec);
+        if (!ec) dir = absolute;
+    }
+    const char* archives[] = {"libonnxruntime_mlas.a", "libkleidiai.a",
+                              "libonnxruntime_common.a", "libcpuinfo.a"};
+    string args;
+    for (const char* name : archives) {
+        fs::path archive = dir / name;
+        if (!fs::exists(archive)) {
+            args.clear();
+            break;
+        }
+        args += " \"" + archive.string() + "\"";
+    }
+    if (!args.empty()) return args;
+#ifdef ANNC_MLAS_ARCHIVE_ARGS
+    return " " ANNC_MLAS_ARCHIVE_ARGS;
+#else
+    cerr << "ANNC_KERNEL_MLAS: set ANNC_MLAS_LIB_DIR or copy the four MLAS "
+            "archives into "
+         << kernelLibPath << endl;
+    return "";
+#endif
+}
+#endif
+
 // 
 class CommandExecutor {
 public:
@@ -616,12 +649,15 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
-#ifdef ANNC_MLAS_ARCHIVE_ARGS
-        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
-        // thread-pool objects they run on and the CPU-feature probe that
-        // picks the kernel.  Absolute archive paths from the build config.
-        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
-                   " -Wl,--end-group -lpthread -ldl -lrt";
+#ifdef ANNC_KERNEL_MLAS
+        // MLAS GEMM kernels: resolve the four archives at runtime
+        // (ANNC_MLAS_LIB_DIR, then the kernel library directory), with the
+        // build-time paths as an optional fallback.
+        const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
+        if (!mlasArgs.empty()) {
+            command += " -Wl,--start-group " + mlasArgs +
+                       " -Wl,--end-group -lpthread -ldl -lrt";
+        }
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
@@ -660,12 +696,15 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
-#ifdef ANNC_MLAS_ARCHIVE_ARGS
-        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
-        // thread-pool objects they run on and the CPU-feature probe that
-        // picks the kernel.  Absolute archive paths from the build config.
-        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
-                   " -Wl,--end-group -lpthread -ldl -lrt";
+#ifdef ANNC_KERNEL_MLAS
+        // MLAS GEMM kernels: resolve the four archives at runtime
+        // (ANNC_MLAS_LIB_DIR, then the kernel library directory), with the
+        // build-time paths as an optional fallback.
+        const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
+        if (!mlasArgs.empty()) {
+            command += " -Wl,--start-group " + mlasArgs +
+                       " -Wl,--end-group -lpthread -ldl -lrt";
+        }
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
