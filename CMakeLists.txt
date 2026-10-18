@@ -30,6 +30,10 @@ set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the nativ
 # ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
 option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR; runtime archives resolved via ANNC_MLAS_LIB_DIR or ANNC_KERNEL_LIB_PATH)" OFF)
 set(ANNC_MLAS_INCLUDE_DIR "" CACHE PATH "ORT source tree's onnxruntime/core/mlas/inc directory (holding mlas.h), required by ANNC_KERNEL_MLAS")
+# The annc driver assembles generated AOT/JIT GEMM kernels against the GEMM-ASM
+# headers in <checkout>/Sve and <checkout>/Neon.  Baked in here as the default;
+# the runtime ANNC_GEMM_ASM_SOURCE_DIR environment variable overrides it.
+set(ANNC_GEMM_ASM_SOURCE_DIR "" CACHE PATH "GEMM-ASM checkout holding Sve/ and Neon/ assembly headers, used by the annc driver when ANNC_GEMM_ASM_SOURCE_DIR is not set at runtime")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR

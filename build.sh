@@ -25,7 +25,19 @@ ENABLE_TENSORFLOW="ON"
 ENABLE_TENSORFLOW_ADDON=""
 ENABLE_ONNX="ON"
 ENABLE_ONNXRUNTIME_EP="OFF"
+# Mutually exclusive framework selection. Empty keeps the legacy default
+# (TensorFlow + ONNX frontend, ORT EP off). --enable-tf / --enable-ort / --all
+# resolve the four switches below after argument parsing.
+FRAMEWORK_MODE=""
+DRY_RUN="NO"
+_user_disable_tf=""
+_user_disable_tf_addon=""
+_user_disable_onnx=""
 ANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR:-}"
+ANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE:-}"
+ANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS:-OFF}"
+ANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR:-}"
+ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:-}"
 ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
@@ -109,7 +121,36 @@ while [[ $# -gt 0 ]]; do
       REGEN_ONNX_PROTOS="YES"
       shift
       ;;
+    --enable-tf)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "tf" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="tf"
+      shift
+      ;;
+    --enable-ort|--enable-ort-ep)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "ort" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="ort"
+      shift
+      ;;
+    --all|--enable-all)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "all" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="all"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN="YES"
+      shift
+      ;;
     --disable-tensorflow)
+      _user_disable_tf="1"
       ENABLE_TENSORFLOW="OFF"
       # The addons are built from the frontend toolchain, so disabling the
       # framework disables them as well.
@@ -117,15 +158,13 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --disable-tensorflow-addon)
+      _user_disable_tf_addon="1"
       ENABLE_TENSORFLOW_ADDON="OFF"
       shift
       ;;
     --disable-onnx)
+      _user_disable_onnx="1"
       ENABLE_ONNX="OFF"
-      shift
-      ;;
-    --enable-ort-ep)
-      ENABLE_ONNXRUNTIME_EP="ON"
       shift
       ;;
     --coverage)
@@ -154,14 +193,22 @@ while [[ $# -gt 0 ]]; do
       echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
       echo "                                (also regenerates the ONNX protos while the ONNX frontend is enabled)"
       echo "  --regen-onnx-protos           Regenerate the ONNX protobuf sources (requires the ONNX frontend)"
+      echo "  Framework selection (mutually exclusive):"
+      echo "    --enable-tf                 Only TensorFlow frontend + TensorFlow addons"
+      echo "    --enable-ort                Only the ONNX Runtime acceleration stack:"
+      echo "                                ONNX frontend + ORT EP plugin (one unit;"
+      echo "                                --enable-ort-ep is an alias)"
+      echo "    --all                       TensorFlow + the ONNX Runtime acceleration stack"
       echo "  --disable-tensorflow          Disable the TensorFlow frontend (annc-tf2atir,"
       echo "                                annc-converter, annc-tf-pipeline) and its addons"
+      echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
       echo "  --disable-tensorflow-addon    Disable the TensorFlow addons (annc_optimizer, annc_fused_op);"
       echo "                                the TensorFlow frontend tools are still built"
+      echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
       echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
-      echo "  --enable-ort-ep               Build the ONNX Runtime EP plugin (addons/onnxruntime);"
-      echo "                                requires the ONNX frontend and ANNC_ONNXRUNTIME_INCLUDE_DIR"
-      echo "                                pointing at the ORT 1.26.0 session headers"
+      echo "                                (legacy/custom mode; conflicts with --enable-ort/--all)"
+      echo "  --dry-run                     Print the resolved framework switches and exit"
+      echo "                                (no configure/build; useful for CI checks)"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
       echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
       echo "                                third_party (LLVM/json) build type is unchanged"
@@ -170,6 +217,13 @@ while [[ $# -gt 0 ]]; do
       echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
       echo "    ANNC_TENSORFLOW_LIBRARIES=<list>      TensorFlow libraries for linked mode"
       echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: 1)"
+      echo "  ORT EP / kernel env vars:"
+      echo "    ANNC_EP_ORT_BUILD_TREE=<path>         ORT build tree Release/ (required when ORT EP is enabled:"
+      echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
+      echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF)"
+      echo "    ANNC_MLAS_INCLUDE_DIR=<path>          ORT onnxruntime/core/mlas/inc (required when MLAS=ON)"
+      echo "    ANNC_GEMM_ASM_SOURCE_DIR=<path>       GEMM-ASM checkout baked into the annc driver as the"
+      echo "                                          default JIT assembly source; runtime env overrides it"
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -180,10 +234,67 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Resolve the mutually exclusive framework selection.  The legacy default
+# (no selection flag) keeps the historical combination and still honors the
+# individual --disable-* switches.
+case "${FRAMEWORK_MODE}" in
+  tf)
+    if [ -n "${_user_disable_tf}" ] || [ -n "${_user_disable_tf_addon}" ]; then
+      echo "ERROR: --enable-tf conflicts with --disable-tensorflow/--disable-tensorflow-addon" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="ON"
+    ENABLE_TENSORFLOW_ADDON="ON"
+    ENABLE_ONNX="OFF"
+    ENABLE_ONNXRUNTIME_EP="OFF"
+    ;;
+  ort)
+    if [ -n "${_user_disable_onnx}" ]; then
+      echo "ERROR: --enable-ort conflicts with --disable-onnx" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="OFF"
+    ENABLE_TENSORFLOW_ADDON="OFF"
+    ENABLE_ONNX="ON"
+    ENABLE_ONNXRUNTIME_EP="ON"
+    ;;
+  all)
+    if [ -n "${_user_disable_tf}" ] || [ -n "${_user_disable_tf_addon}" ] || \
+       [ -n "${_user_disable_onnx}" ]; then
+      echo "ERROR: --all conflicts with --disable-tensorflow/--disable-tensorflow-addon/--disable-onnx" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="ON"
+    ENABLE_TENSORFLOW_ADDON="ON"
+    ENABLE_ONNX="ON"
+    ENABLE_ONNXRUNTIME_EP="ON"
+    ;;
+  "")
+    ;;
+  *)
+    echo "ERROR: unknown framework selection '${FRAMEWORK_MODE}'" >&2
+    exit 1
+    ;;
+esac
+
 # The TensorFlow addon follows the TensorFlow framework switch unless it was
 # set explicitly; --disable-tensorflow already forces it off.
 if [ -z "${ENABLE_TENSORFLOW_ADDON}" ]; then
   ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW}"
+fi
+
+if [ "${DRY_RUN}" == "YES" ]; then
+  case "${FRAMEWORK_MODE}" in
+    tf) echo "Framework selection: tf (TensorFlow frontend + addon)" ;;
+    ort) echo "Framework selection: ort (ONNX frontend + ONNXRuntime EP, one unit)" ;;
+    all) echo "Framework selection: all (TensorFlow + ONNX frontend + ONNXRuntime EP)" ;;
+    *) echo "Framework selection: legacy" ;;
+  esac
+  echo "ANNC_ENABLE_TENSORFLOW=${ENABLE_TENSORFLOW}"
+  echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
+  echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
+  echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
+  exit 0
 fi
 
 # Resolve the selected interpreter before entering build/. Relative virtualenv
@@ -612,13 +723,17 @@ get_cache_value() {
 # Check that key build options still match an existing cache.  CMake does not
 # automatically reconfigure when -D arguments change; silently reusing the old
 # cache would ignore user-requested changes (e.g. --kdnn-source RELEASE on a
-# tree previously configured with LOCAL).  If a mismatch is found, force an
-# explicit --clean reconfigure.
+# tree previously configured with LOCAL).  A changed non-empty value forces an
+# explicit --clean reconfigure.  A new/empty cache entry (for example the
+# ANNC_EP_ORT_BUILD_TREE / ANNC_GEMM_ASM_SOURCE_DIR keys added after an older
+# cache was written) triggers an in-place reconfigure instead: the third-party
+# build artifacts are kept, but the requested -D values are applied.
 check_cache_consistency() {
   [ -f "CMakeCache.txt" ] || return 0
 
   local key old_val new_val
   local -a mismatches=()
+  local -a missing_keys=()
   local -a cache_checks=(
     "CMAKE_BUILD_TYPE:${BUILD_TYPE}"
     "CMAKE_INSTALL_PREFIX:${INSTALL_PREFIX}"
@@ -636,6 +751,10 @@ check_cache_consistency() {
     "ANNC_KDNN_DIR:${KDNN_DIR}"
     "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
     "ANNC_ONNXRUNTIME_INCLUDE_DIR:${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
+    "ANNC_EP_ORT_BUILD_TREE:${ANNC_EP_ORT_BUILD_TREE}"
+    "ANNC_KERNEL_MLAS:${ANNC_KERNEL_MLAS}"
+    "ANNC_MLAS_INCLUDE_DIR:${ANNC_MLAS_INCLUDE_DIR}"
+    "ANNC_GEMM_ASM_SOURCE_DIR:${ANNC_GEMM_ASM_SOURCE_DIR}"
     "ANNC_TENSORFLOW_PRELOAD:${ANNC_TENSORFLOW_PRELOAD}"
     "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
     "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
@@ -646,8 +765,12 @@ check_cache_consistency() {
     key="${entry%%:*}"
     new_val="${entry#*:}"
     old_val=$(get_cache_value "${key}")
-    if [ -n "${old_val}" ] && [ "${old_val}" != "${new_val}" ]; then
-      mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+    if [ "${old_val}" != "${new_val}" ]; then
+      if [ -z "${old_val}" ]; then
+        missing_keys+=("  ${key}: cache has no value; requested='${new_val}'")
+      else
+        mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+      fi
     fi
   done
 
@@ -656,6 +779,13 @@ check_cache_consistency() {
     printf '%s\n' "${mismatches[@]}" >&2
     echo "       Use --clean to reconfigure with the new options." >&2
     exit 1
+  fi
+
+  if [ ${#missing_keys[@]} -ne 0 ]; then
+    echo "New build option(s) are not present in the existing cache:"
+    printf '%s\n' "${missing_keys[@]}"
+    echo "reconfiguring in place (third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
   fi
 }
 
@@ -696,16 +826,14 @@ check_framework_switch_cache() {
   done
 
   if [ ${#mismatches[@]} -ne 0 ]; then
-    echo "ERROR: Framework build switch(es) changed but an existing CMakeCache.txt was found." >&2
-    printf '%s\n' "${mismatches[@]}" >&2
+    echo "Framework build switch(es) changed; reconfiguring in place"
+    printf '%s\n' "${mismatches[@]}"
     if [ "${missing_keys}" == "YES" ]; then
-      echo "       Missing keys are read as the pre-switch default combination (ON/ON/ON)." >&2
+      echo "  (missing keys are read as the pre-switch default combination ON/ON/ON/OFF)"
     fi
-    echo "       Use --clean to reconfigure with the new switches." >&2
-    exit 1
-  fi
-
-  if [ "${missing_keys}" == "YES" ]; then
+    echo "(third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  elif [ "${missing_keys}" == "YES" ]; then
     echo "Framework switches are absent from the existing CMakeCache.txt but the"
     echo "requested values match the pre-switch defaults; reconfiguring in place"
     echo "(third-party build artifacts are kept unchanged)."
@@ -813,13 +941,20 @@ else
   echo "  Python: ${PYTHON}"
   echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
   echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+  echo "  Framework Selection: ${FRAMEWORK_MODE:-legacy}"
   echo "  TensorFlow Frontend: ${ENABLE_TENSORFLOW}"
   echo "  TensorFlow Addon: ${ENABLE_TENSORFLOW_ADDON}"
   echo "  ONNX Frontend: ${ENABLE_ONNX}"
   echo "  ONNXRuntime EP: ${ENABLE_ONNXRUNTIME_EP}"
   if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
     echo "  ONNXRuntime Include Dir: ${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
+    echo "  ORT Build Tree: ${ANNC_EP_ORT_BUILD_TREE:-<unset>}"
   fi
+  echo "  Kernel MLAS: ${ANNC_KERNEL_MLAS}"
+  if [ "${ANNC_KERNEL_MLAS}" == "ON" ]; then
+    echo "  MLAS Include Dir: ${ANNC_MLAS_INCLUDE_DIR}"
+  fi
+  echo "  GEMM-ASM Source Dir: ${ANNC_GEMM_ASM_SOURCE_DIR:-<runtime env only>}"
   echo "  Coverage: ${ENABLE_COVERAGE}"
   echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
   echo "  KDNN Source: ${KDNN_SOURCE}"
@@ -847,6 +982,10 @@ else
     -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
     -DANNC_ENABLE_ONNXRUNTIME_EP="${ENABLE_ONNXRUNTIME_EP}" \
     -DANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR}" \
+    -DANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE}" \
+    -DANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS}" \
+    -DANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR}" \
+    -DANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR}" \
     -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \

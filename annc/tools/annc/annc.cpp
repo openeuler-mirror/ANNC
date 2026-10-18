@@ -547,7 +547,10 @@ private:
                                : fs::path(ANNC_GEMM_ASM_SOURCE_DIR);
         if (asmRoot.empty() || !fs::exists(asmRoot / "Sve") ||
             !fs::exists(asmRoot / "Neon")) {
-            cerr << "ANNC_GEMM_ASM_SOURCE_DIR must point to a GEMM-ASM checkout"
+            cerr << "ANNC_GEMM_ASM_SOURCE_DIR must point to a GEMM-ASM checkout "
+                    "containing Sve/ and Neon/ (set the environment variable, or "
+                    "configure ANNC with "
+                    "-DANNC_GEMM_ASM_SOURCE_DIR=<checkout>)"
                  << endl;
             return false;
         }
