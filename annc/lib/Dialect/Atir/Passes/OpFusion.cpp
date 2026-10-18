@@ -6,6 +6,7 @@
 #include "Dialect/Atir/TemplateFingerprint.h"
 #include "Helper.h"
 #include "Kernel/KernelPriorityResolver.h"
+#include "Support/FusionSwitch.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -5318,10 +5319,14 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseDnnEmbeddingHashBucketAsFuncCallPattern>(&getContext());
     patterns.add<FuseMatMulAsFuncCallPattern>(&getContext());
-    patterns.add<FuseTensordotMatMulAsFuncCallPattern>(&getContext());
-    patterns.add<FuseMaskedMulAsFuncCallPattern>(&getContext());
-    patterns.add<FuseLayerNormAsFuncCallPattern>(&getContext());
-    patterns.add<FuseBatchedMatMulAddAsFuncCallPattern>(&getContext());
+    if (annc::fusionPatternEnabled("tensordot_matmul"))
+      patterns.add<FuseTensordotMatMulAsFuncCallPattern>(&getContext());
+    if (annc::fusionPatternEnabled("masked_mul"))
+      patterns.add<FuseMaskedMulAsFuncCallPattern>(&getContext());
+    if (annc::fusionPatternEnabled("layer_norm"))
+      patterns.add<FuseLayerNormAsFuncCallPattern>(&getContext());
+    if (annc::fusionPatternEnabled("batched_matmul_add"))
+      patterns.add<FuseBatchedMatMulAddAsFuncCallPattern>(&getContext());
     patterns.add<FuseKpEmbeddingActionIdGatherAsFuncCallPattern>(
         &getContext());
     patterns.add<FuseKpTargetBehaviorInteractionAsFuncCallPattern>(

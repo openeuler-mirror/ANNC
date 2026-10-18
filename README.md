@@ -629,6 +629,33 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 | `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅对 `openblas` MatMul 路径做特殊判断 |
 | `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存 |
 
+### ONNX Runtime EP 插件（`libannc_ep.so`）
+
+仅在宿主进程通过 `RegisterExecutionProviderLibrary` 注册 EP 后生效。融合开关默认开启，精确 `0` 关闭。
+
+| 变量 | 取值 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANNC_EP_PIPELINE` | 可执行文件路径 | 本 `.so` 同目录 → `../bin` → `PATH` | `annc-onnx-pipeline` 路径；设置但文件不存在时直接禁用运行时编译，不回退 |
+| `ANNC_EP_CACHE_DIR` | 目录路径 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` | 运行时编译缓存根 |
+| `ANNC_EP_COMPILE` | `0` 关闭 | 启用 | 关闭运行时编译，模型整体回落 CPU |
+| `ANNC_EP_COMPILE_TIMEOUT_S` | 正整数（秒） | `600` | 单次编译超时 |
+| `ANNC_EP_KEEP_TEMPS` | 非空且非 `0` | 关闭 | 保留编译失败的工作目录 |
+| `ANNC_EP_DEBUG` | 存在即开启 | 关闭 | 编译/申报诊断；设 `0` 仍然开启 |
+| `ANNC_EP_TIMING` | 存在即开启 | 关闭 | 每节点耗时拆分；设 `0` 仍然开启 |
+| `ANNC_EP_NOOP` | 存在即开启 | 关闭 | 只分配输出不计算；设 `0` 仍然开启 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | `0` 关闭 | 开启 | 控制 FusedTensordotMatmul 站点申报 |
+| `ANNC_EP_FUSION_LAYER_NORM` | `0` 关闭 | 开启 | 控制 LayerNormalization 站点申报 |
+| `ANNC_EP_FUSION_MASKED_MUL` | `0` 关闭 | 开启 | 控制 FusedMaskedMul 站点申报 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `0` 关闭 | 开启 | 控制 FusedBatchedMatmulAdd 站点申报 |
+
+四个 `ANNC_EP_FUSION_*` 开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在
+编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。开关只关闭该
+特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
+
+EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 运行时开关。原生池是构建期选项（`ANNC_EP_NATIVE_POOL`，默认 OFF），编译进来的路径在宿主版本匹配时自动启用。
+
+构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录（见 `build.sh --enable-ort-ep`）。
+
 ### 构建与测试
 
 | 变量 | 取值 | 默认值 | 说明 |

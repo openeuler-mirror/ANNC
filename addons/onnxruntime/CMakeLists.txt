@@ -187,6 +187,13 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/ftdmm_aot_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>)
   set_tests_properties(AnncEpFtdmmAotE2e PROPERTIES TIMEOUT 300)
+  # One fused pattern per switch; each is run enabled (claimed) and disabled
+  # (the EP drops the site and the CPU EP runs it).
+  add_test(NAME AnncEpFusionToggles
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fusion_toggles_e2e.py
+      --ep-library $<TARGET_FILE:annc_ep>)
+  set_tests_properties(AnncEpFusionToggles PROPERTIES TIMEOUT 300)
   # The context-ABI FTDMM needs the pipeline and kernel library built from
   # this tree (the legacy e2e can also run against an installed dev pipeline).
   if(TARGET annc-onnx-pipeline)

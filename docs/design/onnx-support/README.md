@@ -224,7 +224,7 @@ sequenceDiagram
 | GAP-05 | 前端语义保真 | P0 | 开放 | 必填属性缺前置拒绝、未定义属性未拒绝、可选输入 slot 保真与动态 axes 语义待补、声明与推导冲突缺诊断；部分守卫已实现（如 GlobalAveragePool 秩守卫） | R-03 · WP-02 · AT-01 | 前端负例与逐算子差分通过；onnx-frontend-design §10 各局部项逐条关闭 | onnx-frontend-design §4.5、§10 |
 | GAP-06 | 算子覆盖 | P1 | 开放 | 通用 kernel 覆盖矩阵家族与四个上下文站点（#11–#14），通用逐元素融合仍未实现；未融合算子在 AOT 路径没有落点 | — · WP-01/WP-02 · AT-01/AT-06 | 发布清单内模式具备 AOT 落点并通过端到端验收；无 AOT 落点的算子按收益扩展 | fusion-design §7.1、§11、附录 A |
 | GAP-07 | 测试门禁 | P0 | 开放 | 前端 52 个 GTest 与 6 个 CLI 用例、EP 侧两个 GTest 与两组宿主夹具、四个上下文端到端用例（FTDMM / masked_mul / layer_norm / BMM）及 `masked_mul_context_test` 已就位；前端语义差分、kernel 全模式数值、真实 ORT 全模型差分、L1–L4 完整失败矩阵，以及 CI 实际执行与跳过统计仍缺 | R-09 · WP-06 · AT-01–AT-05 | 规定套件进 CI 并阻断发布；全程报告收集/执行/跳过/通过数；精度与失败矩阵证据归档 | ep-design §8.6、§10；fusion-design §9、§11；onnx-frontend-design §8.1 |
-| GAP-08 | 并行执行 | 已闭合 | 已闭合 | 已实现：EP 经执行上下文 ABI v3 的 `thread_pool` 注入适配器，kernel 经 `resolveThreadPool` 取池并复用 ORT intra-op 池；另有受版本校验、默认可用的原生池路径（`ANNC_EP_NATIVE_POOL`）与默认关闭的 MLAS 路径。剩余风险为 EP 与 kernel 必须同源构建、原生池私有布局随宿主版本变化、嵌套判定依赖 `thread_local`、池不可用时静默回退本线程 | R-10 · WP-03 · AT-06 | 已闭合；剩余风险在 §6.6 与 ep-design §10 跟踪，线程数声明与并行收益随性能验收固定 | ep-design §6.6、§8.4、§10；fusion-design §7.2、§11 |
+| GAP-08 | 并行执行 | 已闭合 | 已闭合 | 已实现：EP 经执行上下文 ABI v3 的 `thread_pool` 注入适配器，kernel 经 `resolveThreadPool` 取池并复用 ORT intra-op 池；另有受版本校验、构建期可选的原生池路径（构建期 `ANNC_EP_NATIVE_POOL`，运行时无关闭开关）与默认关闭的 MLAS 路径。剩余风险为 EP 与 kernel 必须同源构建、原生池私有布局随宿主版本变化、嵌套判定依赖 `thread_local`、池不可用时静默回退本线程 | R-10 · WP-03 · AT-06 | 已闭合；剩余风险在 §6.6 与 ep-design §10 跟踪，线程数声明与并行收益随性能验收固定 | ep-design §6.6、§8.4、§10；fusion-design §7.2、§11 |
 
 本节依据源码机制分析差距及其风险，具体后果需在相应测试中验证。完整支持按“ONNX 可表达 → 公共模式可形成 → pipeline 可生成 → EP 可执行 → 目标平台已验收”逐层确认。各项差距在实现补齐并通过验证后关闭，发布能力以整体方案的验收矩阵为准。
 

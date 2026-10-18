@@ -1,4 +1,9 @@
 // RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: env ANNC_EP_FUSION_TENSORDOT_MATMUL=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
+// DISABLED: "atir.MatMul"
+// DISABLED-NOT: fusion.pattern = "tensordot_matmul"
+// DISABLED-NOT: custom.op_name = "TensordotMatMul"
+// DISABLED-NOT: func.func private @fused_tensordot_matmul_
 // FTDMM 站点（execution v2 形态）：kernel 函数首参为执行上下文，fusion.metadata
 // 的 abi 为 annc_execution_v2、kernel_arg_order 为空（输出由 kernel 经上下文
 // 分配），成员名单记录整块；主图区域不再重写，只标记 annc.fusion_materialized

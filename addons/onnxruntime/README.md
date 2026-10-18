@@ -104,7 +104,7 @@ include guard，重复 include 会让其中每个结构体重复定义。
 
 | CMake 选项 | 启用配置 |
 |---|---|
-| `ANNC_EP_NATIVE_POOL` | `ON`，同时启用 `ANNC_ENABLE_ONNXRUNTIME_EP` |
+| `ANNC_EP_NATIVE_POOL` | 构建期选项：`ON`，同时启用 `ANNC_ENABLE_ONNXRUNTIME_EP`；编译进来的原生池路径没有运行时关闭入口 |
 | `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 common/cpuinfo 归档 |
 | `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
 | `ANNC_KERNEL_MLAS` | `ON`，与原生池配套 |
@@ -112,11 +112,26 @@ include guard，重复 include 会让其中每个结构体重复定义。
 | `ANNC_MLAS_BUILD_TREE` | 同一宿主构建树，提供 MLAS/KleidiAI/common/cpuinfo 归档 |
 
 原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
-不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配或运行时
-`ANNC_EP_NATIVE_POOL=0` 时回落公开 API；原生路径的空池表示串行。
+不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开
+API；原生路径的空池表示串行。
 
 原生路径有 cost 时调用 `TryParallelFor`，只有 grain 时固定块调度，两者都没有时使用
-公开 API。`ANNC_EP_SHARDS` 仅限制公开 API 路径，不限制原生 cost/grain 调度或 MLAS。
+公开 API。EP 始终使用 ORT 的线程池：运行时不再提供 `ANNC_EP_NATIVE_POOL` 或
+`ANNC_EP_SHARDS` 开关，分片数由内部估计与 ORT 池决定。
+
+四个融合算子可通过运行时环境变量逐个关闭（默认开启，精确 `0` 关闭）：
+
+| 变量 | 作用 |
+|---|---|
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL=0` | 不申报 FusedTensordotMatmul（`tensordot_matmul`）站点 |
+| `ANNC_EP_FUSION_LAYER_NORM=0` | 不申报 LayerNormalization（`layer_norm`）站点 |
+| `ANNC_EP_FUSION_MASKED_MUL=0` | 不申报 FusedMaskedMul（`masked_mul`）站点 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=0` | 不申报 FusedBatchedMatmulAdd（`batched_matmul_add`）站点 |
+
+开关由 `annc-onnx-pipeline` 转发给 `annc-opt`，`OpFusion` 在编译期直接跳过对应的
+matcher，因此不会生成该融合算子；EP 申报循环保留过滤作为兜底。四个开关进入 EP 缓存
+指纹，切换会产生新的缓存条目。注意：开关只关闭该特定融合算子，其他 pattern（例如通用
+`matmul`）仍可能融合同一子图中的节点。
 
 FTDMM/BMM 仅在编译启用 MLAS 且 `native_pool()` 非空时调用 `MlasGemmBatch`；否则执行
 标量行路径，空池（如 intra-op=1）也不执行串行 MLAS。driver 将上述归档路径写入 kernel
@@ -186,8 +201,10 @@ ABI、参数绑定规则与失败形态见
 | `ANNC_EP_DEBUG=1` | 编译诊断：签名/缓存命中、逐站点申报与丢弃原因、每融合节点的锚点名与 kernel 名、每节点首次操作数形状 |
 | `ANNC_EP_TIMING=1` | 进程退出时打印每节点的开销拆分（输入识别 / 输出分配 / kernel） |
 | `ANNC_EP_NOOP=1` | `Compute` 只分配输出不做计算——测量辅助，不是运行模式 |
-| `ANNC_EP_SHARDS=<n>` | 限制公开 API 路径的分片数；不影响原生 cost/grain 调度或 MLAS |
-| `ANNC_EP_NATIVE_POOL=0` | 禁用原生池并回落公开 API；MLAS 因无原生池而回落标量 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL=0` | 关闭 FusedTensordotMatmul 站点申报 |
+| `ANNC_EP_FUSION_LAYER_NORM=0` | 关闭 LayerNormalization 站点申报 |
+| `ANNC_EP_FUSION_MASKED_MUL=0` | 关闭 FusedMaskedMul 站点申报 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=0` | 关闭 FusedBatchedMatmulAdd 站点申报 |
 | `ANNC_EP_COMPILE=0` | 完全禁用运行时编译（等价于不注册 EP，用于对照） |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 子进程超时，默认 600 |
 | `ANNC_EP_KEEP_TEMPS=1` | 保留编译工作目录 |

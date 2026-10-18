@@ -499,21 +499,6 @@ TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
   EXPECT_EQ(fake_.last_parallel_batches, 2u);
 }
 
-// ANNC_EP_SHARDS caps the shard count for tuning without a rebuild.
-TEST_F(ExecutionContextFailureTest, ParallelForShardOverrideCapsTheCount) {
-  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
-  ::setenv("ANNC_EP_SHARDS", "2", 1);
-  std::vector<int64_t> shard_sizes;
-  annc::threadpool::ParallelForOptions options;
-  options.cost_per_unit = 128;  // 12 shards unclamped, see the test above
-  pool.parallel_for(4096, options, [&](int64_t begin, int64_t end) {
-    shard_sizes.push_back(end - begin);
-  });
-  ::unsetenv("ANNC_EP_SHARDS");
-  EXPECT_EQ(shard_sizes, (std::vector<int64_t>{2048, 2048}));
-  EXPECT_EQ(fake_.last_parallel_batches, 2u);
-}
-
 // With neither signal the range is split the way the in-tree pool's grain
 // default (1) and ORT's own num_batches<=0 default split it: one unit per
 // block, bounded by the pool's degree.

@@ -424,11 +424,6 @@ void OrtThreadPool::parallel_for(
     fn(0, total);
     return;
   }
-  // ANNC_EP_SHARDS caps the count for tuning without a rebuild.
-  if (const char* override_shards = std::getenv("ANNC_EP_SHARDS")) {
-    batches = std::min<std::int64_t>(
-        batches, std::max<std::int64_t>(1, std::atoll(override_shards)));
-  }
   LogPoolDecision(total, options, batches);
   // One ORT batch per shard: ORT calls the shim once per batch index, and the
   // shim turns that index into the row range it covers (see InvokeShard).

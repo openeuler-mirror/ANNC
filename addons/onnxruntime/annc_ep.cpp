@@ -16,6 +16,9 @@
 //                       then $HOME/.cache/annc-ep)
 //   ANNC_EP_DEBUG=1     compile diagnostics + per-node operand shapes on stderr
 //   ANNC_EP_TIMING=1    per-node cost split (input / output / kernel) at exit
+//   ANNC_EP_FUSION_*=0  disable one fused pattern in the compiler and at
+//                       claim time (TENSORDOT_MATMUL, LAYER_NORM,
+//                       MASKED_MUL, BATCHED_MATMUL_ADD)
 //
 // Scope:
 //   * the ANNC toolchain decides the fusion boundaries (no matcher is replayed
@@ -77,9 +80,19 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
   // matchers, compiler/linker inputs, headers, and runtime search paths, so a
   // changed value must not reuse a previously compiled cache entry.
   constexpr const char* config_names[] = {
-      "ANNC_EP_PIPELINE",       "ANNC_GEMM_CONFIG",    "ANNC_GEMM",
-      "ANNC_KERNEL_LIB_PATH",   "ANNC_CLANG",          "LIBRARY_PATH",
-      "CPATH",                  "C_INCLUDE_PATH",      "CPLUS_INCLUDE_PATH",
+      "ANNC_EP_PIPELINE",
+      "ANNC_GEMM_CONFIG",
+      "ANNC_GEMM",
+      "ANNC_KERNEL_LIB_PATH",
+      "ANNC_CLANG",
+      "LIBRARY_PATH",
+      "CPATH",
+      "C_INCLUDE_PATH",
+      "CPLUS_INCLUDE_PATH",
+      "ANNC_EP_FUSION_TENSORDOT_MATMUL",
+      "ANNC_EP_FUSION_LAYER_NORM",
+      "ANNC_EP_FUSION_MASKED_MUL",
+      "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
   };
   fingerprint += "\nannc-ep-config-v1";
   for (const char* name : config_names) {
@@ -923,6 +936,18 @@ OrtStatus* ORT_API_CALL GetCapabilityRuntimeCompileImpl(
   std::unordered_set<std::string> claimed_names;
   size_t claimed = 0, dropped = 0;
   for (const annc_ep::Site& reported : report.sites) {
+    // The compiler's OpFusion pass already skips a disabled pattern (the
+    // pipeline forwards the switch); this claim-time filter is a safety net
+    // for an old toolchain or a stale cache entry.
+    if (!annc_ep::FusionPatternEnabled(reported.pattern)) {
+      ++dropped;
+      if (g_debug) {
+        std::fprintf(stderr,
+                     "[annc-ep] drop site '%s': fusion pattern '%s' disabled\n",
+                     reported.kernelName.c_str(), reported.pattern.c_str());
+      }
+      continue;
+    }
     // Translate the report's names back to the graph's own names (the report
     // speaks the exported model's). A site whose names are not all in the
     // table can still be claimed when the rank/type rule identifies its
@@ -1375,8 +1400,8 @@ OrtStatus* ORT_API_CALL CreateEpFactories(const char* /*registration_name*/,
   annc_ep::native::CheckHostVersion(ort_api_base);
   if (g_debug && !annc_ep::native::PoolAvailable()) {
     std::fprintf(stderr,
-                 "[annc-ep] native pool unavailable (host version or "
-                 "ANNC_EP_NATIVE_POOL=0); using the public adapter\n");
+                 "[annc-ep] native pool unavailable (host version mismatch); "
+                 "using the public adapter\n");
   }
 #endif
   if (max_factories < 1) {

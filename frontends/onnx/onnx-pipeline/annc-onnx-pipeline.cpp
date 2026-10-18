@@ -238,8 +238,13 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
   }
   // GEMM tuning config and the fusion switches travel with the caller: they
   // change what the ANNC matcher accepts, so the EP's graph view and this
-  // compile must agree on them.
-  for (const char *name : {"ANNC_GEMM_CONFIG", "ANNC_GEMM"}) {
+  // compile must agree on them. The four ANNC_EP_FUSION_* switches are read by
+  // annc-opt's OpFusion pass, which then skips the disabled matcher entirely.
+  for (const char *name : {"ANNC_GEMM_CONFIG", "ANNC_GEMM",
+                           "ANNC_EP_FUSION_TENSORDOT_MATMUL",
+                           "ANNC_EP_FUSION_LAYER_NORM",
+                           "ANNC_EP_FUSION_MASKED_MUL",
+                           "ANNC_EP_FUSION_BATCHED_MATMUL_ADD"}) {
     if (const char *value = std::getenv(name)) {
       env.push_back(std::string(name) + "=" + value);
     }
