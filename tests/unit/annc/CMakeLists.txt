@@ -53,3 +53,19 @@ if(ANNC_ENABLE_TENSORFLOW_ADDON)
         TEST_PREFIX "JitCompilationCache."
     )
 endif()
+
+# The mlir_ciface argument dispatch is header-only and independent of
+# TensorFlow; keep its regression test available even in TF-disabled builds.
+add_executable(ciface_dispatch_test
+    ciface_dispatch_test.cpp
+)
+target_include_directories(ciface_dispatch_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/tensorflow_addons"
+)
+target_link_libraries(ciface_dispatch_test PRIVATE
+    GTest::gtest_main
+    Threads::Threads
+)
+gtest_discover_tests(ciface_dispatch_test
+    TEST_PREFIX "CifaceDispatch."
+)

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 DEFAULT_ANNC_INSTALL="${PROJECT_ROOT}/install"
 DEFAULT_ANNC_BUILD="${PROJECT_ROOT}/build"
 
@@ -21,8 +21,8 @@ fi
 export PATH="${DEFAULT_ANNC_BIN}:$PATH"
 
 ADDONS_DIR="${ADDONS_DIR:-${DEFAULT_ADDONS_DIR}}"
-CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/session_config.pbtxt}"
-BASELINE_CONFIG_FILE="${BASELINE_CONFIG_FILE:-${SCRIPT_DIR}/baseline_session_config.pbtxt}"
+CONFIG_FILE="${CONFIG_FILE:-${PROJECT_ROOT}/tensorflow_addons/session_config.pbtxt}"
+BASELINE_CONFIG_FILE="${BASELINE_CONFIG_FILE:-${PROJECT_ROOT}/tensorflow_addons/baseline_session_config.pbtxt}"
 
 MODELS=${1:-"wide_and_deep"}
 INTRA_OP=${2:-24}
@@ -124,10 +124,10 @@ WARMUP_REQUESTS=${WARMUP_REQUESTS:-50}
 #   NUMA 拓扑              : 自动从 /sys/devices/system/node 检测
 #
 # ── 使用示例 ──
-#   bash test_model_zoo_annc.sh wide_and_deep
-#   bash test_model_zoo_annc.sh wide_and_deep,dlrm,deepfm 20 20 1
-#   SERVER_START_CPU=0 CLIENT_START_CPU=48 bash test_model_zoo_annc.sh wide_and_deep
-#   RUN_BOTH=0 ENABLE_ANNC=0 bash test_model_zoo_annc.sh wide_and_deep
+#   bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep
+#   bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep,dlrm,deepfm 20 20 1
+#   SERVER_START_CPU=0 CLIENT_START_CPU=48 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep
+#   RUN_BOTH=0 ENABLE_ANNC=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep
 #
 # ============================================================================
 
@@ -180,7 +180,7 @@ TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
 THREAD_TAG="i${INTRA_OP}-o${INTER_OP}-n${INSTANCE_NUMS}"
 
 # 顶层日志目录：一次调用中 baseline 与 ANNc 的结果放在同一父目录下，便于对比。
-BASE_LOG_DIR="logs/modelzoo_${MODELS}_${THREAD_TAG}_${TIMESTAMP}"
+BASE_LOG_DIR="${PROJECT_ROOT}/tensorflow_addons/logs/modelzoo_${MODELS}_${THREAD_TAG}_${TIMESTAMP}"
 mkdir -p "$BASE_LOG_DIR"
 
 declare -A model_params

@@ -138,7 +138,7 @@ pipeline {
         BUILD_STATUS_FILE = "${env.ANNC_NIGHTLY_HOME}/build_status.json"
 
         // pytest 显式使用本次构建目录，避免测试脚本回退到其他 build 目录
-        // （tests/test_onnx_frontend.py 等优先选择 build-v2/）。
+        // （tests/integration/onnx2atir/test_onnx_frontend.py 等优先选择 build-v2/）。
         ANNC_BUILD_DIR = "${WORKSPACE}/build"
         // 依赖预检与安装校验随框架开关条件化；默认三项均为 1（与改动前
         // 的默认任务等价）。TensorFlow Python 包只在构建 TF addon 时需要。

@@ -1777,10 +1777,18 @@ struct FuseKpSparseDynamicStitchAsFuncCallPattern
         "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
     metadata.push_back(rewriter.getNamedAttr(
         "abi", rewriter.getStringAttr("mlir_ciface")));
+    // The GraphDef rewrite emits the inputs fixed-first, dynamic-last:
+    //   [v0..vN-1, x, output]
+    // while the kernel function signature is [x, v0..vN-1, output].
+    // Map the runtime list onto that signature explicitly.
     SmallVector<int64_t> kernelArgOrder;
-    for (int64_t i = 0; i < static_cast<int64_t>(callInputs.size()) + 1; ++i) {
-      kernelArgOrder.push_back(i);
+    const int64_t numVariables =
+        static_cast<int64_t>(match.variables.size());
+    kernelArgOrder.push_back(numVariables);  // x
+    for (int64_t i = 0; i < numVariables; ++i) {
+      kernelArgOrder.push_back(i);  // v0..vN-1
     }
+    kernelArgOrder.push_back(numVariables + 1);  // output
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), kernelArgOrder)));
     metadata.push_back(rewriter.getNamedAttr(

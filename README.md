@@ -65,10 +65,17 @@ LLVM 和 nlohmann/json 自动拉取并编译：
 > - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：选择 KDNN 来源（默认 RELEASE）
 > - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
 > - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party（LLVM/json）保持原构建类型、不重编
-> - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon
-> - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建
-> - `--disable-onnx`：关闭 ONNX 前端（`annc-onnx2atir`）
-> - `--enable-ort-ep`：构建 ONNX Runtime EP 插件（`addons/onnxruntime`，默认关闭）；需 ONNX 前端可用，并把环境变量 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录
+> - 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名
+>   `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 是一个整体，总是同时
+>   构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，
+>   ORT EP 关闭）。
+> - `--dry-run`：打印解析后的四个框架开关并退出，不 configure/build
+> - `--disable-tensorflow`：关闭 TensorFlow 前端及其 addon（legacy/custom 模式；
+>   与 `--enable-tf`/`--all` 冲突）
+> - `--disable-tensorflow-addon`：只关闭 TF addon，TF 前端工具仍构建
+>   （legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
+> - `--disable-onnx`：关闭 ONNX 前端（legacy/custom 模式；与
+>   `--enable-ort`/`--all` 冲突）
 > - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
 
 只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
@@ -115,7 +122,7 @@ which annc-opt annc-asm
 
 # 运行测试
 python3 -m pytest tests/          # 全部测试
-python3 -m pytest tests/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
+python3 -m pytest tests/integration/fusion/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
 ```
 
 ## 架构概览
@@ -417,7 +424,7 @@ annc-asm model_fused_atir.mlir \
 ```shell
 annc model_lowered.mlir -o app
 annc model_lowered.mlir --shared -o kernel.so
-annc model_lowered.mlir -t tests/annc/driver_dynamic.c -o test_app -v --shared
+annc model_lowered.mlir -t tests/e2e/annc-driver/driver_dynamic.c -o test_app -v --shared
 ```
 
 常用参数：
@@ -544,9 +551,9 @@ ninja && ninja install
 Serving 侧建议用以下命令对比开启和关闭 ANNC 的延迟，并在开启 ANNC 时打开打点：
 
 ```bash
-cd /annc/ANNC_E2E/ANNC_zch/tensorflow_serving_addons
-ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
-ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
+cd <ANNC 源码根目录>
+ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
+ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 ```
 
 ## CMake / 构建选项参考
@@ -557,8 +564,12 @@ ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
-| `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort-ep` |
+| `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
+| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
+| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF` | 启用 MLAS GEMM kernel 后端；构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析 |
+| `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
+| `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 的 JIT 汇编源码编译期默认值，运行时同名环境变量可覆盖 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
 | `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |
@@ -654,7 +665,8 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 
 EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
 
-构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。
+构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。`build.sh --all` 会转发 `ANNC_EP_ORT_BUILD_TREE`、`ANNC_KERNEL_MLAS`、`ANNC_MLAS_INCLUDE_DIR` 与 `ANNC_GEMM_ASM_SOURCE_DIR`，同时构建 TF 前端/addon 与 EP；`--enable-ort` 只构建 ORT 加速栈（ONNX 前端与 EP
+作为一体），`--enable-tf` 只构建 TF。
 
 ### 构建与测试
 
@@ -669,7 +681,7 @@ EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_E
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
 | `ANNCOPT` / `ANNASM` / `FILECHECK` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
 
-### 模型压测脚本 `test_model_zoo_annc.sh`
+### 模型压测脚本 `tests/e2e/tf/test_model_zoo_annc.sh`
 
 脚本控制变量：`START_CPU` / `SERVER_START_CPU` / `CLIENT_START_CPU` / `CLIENT_NUMA_NODE` / `RUN_BOTH` / `LATENCY_THRESHOLD` / `WARMUP_REQUESTS` / `BASE_PORT` / `ENABLE_PROFILER`。
 

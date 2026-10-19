@@ -11,7 +11,7 @@
 #include "Kernel/KernelMacros.h"
 #include "Kernel/KernelRegistry.h"
 #include "Kernel/MemRefTypes.h"
-#include "tests/kernels/auto_kernel_support.h"
+#include "tests/unit/kernels/auto_kernel_support.h"
 
 using namespace annc::kernels;
 

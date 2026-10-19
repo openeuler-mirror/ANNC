@@ -1,4 +1,5 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
+// RUN: annc-opt %s --atir-op-fusion | FileCheck %s --check-prefix=OPFUSION
 // Config fusion first level for sparse dynamic stitch: the subgraph in
 // main is extracted into a private kernel func with annc.kernel +
 // fusion.metadata while preserving the legacy output-buffer ABI.
@@ -20,6 +21,11 @@
 // CHECK-SAME: role = "fixed"
 // CHECK-SAME: kernel_name = "fused_kp_sparse_dynamic_stitch_
 // CHECK-SAME: llvm.emit_c_interface
+// OPFUSION-LABEL: func.func private @fused_kp_sparse_dynamic_stitch_
+// The GraphDef rewrite emits fixed inputs first and the dynamic x last, so
+// the runtime order is [v0, v1, x, output]; the kernel signature is
+// [x, v0, v1, output].
+// OPFUSION-SAME: kernel_arg_order = [2, 0, 1, 3]
 module attributes {module.state = "atir"} {
 func.func @main(
     %arg0: !atir.tensor<4xi64, name = "x">,

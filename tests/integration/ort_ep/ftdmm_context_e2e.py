@@ -21,7 +21,7 @@ import numpy as np
 import onnxruntime as ort
 import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
-MODEL = Path(__file__).parent / "ftdmm_aot_e2e.onnx"
+MODEL = Path(__file__).parent / "fixtures" / "ftdmm_aot_e2e.onnx"
 INPUT = "t558_0"
 
 

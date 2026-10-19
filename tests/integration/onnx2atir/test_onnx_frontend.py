@@ -23,7 +23,7 @@ from onnx import TensorProto, helper, numpy_helper  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def _build_dir():

@@ -19,7 +19,7 @@ import numpy as np
 import onnxruntime as ort
 import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
-MODEL = Path(__file__).parent / "ftdmm_aot_e2e.onnx"
+MODEL = Path(__file__).parent / "fixtures" / "ftdmm_aot_e2e.onnx"
 INPUT = "t558_0"
 
 
@@ -33,10 +33,27 @@ def find_pipeline():
     raise RuntimeError("annc-onnx-pipeline not found; set ANNC_EP_PIPELINE")
 
 
+def merge_kernel_libs(work, lib_dirs):
+    """The annc driver links with a single -L: every archive it needs -- ANNC
+    kernels and the LLVM support libraries -- must sit in one directory."""
+    merged = work / "kernel-libs"
+    merged.mkdir(parents=True, exist_ok=True)
+    for lib_dir in lib_dirs:
+        if lib_dir is None or not Path(lib_dir).is_dir():
+            continue
+        for archive in Path(lib_dir).glob("*.a"):
+            target = merged / archive.name
+            if not target.exists():
+                target.symlink_to(archive)
+    return merged
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-library", required=True)
     parser.add_argument("--work-dir")
+    parser.add_argument("--llvm-lib-dir")
+    parser.add_argument("--extra-lib-dir", action="append", default=[])
     args = parser.parse_args()
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ftdmm-e2e-"))
     (work / "cache").mkdir(parents=True, exist_ok=True)
@@ -46,6 +63,11 @@ def main():
     env = dict(os.environ,
                ANNC_EP_PIPELINE=str(find_pipeline()),
                ANNC_EP_CACHE_DIR=str(work / "cache"))
+    merged_lib_dir = None
+    if args.llvm_lib_dir or args.extra_lib_dir:
+        merged_lib_dir = merge_kernel_libs(
+            work, [args.llvm_lib_dir] + args.extra_lib_dir)
+        env["ANNC_KERNEL_LIB_PATH"] = str(merged_lib_dir)
     if not env.get("ANNC_KERNEL_LIB_PATH"):
         lib_dir = Path(env["ANNC_EP_PIPELINE"]).parent.parent / "lib"
         if not (lib_dir / "libANNCBuiltinKernels.a").exists():

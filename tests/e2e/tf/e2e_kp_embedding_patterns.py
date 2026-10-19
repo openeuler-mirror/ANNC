@@ -17,7 +17,7 @@ import numpy as np
 import tensorflow as tf
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = ROOT / "configs" / "fusion" / "kp_embedding_patterns.json"
 
 
@@ -52,7 +52,9 @@ def _default_fused_op():
     candidates.extend(
         [
             ROOT / "install" / "lib" / "libannc_fused_op.so",
+            ROOT / "build" / "lib" / "libannc_fused_op.so",
             ROOT / "build" / "tensorflow_addons" / "libannc_fused_op.so",
+            ROOT / "build-v2" / "lib" / "libannc_fused_op.so",
             ROOT / "build-v2" / "tensorflow_addons" / "libannc_fused_op.so",
             ROOT / "tensorflow_addons" / "build" / "libannc_fused_op.so",
         ]

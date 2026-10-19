@@ -734,10 +734,10 @@ flowchart TB
 
 ### 7.1 可测试性
 
-- **单元测试**：`tests/kernels/` 覆盖 KernelRegistry、KernelPriorityResolver、builtin kernel 与 customcall 符号解析，经 `gtest_discover_tests` 接入 CTest，是当前唯一接入 CTest 的测试套件。
+- **单元测试**：`tests/unit/kernels/` 覆盖 KernelRegistry、KernelPriorityResolver、builtin kernel 与 customcall 符号解析；`tests/unit/annc/`、`tests/unit/onnx2atir/`、`tests/unit/ort_ep/` 分别覆盖 JIT/ciface、ONNX 前端与 ORT EP。全部经 `gtest_discover_tests` 接入 CTest；入口与分层见 `tests/README.md`。
 - **Lowering 集成测试**：`tests/FileCheck/` 与 `benchmark/annc-bench` 分别覆盖 Pass 输出和 GEMM 编译执行。
 - **FileCheck 测试**：`tests/FileCheck/`（lit 风格 `// RUN:` 行，由自定义 `run.sh` 驱动，无 lit 基础设施）覆盖保留的 Conversion/Dialect/Target Pass。
-- **driver 测试**：`tests/annc/`（`driver_dynamic.c`/`driver_static.c`）验证 `annc` 编译产出的 kernel 执行；当前无自动化驱动，经 `annc -t <driver.c>` 手动使用。
+- **driver 测试**：`tests/e2e/annc-driver/`（`driver_dynamic.c`/`driver_static.c`）验证 `annc` 编译产出的 kernel 执行；当前无自动化驱动，经 `annc -t <driver.c>` 手动使用。
 - **覆盖率**：`build.sh --coverage` + gcovr 提供 ctest 套件覆盖率入口。
 - **工具链测试**：每个 CLI 工具均可独立调用并验证输入输出。
 - **ATIR 解释执行**：通过 `Interpret` 接口验证算子语义正确性。

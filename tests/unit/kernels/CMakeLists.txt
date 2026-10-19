@@ -9,11 +9,11 @@ set(ANNC_AUTO_KERNEL_WRAPPERS_GEN "${ANNC_KERNEL_TEST_GENERATED_DIR}/auto_kernel
 file(WRITE "${ANNC_AUTO_KERNEL_WRAPPERS_GEN}" [=[
 #include "Kernel/MemRefTypes.h"
 #define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
-#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/kernels/auto_kernel_specs.inc"
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
 #include "Kernel/BuiltinKernelSpecDeclare.h"
-#include "tests/kernels/auto_kernel_impls.cpp"
+#include "tests/unit/kernels/auto_kernel_impls.cpp"
 #define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
-#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/kernels/auto_kernel_specs.inc"
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
 #include "Kernel/BuiltinKernelSpecDefine.h"
 ]=])
 
@@ -30,7 +30,7 @@ void registerAutoKernelSpecsForTest() {
     using ::annc::kernels::Name;
 #undef ANNC_SPEC_TOKEN_PREFIX
 #define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
-#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/kernels/auto_kernel_specs.inc"
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
 #define ANNC_KERNEL_SPEC(spec_token, builder_expr, args_decl, body)     ::annc::kernels::KernelRegistry::instance().registerKernel(         (builder_expr).Build(ANNC_AUTO_KERNEL_SYMBOL_STRING(spec_token), __FILE__, __LINE__));
 #include ANNC_BUILTIN_KERNEL_SPECS_FILE
 #undef ANNC_KERNEL_SPEC

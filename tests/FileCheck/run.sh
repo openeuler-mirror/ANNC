@@ -2,8 +2,8 @@
 # FileCheck —— ANNC pass pipeline
 #
 # 用法:
-#   bash tests/mlir/run.sh                  # 跑全部
-#   bash tests/mlir/run.sh Dialect/Atir     # 跑子目录
+#   bash tests/FileCheck/run.sh                  # 跑全部
+#   bash tests/FileCheck/run.sh Dialect/Atir     # 跑子目录
 
 set -euo pipefail
 

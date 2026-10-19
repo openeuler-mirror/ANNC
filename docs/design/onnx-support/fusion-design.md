@@ -241,7 +241,7 @@ IR 的输出/临时 Buffer 与保留的 Constant 属于构造设施，分别归�
 | 13  | `batched_matmul_add`             | 秩为 3 或 4 的 MatMul 加偏置 Add（可选前导仿射）                        | AOT  | `annc_execution_v2` | 直接生成 `Customize("BatchedMatMulAdd"/"BatchedMatMulAdd4")` |
 | 14  | `layer_norm`                     | 12 个节点构成的归一化链，系数为常量                                        | AOT  | `annc_execution_v2` | 直接生成 `Customize("LayerNorm")`        |
 
-当前基线注册的模式类为 14 个（#1–#14）；2 号类内部包含 V2、epilogue 与 plain 三条分支，故上表列出 16 行。#12 `masked_mul`、#13 `batched_matmul_add`、#14 `layer_norm` 的融合模式与 kernel 文件已随 `!249` 合入当前基线 `4c5435fd`（`tests/kernels/` 另有 `masked_mul_context_test` 用例），三者与 #11 一并产出上下文 ABI（`annc_execution_v2`）站点（`custom.op_name` 分别为 `MaskedMul*`／`BatchedMatMulAdd(4)`／`LayerNorm` 与 `TensordotMatMul`）。ONNX AOT 链路的实际载体为这四个上下文站点；matmul 家族为 JIT，可形成模板但不进入当前 ONNX AOT 执行链，prune 阶段即被裁剪。
+当前基线注册的模式类为 14 个（#1–#14）；2 号类内部包含 V2、epilogue 与 plain 三条分支，故上表列出 16 行。#12 `masked_mul`、#13 `batched_matmul_add`、#14 `layer_norm` 的融合模式与 kernel 文件已随 `!249` 合入当前基线 `4c5435fd`（`tests/unit/kernels/` 另有 `masked_mul_context_test` 用例），三者与 #11 一并产出上下文 ABI（`annc_execution_v2`）站点（`custom.op_name` 分别为 `MaskedMul*`／`BatchedMatMulAdd(4)`／`LayerNorm` 与 `TensordotMatMul`）。ONNX AOT 链路的实际载体为这四个上下文站点；matmul 家族为 JIT，可形成模板但不进入当前 ONNX AOT 执行链，prune 阶段即被裁剪。
 
 ONNX 可执行能力需逐层成立：公共目录中有模式 → ONNX 导入能形成该模式所需 ATIR → 本次 pipeline 能完成 AOT lowering 与链接 → EP 支持导出 ABI、类型、形状与输出协议。pipeline 只编译 AOT 函数；当前基线 ONNX AOT 链路的实际载体是 #11–#14 四个上下文站点（`tensordot_matmul`／`masked_mul`／`layer_norm`／`batched_matmul_add`）。matmul 家族（#2 各分支）为 JIT：EP 白名单虽包含 `matmul`，但当前 pipeline 不为其产出可接管产物，白名单条目不等于实际可交付。TF/KP 专用模式的实际产出范围也须经过上述各层核验；“可交付”的结论保留给通过指定平台验收的组合（见整体方案 §4.3）。
 
@@ -280,7 +280,7 @@ ONNX 可执行能力需逐层成立：公共目录中有模式 → ONNX 导入�
 | 特化常量             | padding 由 Equal 的可读一致整数常量取得，存于 Customize schema 的 `custom.attr.padding`，lowering 将其物化为内部调用的 i64 实参；导出函数形参保持为 data、ids 和输出。padding 直接进入代码，必须参与缓存身份/版本                             |
 | 实现路径             | 上下文 ABI（`annc_execution_v2`）：融合函数 `(context,data_0…,ids) -> (output_0…)`，`kernel_arg_order` 为空数组，每个输出由 kernel 经上下文按槽位分配；内部 schema 为 `(arg_0…arg_n,ids)` 加 `Result(output_0…[,flat])`，padding/argMap/divisor 等作为 i64 属性携带；算子名 `MaskedMul<实参数>[Flat]`，经 Common lowering 调用 aarch64 `masked_mul`     |
 | 拒绝条件             | 任一类型/形状、bool Not 编码、padding/轴/Tile 常量或 kernel 可用性不合；链值有 Mul 外消费者；超过 4 路；重复 data 实参（基线限制）；某 data 来自本站成员；成员间有离开集合再返回的路径；不存在支配全部实参且先于全部输出使用的调用点；逃逸结果不等于全部 Mul 输出                    |
-| 验证要点             | FileCheck 核对共享 mask 的全部 Mul 和多输出一起接管、调用点及反例；数值验证每一路，覆盖 padding=0/非零/负值、NaN/±Inf/±0、Tile 有无、不同末维与 batch 变化，以及同形不同 padding 的重复缓存。已有 `tests/kernels/masked_mul_context_test.cpp`（真实算术下的实参别名、被选 Sum 输入、多输出与 SIMD 尾）与端到端 `masked_mul_context_e2e.py`；多路错误码传播见 §11 |
+| 验证要点             | FileCheck 核对共享 mask 的全部 Mul 和多输出一起接管、调用点及反例；数值验证每一路，覆盖 padding=0/非零/负值、NaN/±Inf/±0、Tile 有无、不同末维与 batch 变化，以及同形不同 padding 的重复缓存。已有 `tests/unit/kernels/masked_mul_context_test.cpp`（真实算术下的实参别名、被选 Sum 输入、多输出与 SIMD 尾）与端到端 `masked_mul_context_e2e.py`；多路错误码传播见 §11 |
 
 #### #13 `batched_matmul_add`（注册 kernel：`BatchedMatMulAdd` / `BatchedMatMulAdd4`）
 
@@ -516,7 +516,7 @@ FileCheck 检验 IR 形态、成员名单、元数据与拒绝行为；已有 ke
 | GAP-06 | 未融合算子的落点      | 后续按收益扩展常见算子的 AOT 实现                                      | 通用 kernel 主要覆盖矩阵家族，部分 Op 另有 lowering；ONNX mapping 提供语义导入，逐算子 AOT 路径仍待扩展          | 未融合的转置、索引、归约、Softmax 等留在 ORT CPU；整图导入用于识别与元数据，ANNC 编译接管范围为融合区域                   |
 | FD-L01 | 配置驱动融合的元数据    | 与内置模式同级                                                  | 函数属性已显式写入 `annc.execution_mode=aot`；元数据中未显式给出执行模式、参数排列与指纹字段，消费方按缺省 aot 与空排列处理                                                                   | 该路径的产物无法参与 JIT 与严格校验；消费方依赖缺省值而非显式字段                                                             |
 | GAP-04 | 报告的消费过滤       | 完整报告与本次产物区分；申报前校验 execution\_mode、ABI 能力、符号及调用契约，按理由诊断拒绝 | 报告生成先于 AOT 裁剪；EP 已按 pattern 白名单、`execution_mode=aot`、`abi` 过滤并做成员/符号预检；首期只发布 AOT，JIT 站点不入库                            | 仍缺少完整调用契约（M6）校验与按理由的拒绝诊断；申报与产物关系难观测，见 [ep-design.md](ep-design.md) §10  |
-| GAP-07 | 测试与精度门禁       | FileCheck、kernel 数值测试和完整 ORT 精度链进入 CI 并满足 R-09           | FileCheck 未接入 CTest；`tests/kernels/` 现有用例覆盖矩阵家族（GEMM 规划、微内核、epilogue）、kernel 注册、优先级解析、执行上下文与 `masked_mul_context_test`；新增 FileCheck 与四个上下文端到端用例（`masked-mul/layer-norm/batched-matmul-add-context-fusion.mlir` 与对应 e2e）；导入至融合的全输出精度、shape 变化和缓存复用证据仍待补齐           | P0 发布阻断：发布前须补齐完整精度证据                                                             |
+| GAP-07 | 测试与精度门禁       | FileCheck、kernel 数值测试和完整 ORT 精度链进入 CI 并满足 R-09           | FileCheck 未接入 CTest；`tests/unit/kernels/` 现有用例覆盖矩阵家族（GEMM 规划、微内核、epilogue）、kernel 注册、优先级解析、执行上下文与 `masked_mul_context_test`；新增 FileCheck 与四个上下文端到端用例（`masked-mul/layer-norm/batched-matmul-add-context-fusion.mlir` 与对应 e2e）；导入至融合的全输出精度、shape 变化和缓存复用证据仍待补齐           | P0 发布阻断：发布前须补齐完整精度证据                                                             |
 | FD-L02 | 公共参数契约校验      | mlir\_ciface 完整排列及实际导出/输出协议共同验证（M6）                      | 公共 validateFusionInfo 检查 M1–M5，未验证完整排列与实际导出签名；EP 另有调用计划局部检查（含名称置换）                      | 元数据解析与 dlsym 完成后，仍需验证实际调用排列，防止参数错位                                               |
 | FD-L03 | 多输出错误传播       | 每路 kernel 失败均传到最终融合函数状态，覆盖所有输出调用                         | MaskedMul 以单次 Customize 携带多路 `Result`（每路输出一槽）；公共 mlir\_ciface lowering 仅在父函数无结果时设置返回状态，多路 call 状态汇总尚未验证 | 多输出完整性及每路错误传播仍需专项验证与修正，最终状态须反映全部输出调用的结果                                          |
 | GAP-08 | 并行执行接入       | Compute 前向 kernel 提供线程池，复用 ORT intra-op 池（§7.2）              | 已在新基线上闭合：上下文 ABI v3 携带 `thread_pool`，kernel 经 `resolveThreadPool` 取池（上下文优先、TLS 回退），EP 经 `KernelContext_ParallelFor` 复用 ORT intra-op 池，失败内联回退；另有受版本校验的原生池路径与默认关闭的 MLAS 路径       | 剩余风险：EP 与 kernel 须同源构建（`thread_pool` 虚表不在尺寸/版本校验内）、原生池私有布局须随宿主版本重新验证、嵌套判定依赖 `thread_local`、池不可用静默串行 |
@@ -567,5 +567,5 @@ FileCheck 检验 IR 形态、成员名单、元数据与拒绝行为；已有 ke
 | `annc/tools/annc*`                                        | 编译驱动、汇编工具与验证工具                                   |
 | `frontends/onnx/onnx-pipeline/annc-onnx-pipeline.cpp`     | 整图导入、融合、报告生成、AOT 筛选与产物链接的实际顺序                    |
 | `addons/onnxruntime/annc_ep.cpp`、`annc_ep_compile.cc`     | 报告读取、站点预检、参数/输出装配、缓存身份与已加载产物消费                   |
-| `tests/FileCheck/`、`tests/kernels/`、`tests/annc/`         | 形态回归、kernel 数值测试与指纹缓存测试                          |
+| `tests/FileCheck/`、`tests/unit/kernels/`、`tests/unit/annc/` | 形态回归、kernel 数值测试与指纹缓存测试                          |
 
