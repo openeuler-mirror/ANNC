@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Dialect/Atir/AtirOps.h"
+#include "Helper.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -33,15 +34,7 @@ struct PipelineOptions {
   bool keepTemps = false;
   bool dumpFusionMetadata = false;
   bool verbose = false;
-  bool enableEpilogue = true;
 };
-
-static bool envFlagEnabled(const char *name, bool defaultValue) {
-  const char *value = std::getenv(name);
-  if (!value || value[0] == '\0') return defaultValue;
-  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
-         std::strcmp(value, "FALSE") != 0;
-}
 
 static void printUsage() {
   std::cout
@@ -147,8 +140,6 @@ static bool parsePipelineOptions(int argc, char **argv, PipelineOptions *opts) {
                     hasArg(argc, argv, "--keep_temp_files");
   opts->dumpFusionMetadata = hasArg(argc, argv, "--dump-fusion-metadata");
   opts->verbose = hasArg(argc, argv, "--verbose") || hasArg(argc, argv, "-v");
-  opts->enableEpilogue =
-      envFlagEnabled("ANNC_ENABLE_GEMM_EPILOGUE", true);
 
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) != "--output_tensor") continue;
@@ -243,7 +234,10 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::vector<std::string> optArgs = {
       anncOpt, rawAtir.string(), rankInferencePass,
       identityCanonicalizePass};
-  if (opts.enableEpilogue) optArgs.push_back(epilogueDiscoveryPass);
+  // Epilogue discovery only matters at ANNC_GEMM=2; OpFusion applies the same
+  // gate when consuming the candidates, so plain-MatMul runs skip the pass.
+  if (annc::anncGemmFusionLevel() == 2)
+    optArgs.push_back(epilogueDiscoveryPass);
   optArgs.insert(optArgs.end(), {fusionPass, "-o", fusedAtir.string()});
 
   bool ok =

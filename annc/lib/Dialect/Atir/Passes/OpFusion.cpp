@@ -1453,6 +1453,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
+    const int gemmLevel = annc::anncGemmFusionLevel();
+    if (gemmLevel == 0) return failure();
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
@@ -1576,8 +1578,13 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     }
 
     std::optional<EpilogueProgram> epilogue;
-    if (auto candidate = matmulOp->getAttrOfType<DictionaryAttr>(
-            kGemmEpilogueCandidateAttr)) {
+    // Epilogue candidates are only consumed at ANNC_GEMM=2 (the pipeline only
+    // emits the attr at that level; this also guards direct annc-opt runs).
+    auto candidate = gemmLevel == 2
+                         ? matmulOp->getAttrOfType<DictionaryAttr>(
+                               kGemmEpilogueCandidateAttr)
+                         : DictionaryAttr();
+    if (candidate) {
       auto parsed = parseEpilogueCandidatePlan(candidate);
       if (failed(parsed) || failed(bindEpilogueProgramToSource(matmulOp,
                                                                *parsed))) {
