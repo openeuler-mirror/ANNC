@@ -119,6 +119,7 @@ def main():
                                              args.ep_library)
     env = dict(os.environ,
                ANNC_EP_PIPELINE=args.pipeline,
+               ANNC_EP_FUSION_LAYER_NORM="1",
                ANNC_KERNEL_LIB_PATH=str(merged))
     gcc_runtime = Path("/usr/lib/gcc/aarch64-openEuler-linux/12")
     if gcc_runtime.is_dir() and not env.get("LIBRARY_PATH"):

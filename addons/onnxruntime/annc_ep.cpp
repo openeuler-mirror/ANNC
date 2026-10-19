@@ -16,9 +16,10 @@
 //                       then $HOME/.cache/annc-ep)
 //   ANNC_EP_DEBUG=1     compile diagnostics + per-node operand shapes on stderr
 //   ANNC_EP_TIMING=1    per-node cost split (input / output / kernel) at exit
-//   ANNC_EP_FUSION_*=0  disable one fused pattern in the compiler and at
+//   ANNC_EP_FUSION_*=1  enable one fused pattern in the compiler and at
 //                       claim time (TENSORDOT_MATMUL, LAYER_NORM,
-//                       MASKED_MUL, BATCHED_MATMUL_ADD)
+//                       MASKED_MUL, BATCHED_MATMUL_ADD); unset or "=0"
+//                       disables it (default: disabled)
 //
 // Scope:
 //   * the ANNC toolchain decides the fusion boundaries (no matcher is replayed
@@ -95,7 +96,9 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
       "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
       "ANNC_MLAS_LIB_DIR",
   };
-  fingerprint += "\nannc-ep-config-v1";
+  // v2: ORT fusion switches default to disabled. Bump the version so caches
+  // produced under the old default-on semantics are not reused.
+  fingerprint += "\nannc-ep-config-v2";
   for (const char* name : config_names) {
     const char* value = std::getenv(name);
     if (value == nullptr) {

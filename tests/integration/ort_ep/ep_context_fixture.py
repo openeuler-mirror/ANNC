@@ -353,6 +353,17 @@ def run_test(args):
         "ANNC_EP_FIXTURE_KERNEL_MODE": args.mode,
         "ANNC_EP_DEBUG": "1",
     })
+    # ORT fusion patterns default to disabled; the fixture explicitly enables
+    # the pattern it stands in for.
+    pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
+    switch = {
+        "tensordot_matmul": "ANNC_EP_FUSION_TENSORDOT_MATMUL",
+        "layer_norm": "ANNC_EP_FUSION_LAYER_NORM",
+        "masked_mul": "ANNC_EP_FUSION_MASKED_MUL",
+        "batched_matmul_add": "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
+    }.get(pattern)
+    if switch is not None:
+        os.environ[switch] = "1"
     expected = session(model, ["CPUExecutionProvider"]).run(None, {"x": x})[0]
     marker = work / "compute.log"
 

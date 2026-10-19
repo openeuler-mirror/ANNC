@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Verify that ANNC_EP_FUSION_*=0 disables exactly one fused pattern.
+"""Verify that ANNC_EP_FUSION_*=1 enables exactly one fused pattern.
 
 The context fixture is reused as the runtime-compile pipeline: it reports a
 site whose pattern is selected by ANNC_EP_FIXTURE_PATTERN and compiles a
 kernel that appends "compute" to ANNC_EP_FIXTURE_MARKER when it runs. For each
 of the four fused patterns we run the same MatMul model twice:
 
-  * switch unset  -> the EP claims the site; the marker records "compute"
-  * switch = 0    -> the EP drops the site; the CPU EP runs instead
+  * switch unset  -> the EP drops the site (default off); the CPU EP runs
+  * switch = 1    -> the EP claims the site; the marker records "compute"
 
 The numeric output must match the CPU EP in both cases.
 """
@@ -72,8 +72,8 @@ def run_case(work, pipeline, pattern, disabled):
             "ANNC_EP_DEBUG": "1",
         }
     )
-    if disabled:
-        os.environ[PATTERNS[pattern]] = "0"
+    if not disabled:
+        os.environ[PATTERNS[pattern]] = "1"
 
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4) / 11
     expected = fixture.session(model, ["CPUExecutionProvider"]).run(None, {"x": x})[0]
@@ -101,7 +101,7 @@ def cache_key_case(work, pipeline):
     fixture.make_model(model, 2)
 
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4) / 11
-    for disabled in (False, True):
+    for enabled in (True, False):
         clear_toggles()
         os.environ.update(
             {
@@ -112,8 +112,7 @@ def cache_key_case(work, pipeline):
                 "ANNC_EP_DEBUG": "1",
             }
         )
-        if disabled:
-            os.environ["ANNC_EP_FUSION_MASKED_MUL"] = "0"
+        os.environ["ANNC_EP_FUSION_MASKED_MUL"] = "1" if enabled else "0"
         actual = fixture.session(
             model, ["AnncExecutionProvider", "CPUExecutionProvider"]
         ).run(None, {"x": x})[0]
@@ -155,7 +154,7 @@ def main():
 
     cache_key_case(work, pipeline)
     clear_toggles()
-    print("Fusion toggles: all four patterns honor ANNC_EP_FUSION_*=0")
+    print("Fusion toggles: all four patterns default off and honor ANNC_EP_FUSION_*=1")
 
 
 if __name__ == "__main__":

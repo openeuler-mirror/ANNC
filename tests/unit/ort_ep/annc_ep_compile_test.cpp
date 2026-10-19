@@ -347,14 +347,16 @@ TEST(AnncEpModelSignature, StaysStructuralWithoutMulAndMatMul) {
   std::remove(b.c_str());
 }
 
-TEST(AnncEpFusionSwitch, DefaultsToEnabledForEveryPattern) {
+TEST(AnncEpFusionSwitch, DefaultsToDisabledForSwitchedPatterns) {
   for (const char* pattern : {"tensordot_matmul", "layer_norm", "masked_mul",
-                              "batched_matmul_add", "matmul", "unknown"}) {
-    EXPECT_TRUE(FusionPatternEnabled(pattern)) << pattern;
+                              "batched_matmul_add"}) {
+    EXPECT_FALSE(FusionPatternEnabled(pattern)) << pattern;
   }
+  EXPECT_TRUE(FusionPatternEnabled("matmul"));
+  EXPECT_TRUE(FusionPatternEnabled("unknown"));
 }
 
-TEST(AnncEpFusionSwitch, ZeroDisablesOnlyItsPattern) {
+TEST(AnncEpFusionSwitch, EnablesOnlyTheSetPattern) {
   const char* names[] = {"ANNC_EP_FUSION_TENSORDOT_MATMUL",
                          "ANNC_EP_FUSION_LAYER_NORM",
                          "ANNC_EP_FUSION_MASKED_MUL",
@@ -362,9 +364,9 @@ TEST(AnncEpFusionSwitch, ZeroDisablesOnlyItsPattern) {
   const char* patterns[] = {"tensordot_matmul", "layer_norm", "masked_mul",
                             "batched_matmul_add"};
   for (size_t i = 0; i < 4; ++i) {
-    ::setenv(names[i], "0", 1);
+    ::setenv(names[i], "1", 1);
     for (size_t j = 0; j < 4; ++j) {
-      EXPECT_EQ(FusionPatternEnabled(patterns[j]), i != j)
+      EXPECT_EQ(FusionPatternEnabled(patterns[j]), i == j)
           << names[i] << " / " << patterns[j];
     }
     EXPECT_TRUE(FusionPatternEnabled("matmul"));
@@ -372,7 +374,14 @@ TEST(AnncEpFusionSwitch, ZeroDisablesOnlyItsPattern) {
   }
 }
 
-TEST(AnncEpFusionSwitch, AnyNonZeroValueKeepsThePatternEnabled) {
+TEST(AnncEpFusionSwitch, ZeroKeepsThePatternDisabled) {
+  ::setenv("ANNC_EP_FUSION_MASKED_MUL", "0", 1);
+  EXPECT_FALSE(FusionPatternEnabled("masked_mul"));
+  ::unsetenv("ANNC_EP_FUSION_MASKED_MUL");
+  EXPECT_FALSE(FusionPatternEnabled("masked_mul"));
+}
+
+TEST(AnncEpFusionSwitch, AnyValueOtherThanZeroEnablesThePattern) {
   ::setenv("ANNC_EP_FUSION_MASKED_MUL", "false", 1);
   EXPECT_TRUE(FusionPatternEnabled("masked_mul"));
   ::setenv("ANNC_EP_FUSION_MASKED_MUL", "1", 1);

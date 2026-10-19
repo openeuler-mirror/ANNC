@@ -5,6 +5,11 @@
 测试发现、`gtest_discover_tests` 或 `add_test` 注册；测试到生产目录只允许
 单向依赖。
 
+## 整体端到端测试手册
+
+- [ORT EP 构建、部署与特性使能](ort-ep-build-and-deploy.md)
+- [TensorFlow predictor 构建与部署](tf-build-and-deploy.md)
+
 ## 分层
 
 | 层 | 目录 | 内容 | 运行入口 |

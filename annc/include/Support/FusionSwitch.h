@@ -32,6 +32,17 @@ inline bool fusionPatternEnabled(std::string_view pattern) {
   return value == nullptr || std::strcmp(value, "0") != 0;
 }
 
+// ORT EP defaults: the four switched patterns are off unless the caller
+// explicitly sets a non-"0" value.  The pipeline forces "=0" into the child
+// environment for unset switches so annc-opt's OpFusion matcher agrees with
+// this site-loop default; patterns without a switch (e.g. "matmul") remain on.
+inline bool fusionPatternEnabledForOrt(std::string_view pattern) {
+  const char* name = fusionSwitchName(pattern);
+  if (name == nullptr) return true;
+  const char* value = std::getenv(name);
+  return value != nullptr && std::strcmp(value, "0") != 0;
+}
+
 }  // namespace annc
 
 #endif  // ANNC_SUPPORT_FUSIONSWITCH_H

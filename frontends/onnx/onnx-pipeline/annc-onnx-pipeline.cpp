@@ -240,6 +240,11 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
   // change what the ANNC matcher accepts, so the EP's graph view and this
   // compile must agree on them. The four ANNC_EP_FUSION_* switches are read by
   // annc-opt's OpFusion pass, which then skips the disabled matcher entirely.
+  // The ORT EP defaults these patterns off: an unset switch is passed as "0"
+  // so the compiler and the EP's claim-time filter agree.
+  const char *fusion_switches[] = {
+      "ANNC_EP_FUSION_TENSORDOT_MATMUL", "ANNC_EP_FUSION_LAYER_NORM",
+      "ANNC_EP_FUSION_MASKED_MUL", "ANNC_EP_FUSION_BATCHED_MATMUL_ADD"};
   for (const char *name : {"ANNC_GEMM_CONFIG", "ANNC_GEMM",
                            "ANNC_EP_FUSION_TENSORDOT_MATMUL",
                            "ANNC_EP_FUSION_LAYER_NORM",
@@ -248,6 +253,17 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
                            "ANNC_MLAS_LIB_DIR"}) {
     if (const char *value = std::getenv(name)) {
       env.push_back(std::string(name) + "=" + value);
+      continue;
+    }
+    bool is_fusion_switch = false;
+    for (const char *fusion : fusion_switches) {
+      if (std::strcmp(name, fusion) == 0) {
+        is_fusion_switch = true;
+        break;
+      }
+    }
+    if (is_fusion_switch) {
+      env.push_back(std::string(name) + "=0");
     }
   }
   return env;
