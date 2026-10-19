@@ -652,9 +652,9 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。开关只关闭该
 特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
 
-EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 运行时开关。原生池是构建期选项（`ANNC_EP_NATIVE_POOL`，默认 OFF），编译进来的路径在宿主版本匹配时自动启用。
+EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
 
-构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录（见 `build.sh --enable-ort-ep`）。
+构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。
 
 ### 构建与测试
 

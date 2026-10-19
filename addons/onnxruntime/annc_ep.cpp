@@ -93,6 +93,7 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
       "ANNC_EP_FUSION_LAYER_NORM",
       "ANNC_EP_FUSION_MASKED_MUL",
       "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
+      "ANNC_MLAS_LIB_DIR",
   };
   fingerprint += "\nannc-ep-config-v1";
   for (const char* name : config_names) {

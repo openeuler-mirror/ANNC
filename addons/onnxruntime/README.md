@@ -61,7 +61,7 @@ session init
 | `allocate_output(handle, slot, desc)` | `KernelContext_GetOutput` + 张量类型复核 | slot 必须在站点声明的输出数内、不得重复分配；rank 与站点契约一致；元素类型与图声明一致（否则记录错误并拒绝） |
 | `allocate_temp(handle, desc)` | `KernelContext_GetAllocator` + `AllocatorAlloc`（`ANNC_ALLOCATION_ZERO` 置零） | 逐 Compute 分配、Compute 结束 `AllocatorFree`；allocator 句柄最后 `ReleaseAllocator` |
 | `report_error(handle, status, msg)` | 记录首个错误，Compute 返回时转 `OrtStatus` | 不会 terminate 宿主；失败即该次 Run 失败，不静默 |
-| `thread_pool` | `OrtThreadPool`（可选原生池，默认公开 API） | 原生路径按 cost/grain 派发；公开路径每 shard 回调一次并映射为区间；公开调用失败回退本线程；嵌套由 thread_local 深度判定 |
+| `thread_pool` | `OrtThreadPool`（原生池，宿主版本不匹配时回落公开 API） | 原生路径按 cost/grain 派发；公开路径每 shard 回调一次并映射为区间；公开调用失败回退本线程；嵌套由 thread_local 深度判定 |
 
 调用约定（kernel 侧 spec 见 `annc/lib/Kernel/builtin_kernels/*_kernel_specs.inc`）：
 
@@ -97,26 +97,30 @@ ONNX protobuf；正常路径是上面的根构建（`--enable-ort-ep`）。
 **只 include `onnxruntime_c_api.h`**：它内含 `onnxruntime_ep_c_api.h`，而后者没有自己的
 include guard，重复 include 会让其中每个结构体重复定义。
 
-### 可选原生线程池与 MLAS
+### 原生线程池与 MLAS
 
-两项优化均默认关闭，用根 CMake 配置启用。构建树指宿主 ORT 构建的 `Release/` 目录，
-不是 SDK 安装目录：
+EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT 构建树的 `Release/`
+归档。MLAS 是可选的 kernel GEMM 后端：构建期只需要 ORT 源码的 `mlas.h`，运行时从
+`ANNC_MLAS_LIB_DIR`（缺省回落到 `ANNC_KERNEL_LIB_PATH`）解析四个归档。
 
 | CMake 选项 | 启用配置 |
 |---|---|
-| `ANNC_EP_NATIVE_POOL` | 构建期选项：`ON`，同时启用 `ANNC_ENABLE_ONNXRUNTIME_EP`；编译进来的原生池路径没有运行时关闭入口 |
-| `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 common/cpuinfo 归档 |
+| `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 native pool 所需的 common/cpuinfo 归档；构建 EP 时必需 |
 | `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
-| `ANNC_KERNEL_MLAS` | `ON`，与原生池配套 |
+| `ANNC_KERNEL_MLAS` | `ON` 时启用 MLAS GEMM 路径；构建期只需要 `mlas.h` |
 | `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
-| `ANNC_MLAS_BUILD_TREE` | 同一宿主构建树，提供 MLAS/KleidiAI/common/cpuinfo 归档 |
+
+运行时 `ANNC_MLAS_LIB_DIR` 指向同时包含 `libonnxruntime_mlas.a`、`libkleidiai.a`、
+`libonnxruntime_common.a`、`libcpuinfo.a` 的目录；未设置时用 `ANNC_KERNEL_LIB_PATH`。
+四者任一缺失时 `annc` driver 直接中止内核链接并报错，不会生成带未定义
+`MlasGemmBatch` 符号的 `.so`。
 
 原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
 不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开
 API；原生路径的空池表示串行。
 
 原生路径有 cost 时调用 `TryParallelFor`，只有 grain 时固定块调度，两者都没有时使用
-公开 API。EP 始终使用 ORT 的线程池：运行时不再提供 `ANNC_EP_NATIVE_POOL` 或
+公开 API。EP 始终使用 ORT 的线程池：不提供 `ANNC_EP_NATIVE_POOL` 或
 `ANNC_EP_SHARDS` 开关，分片数由内部估计与 ORT 池决定。
 
 四个融合算子可通过运行时环境变量逐个关闭（默认开启，精确 `0` 关闭）：

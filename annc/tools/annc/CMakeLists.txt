@@ -20,13 +20,10 @@ else()
         ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=0)
 endif()
 
-# MLAS archives for kernels built with ANNC_KERNEL_MLAS: baked as absolute
-# paths into the link commands for kernel shared libraries (and test
-# executables), so the single -L directory the driver gets for the ANNC and
-# LLVM archives is untouched.
+# MLAS archives for kernels built with ANNC_KERNEL_MLAS: the driver resolves
+# them at link time from ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
 if(ANNC_KERNEL_MLAS)
-    target_compile_definitions(annc PRIVATE
-        ANNC_MLAS_ARCHIVE_ARGS="${ANNC_MLAS_ARCHIVE_ARGS}")
+    target_compile_definitions(annc PRIVATE ANNC_KERNEL_MLAS=1)
 endif()
 
 # bin

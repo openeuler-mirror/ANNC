@@ -21,17 +21,15 @@ option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protob
 # SDK that the default build neither needs nor downloads.
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
 set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
-option(ANNC_EP_NATIVE_POOL "Back the EP plugin's thread pool with ORT's native operator pool, so the scheduling decision is ORT's own (private ABI: verified context layout + ORT build-tree archives; see addons/onnxruntime/annc_ep_native_pool.h); requires ANNC_EP_ORT_BUILD_TREE" OFF)
-set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for ANNC_EP_NATIVE_POOL; an install/SDK tree does not carry them")
+set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for the EP's native pool (always used by the EP); an install/SDK tree does not carry them")
 set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the native-pool context layout and archives were verified against; the adapter refuses the native path in any other host and falls back to the public KernelContext_ParallelFor adapter")
 # MLAS GEMM backend for the builtin kernels: a kernel whose host hands over its
 # native pool (AnncThreadPool::native_pool; the ORT EP does) may pass it
-# straight to MlasGemmBatch.  Opt-in like the EP switch: it needs the ORT
-# source tree's mlas.h to compile and the ORT build tree's archives to link
-# into the kernel shared libraries the annc driver produces.
-option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR and ANNC_MLAS_BUILD_TREE; pair with ANNC_EP_NATIVE_POOL)" OFF)
+# straight to MlasGemmBatch.  It needs the ORT source tree's mlas.h to compile;
+# the annc driver resolves the four ORT archives at link time from
+# ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
+option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR; runtime archives resolved via ANNC_MLAS_LIB_DIR or ANNC_KERNEL_LIB_PATH)" OFF)
 set(ANNC_MLAS_INCLUDE_DIR "" CACHE PATH "ORT source tree's onnxruntime/core/mlas/inc directory (holding mlas.h), required by ANNC_KERNEL_MLAS")
-set(ANNC_MLAS_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will load the kernels) providing libonnxruntime_mlas.a, libkleidiai.a, libonnxruntime_common.a and libcpuinfo.a for ANNC_KERNEL_MLAS")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
@@ -71,23 +69,6 @@ if(ANNC_KERNEL_MLAS)
       "ANNC_KERNEL_MLAS=ON requires ANNC_MLAS_INCLUDE_DIR to point at the ORT "
       "source tree's onnxruntime/core/mlas/inc directory (holding mlas.h).")
   endif()
-  set(ANNC_MLAS_ARCHIVES
-      "${ANNC_MLAS_BUILD_TREE}/libonnxruntime_mlas.a"
-      "${ANNC_MLAS_BUILD_TREE}/_deps/kleidiai-build/libkleidiai.a"
-      "${ANNC_MLAS_BUILD_TREE}/libonnxruntime_common.a"
-      "${ANNC_MLAS_BUILD_TREE}/_deps/pytorch_cpuinfo-build/libcpuinfo.a")
-  foreach(archive IN LISTS ANNC_MLAS_ARCHIVES)
-    if(NOT EXISTS "${archive}")
-      message(FATAL_ERROR
-        "ANNC_KERNEL_MLAS=ON needs ${archive}: point ANNC_MLAS_BUILD_TREE at "
-        "the ORT build tree (the Release/ directory, not the install tree) of "
-        "the runtime that will load the kernels.")
-    endif()
-  endforeach()
-  # The annc driver bakes these paths into every kernel shared-library link,
-  # so the archives need not live in the single -L directory the driver is
-  # given (ANNC_KERNEL_LIB_PATH).
-  string(REPLACE ";" " " ANNC_MLAS_ARCHIVE_ARGS "${ANNC_MLAS_ARCHIVES}")
 endif()
 # set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0")
 

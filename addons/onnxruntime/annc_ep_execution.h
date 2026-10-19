@@ -34,10 +34,10 @@ struct OutputContract {
 };
 
 // Carries ORT's thread pool into ANNC's parallel regions. One per Compute
-// call, handed to the kernel through the execution context.  When the
-// plugin was built with the native pool (ANNC_EP_NATIVE_POOL) and the host
-// is the ORT release it was verified against, the region is backed by
-// ORT's own operator pool and the scheduling decision is the framework's.
+// call, handed to the kernel through the execution context.  The plugin
+// always builds the native pool; when the host is the ORT release it was
+// verified against, the region is backed by ORT's own operator pool and the
+// scheduling decision is the framework's.
 class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
  public:
   OrtThreadPool(const OrtApi* api, OrtKernelContext* kernel_context);

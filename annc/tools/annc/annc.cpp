@@ -37,6 +37,40 @@ static string getClangPath() {
     return "clang";
 }
 
+#ifdef ANNC_KERNEL_MLAS
+// Resolve the four MLAS archives at kernel-link time.  Returns false when any
+// archive is missing: linking a kernel that calls MlasGemmBatch without them
+// would produce a .so with unresolved symbols that only fails at dlopen time.
+static bool getMlasArchiveArgs(const string& kernelLibPath, string& args) {
+    args.clear();
+    const char* envDir = getenv("ANNC_MLAS_LIB_DIR");
+    fs::path dir = (envDir && envDir[0] != '\0') ? fs::path(envDir)
+                                                 : fs::path(kernelLibPath);
+    if (dir.is_relative()) {
+        std::error_code ec;
+        fs::path absolute = fs::absolute(dir, ec);
+        if (!ec) dir = absolute;
+    }
+    const char* archives[] = {"libonnxruntime_mlas.a", "libkleidiai.a",
+                              "libonnxruntime_common.a", "libcpuinfo.a"};
+    for (const char* name : archives) {
+        fs::path archive = dir / name;
+        if (!fs::exists(archive)) {
+            cerr << "ANNC_KERNEL_MLAS: required MLAS archive " << archive
+                 << " is missing; refusing to link a kernel with unresolved "
+                    "MlasGemmBatch symbols. Set ANNC_MLAS_LIB_DIR to a "
+                    "directory containing libonnxruntime_mlas.a, "
+                    "libkleidiai.a, libonnxruntime_common.a and libcpuinfo.a "
+                    "(or place them in "
+                 << kernelLibPath << ")." << endl;
+            return false;
+        }
+        args += " \"" + archive.string() + "\"";
+    }
+    return true;
+}
+#endif
+
 // 
 class CommandExecutor {
 public:
@@ -616,11 +650,17 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
-#ifdef ANNC_MLAS_ARCHIVE_ARGS
-        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
-        // thread-pool objects they run on and the CPU-feature probe that
-        // picks the kernel.  Absolute archive paths from the build config.
-        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
+#ifdef ANNC_KERNEL_MLAS
+        // MLAS GEMM kernels: resolve the four archives at link time from
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.  A missing
+        // archive is a hard error: the kernel calls MlasGemmBatch, so a .so
+        // linked without these archives can only fail later at dlopen time.
+        string mlasArgs;
+        if (!getMlasArchiveArgs(config.kernelLibPath, mlasArgs)) {
+            log("Error: MLAS archive resolution failed; aborting kernel link");
+            return false;
+        }
+        command += " -Wl,--start-group " + mlasArgs +
                    " -Wl,--end-group -lpthread -ldl -lrt";
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
@@ -660,11 +700,17 @@ private:
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
-#ifdef ANNC_MLAS_ARCHIVE_ARGS
-        // MLAS GEMM kernels (ANNC_KERNEL_MLAS): the MLAS entries, the ORT
-        // thread-pool objects they run on and the CPU-feature probe that
-        // picks the kernel.  Absolute archive paths from the build config.
-        command += " -Wl,--start-group " ANNC_MLAS_ARCHIVE_ARGS
+#ifdef ANNC_KERNEL_MLAS
+        // MLAS GEMM kernels: resolve the four archives at link time from
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.  A missing
+        // archive is a hard error: the kernel calls MlasGemmBatch, so a .so
+        // linked without these archives can only fail later at dlopen time.
+        string mlasArgs;
+        if (!getMlasArchiveArgs(config.kernelLibPath, mlasArgs)) {
+            log("Error: MLAS archive resolution failed; aborting kernel link");
+            return false;
+        }
+        command += " -Wl,--start-group " + mlasArgs +
                    " -Wl,--end-group -lpthread -ldl -lrt";
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR

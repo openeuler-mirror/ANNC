@@ -1,7 +1,7 @@
 # The host (ORT's plugin EP loader, onnxruntime/core/session/plugin_ep/
 # ep_library_plugin.cc) resolves exactly two symbols from this library:
 # CreateEpFactories and ReleaseEpFactory.  The ORT build-tree archives
-# linked in for the native pool (build option ANNC_EP_NATIVE_POOL) would otherwise export
+# linked in for the native pool would otherwise export
 # ORT's internal thread-pool symbols from the plugin, where any other
 # dynamically linked library in the process could bind to this copy instead
 # of its own.
