@@ -112,6 +112,8 @@ EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT
 
 运行时 `ANNC_MLAS_LIB_DIR` 指向同时包含 `libonnxruntime_mlas.a`、`libkleidiai.a`、
 `libonnxruntime_common.a`、`libcpuinfo.a` 的目录；未设置时用 `ANNC_KERNEL_LIB_PATH`。
+四者任一缺失时 `annc` driver 直接中止内核链接并报错，不会生成带未定义
+`MlasGemmBatch` 符号的 `.so`。
 
 原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
 不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开

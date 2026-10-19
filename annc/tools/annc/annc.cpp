@@ -38,7 +38,11 @@ static string getClangPath() {
 }
 
 #ifdef ANNC_KERNEL_MLAS
-static string getMlasArchiveArgs(const string& kernelLibPath) {
+// Resolve the four MLAS archives at kernel-link time.  Returns false when any
+// archive is missing: linking a kernel that calls MlasGemmBatch without them
+// would produce a .so with unresolved symbols that only fails at dlopen time.
+static bool getMlasArchiveArgs(const string& kernelLibPath, string& args) {
+    args.clear();
     const char* envDir = getenv("ANNC_MLAS_LIB_DIR");
     fs::path dir = (envDir && envDir[0] != '\0') ? fs::path(envDir)
                                                  : fs::path(kernelLibPath);
@@ -49,20 +53,21 @@ static string getMlasArchiveArgs(const string& kernelLibPath) {
     }
     const char* archives[] = {"libonnxruntime_mlas.a", "libkleidiai.a",
                               "libonnxruntime_common.a", "libcpuinfo.a"};
-    string args;
     for (const char* name : archives) {
         fs::path archive = dir / name;
         if (!fs::exists(archive)) {
-            args.clear();
-            break;
+            cerr << "ANNC_KERNEL_MLAS: required MLAS archive " << archive
+                 << " is missing; refusing to link a kernel with unresolved "
+                    "MlasGemmBatch symbols. Set ANNC_MLAS_LIB_DIR to a "
+                    "directory containing libonnxruntime_mlas.a, "
+                    "libkleidiai.a, libonnxruntime_common.a and libcpuinfo.a "
+                    "(or place them in "
+                 << kernelLibPath << ")." << endl;
+            return false;
         }
         args += " \"" + archive.string() + "\"";
     }
-    if (!args.empty()) return args;
-    cerr << "ANNC_KERNEL_MLAS: set ANNC_MLAS_LIB_DIR or copy the four MLAS "
-            "archives into "
-         << kernelLibPath << endl;
-    return "";
+    return true;
 }
 #endif
 
@@ -647,12 +652,16 @@ private:
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
         // MLAS GEMM kernels: resolve the four archives at link time from
-        // ANNC_MLAS_LIB_DIR, then the kernel library directory.
-        const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
-        if (!mlasArgs.empty()) {
-            command += " -Wl,--start-group " + mlasArgs +
-                       " -Wl,--end-group -lpthread -ldl -lrt";
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.  A missing
+        // archive is a hard error: the kernel calls MlasGemmBatch, so a .so
+        // linked without these archives can only fail later at dlopen time.
+        string mlasArgs;
+        if (!getMlasArchiveArgs(config.kernelLibPath, mlasArgs)) {
+            log("Error: MLAS archive resolution failed; aborting kernel link");
+            return false;
         }
+        command += " -Wl,--start-group " + mlasArgs +
+                   " -Wl,--end-group -lpthread -ldl -lrt";
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
@@ -693,12 +702,16 @@ private:
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
         // MLAS GEMM kernels: resolve the four archives at link time from
-        // ANNC_MLAS_LIB_DIR, then the kernel library directory.
-        const string mlasArgs = getMlasArchiveArgs(config.kernelLibPath);
-        if (!mlasArgs.empty()) {
-            command += " -Wl,--start-group " + mlasArgs +
-                       " -Wl,--end-group -lpthread -ldl -lrt";
+        // ANNC_MLAS_LIB_DIR, then the kernel library directory.  A missing
+        // archive is a hard error: the kernel calls MlasGemmBatch, so a .so
+        // linked without these archives can only fail later at dlopen time.
+        string mlasArgs;
+        if (!getMlasArchiveArgs(config.kernelLibPath, mlasArgs)) {
+            log("Error: MLAS archive resolution failed; aborting kernel link");
+            return false;
         }
+        command += " -Wl,--start-group " + mlasArgs +
+                   " -Wl,--end-group -lpthread -ldl -lrt";
 #endif
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
         command += " -L" KDNN_LIB_DIR " -lkdnn";
