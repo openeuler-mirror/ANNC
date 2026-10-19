@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -1122,7 +1123,8 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
       }
 
-      const std::string key_summary = cache_key.digest.substr(0, 16);
+      const std::string key_summary =
+          annc::jit::CacheKeySummary(cache_key);
       annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
       annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
         auto compile_start = Clock::now();
@@ -1173,9 +1175,25 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
                     << " entries=" << stats_after.entries;
           for (const std::string& evicted_key : lookup.evictedKeys) {
             LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="
-                      << evicted_key.substr(0, 16)
+                      << annc::jit::CacheKeySummary(
+                             annc::jit::JitCacheKey{evicted_key})
                       << " entries=" << stats_after.entries;
           }
+        }
+      }
+      if (!lookup.evictedKeys.empty()) {
+        // 驱逐意味着工作集（模板×形状组合数）超过 ANNC_JIT_CACHE_MAX_ENTRIES，
+        // 稳态会持续触发重编译（每次 ~百毫秒级子进程编译），生产上不可接受。
+        // 该事件必须可见，与 profile 开关无关；限频避免风暴时刷爆日志。
+        static std::atomic<uint64_t> eviction_log_count{0};
+        const uint64_t seen = eviction_log_count.fetch_add(1);
+        if (seen == 0 || seen % 1000 == 999) {
+          LOG(WARNING) << "[ANNC-JIT-CACHE] jit cache evicted "
+                       << lookup.evictedKeys.size()
+                       << " entries (eviction events so far: " << seen + 1
+                       << "); template x shape working set exceeds"
+                          " ANNC_JIT_CACHE_MAX_ENTRIES, steady-state"
+                          " recompiles will follow";
         }
       }
       OP_REQUIRES(context, lookup.ok(), errors::Internal(lookup.error));

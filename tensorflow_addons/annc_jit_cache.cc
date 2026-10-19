@@ -1,13 +1,11 @@
 #include "annc_jit_cache.h"
 
 #include <dlfcn.h>
-#include <openssl/evp.h>
 
-#include <array>
+#include <algorithm>
+#include <cstring>
 #include <exception>
 #include <filesystem>
-#include <iomanip>
-#include <sstream>
 #include <utility>
 
 namespace annc::jit {
@@ -15,32 +13,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr char kKeySchema[] = "annc-jit-cache-key-v3";
+// Key layout, version 4: the digest IS the exact serialized identity
+// (schema tag, length-prefixed fingerprint, fixed-width argument dims).
+// Byte-exact map equality means distinct compilations can never share a
+// digest, unlike the previous SHA-256 hex scheme which cost ~3.5-4.4 us per
+// call in ostringstream + hashing and dominated the multi-shape hot path.
+constexpr char kKeySchema[] = "annc-jit-cache-key-v4";
 
-void AppendField(std::ostringstream &output, const std::string &name,
-                 const std::string &value) {
-  output << name.size() << ':' << name << value.size() << ':' << value;
-}
-
-std::string Sha256Hex(const std::string &content) {
-  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
-      EVP_MD_CTX_new(), EVP_MD_CTX_free);
-  if (!context ||
-      EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
-      EVP_DigestUpdate(context.get(), content.data(), content.size()) != 1) {
-    return "";
-  }
-  std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-  unsigned int digestSize = 0;
-  if (EVP_DigestFinal_ex(context.get(), digest.data(), &digestSize) != 1) {
-    return "";
-  }
-  std::ostringstream output;
-  output << std::hex << std::setfill('0');
-  for (unsigned int i = 0; i < digestSize; ++i) {
-    output << std::setw(2) << static_cast<unsigned int>(digest[i]);
-  }
-  return output.str();
+void AppendU64(std::string &output, uint64_t value) {
+  char buffer[sizeof(uint64_t)];
+  std::memcpy(buffer, &value, sizeof(value));
+  output.append(buffer, sizeof(buffer));
 }
 
 JitCompileResult InvokeCompile(const JitCompilationCache::CompileFunction &compile) {
@@ -75,24 +58,38 @@ bool BuildJitCacheKey(const std::string &templateFingerprint,
     }
   }
 
-  std::ostringstream serialized;
-  AppendField(serialized, "schema", kKeySchema);
-  AppendField(serialized, "template", templateFingerprint);
-  AppendField(serialized, "argument_count", std::to_string(arguments.size()));
-  for (size_t i = 0; i < arguments.size(); ++i) {
-    const JitArgumentSignature &argument = arguments[i];
-    AppendField(serialized, "argument_index", std::to_string(i));
-    AppendField(serialized, "rank", std::to_string(argument.dims.size()));
+  std::string &serialized = key->digest;
+  serialized.reserve(sizeof(kKeySchema) + sizeof(uint64_t) +
+                     templateFingerprint.size() +
+                     sizeof(uint64_t) * (1 + arguments.size()));
+  serialized.append(kKeySchema);
+  AppendU64(serialized, templateFingerprint.size());
+  serialized.append(templateFingerprint);
+  AppendU64(serialized, arguments.size());
+  for (const JitArgumentSignature &argument : arguments) {
+    AppendU64(serialized, argument.dims.size());
     for (int64_t dimension : argument.dims) {
-      AppendField(serialized, "dimension", std::to_string(dimension));
+      AppendU64(serialized, static_cast<uint64_t>(dimension));
     }
   }
-  key->digest = Sha256Hex(serialized.str());
-  if (key->digest.empty()) {
-    *error = "cannot hash JIT cache key inputs";
+  if (serialized.empty()) {
+    *error = "cannot serialize JIT cache key inputs";
     return false;
   }
   return true;
+}
+
+std::string CacheKeySummary(const JitCacheKey &key) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string summary;
+  const size_t count = std::min<size_t>(8, key.digest.size());
+  summary.reserve(count * 2);
+  for (size_t i = 0; i < count; ++i) {
+    const unsigned char byte = static_cast<unsigned char>(key.digest[i]);
+    summary.push_back(kHex[byte >> 4]);
+    summary.push_back(kHex[byte & 0xf]);
+  }
+  return summary;
 }
 
 JitExecutable::JitExecutable(std::string workDir, std::string sharedLibraryPath,
@@ -138,10 +135,15 @@ JitCompilationCache::JitCompilationCache(size_t capacity)
     : capacity_(capacity) {}
 
 void JitCompilationCache::touchReadyEntry(const std::shared_ptr<Entry> &entry) {
-  if (entry->inLru) lru_.erase(entry->lruPosition);
-  lru_.push_front(entry->key);
+  if (entry->inLru) {
+    // Move the existing node instead of erase + push_front, which allocated
+    // and freed a list node (plus copied the key) on every hot cache hit.
+    lru_.splice(lru_.begin(), lru_, entry->lruPosition);
+  } else {
+    lru_.push_front(entry->key);
+    entry->inLru = true;
+  }
   entry->lruPosition = lru_.begin();
-  entry->inLru = true;
 }
 
 JitCacheLookup JitCompilationCache::GetOrCompile(
