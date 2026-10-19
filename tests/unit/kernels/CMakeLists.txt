@@ -92,6 +92,21 @@ annc_add_kernel_gtest(masked_mul_context_test masked_mul_context_test.cpp)
 target_link_libraries(masked_mul_context_test PRIVATE
     ANNCThreadPool LLVMSupport LLVMDemangle)
 
+annc_add_kernel_gtest(tensordot_matmul_context_test
+    tensordot_matmul_context_test.cpp)
+target_link_libraries(tensordot_matmul_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(batched_matmul_add_context_test
+    batched_matmul_add_context_test.cpp)
+target_link_libraries(batched_matmul_add_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(layer_norm_context_test
+    layer_norm_context_test.cpp)
+target_link_libraries(layer_norm_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
 annc_add_kernel_gtest(kernel_priority_resolver_test
     kernel_priority_resolver_test.cpp
 )
