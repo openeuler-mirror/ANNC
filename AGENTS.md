@@ -52,15 +52,15 @@ ninja install
 ## 5. 运行测试
 
 ```bash
-python3 -m pytest tests/          # 全部测试
-python3 -m pytest tests/test_asm.py -v  # 单个测试文件
+python3 -m pytest tests/          # 全部 Python 测试
+python3 -m pytest tests/integration/fusion/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
 ```
 
-顶层脚本：`test_matmul.py`（matmul 功能测试）、`tf_protos_minimal.sh`（TF protobuf 最小化生成）
+测试目录的分层、资产归属和前置条件见 `tests/README.md`。`tf_protos_minimal.sh`（TF protobuf 最小化生成）仍位于仓库根目录，不是测试。
 
 ### C++ 单元测试（ctest）
 
-`tests/kernels/`、`tests/annc/` 与 `frontends/onnx/onnx2atir/test/` 下的 GTest 用例通过 CTest 注册（`annc_jit_cache_test` 随 TF addon 开关注册，ONNX 用例随 `ANNC_ENABLE_ONNX` 注册）：
+`tests/unit/` 下的 GTest 用例与 `tests/integration/ort_ep/` 的 Python 驱动通过 CTest 注册（`annc_jit_cache_test` 随 TF addon 开关注册，ONNX 用例随 `ANNC_ENABLE_ONNX` 注册，EP 用例随 `ANNC_ENABLE_ONNXRUNTIME_EP` 注册）：
 
 ```bash
 cd build && ctest --output-on-failure   # 跑全部 GTest 用例

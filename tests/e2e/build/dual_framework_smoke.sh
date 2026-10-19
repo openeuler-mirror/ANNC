@@ -5,7 +5,7 @@
 # ANNC_ENABLE_ONNXRUNTIME_EP.  It verifies the artifact set and the forwarded
 # build options without requiring a model or a running predictor.
 #
-#   ANNC_SRC=<source tree> ANNC_PREFIX=<install prefix> tests/dual_framework_smoke.sh
+#   ANNC_SRC=<source tree> ANNC_PREFIX=<install prefix> tests/e2e/build/dual_framework_smoke.sh
 set -euo pipefail
 
 : "${ANNC_SRC:?set ANNC_SRC to the ANNC source tree}"

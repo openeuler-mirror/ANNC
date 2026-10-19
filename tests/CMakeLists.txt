@@ -1,5 +1,45 @@
-add_subdirectory(annc)
-add_subdirectory(kernels)
+# ANNC test tree.
+#
+# Every test-only dependency discovery and every test target registration lives
+# here or in a per-suite CMakeLists below this directory.  The production
+# subdirectories (annc/, frontends/, addons/, tensorflow_addons/) own no test
+# sources and must not call find_package(GTest) or register add_test entries.
+#
+# The root CMakeLists.txt enters this directory only while BUILD_TESTING is on,
+# after ALL production targets have been defined, so the optional suites below
+# can gate on target existence (annc-onnx2atir, annc_ep).
+
+find_package(GTest REQUIRED)
+find_package(Threads REQUIRED)
+include(GoogleTest)
+
+# L0: C++ unit tests, grouped by the production subsystem they cover.
+add_subdirectory(unit/annc)
+add_subdirectory(unit/kernels)
+
+# ONNX frontend unit test: registered only while ANNC_ENABLE_ONNX=ON, which is
+# what defines the annc-onnx2atir target.
+if(TARGET annc-onnx2atir)
+  add_subdirectory(unit/onnx2atir)
+endif()
+
+# ONNX Runtime EP tests: registered only while ANNC_ENABLE_ONNXRUNTIME_EP=ON,
+# which is what defines the annc_ep target.  The GTest suites live under
+# unit/ort_ep; the Python fixtures and e2e drivers (CTest add_test entries)
+# live under integration/ort_ep.
+if(TARGET annc_ep)
+  # The EP Python fixtures need onnx + onnxruntime, which the interpreter used
+  # for the C++ build does not necessarily provide.  Keep the override local to
+  # the test tree so it cannot change the Python bindings' interpreter.
+  set(ANNC_TEST_PYTHON "" CACHE FILEPATH
+      "Interpreter for CTest-driven Python suites (defaults to the one found by FindPython3)")
+  if(ANNC_TEST_PYTHON)
+    set(Python3_EXECUTABLE "${ANNC_TEST_PYTHON}")
+  endif()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_subdirectory(unit/ort_ep)
+  add_subdirectory(integration/ort_ep)
+endif()
 
 if(ANNC_ENABLE_COVERAGE)
     set(ANNC_COVERAGE_DIR "${CMAKE_BINARY_DIR}/coverage")

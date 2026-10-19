@@ -1,4 +1,4 @@
-// RUN: annc-opt --split-input-file %s -atir-op-fusion | FileCheck %s
+// RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s -atir-op-fusion | FileCheck %s
 // OpFusion: 将 MatMulOp 替换为 call @fused_* + private kernel 函数
 // MatMul operand 顺序: (C=输出buffer, lhs, rhs)
 

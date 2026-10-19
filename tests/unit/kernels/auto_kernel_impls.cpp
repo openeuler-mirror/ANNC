@@ -1,7 +1,7 @@
 #include <cstdint>
 
 #include "Kernel/MemRefTypes.h"
-#include "tests/kernels/auto_kernel_support.h"
+#include "tests/unit/kernels/auto_kernel_support.h"
 
 int g_auto_spec_f32_calls = 0;
 int g_auto_spec_i32_calls = 0;

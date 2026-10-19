@@ -1,4 +1,4 @@
-// RUN: annc-opt %s --atir-identity-canonicalize --atir-op-fusion | FileCheck %s
+// RUN: env ANNC_GEMM=2 annc-opt %s --atir-identity-canonicalize --atir-op-fusion | FileCheck %s
 
 module @main attributes {module.state = "atir"} {
   func.func @main(

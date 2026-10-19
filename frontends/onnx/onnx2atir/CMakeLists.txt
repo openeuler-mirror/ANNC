@@ -78,47 +78,5 @@ set_target_properties(annc-onnx2atir PROPERTIES
 )
 install(TARGETS annc-onnx2atir DESTINATION bin)
 
-if(BUILD_TESTING)
-  find_package(GTest REQUIRED)
-  include(GoogleTest)
-  add_executable(annc-onnx2atir-frontend-test
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/onnx_frontend_test.cpp"
-      onnx_frontend.cpp
-      onnx_tensor_resolver.cpp
-      onnx_tensor_decoder.cpp
-      onnx_node_info_adapter.cpp
-      onnx_mlir_builder.cpp
-      onnx_transformers.cpp
-      ${ONNX_PROTO_SRCS}
-  )
-  target_include_directories(annc-onnx2atir-frontend-test BEFORE PRIVATE
-      "${CMAKE_SOURCE_DIR}/annc/include"
-      "${CMAKE_CURRENT_SOURCE_DIR}"
-      "${CMAKE_SOURCE_DIR}/frontends/onnx/protos/gen_code"
-  )
-  target_include_directories(annc-onnx2atir-frontend-test SYSTEM PRIVATE
-      "${Protobuf_INCLUDE_DIRS}"
-      "${MLIR_INCLUDE_DIRS}"
-      "${LLVM_INCLUDE_DIRS}"
-  )
-  if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
-    target_link_libraries(annc-onnx2atir-frontend-test PRIVATE
-        ${ABSL_LOG_LIBRARIES}
-        ${ABSL_CHECK_OP_LIBRARIES}
-    )
-  endif()
-  target_link_libraries(annc-onnx2atir-frontend-test PRIVATE
-      ${Protobuf_LIBRARIES}
-      GTest::gtest
-      GTest::gtest_main
-      AtirBuilder
-      AtirDialect
-      MLIRDialect
-      MLIRFuncDialect
-      MLIRArithDialect
-      MLIRInferTypeOpInterface
-      ${MLIR_LIBS}
-      ${llvm_libs}
-  )
-  gtest_discover_tests(annc-onnx2atir-frontend-test)
-endif()
+# The frontend's GTest suite lives in tests/unit/onnx2atir; this directory only
+# builds the production tool.

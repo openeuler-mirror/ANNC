@@ -431,8 +431,8 @@ if [ "${ENABLE_TENSORFLOW}" == "ON" ] || [ "${ENABLE_ONNX}" == "ON" ]; then
   fi
 fi
 
-# Kernel unit tests are registered unconditionally, so their C++ GoogleTest
-# dependency must be available while configuring the default build.
+# C++ unit tests are registered from tests/, so the GoogleTest dependency must
+# be available while configuring the default build.
 if command -v rpm >/dev/null 2>&1 && ! rpm -q gtest-devel >/dev/null 2>&1; then
   echo "ERROR: Required system package 'gtest-devel' is not installed." >&2
   echo "       Install it on openEuler/RPM-based systems with:" >&2

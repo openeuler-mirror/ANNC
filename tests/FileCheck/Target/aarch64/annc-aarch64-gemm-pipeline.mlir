@@ -1,29 +1,29 @@
 // RUN: rm -rf %t.dir && mkdir -p %t.dir && split-file %s %t.dir
-// RUN: annc-opt --split-input-file %t.dir/discovery.mlir -atir-gemm-epilogue-fusion -o %t.discovery.mlir
+// RUN: env ANNC_GEMM=2 annc-opt --split-input-file %t.dir/discovery.mlir -atir-gemm-epilogue-fusion -o %t.discovery.mlir
 // RUN: FileCheck %t.dir/discovery.mlir < %t.discovery.mlir
-// RUN: annc-asm --split-input-file %t.discovery.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/discovery.mlir --check-prefix=COMMIT
-// RUN: annc-asm --split-input-file %t.dir/conversion.mlir -convert-atir-to-linalg | FileCheck %t.dir/conversion.mlir
-// RUN: annc-opt %t.dir/production.mlir -atir-gemm-epilogue-fusion -o %t.production.mlir
-// RUN: not annc-opt %t.dir/invalid-candidate.mlir -atir-op-fusion 2>&1 | FileCheck %t.dir/invalid-candidate.mlir --check-prefix=INVALID
-// RUN: annc-opt %t.dir/jit-template.mlir -atir-gemm-epilogue-fusion -atir-op-fusion -o %t.jit-template.mlir
-// RUN: annc-asm %t.jit-template.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/jit-template.mlir --check-prefix=JIT-COMMIT
-// RUN: annc-opt %t.dir/neon-vecmat-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.neon-vecmat.mlir
-// RUN: annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
-// RUN: annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
-// RUN: annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm --split-input-file %t.discovery.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/discovery.mlir --check-prefix=COMMIT
+// RUN: env ANNC_GEMM=2 annc-asm --split-input-file %t.dir/conversion.mlir -convert-atir-to-linalg | FileCheck %t.dir/conversion.mlir
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/production.mlir -atir-gemm-epilogue-fusion -o %t.production.mlir
+// RUN: env ANNC_GEMM=2 not annc-opt %t.dir/invalid-candidate.mlir -atir-op-fusion 2>&1 | FileCheck %t.dir/invalid-candidate.mlir --check-prefix=INVALID
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/jit-template.mlir -atir-gemm-epilogue-fusion -atir-op-fusion -o %t.jit-template.mlir
+// RUN: env ANNC_GEMM=2 annc-asm %t.jit-template.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/jit-template.mlir --check-prefix=JIT-COMMIT
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/neon-vecmat-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.neon-vecmat.mlir
+// RUN: env ANNC_GEMM=2 annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE
 // Euler dev selects direct/packed/prepacked from the target plan; the legacy
 // ANNC_GEMM_RHS_PACKING override is intentionally not part of this contract.
-// RUN: annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
-// RUN: annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=NEON,NEON-DIRECT,NEON-PACKED
-// RUN: env ANNC_ENABLE_EPILOGUE_MATVEC=0 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefix=NEON-MATVEC-OFF
-// RUN: annc-asm %t.production.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/production.mlir --check-prefix=COMMIT
-// RUN: rm -rf %t.aot && annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' -o %t.mlir
-// RUN: annc-model-kernel-export %t.mlir --output-dir %t.aot
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=NEON,NEON-DIRECT,NEON-PACKED
+// RUN: env ANNC_GEMM=2 ANNC_ENABLE_EPILOGUE_MATVEC=0 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefix=NEON-MATVEC-OFF
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/production.mlir --check-prefix=COMMIT
+// RUN: rm -rf %t.aot && env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' -o %t.mlir
+// RUN: env ANNC_GEMM=2 annc-model-kernel-export %t.mlir --output-dir %t.aot
 // RUN: find %t.aot/model_generated_kernels -name '*.S' -print | count 7
 // RUN: FileCheck %t.dir/production.mlir --check-prefix=AOT-MANIFEST < %t.aot/model_generated_kernels/manifest.json
-// RUN: env ANNC_GEMM_ASM_SOURCE_DIR=/nonexistent LIBRARY_PATH="${LIBRARY_PATH:?}" annc -v %t.mlir --shared -o %t.invalid.so > %t.error 2>&1; test $? -ne 0
+// RUN: env ANNC_GEMM=2 ANNC_GEMM_ASM_SOURCE_DIR=/nonexistent LIBRARY_PATH="${LIBRARY_PATH:?}" annc -v %t.mlir --shared -o %t.invalid.so > %t.error 2>&1; test $? -ne 0
 // RUN: FileCheck %t.dir/production.mlir --check-prefix=AOT-ERROR < %t.error
-// RUN: env ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:?}" LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
+// RUN: env ANNC_GEMM=2 ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:?}" LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
 // RUN: python3 -c "import ctypes; ctypes.CDLL(r'%t.so')"
 // RUN: llvm-nm -D --defined-only %t.so | grep generated | count 26
 // RUN: llvm-nm -D --defined-only %t.so | FileCheck %t.dir/production.mlir --check-prefix=AOT-LINK

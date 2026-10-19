@@ -2,10 +2,10 @@
 # Check the mutually exclusive framework-selection modes without configuring
 # or building anything.
 #
-#   ANNC_SRC=<source tree> tests/build_mode_selection_test.sh
+#   ANNC_SRC=<source tree> tests/e2e/build/build_mode_selection_test.sh
 set -euo pipefail
 
-SRC=${ANNC_SRC:-$(cd "$(dirname "$0")/.." && pwd)}
+SRC=${ANNC_SRC:-$(cd "$(dirname "$0")/../../.." && pwd)}
 BUILD="${SRC}/build.sh"
 
 expect() {

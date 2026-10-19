@@ -122,7 +122,7 @@ which annc-opt annc-asm
 
 # 运行测试
 python3 -m pytest tests/          # 全部测试
-python3 -m pytest tests/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
+python3 -m pytest tests/integration/fusion/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
 ```
 
 ## 架构概览
@@ -424,7 +424,7 @@ annc-asm model_fused_atir.mlir \
 ```shell
 annc model_lowered.mlir -o app
 annc model_lowered.mlir --shared -o kernel.so
-annc model_lowered.mlir -t tests/annc/driver_dynamic.c -o test_app -v --shared
+annc model_lowered.mlir -t tests/e2e/annc-driver/driver_dynamic.c -o test_app -v --shared
 ```
 
 常用参数：
@@ -551,9 +551,9 @@ ninja && ninja install
 Serving 侧建议用以下命令对比开启和关闭 ANNC 的延迟，并在开启 ANNC 时打开打点：
 
 ```bash
-cd /annc/ANNC_E2E/ANNC_zch/tensorflow_serving_addons
-ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
-ANNC_BACKEND=kdnn START_CPU=0 bash test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
+cd <ANNC 源码根目录>
+ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
+ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
 ```
 
 ## CMake / 构建选项参考
@@ -681,7 +681,7 @@ EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_E
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
 | `ANNCOPT` / `ANNASM` / `FILECHECK` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
 
-### 模型压测脚本 `test_model_zoo_annc.sh`
+### 模型压测脚本 `tests/e2e/tf/test_model_zoo_annc.sh`
 
 脚本控制变量：`START_CPU` / `SERVER_START_CPU` / `CLIENT_START_CPU` / `CLIENT_NUMA_NODE` / `RUN_BOTH` / `LATENCY_THRESHOLD` / `WARMUP_REQUESTS` / `BASE_PORT` / `ENABLE_PROFILER`。
 

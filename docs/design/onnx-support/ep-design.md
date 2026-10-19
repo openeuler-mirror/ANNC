@@ -613,7 +613,7 @@ stateDiagram-v2
 | `addons/onnxruntime/annc_ep_graph_export.cc` | 图导出后的确定性重命名、哈希与模型签名                                          |
 | `addons/onnxruntime/ort_graph_to_proto.h`    | 随 ORT 版本 vendored 的图到 ONNX 序列化器（含一处 ANNC 修改：字符串 initializer） |
 | `addons/onnxruntime/annc_ep_compile_test.cpp`、`annc_ep_execution_test.cpp` | 站点校验与执行上下文的 GTest 单测（清单见 §10 GAP-07） |
-| `addons/onnxruntime/tests/`                  | ctest 宿主夹具与端到端用例（AOT、上下文、FTDMM）                                     |
+| `tests/integration/ort_ep/`                  | ctest 宿主夹具与端到端用例（AOT、上下文、FTDMM）                                     |
 | `addons/onnxruntime/CMakeLists.txt`          | 可选插件构建（默认关闭，要求外部 ORT SDK 头文件目录）                              |
 | `addons/onnxruntime/README.md`               | 使用说明与接入示例。其中少量表述与代码不符，见 §10 与各节注记                            |
 | `annc/lib/Support/ThreadPool/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/annc_fused_op.cc` |

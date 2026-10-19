@@ -2,7 +2,8 @@
 // disk: the tensor decoder, the graph parser (including control-flow refusal),
 // the type/shape resolver, and the NodeInfo adapter's fallback decisions.
 //
-// The tool's end-to-end behaviour is covered by tests/test_onnx_frontend.py,
+// The tool's end-to-end behaviour is covered by
+// tests/integration/onnx2atir/test_onnx_frontend.py,
 // which drives the annc-onnx2atir binary on generated models.
 
 #include <cstdint>

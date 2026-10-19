@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "fixtures" / "kp_fused_gather_match.pbtxt"
 CONFIG = ROOT / "tests" / "FileCheck" / "Dialect" / "Atir" / (
     "config-fusion-kp-fused-gather.json"

@@ -503,5 +503,5 @@ I5 要求声明与推导中的已知信息一致，发现冲突时显式诊断�
 | `frontends/onnx/onnx2atir/onnx_mlir_builder.{h,cpp}`           | 前端与公共引擎的构建引擎扩展接口实现                            |
 | `frontends/onnx/onnx-pipeline/annc-onnx-pipeline.cpp`          | 端到端编排、站点报告生成与工具链指纹                            |
 | `frontends/onnx/protos/`                                       | 精简 ONNX schema 与预生成脚本（无 CMake protoc 钩子）      |
-| `frontends/onnx/onnx2atir/test/`、`tests/test_onnx_frontend.py` | 阶段级 GTest 与 CLI 契约测试                          |
+| `tests/unit/onnx2atir/`、`tests/integration/onnx2atir/test_onnx_frontend.py` | 阶段级 GTest 与 CLI 契约测试                          |
 
