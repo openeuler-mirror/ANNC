@@ -220,7 +220,7 @@ while [[ $# -gt 0 ]]; do
       echo "  ORT EP / kernel env vars:"
       echo "    ANNC_EP_ORT_BUILD_TREE=<path>         ORT build tree Release/ (required when ORT EP is enabled:"
       echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
-      echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF)"
+      echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF; automatically ON for ORT EP)"
       echo "    ANNC_MLAS_INCLUDE_DIR=<path>          ORT onnxruntime/core/mlas/inc (required when MLAS=ON)"
       echo "    ANNC_GEMM_ASM_SOURCE_DIR=<path>       GEMM-ASM checkout baked into the annc driver as the"
       echo "                                          default JIT assembly source; runtime env overrides it"
@@ -276,6 +276,12 @@ case "${FRAMEWORK_MODE}" in
     exit 1
     ;;
 esac
+
+# The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
+# the kernel MLAS backend automatically.  TF-only builds keep it off.
+if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
+  ANNC_KERNEL_MLAS="ON"
+fi
 
 # The TensorFlow addon follows the TensorFlow framework switch unless it was
 # set explicitly; --disable-tensorflow already forces it off.

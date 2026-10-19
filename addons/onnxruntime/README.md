@@ -100,14 +100,15 @@ include guard，重复 include 会让其中每个结构体重复定义。
 ### 原生线程池与 MLAS
 
 EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT 构建树的 `Release/`
-归档。MLAS 是可选的 kernel GEMM 后端：构建期只需要 ORT 源码的 `mlas.h`，运行时从
+归档。MLAS 是 EP 使用的 kernel GEMM 后端，构建 EP 时自动启用（`ANNC_KERNEL_MLAS`
+被强制为 `ON`）：构建期只需要 ORT 源码的 `mlas.h`，运行时从
 `ANNC_MLAS_LIB_DIR`（缺省回落到 `ANNC_KERNEL_LIB_PATH`）解析四个归档。
 
 | CMake 选项 | 启用配置 |
 |---|---|
 | `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 native pool 所需的 common/cpuinfo 归档；构建 EP 时必需 |
 | `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
-| `ANNC_KERNEL_MLAS` | `ON` 时启用 MLAS GEMM 路径；构建期只需要 `mlas.h` |
+| `ANNC_KERNEL_MLAS` | 构建 EP 时自动为 `ON`，无需手动设置；构建期只需要 `mlas.h` |
 | `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
 
 运行时 `ANNC_MLAS_LIB_DIR` 指向同时包含 `libonnxruntime_mlas.a`、`libkleidiai.a`、
@@ -123,14 +124,14 @@ API；原生路径的空池表示串行。
 公开 API。EP 始终使用 ORT 的线程池：不提供 `ANNC_EP_NATIVE_POOL` 或
 `ANNC_EP_SHARDS` 开关，分片数由内部估计与 ORT 池决定。
 
-四个融合算子可通过运行时环境变量逐个关闭（默认开启，精确 `0` 关闭）：
+四个融合算子可通过运行时环境变量逐个开启（默认关闭，设为非 `0` 值开启）：
 
 | 变量 | 作用 |
 |---|---|
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL=0` | 不申报 FusedTensordotMatmul（`tensordot_matmul`）站点 |
-| `ANNC_EP_FUSION_LAYER_NORM=0` | 不申报 LayerNormalization（`layer_norm`）站点 |
-| `ANNC_EP_FUSION_MASKED_MUL=0` | 不申报 FusedMaskedMul（`masked_mul`）站点 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=0` | 不申报 FusedBatchedMatmulAdd（`batched_matmul_add`）站点 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL=1` | 申报 FusedTensordotMatmul（`tensordot_matmul`）站点 |
+| `ANNC_EP_FUSION_LAYER_NORM=1` | 申报 LayerNormalization（`layer_norm`）站点 |
+| `ANNC_EP_FUSION_MASKED_MUL=1` | 申报 FusedMaskedMul（`masked_mul`）站点 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1` | 申报 FusedBatchedMatmulAdd（`batched_matmul_add`）站点 |
 
 开关由 `annc-onnx-pipeline` 转发给 `annc-opt`，`OpFusion` 在编译期直接跳过对应的
 matcher，因此不会生成该融合算子；EP 申报循环保留过滤作为兜底。四个开关进入 EP 缓存
@@ -205,10 +206,10 @@ ABI、参数绑定规则与失败形态见
 | `ANNC_EP_DEBUG=1` | 编译诊断：签名/缓存命中、逐站点申报与丢弃原因、每融合节点的锚点名与 kernel 名、每节点首次操作数形状 |
 | `ANNC_EP_TIMING=1` | 进程退出时打印每节点的开销拆分（输入识别 / 输出分配 / kernel） |
 | `ANNC_EP_NOOP=1` | `Compute` 只分配输出不做计算——测量辅助，不是运行模式 |
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL=0` | 关闭 FusedTensordotMatmul 站点申报 |
-| `ANNC_EP_FUSION_LAYER_NORM=0` | 关闭 LayerNormalization 站点申报 |
-| `ANNC_EP_FUSION_MASKED_MUL=0` | 关闭 FusedMaskedMul 站点申报 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=0` | 关闭 FusedBatchedMatmulAdd 站点申报 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL=1` | 开启 FusedTensordotMatmul 站点申报 |
+| `ANNC_EP_FUSION_LAYER_NORM=1` | 开启 LayerNormalization 站点申报 |
+| `ANNC_EP_FUSION_MASKED_MUL=1` | 开启 FusedMaskedMul 站点申报 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1` | 开启 FusedBatchedMatmulAdd 站点申报 |
 | `ANNC_EP_COMPILE=0` | 完全禁用运行时编译（等价于不注册 EP，用于对照） |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 子进程超时，默认 600 |
 | `ANNC_EP_KEEP_TEMPS=1` | 保留编译工作目录 |

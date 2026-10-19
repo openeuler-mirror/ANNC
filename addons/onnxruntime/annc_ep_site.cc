@@ -126,7 +126,7 @@ bool ValidateContextSite(const Site& site, std::string* error) {
 }  // namespace
 
 bool FusionPatternEnabled(const std::string& pattern) {
-  return annc::fusionPatternEnabled(pattern);
+  return annc::fusionPatternEnabledForOrt(pattern);
 }
 
 bool SiteNeedsResolvedNames(const Site& site) {

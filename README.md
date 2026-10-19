@@ -567,7 +567,7 @@ ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
-| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF` | 启用 MLAS GEMM kernel 后端；构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析 |
+| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置。构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 的 JIT 汇编源码编译期默认值，运行时同名环境变量可覆盖 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
@@ -654,18 +654,19 @@ allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`Ma
 | `ANNC_EP_DEBUG` | 存在即开启 | 关闭 | 编译/申报诊断；设 `0` 仍然开启 |
 | `ANNC_EP_TIMING` | 存在即开启 | 关闭 | 每节点耗时拆分；设 `0` 仍然开启 |
 | `ANNC_EP_NOOP` | 存在即开启 | 关闭 | 只分配输出不计算；设 `0` 仍然开启 |
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | `0` 关闭 | 开启 | 控制 FusedTensordotMatmul 站点申报 |
-| `ANNC_EP_FUSION_LAYER_NORM` | `0` 关闭 | 开启 | 控制 LayerNormalization 站点申报 |
-| `ANNC_EP_FUSION_MASKED_MUL` | `0` 关闭 | 开启 | 控制 FusedMaskedMul 站点申报 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `0` 关闭 | 开启 | 控制 FusedBatchedMatmulAdd 站点申报 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedTensordotMatmul 站点申报 |
+| `ANNC_EP_FUSION_LAYER_NORM` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 LayerNormalization 站点申报 |
+| `ANNC_EP_FUSION_MASKED_MUL` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedMaskedMul 站点申报 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedBatchedMatmulAdd 站点申报 |
 
-四个 `ANNC_EP_FUSION_*` 开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在
-编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。开关只关闭该
-特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
+四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0`
+关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在编译期跳过
+对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。关闭只影响该特定
+融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
 
 EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
 
-构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。`build.sh --all` 会转发 `ANNC_EP_ORT_BUILD_TREE`、`ANNC_KERNEL_MLAS`、`ANNC_MLAS_INCLUDE_DIR` 与 `ANNC_GEMM_ASM_SOURCE_DIR`，同时构建 TF 前端/addon 与 EP；`--enable-ort` 只构建 ORT 加速栈（ONNX 前端与 EP
+构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。`--enable-ort`/`--all` 会自动强制 `ANNC_KERNEL_MLAS=ON`（CMake 在 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时同样强制），并转发 `ANNC_EP_ORT_BUILD_TREE` 与 `ANNC_MLAS_INCLUDE_DIR`；`ANNC_GEMM_ASM_SOURCE_DIR` 仅 TF 侧 AOT/JIT GEMM 路径需要，ORT EP 的 fused context 站点不依赖它。`--enable-ort` 只构建 ORT 加速栈（ONNX 前端与 EP
 作为一体），`--enable-tf` 只构建 TF。
 
 ### 构建与测试
