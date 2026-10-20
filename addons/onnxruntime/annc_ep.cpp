@@ -94,7 +94,7 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
       "ANNC_EP_FUSION_LAYER_NORM",
       "ANNC_EP_FUSION_MASKED_MUL",
       "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
-      "ANNC_MLAS_LIB_DIR",
+      "ANNC_EP_ORT_BUILD_TREE",
   };
   // v2: ORT fusion switches default to disabled. Bump the version so caches
   // produced under the old default-on semantics are not reused.

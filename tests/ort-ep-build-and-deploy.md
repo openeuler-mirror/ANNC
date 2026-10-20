@@ -31,7 +31,7 @@
 
   ```shell
   yum install cmake ninja-build protobuf-devel protobuf-compiler \
-              gcc gcc-c++ openssl-devel python3-devel
+              gcc gcc-c++ openssl-devel python3-devel numactl
   pip install pybind11 nanobind numpy
   ```
 
@@ -114,8 +114,9 @@ export ANNC_MLAS_INCLUDE_DIR=<ORT_ROOT>/onnxruntime/core/mlas/inc
 - `--dry-run`：先确认框架开关，不 configure/build。
 - MLAS 是 ORT EP 的必需组件，构建 ORT EP 时自动启用，不需要手动设置。
   构建日志应出现 `Kernel MLAS: ON`。
-- 四个 MLAS 运行期归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析。
-- `ANNC_EP_ORT_BUILD_TREE` 填 ORT 构建树的 `Release/` 目录，不是源码树。
+- 四个 MLAS 运行期归档由 `ANNC_EP_ORT_BUILD_TREE` 定位；该变量必须指向 ORT
+  构建树的 `Release/` 目录（不是源码树），driver 按 `<tree>/` 与
+  `<tree>/_deps/*-build/` 的布局查找四个归档。
 
 等价的直接 `cmake` 配置：
 
@@ -166,8 +167,8 @@ ninja -C <ANNC_ROOT>/build install
   指向该目录（本机为 `<ANNC_PREFIX>/lib`）。
 - `libannc_ep.so` 由 GNUInstallDirs 决定安装到 `lib` 或 `lib64`，注册时使用实际
   路径；本机为 `<ANNC_PREFIX>/lib64/libannc_ep.so`。
-- MLAS 四个归档在运行时解析：优先 `ANNC_MLAS_LIB_DIR`，其次
-  `ANNC_KERNEL_LIB_PATH`。构建期只需要 `mlas.h`。
+- MLAS 四个归档在运行时由 `ANNC_EP_ORT_BUILD_TREE` 定位。构建期只需要
+  `mlas.h`。
 
 ## 3. 特性使能
 
@@ -183,9 +184,9 @@ ANNC 安装前缀保持默认相对布局时大多数变量可省略。常用变
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | 对应 `batched_matmul_add` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
 | `ANNC_EP_PIPELINE` | `annc-onnx-pipeline` 绝对路径 | 与 EP 同目录 → `../bin` → `PATH` |
 | `ANNC_KERNEL_LIB_PATH` | ANNC/LLVM 归档目录 | `<ANNC_PREFIX>/lib` |
-| `ANNC_MLAS_LIB_DIR` | 四个 MLAS 归档目录 | `ANNC_KERNEL_LIB_PATH` |
+| `ANNC_EP_ORT_BUILD_TREE` | ORT 构建树 `Release/`；用于定位四个 MLAS 归档 | 构建期值/未设置 |
 | `ANNC_EP_CACHE_DIR` | EP 编译缓存目录 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` |
-| `ANNC_CLANG` | clang 路径或 GCC triple 包装脚本 | 构建期检测值 |
+| `ANNC_CLANG` | clang 路径或 GCC triple 包装脚本（`crtbeginS.o` 问题见 §4.1） | 构建期检测值 |
 | `ANNC_EP_DEBUG=1` | 打印站点申报、编译与缓存诊断 | 关闭 |
 
 要点：
@@ -232,26 +233,90 @@ sess = ort.InferenceSession(
 
 - 打开：设置 `ANNC_EP_FUSION_TENSORDOT_MATMUL=1`（默认关闭）。
 - 对应 pattern：`tensordot_matmul`；融合算子：`FusedTensordotMatmul`。
-- 本机 model4 含该 pattern 站点，用 model4 做开启/关闭对照。
+- 本机 model4 含该 pattern 站点。
+
+测试命令与四模型 A/B 同参；`numactl -C 48-63` 按目标机 cpuset 调整（本机实测
+用 48-63）：
 
 ```shell
 # 开启
 ANNC_EP_FUSION_TENSORDOT_MATMUL=1 ANNC_EP_DEBUG=1 \
-  <PYTHON> /tmp/onnx_benchmark_all_annc.py \
-  --model <ONNX_MODEL_DIR>/model4.onnx --thread_num 2 --max_qps 0 \
-  --max_inflight 8 --batch_size 8 --warmup_duration_s 1 --test_duration_s 2 \
-  --intra_threads 4 --inter_threads 2 --output_md tdt_on.md
+  numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
+  --model <ONNX_MODEL_DIR>/model4.onnx --thread_num 5 --max_qps 0 \
+  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \
+  --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
+  --timeout_ms 30000 --output_md tdt_on.md --debug 2>&1 | tee tdt_on.log
 
 # 关闭对照（不设置或设为 0）
 ANNC_EP_FUSION_TENSORDOT_MATMUL=0 ANNC_EP_DEBUG=1 \
-  <PYTHON> /tmp/onnx_benchmark_all_annc.py \
-  --model <ONNX_MODEL_DIR>/model4.onnx --thread_num 2 --max_qps 0 \
-  --max_inflight 8 --batch_size 8 --warmup_duration_s 1 --test_duration_s 2 \
-  --intra_threads 4 --inter_threads 2 --output_md tdt_off.md
+  numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
+  --model <ONNX_MODEL_DIR>/model4.onnx --thread_num 5 --max_qps 0 \
+  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \
+  --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
+  --timeout_ms 30000 --output_md tdt_off.md --debug 2>&1 | tee tdt_off.log
 ```
 
-证明：比较两次日志中的 `GetCapability(...): sites=N claimed=N`；开启时该 pattern
-的站点被申报，关闭后对应申报减少或消失。
+基线（CPU EP）用未修改的 `<BENCH_SCRIPT>`，不带 `ANNC_EP_FUSION_*` 和
+`ANNC_EP_DEBUG`，其余参数相同。
+
+**日志在哪看**：EP 和 pipeline 的诊断都输出到进程 **stderr**；`--output_md`
+只写压测报告，不包含站点信息。上面的 `2>&1 | tee` 会把两者都写进日志，然后：
+
+```shell
+grep -E 'GetCapability|site\(s\)' tdt_on.log tdt_off.log
+```
+
+正常情况下能看到两类行：
+
+```text
+[annc-ep] GetCapability(runtime-compile): nodes=<N> sites=<S> claimed=<C> dropped=<D> ...
+[annc-onnx-pipeline] <S> site(s) -> <cache>/libannc_kernels.so
+```
+
+- `[annc-onnx-pipeline] N site(s)`：运行时编译成功并生成了含 N 个站点的
+  `libannc_kernels.so`。这一行是 pipeline 在编译结束时打印的，较稳定。
+- `[annc-ep] GetCapability(...)`：EP 在创建 session 时打印的站点申报摘要；
+  只有当前 EP 版本带该诊断且 `ANNC_EP_DEBUG` 在 EP 进程里生效时才会出现。
+  如果只看到 pipeline 的 `N site(s)`、没有 `GetCapability`，以 pipeline 的
+  N 为准，并检查 `ANNC_EP_DEBUG` 是否设置在加载 EP 的进程里、EP 是否为旧版本。
+  可用 `strings <ANNC_PREFIX>/lib64/libannc_ep.so | grep 'GetCapability(runtime-compile)'`
+  确认 EP 二进制是否包含该诊断。
+- 关闭组如果没有 `site(s)` 行，说明编译了 0 个站点，等价于 `sites=0`。
+
+判定：开启时目标 pattern 的站点数应等于预期值（见下表），`claimed=sites`、
+`dropped=0`；关闭时对应站点为 0。若 `claimed` 小于 `sites` 或 `dropped>0`，
+在日志里搜 `dropping site` 查看被丢弃的站点及原因。
+
+model4 只开 `tensordot_matmul` 时预期 `sites=15 claimed=15 dropped=0`；`=0` 时
+预期 `sites=0 claimed=0`。
+
+导入阶段出现以下 warning 是正常的：
+
+```text
+warning: unsupported op 'Gemm' at node '...' lowered to atir.opaque
+warning: unsupported op 'Slice' at node '...' lowered to atir.opaque
+```
+
+ATIR 尚未覆盖这些 op，或该节点的形状/属性不满足映射条件（例如 `Gemm` 没有
+OpSpec 行，`Slice` 只支持 stride-1 的静态 begin/size）；节点保留为
+`atir.opaque`，被融合 pattern 吸收的节点进入编译，未吸收的节点由 ORT CPU EP
+执行。`annc-onnx2atir` 用退出码 2 表示“导入成功但有 opaque 节点”，pipeline
+将其视为正常，不影响已编译站点的计数。
+
+**各模型/特性的站点数**（单独开启对应开关、其余保持默认关闭）：
+
+| 模型 | 特性 | 开启时 `sites/claimed` | 关闭时 |
+|---|---|---|---|
+| model1 | `masked_mul` | 21/21 | 0/0 |
+| model2 | `masked_mul` | 33/33 | 0/0 |
+| model3 | `masked_mul` | 3/3 | 0/0 |
+| model3 | `batched_matmul_add` | 50/50 | 0/0 |
+| model4 | `layer_norm` | 27/27 | 0/0 |
+| model4 | `tensordot_matmul` | 15/15 | 0/0 |
+
+四个开关全开时，`GetCapability` 应为 model1 21/21、model2 33/33、model3 53/53
+（`batched_matmul_add` 50 + `masked_mul` 3）、model4 42/42（`layer_norm` 27 +
+`tensordot_matmul` 15）。
 
 ### 3.4 layer_norm 特性
 
@@ -259,17 +324,18 @@ ANNC_EP_FUSION_TENSORDOT_MATMUL=0 ANNC_EP_DEBUG=1 \
 - 对应 pattern：`layer_norm`；融合算子：`LayerNormalization`。
 - 本机 model4 含该 pattern 站点。
 
-证明方式与 3.3 相同：用 model4 跑 `=1` 开启与 `=0` 关闭两组，比较
-`GetCapability(...): sites/claimed` 的变化。
+命令同 3.3，把开关换成 `ANNC_EP_FUSION_LAYER_NORM=1/0`。model4 预期
+`sites=27 claimed=27`；关闭后 `sites=0 claimed=0`。
 
 ### 3.5 masked_mul 特性
 
 - 打开：设置 `ANNC_EP_FUSION_MASKED_MUL=1`（默认关闭）。
 - 对应 pattern：`masked_mul`；融合算子：`FusedMaskedMul`。
-- 本机 model1 的 21 个站点全部由该 pattern 覆盖。
+- 本机 model1/2/3 含该 pattern 站点。
 
-证明方式与 3.3 相同：用 model1 跑 `=1` 开启与 `=0` 关闭两组。本机实测开启时
-`GetCapability(...): sites=21 claimed=21`，关闭或未设置时 `sites=0 claimed=0`。
+命令同 3.3，把开关换成 `ANNC_EP_FUSION_MASKED_MUL=1/0`，分别跑 model1、
+model2、model3。预期 model1 `21/21`、model2 `33/33`、model3 `3/3`；关闭后
+均为 `0/0`。
 
 ### 3.6 batched_matmul_add 特性
 
@@ -277,9 +343,9 @@ ANNC_EP_FUSION_TENSORDOT_MATMUL=0 ANNC_EP_DEBUG=1 \
 - 对应 pattern：`batched_matmul_add`；融合算子：`FusedBatchedMatmulAdd`。
 - 本机 model3 含该 pattern 站点。
 
-证明方式与 3.3 相同：用 model3 跑 `=1` 开启与 `=0` 关闭两组，比较
-`GetCapability(...): sites/claimed` 的变化。其他 pattern（例如通用 `matmul`）
-仍可能融合同一子图，因此关闭后站点不一定全部消失。
+命令同 3.3，把开关换成 `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1/0`，跑 model3。
+预期 `sites=50 claimed=50`；关闭后 `sites=0 claimed=0`。通用 `matmul` 仍可能
+融合同一子图，因此“全部站点”不一定随目标 pattern 关闭而下降。
 
 ### 3.7 使能所有特性
 
@@ -288,20 +354,48 @@ ANNC_EP_FUSION_TENSORDOT_MATMUL=0 ANNC_EP_DEBUG=1 \
 
 ```shell
 # 基线：CPU EP
-<PYTHON> <BENCH_SCRIPT> \
+numactl -C 48-63 <PYTHON> <BENCH_SCRIPT> \
   --model <ONNX_MODEL_DIR>/model1.onnx --thread_num 5 --max_qps 0 \
-  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 --test_duration_s 30 \
-  --intra_threads 16 --inter_threads 8 --output_md baseline.md
+  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \
+  --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
+  --timeout_ms 30000 --output_md baseline.md
 
 # ANNC：四个融合开关全部设为 1
 ANNC_EP_FUSION_TENSORDOT_MATMUL=1 ANNC_EP_FUSION_LAYER_NORM=1 \
 ANNC_EP_FUSION_MASKED_MUL=1 ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1 \
-ANNC_EP_DEBUG=1 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
+ANNC_EP_DEBUG=1 numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
   --model <ONNX_MODEL_DIR>/model1.onnx --thread_num 5 --max_qps 0 \
-  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 --test_duration_s 30 \
-  --intra_threads 16 --inter_threads 8 --output_md annc.md
+  --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \
+  --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
+  --timeout_ms 30000 --output_md annc.md --debug 2>&1 | tee annc.log
 ```
 
-证明：对比 `actual_qps`、`avg_latency_us`、`p99_latency_us`，并用
-`ANNC_EP_DEBUG=1` 日志中的 `sites/claimed` 确认融合已生效（本机 model1 在四个
-开关都设为 `1` 时为 21/21；默认全关时为 0/0）。
+证明：对比 `actual_qps`、`avg_latency_us`、`p99_latency_us`，并按 3.3 的方法
+`grep -E 'GetCapability|site\(s\)'` 确认站点：四个开关全开时 model1/2/3/4 分别为
+21/33/53/42，claimed 相同、dropped=0；默认全关时目标 pattern 为 0/0。
+
+## 4. 常见报错
+
+### 4.1 clang 链接 kernel 时找不到 `crtbeginS.o`
+
+现象：
+
+```text
+/usr/bin/ld: cannot find crtbeginS.o: No such file or directory
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+```
+
+根因：clang 按默认 triple `aarch64-unknown-linux-gnu` 找 GCC runtime，但目标机
+GCC 实际在 `/usr/lib/gcc/aarch64-openEuler-linux/<ver>/`；`LIBRARY_PATH` 不能
+替代 GCC installation 的定位。
+
+处理：建 triple 符号链接（需要 root）。
+
+```shell
+ls -ld /usr/lib/gcc/aarch64-unknown-linux-gnu   # 先确认不存在
+sudo ln -s /usr/lib/gcc/aarch64-openEuler-linux \
+           /usr/lib/gcc/aarch64-unknown-linux-gnu
+```
+
+建好后重新运行；该链接让 clang 的默认 triple 找到 GCC installation 下的
+`crtbeginS.o`。

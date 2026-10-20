@@ -21,7 +21,7 @@ else()
 endif()
 
 # MLAS archives for kernels built with ANNC_KERNEL_MLAS: the driver resolves
-# them at link time from ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
+# them at link time from ANNC_EP_ORT_BUILD_TREE.
 if(ANNC_KERNEL_MLAS)
     target_compile_definitions(annc PRIVATE ANNC_KERNEL_MLAS=1)
 endif()

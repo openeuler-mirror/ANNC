@@ -101,8 +101,8 @@ include guard，重复 include 会让其中每个结构体重复定义。
 
 EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT 构建树的 `Release/`
 归档。MLAS 是 EP 使用的 kernel GEMM 后端，构建 EP 时自动启用（`ANNC_KERNEL_MLAS`
-被强制为 `ON`）：构建期只需要 ORT 源码的 `mlas.h`，运行时从
-`ANNC_MLAS_LIB_DIR`（缺省回落到 `ANNC_KERNEL_LIB_PATH`）解析四个归档。
+被强制为 `ON`）：构建期只需要 ORT 源码的 `mlas.h`，运行时由
+`ANNC_EP_ORT_BUILD_TREE` 定位四个归档。
 
 | CMake 选项 | 启用配置 |
 |---|---|
@@ -111,10 +111,10 @@ EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT
 | `ANNC_KERNEL_MLAS` | 构建 EP 时自动为 `ON`，无需手动设置；构建期只需要 `mlas.h` |
 | `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
 
-运行时 `ANNC_MLAS_LIB_DIR` 指向同时包含 `libonnxruntime_mlas.a`、`libkleidiai.a`、
-`libonnxruntime_common.a`、`libcpuinfo.a` 的目录；未设置时用 `ANNC_KERNEL_LIB_PATH`。
-四者任一缺失时 `annc` driver 直接中止内核链接并报错，不会生成带未定义
-`MlasGemmBatch` 符号的 `.so`。
+运行时 `ANNC_EP_ORT_BUILD_TREE` 必须指向 ORT 构建树（`<build_dir>/Linux/Release`），
+`annc` driver 按 `<tree>/` 与 `<tree>/_deps/*-build/` 的布局定位四个归档。四者
+任一缺失时直接中止内核链接并报错，不会生成带未定义 `MlasGemmBatch` 符号的
+`.so`。
 
 原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
 不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开
