@@ -8,6 +8,7 @@
 | --- | --- |
 | JIT 常量折叠特性设计 | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
+| TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
 
 ## 约定
 
