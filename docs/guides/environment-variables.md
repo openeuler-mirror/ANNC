@@ -24,7 +24,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_GEMM` | `0` / `1` / `2` | `0` | MatMul 融合级别：未设置或 `0` 关闭融合，`1` 只融合 plain MatMul，`2` 追加 epilogue 尾融合（需要 `ANNC_GEMM_ASM_SOURCE_DIR`）。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
+| `ANNC_GEMM` | `0` / `1` / `2` | `0` | MatMul 融合级别：未设置或 `0` 关闭融合，`1` 融合 plain MatMul（KDNN adaptor 构建下为 AOT KDNN 站点），`2` 追加 epilogue 尾融合（需要 `ANNC_GEMM_ASM_SOURCE_DIR`）。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
 
 ## `annc-asm` / FastCodegen
 

@@ -60,7 +60,7 @@ ninja && ninja install
 - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：KDNN 来源（`build.sh` 默认 `RELEASE`，CMake 默认 `LOCAL`）；`LOCAL` 用本地 `third_party/KDNN`，`REMOTE` 从 git 仓库 FetchContent
 - `--enable-kdnn-adaptor` / `--disable-kdnn-adaptor`：启用/关闭内置 KDNN adaptor kernel（默认关闭）；关闭时 KDNN 来源选项不产生实际集成
 - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
-- `--enable-constant-folding`：启用常量折叠与 KDNN packed-B 支持（默认关闭）
+- `--enable-constant-folding`：启用常量折叠与 KDNN packed-B 支持（默认关闭；需要 TensorFlow 前端，与 `--enable-ort` 互斥）
 - `--disable-assertions`：关闭断言（默认开启断言）
 - `--kdnn-dir <path>`：LOCAL 模式下的本地 KDNN 树（默认 `third_party/KDNN`；仅 `--kdnn-source LOCAL` 有效）
 - `--regen-tf-protos` / `--regen-onnx-protos`：强制重新生成 TF / ONNX protobuf 源码
@@ -120,6 +120,6 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 
 - KDNN backend（`ANNC_ENABLE_KDNN_ADAPTOR=ON`）仅支持 AArch64 平台。
 - RELEASE 模式需要系统安装 `unzip`、`rpm2cpio`、`cpio`（openEuler：`sudo yum install -y unzip rpm cpio`）。
-- RELEASE 且 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 时当前不支持 `ANNC_ENABLE_CONSTANT_FOLDING=ON`。
+- `--enable-constant-folding` 需要 TensorFlow 前端与 AArch64 GEMM 微内核归档（放在 `third_party/annc-gemm-kernels/`，或设置 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`）；`--enable-ort` 下传该选项会直接报错。
 - `--build-type Debug` 会把 third_party（LLVM/json）一起重编；只调试 ANNC 时改用 `--annc-debug`。
 - 切换 Python 环境或 TensorFlow 版本后需重新运行 CMake（configure 时自动检测 TF）。

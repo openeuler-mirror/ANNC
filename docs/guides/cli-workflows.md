@@ -287,7 +287,7 @@ annc-onnx-pipeline --model model.onnx --out-dir <dir> [--work-dir <dir>] [--verb
 annc-onnx-pipeline --toolchain-info     # 打印工具链指纹 JSON（缓存键用）
 ```
 
-产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。`.so` **只包含 AOT 站点**：站点报告在 prune 之前生成，因此 `sites.json` 可能列出 JIT（`matmul` 家族）站点，但这些站点不会进入 `.so`，EP 也会拒绝申报。中间件走 MLIR bytecode（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方应回落到 CPU 执行而不是让会话失败。
+产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。`.so` **只包含 AOT 站点**：站点报告在 prune 之前生成，因此默认构建的 `sites.json` 可能列出 JIT（`matmul` 家族）站点，但这些站点不会进入 `.so`，EP 也会拒绝申报。`ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建会自动向 FastCodegen 传 `enable-kdnn=true`；再设 `ANNC_GEMM=1` 时，plain `matmul` 以 AOT 站点进入 `.so`（`matmul_add`/`matmul_add_relu` 不在 EP 白名单内）。中间件走 MLIR bytecode（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方应回落到 CPU 执行而不是让会话失败。
 
 前置：`annc` 链接阶段从**单一目录** `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib`）解析全部归档（ANNC kernel 归档 + `libLLVMSupport.a` 等 LLVM 归档），因此该目录必须来自 `ninja install` 的安装树；工具启动时会预检并给出明确报错。同理，`annc` 以裸名调用 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`，本工具会把自身 bin 目录（构建树另加 `_deps/llvm-build/bin`）前置到子进程 `PATH`。
 

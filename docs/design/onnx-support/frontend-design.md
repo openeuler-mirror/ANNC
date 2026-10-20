@@ -3,10 +3,10 @@
 | 文档控制项 | 内容                                                                                    |
 | ----- | ------------------------------------------------------------------------------------- |
 | 文档编号  | ANNC-ONNX-LLD-002                                                                     |
-| 版本与日期 | 1.9，2026-10-20；复核并迁移至新基线 `c1622b87`（原基线 `4c5435fd`）；补充 Gemm 形状推导事实，GTest 计数更新为 52 |
+| 版本与日期 | 1.10，2026-10-20；迁移至新基线 `11bef0d0`（`frontends/onnx/` 在该区间无变化，原基线 `c1622b87`）；GTest 计数为 52 |
 | 文档状态  | 模块设计。描述当前设计意图与实现遵循度，差距见第 10 节                                                         |
 | 评审对象  | ANNC 架构师、前端开发、融合与后端开发、测试负责人                                                           |
-| 设计基线  | `frontends/onnx/`（源码基线 `c1622b87`，分支 `upstream/dev`）                                                    |
+| 设计基线  | `frontends/onnx/`（源码基线 `11bef0d0`，分支 `upstream/dev`）                                                    |
 | 上级文档  | [ANNC ONNX 支持整体方案设计](overall.md)（重点第 7.1、8.1 节与附录 A）           |
 | 关联文档  | [README](README.md)、[ep-design.md](ep-design.md)、[fusion-design.md](fusion-design.md)、[ADR-011](../../decisions/decisions.md#adr-011)、[ADR-013](../../decisions/decisions.md#adr-013) |
 

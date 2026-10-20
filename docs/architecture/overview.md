@@ -1,11 +1,11 @@
 # ANNC 架构设计文档
 
 > **文档编号**：ANNC-ARCH-001\
-> **文档版本**：v3.6\
-> **发布日期**：2026-10-17\
+> **文档版本**：v3.7\
+> **发布日期**：2026-10-20\
 > **目标受众**：架构评审、产品经理、开发工程师、测试工程师、运维工程师\
 > **文档密级**：公开\
-> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算；v3.5 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline；v3.6 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物。
+> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算；v3.5 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline；v3.6 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物；v3.7 同步 upstream !248/!260：KDNN adaptor 构建下 `ANNC_GEMM=1` 新增 AOT `matmul` 分支，ONNX EP 可申报站点随构建配置变化；GEMM 常量折叠要求 TensorFlow 与 AArch64 GEMM 微内核归档。
 
 ***
 
@@ -453,7 +453,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - `annc-tf-pipeline` 负责 AOT 编译和 GraphDef 重写；运行时 JIT 通过 `atir-select-kernel`、`atir-specialize-shapes` 处理单个融合函数。
 - GEMM lowering 采用 ATIR→Linalg 和 `annc-aarch64-gemm-pipeline`，由 AArch64 后端依次完成计划选择、线程划分、缓存/微内核分块和 ABI lowering。
 - Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
-- GEMM 常量折叠由 `ANNC_ENABLE_CONSTANT_FOLDING` 编译期开关控制（默认 OFF，`build.sh --enable-constant-folding` 开启）。开启后，若 AArch64 GEMM pipeline 收到非空 `packed-c` 路径且 MatMul 的常量 RHS 携带 checkpoint 变量名（`annc.aarch64.rhs_name`）并满足 `K*N >= 300`，策略在 `Autotune` 与 `Finalize` 之间插入 `aarch64-gemm-prepack-rhs`：从 checkpoint 读取 RHS，按 tuning 配置的 cache tile 调用 `pack_b` 生成 packed C 源文件，并把契约写入 `annc.aarch64.prepacked_rhs`；lowering 将其物化为外部 `memref.global`，由 `annc --packed-rhs-c` 链接进最终 `.so`，运行时不再执行 `pack_b`。关闭开关时即使传入 `packed-c` 也会被忽略，保持 runtime packed/direct 路线；该接线同时覆盖 AOT（`annc-tf-pipeline`）与 JIT（`ANNCFusedOp`）路径。
+- GEMM 常量折叠由 `ANNC_ENABLE_CONSTANT_FOLDING` 编译期开关控制（默认 OFF，`build.sh --enable-constant-folding` 开启；要求 TensorFlow 前端与 AArch64 GEMM 微内核归档，`--enable-ort` 下不可用）。开启后，若 AArch64 GEMM pipeline 收到非空 `packed-c` 路径且 MatMul 的常量 RHS 携带 checkpoint 变量名（`annc.aarch64.rhs_name`）并满足 `K*N >= 300`，策略在 `Autotune` 与 `Finalize` 之间插入 `aarch64-gemm-prepack-rhs`：从 checkpoint 读取 RHS，按 tuning 配置的 cache tile 调用 `pack_b` 生成 packed C 源文件，并把契约写入 `annc.aarch64.prepacked_rhs`；lowering 将其物化为外部 `memref.global`，由 `annc --packed-rhs-c` 链接进最终 `.so`，运行时不再执行 `pack_b`。关闭开关时即使传入 `packed-c` 也会被忽略，保持 runtime packed/direct 路线；该接线同时覆盖 AOT（`annc-tf-pipeline`）与 JIT（`ANNCFusedOp`）路径。
 
 - 新编译策略可增量接入（如 XLA），不影响已有策略的稳定性。
 
@@ -852,7 +852,7 @@ flowchart TB
 - GEMM MLIR 优化路径的 Lowering 策略（Affine vs Linalg）尚未收敛，Linalg 路径仅 MatMul/Customize 实现完整。
 - LLM 自动生成路径和 XLA 接入路径处于开发/规划阶段。
 - ONNX 前端已实现（`frontends/onnx/onnx2atir/`），op 覆盖以目标融合子图所需子集为准，尚未做全量 op 覆盖与控制流。
-- ONNX EP 的执行上下文形态（`annc_execution_v2`，ADR-013）已有四个可达站点：`tensordot_matmul`（FTDMM）与 `masked_mul` / `layer_norm` / `batched_matmul_add`（patterns 见 `annc/lib/Dialect/Atir/Passes/OpFusion.cpp`，整体方案见 [ONNX 支持整体方案](../design/onnx-support/overall.md)）。这四个站点各由独立的 `ANNC_EP_FUSION_*` 开关控制且**默认关闭**，默认构建的站点报告为 0 个站点，须显式设非 `0` 值才启用对应融合。`matmul` 家族走模板/JIT 路径，在 prune 阶段被裁剪，无可接管产物，含此类子图的模型回退 CPU EP。输入张量按连续行主序处理，非连续视图不在支持范围。
+- ONNX EP 的执行上下文形态（`annc_execution_v2`，ADR-013）在默认构建有四个可达站点：`tensordot_matmul`（FTDMM）与 `masked_mul` / `layer_norm` / `batched_matmul_add`（patterns 见 `annc/lib/Dialect/Atir/Passes/OpFusion.cpp`，整体方案见 [ONNX 支持整体方案](../design/onnx-support/overall.md)）。这四个站点各由独立的 `ANNC_EP_FUSION_*` 开关控制且**默认关闭**，默认构建的站点报告为 0 个站点，须显式设非 `0` 值才启用对应融合。默认构建的 `matmul` 家族走模板/JIT 路径，在 prune 阶段被裁剪，无可接管产物；`ANNC_ENABLE_KDNN_ADAPTOR=ON` 构建且 `ANNC_GEMM=1` 时，plain `matmul` 由条件注册的 KDNN 模式产出 AOT 上下文站点，可进入 EP 白名单（`matmul_add`/`matmul_add_relu` 不在白名单内）。输入张量按连续行主序处理，非连续视图不在支持范围。
 - ONNX EP 未做 model-level 性能承诺；ORT 并行与 ANNC 并行区叠加的过订阅只记录、未调优。
 - `ANNCOptimizer` 会向 annc-tf-pipeline 透传 `--backend` 参数，但 pipeline 当前不解析该参数（静默忽略），存在接口漂移，需对齐。
 - `ANNCOptimizer::Init()` 未实现 `pipeline_path` 启动期校验（见 5.6 节），`timeout_seconds` 等配置无范围校验，需补强。

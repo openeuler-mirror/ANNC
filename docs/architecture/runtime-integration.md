@@ -5,7 +5,7 @@
 | 文档编号 | ANNC-ARCH-002 |
 | 版本与日期 | 1.0，2026-10-20 |
 | 文档状态 | 架构说明。描述 TensorFlow 与 ONNX Runtime 两条运行时接入路径的产物契约与执行方式 |
-| 设计基线 | `tensorflow_addons/`、`addons/onnxruntime/`（源码基线 `c1622b87`，分支 `upstream/dev`） |
+| 设计基线 | `tensorflow_addons/`、`addons/onnxruntime/`（源码基线 `11bef0d0`，分支 `upstream/dev`） |
 | 责任人 | 编译器开发团队 |
 | 上级文档 | [ANNC 架构设计文档](overview.md) |
 
