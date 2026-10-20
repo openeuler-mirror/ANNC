@@ -3,10 +3,10 @@
 | 文档控制项 | 内容                                                                                                                                                                                                                                                  |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 文档编号  | ANNC-ONNX-LLD-003                                                                                                                                                                                                                                   |
-| 版本与日期 | 1.8，2026-10-16；迁移至新基线 `4c5435fd`：模式目录增至 14 类，#12–#14 三个上下文站点合入并改走上下文 ABI；校正 kernel 库存与并行路径                                                                                                                                                                                                                      |
+| 版本与日期 | 1.9，2026-10-20；复核并迁移至新基线 `c1622b87`（原基线 `4c5435fd`：模式目录增至 14 类，#12–#14 三个上下文站点合入并改走上下文 ABI；校正 kernel 库存与并行路径）                                                                                                                                                                                                                      |
 | 文档状态  | 模块设计。描述当前设计意图与实现遵循度，差距见第 11 节                                                                                                                                                                                                                       |
 | 评审对象  | ANNC 架构师、融合与后端开发、kernel 开发、测试负责人                                                                                                                                                                                                                    |
-| 设计基线  | `annc/lib/Dialect/Atir/Passes/`、`annc/lib/FusionMetadata/`、`annc/lib/Conversion/`、`annc/lib/Target/aarch64/`、`annc/lib/Kernel/`、`annc/lib/Support/ThreadPool/`、`annc/tools/`、`frontends/onnx/onnx-pipeline/`、`addons/onnxruntime/`（源码基线 `4c5435fd`，分支 `upstream/dev`） |
+| 设计基线  | `annc/lib/Dialect/Atir/Passes/`、`annc/lib/FusionMetadata/`、`annc/lib/Conversion/`、`annc/lib/Target/aarch64/`、`annc/lib/Kernel/`、`annc/lib/Support/ThreadPool/`、`annc/tools/`、`frontends/onnx/onnx-pipeline/`、`addons/onnxruntime/`（源码基线 `c1622b87`，分支 `upstream/dev`） |
 | 上级文档  | [ANNC ONNX 支持整体方案设计](overall.md)（重点第 7.2、7.3、8.2 节）                                                                                                                                                                          |
 | 关联文档  | [README](README.md)、[ep-design.md](ep-design.md)、[onnx-frontend-design.md](frontend-design.md)、[JIT 常量折叠设计](../jit-constant-folding/overview.md)、[架构决策记录](../../decisions/decisions.md)（ADR-013：ONNX EP 执行上下文——线程池入上下文、TF/ONNX 共用 ABI v3）                                                                                    |
 
@@ -241,7 +241,7 @@ IR 的输出/临时 Buffer 与保留的 Constant 属于构造设施，分别归�
 | 13  | `batched_matmul_add`             | 秩为 3 或 4 的 MatMul 加偏置 Add（可选前导仿射）                        | AOT  | `annc_execution_v2` | 直接生成 `Customize("BatchedMatMulAdd"/"BatchedMatMulAdd4")` |
 | 14  | `layer_norm`                     | 12 个节点构成的归一化链，系数为常量                                        | AOT  | `annc_execution_v2` | 直接生成 `Customize("LayerNorm")`        |
 
-当前基线注册的模式类为 14 个（#1–#14）；2 号类内部包含 V2、epilogue 与 plain 三条分支，故上表列出 16 行。#12 `masked_mul`、#13 `batched_matmul_add`、#14 `layer_norm` 的融合模式与 kernel 文件已随 `!249` 合入当前基线 `4c5435fd`（`tests/unit/kernels/` 另有 `masked_mul_context_test` 用例），三者与 #11 一并产出上下文 ABI（`annc_execution_v2`）站点（`custom.op_name` 分别为 `MaskedMul*`／`BatchedMatMulAdd(4)`／`LayerNorm` 与 `TensordotMatMul`）。ONNX AOT 链路的实际载体为这四个上下文站点；matmul 家族为 JIT，可形成模板但不进入当前 ONNX AOT 执行链，prune 阶段即被裁剪。
+当前基线注册的模式类为 14 个（#1–#14）；2 号类内部包含 V2、epilogue 与 plain 三条分支，故上表列出 16 行。#12 `masked_mul`、#13 `batched_matmul_add`、#14 `layer_norm` 的融合模式与 kernel 文件已在当前复核基线 `c1622b87` 中实现（`tests/unit/kernels/` 另有 `masked_mul_context_test` 用例），三者与 #11 一并产出上下文 ABI（`annc_execution_v2`）站点（`custom.op_name` 分别为 `MaskedMul*`／`BatchedMatMulAdd(4)`／`LayerNorm` 与 `TensordotMatMul`）。ONNX AOT 链路的实际载体为这四个上下文站点；matmul 家族为 JIT，可形成模板但不进入当前 ONNX AOT 执行链，prune 阶段即被裁剪。
 
 ONNX 可执行能力需逐层成立：公共目录中有模式 → ONNX 导入能形成该模式所需 ATIR → 本次 pipeline 能完成 AOT lowering 与链接 → EP 支持导出 ABI、类型、形状与输出协议。pipeline 只编译 AOT 函数；当前基线 ONNX AOT 链路的实际载体是 #11–#14 四个上下文站点（`tensordot_matmul`／`masked_mul`／`layer_norm`／`batched_matmul_add`）。matmul 家族（#2 各分支）为 JIT：EP 白名单虽包含 `matmul`，但当前 pipeline 不为其产出可接管产物，白名单条目不等于实际可交付。TF/KP 专用模式的实际产出范围也须经过上述各层核验；“可交付”的结论保留给通过指定平台验收的组合（见整体方案 §4.3）。
 
@@ -251,7 +251,7 @@ ONNX 可执行能力需逐层成立：公共目录中有模式 → ONNX 导入�
 
 ### 5.1 ONNX 主推模式规格
 
-四个主推模式（#11–#14）均以注册 kernel 替代成员计算：模式识别与常量通道在 L1 完成，随后直接生成 `Customize` 调用；四者均走上下文 ABI（`annc_execution_v2`），融合阶段保留主图并只做物化标记，输出由 kernel 经执行上下文按槽位分配。三者（#12–#14）已随 `!249` 合入当前基线。统一规格包含计算公式与顺序、输入输出 shape/dtype、布局和广播限制、边界、特化常量、实现路径、拒绝条件及验证要点。匹配器、kernel 和测试按这些规格对齐，EP 消费其接口契约。下表分别列出静态匹配条件与运行期 kernel 检查，支持范围以各项规格为准，数值等价性按 §9 验证。
+四个主推模式（#11–#14）均以注册 kernel 替代成员计算：模式识别与常量通道在 L1 完成，随后直接生成 `Customize` 调用；四者均走上下文 ABI（`annc_execution_v2`），融合阶段保留主图并只做物化标记，输出由 kernel 经执行上下文按槽位分配。三者（#12–#14）已在当前基线中实现。统一规格包含计算公式与顺序、输入输出 shape/dtype、布局和广播限制、边界、特化常量、实现路径、拒绝条件及验证要点。匹配器、kernel 和测试按这些规格对齐，EP 消费其接口契约。下表分别列出静态匹配条件与运行期 kernel 检查，支持范围以各项规格为准，数值等价性按 §9 验证。
 
 #### #11 `tensordot_matmul`（注册 kernel：`TensordotMatMul`）
 

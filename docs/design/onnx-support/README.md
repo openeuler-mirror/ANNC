@@ -3,10 +3,10 @@
 | 文档控制项 | 内容 |
 | --- | --- |
 | 文档编号 | ANNC-ONNX-LLD-000 |
-| 版本与日期 | 1.8，2026-10-16；迁移至新基线 `4c5435fd`：模式目录增至 14 类，#12–#14 三个上下文站点合入；同步白名单、参数契约、并行路径与缓存身份事实 |
+| 版本与日期 | 1.9，2026-10-20；复核并迁移至新基线 `c1622b87`（原基线 `4c5435fd`：模式目录增至 14 类，#12–#14 三个上下文站点合入）；同步白名单、参数契约、并行路径与缓存身份事实 |
 | 文档状态 | 模块设计。与源码基线同步，待评审 |
 | 文档层级 | 详细设计索引与整体数据流；各模块设计见同目录子文档 |
-| 源码基线 | Git 提交 `4c5435fd`（分支 `upstream/dev`） |
+| 源码基线 | Git 提交 `c1622b87`（分支 `upstream/dev`） |
 | 上级文档 | [ANNC ONNX 支持整体方案设计](overall.md)（ANNC-ONNX-HLD-001） |
 | 关联文档 | [ANNC 总体架构](../../architecture/overview.md)、[架构决策索引](../../decisions/README.md)（ADR-011～ADR-015） |
 
@@ -26,7 +26,7 @@
 
 ### 2.1 基线
 
-- 源码基线：Git 提交 `4c5435fd`（分支 `upstream/dev`）。正文描述该基线的实现事实；尚未落地的能力显式标注为设计目标或待补项，不写成既有保障。
+- 源码基线：Git 提交 `c1622b87`（分支 `upstream/dev`）。正文描述该基线的实现事实；尚未落地的能力显式标注为设计目标或待补项，不写成既有保障。
 - 首期验收基线：ONNX 默认域 opset 13；ORT SDK 与宿主 1.26.0；openEuler + AArch64 CPU。
 - 能力口径：全文统一使用“能导入／能生成／能交付”三层（定义见[整体方案](overall.md) §4.3）。“可交付”只用于通过指定平台验收的组合；源码事实、测试复现与生产观察三类证据在正文中分别标注。
 
@@ -40,14 +40,14 @@
 | 执行上下文结构版本 | 3；校验同时接受 v3（按结构尺寸＋版本 3）与 v2（按 `ANNC_EXECUTION_V2_CONTEXT_SIZE`＋版本 2） | `AnncExecutionContext` 的结构字段；v3 在尾部增加不透明 `thread_pool`（[ep-design.md](ep-design.md) §6.7、[ADR-013](../../decisions/decisions.md#adr-013)） |
 | 站点报告 schema | `annc-ep-site-report/1` | 报告顶层字段，EP 读取并校验，不符即按未命中处理（[fusion-design.md](fusion-design.md) §6.4） |
 | 报告契约版本 | `contract_version = 1.0.0` | 由 pipeline 写出；EP 当前**不读取**该字段（GAP-04） |
-| 缓存命名空间 | `v1`（`<cache>/v1/<签名前两位>/<签名>/`） | 磁盘缓存目录；签名另有三个前缀：`annc-ep-cache-key-v1`（模型结构）、`annc-ep-config-v1`（工具链与配置）与 `annc-ep-kernel-libs-v1`（kernel 归档大小＋修改时间）（[ep-design.md](ep-design.md) §6.2） |
+| 缓存命名空间 | `v1`（`<cache>/v1/<签名前两位>/<签名>/`） | 磁盘缓存目录；签名另有三个前缀：`annc-ep-cache-key-v1`（模型结构）、`annc-ep-config-v2`（工具链与配置，含四个 `ANNC_EP_FUSION_*` 与 `ANNC_MLAS_LIB_DIR`）与 `annc-ep-kernel-libs-v1`（kernel 归档大小＋修改时间）（[ep-design.md](ep-design.md) §6.2） |
 
 ### 2.3 当前能力摘要
 
 | 层次 | 当前基线结论（详见各文档与 §7） |
 | --- | --- |
 | 能导入 | 前端映射表列出 39 个 ONNX 算子名称；未支持的节点按 opaque 降级并记录原因（[onnx-frontend-design.md](frontend-design.md) 附录 A） |
-| 能生成 | 融合 Pass 当前注册 14 个模式类（patterns 由 `!249` 引入 #12–#14）；AOT 裁剪只保留 `execution_mode=aot` 且带 `fusion.pattern` 的函数。`masked_mul`、`batched_matmul_add`、`layer_norm` 三个模式的融合实现与 kernel 已合入当前基线（[fusion-design.md](fusion-design.md) §5） |
+| 能生成 | 融合 Pass 当前注册 14 个模式类（#12–#14 三个上下文站点，patterns 见 `annc/lib/Dialect/Atir/Passes/OpFusion.cpp`）；AOT 裁剪只保留 `execution_mode=aot` 且带 `fusion.pattern` 的函数。`masked_mul`、`batched_matmul_add`、`layer_norm` 三个模式的融合实现与 kernel 已合入当前基线（[fusion-design.md](fusion-design.md) §5） |
 | 能交付 | ONNX AOT 链路的实际载体为四个上下文 ABI（`annc_execution_v2`）站点：#11 `tensordot_matmul`（FTDMM）与 #12–#14 `masked_mul`/`layer_norm`/`batched_matmul_add`；`matmul` 家族为 JIT，prune 阶段即被裁剪，EP 白名单含 `matmul` 不代表存在可接管产物。当前尚未有组合完成指定平台验收，发布清单以验收报告为准 |
 
 ### 2.4 阅读入口
@@ -245,9 +245,9 @@ sequenceDiagram
 | 运行时编译驱动、超时与工具链指纹 | [ep-design.md](ep-design.md) §4.2、§6.4 |
 | pipeline 阶段与站点报告 | [onnx-frontend-design.md](frontend-design.md) §3.5；[fusion-design.md](fusion-design.md) §6 |
 | 前端语义适配与“不可表达即降级”契约 | [onnx-frontend-design.md](frontend-design.md) §6；[ADR-011](../../decisions/decisions.md#adr-011) |
-| 原生池私有布局与 MLAS 路径（`!249`） | [ep-design.md](ep-design.md) §6.6；使用与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md) |
-| 实参名称回映射与参数/输出槽置换（`!249`） | [ep-design.md](ep-design.md) §4.3、§6.3 |
-| masked_mul / layer_norm / batched_matmul_add 站点（`!249`） | [fusion-design.md](fusion-design.md) §5、§5.1 |
+| 原生池私有布局与 MLAS 路径 | [ep-design.md](ep-design.md) §6.6；使用与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md) |
+| 实参名称回映射与参数/输出槽置换 | [ep-design.md](ep-design.md) §4.3、§6.3 |
+| masked_mul / layer_norm / batched_matmul_add 站点 | [fusion-design.md](fusion-design.md) §5、§5.1 |
 
 ## 9 关联文档
 
@@ -275,7 +275,7 @@ sequenceDiagram
 
 文档集遵循以下编写约定。
 
-- 三份文档均以源码事实为基础描述现状，与标记为待补齐的目标项明确区分；主语与时间范围写明（“基线 `4c5435fd` 的上下文路径已……；兼容路径……；尚缺……”）。
+- 三份文档均以源码事实为基础描述现状，与标记为待补齐的目标项明确区分；主语与时间范围写明（“基线 `c1622b87` 的上下文路径已……；兼容路径……；尚缺……”）。
 - 术语沿用整体方案设计（EP、site/融合区域、kernel、AOT、ABI、opaque 等），详见其附录 B；版本标识按本文 §2.2 区分。
 - 跨模块契约（如站点报告）由定义方文档给出字段语义，消费方文档说明校验与使用规则，并作交叉引用；同一事实只在唯一位置维护，其他位置保留摘要与链接。
 - 四种“降级”分属不同机制，首次出现时使用完整称呼：前端保留 opaque（导入降级）、EP 不申报区域（放弃接管）、服务切换 CPU 会话（运维切换）、执行失败后重放 CPU 子图（尚未实现）。

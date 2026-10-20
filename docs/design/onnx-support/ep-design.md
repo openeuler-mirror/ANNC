@@ -3,10 +3,10 @@
 | 文档控制项 | 内容                                                                                                          |
 | ----- | ----------------------------------------------------------------------------------------------------------- |
 | 文档编号  | ANNC-ONNX-LLD-001                                                                                           |
-| 版本与日期 | 1.9，2026-10-16；迁移至新基线 `4c5435fd`：白名单扩至五个 pattern、上下文参数上限与 dtype 调整、参数按名称置换、缓存纳入 kernel 归档身份；线程池新增原生池路径 |
+| 版本与日期 | 1.10，2026-10-20；复核并迁移至新基线 `c1622b87`（原基线 `4c5435fd`：白名单扩至五个 pattern、上下文参数上限与 dtype 调整、参数按名称置换、缓存纳入 kernel 归档身份；线程池新增原生池路径）；同步融合开关默认关闭与 config 指纹 v2。 |
 | 文档状态  | 模块设计。描述当前设计意图与实现遵循度，差距见第 10 节                                                                               |
 | 评审对象  | ANNC 架构师、框架接入开发、Runtime 开发、测试负责人                                                                            |
-| 设计基线  | `addons/onnxruntime/`（源码基线 `4c5435fd`，分支 `upstream/dev`）                                                                      |
+| 设计基线  | `addons/onnxruntime/`（源码基线 `c1622b87`，分支 `upstream/dev`）                                                                      |
 | 上级文档  | [ANNC ONNX 支持整体方案设计](overall.md)（重点第 6、7.3–7.7、8 节）                                  |
 | 关联文档  | [README](README.md)、[onnx-frontend-design.md](frontend-design.md)、[fusion-design.md](fusion-design.md)、[ADR-012](../../decisions/decisions.md#adr-012)、[ADR-013](../../decisions/decisions.md#adr-013) |
 
@@ -294,12 +294,14 @@ sequenceDiagram
 | `ANNC_EP_DEBUG` / `ANNC_EP_TIMING`       | 诊断输出 / 执行计时                 | 关闭             |
 | `ANNC_EP_NOOP` / `ANNC_EP_KEEP_TEMPS`    | 测量辅助（分配输出但不计算）/ 保留失败编译的工作目录（§6.2.3）   | 关闭             |
 | `ANNC_EP_NUM_THREADS`                    | 声明 intra-op 并行度，供 kernel 并行判定与规模选择，不参与正确性（§6.6） | 未接线：当前实现不读取该变量，适配器按硬件并发度取值 |
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL`         | 取值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 开启 |
-| `ANNC_EP_FUSION_LAYER_NORM`               | 取值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 开启 |
-| `ANNC_EP_FUSION_MASKED_MUL`               | 取值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 开启 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD`       | 取值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 开启 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL`         | EP 链路中未设置或取值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 关闭（设为非 0 值开启） |
+| `ANNC_EP_FUSION_LAYER_NORM`               | EP 链路中未设置或取值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 关闭（设为非 0 值开启） |
+| `ANNC_EP_FUSION_MASKED_MUL`               | EP 链路中未设置或取值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 关闭（设为非 0 值开启） |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD`       | EP 链路中未设置或取值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 关闭（设为非 0 值开启） |
 
-这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 以及四个 `ANNC_EP_FUSION_*` 开关在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局；`ANNC_EP_TIMING`、`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——尤其 `ANNC_EP_NOOP` 一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
+上表的“未设置即跳过”是 EP 链路的口径：`annc-onnx-pipeline` 会为未设置的开关向编译子进程注入 `=0`；直接调用 `annc-opt --atir-op-fusion` 时，`OpFusion` 对未设置的开关按开启处理。
+
+这些配置的读取时机不同。编译驱动为每次能力查询局部创建：定位、启用状态与工具链指纹都按次探测、不跨查询复用，因此替换工具链或修改 `ANNC_EP_PIPELINE`、`ANNC_EP_CACHE_DIR`、`ANNC_EP_COMPILE`、`ANNC_EP_COMPILE_TIMEOUT_S`、`ANNC_EP_KEEP_TEMPS` 以及四个 `ANNC_EP_FUSION_*` 开关在下次能力查询即生效，无需重启进程。`ANNC_EP_DEBUG` 在工厂创建时读取并存入进程全局，执行期诊断另有实时读取；`ANNC_EP_TIMING` 在上下文执行路径每次 `Compute` 读取，但执行路径内层的拆分计时与其余路径为静态记忆；`ANNC_EP_NOOP` 在首次访问时静态记忆，此后不再读取环境——一旦首次启用，删除变量或新建会话都不会刷新该记忆值。原生池可用性（宿主版本校验）在进程内首次求值时记忆一次。需要新进程才能刷新的是进程级的长生命周期状态——已加载的共享库句柄与符号负缓存（§6.5）。`ANNC_EP_NUM_THREADS` 当前实现未读取（见 §6.6 与 §10），接入后按进程级配置处理、变更须重启进程生效。
 
 ### 4.6 契约不变量
 
@@ -312,7 +314,7 @@ sequenceDiagram
 | I5 | 非零站点缓存条目在报告、共享库与完成标记齐备后，零站点条目在报告与完成标记齐备后，才对读者可见                                            |
 | I6 | kernel 执行期间可用的并行运行时由执行器写入本次 Compute 的执行上下文并随调用结束回收，适配器不跨请求、不跨线程保留          |
 
-I1、I2 与 I3 的参数装配检查已实现（上下文站点另校验参数秩互异与 dtype 为 f32）；I3 的输出端点核对、I4 的显式形状关系与固定维校验仍是目标契约；I6 已随并行执行接入（GAP-08 已闭合）落地。差距见 §10。
+I1、I2 与 I3 的参数装配检查已实现（上下文站点的具体校验条件以 §4.3 契约表为准）；I3 的输出端点核对、I4 的显式形状关系与固定维校验仍是目标契约；I6 已随并行执行接入（GAP-08 已闭合）落地。差距见 §10。
 
 ## 5 关键设计决策
 
@@ -356,7 +358,7 @@ ORT 图中的张量名可能为空、重复，或由上游组件自由生成，�
 
 导出完成后，EP 保留供回接使用的映射：导出节点名到节点下标、张量原名与导出名的双向映射。映射的生命周期为单次 `GetCapability` 调用，随申报完成释放。
 
-导出模型写入缓存根下按 PID 与递增序号生成的独立目录（`<缓存根>/tmp-<pid>-<n>/model.onnx`），每次能力查询新建一个，目录当前不回收（GAP-03）。initializer 为 ORT 已加载并内联的值，随图一并写入；编译子进程从该自包含文件读取全部数据。工具链使用导出命名空间处理模型并生成报告；EP 以导出映射把报告成员名还原为原图节点（§6.3）；实参张量名的双向映射当前只生成、不消费。确定性命名使同一模型多次导出的字节差异限于易变字段，有利于保持缓存身份稳定（§6.2）。
+导出模型写入缓存根下按 PID 与递增序号生成的独立目录（`<缓存根>/tmp-<pid>-<n>/model.onnx`），每次能力查询新建一个，目录当前不回收（GAP-03）。initializer 为 ORT 已加载并内联的值，随图一并写入；编译子进程从该自包含文件读取全部数据。工具链使用导出命名空间处理模型并生成报告；EP 以导出映射把报告成员名还原为原图节点（§6.3）；实参张量名的**回译映射（导出名 → 原名）在申报期消费**，而**正向映射（原名 → 导出名）当前只生成、不消费**。确定性命名使同一模型多次导出的字节差异限于易变字段，有利于保持缓存身份稳定（§6.2）。
 
 ### 6.2 缓存身份与发布协议
 
@@ -364,7 +366,7 @@ ORT 图中的张量名可能为空、重复，或由上游组件自由生成，�
 
 缓存身份应覆盖所有决定编译结果或执行兼容性的因素。目标键包含模型结构与常量、工具链及 EP 构建版本、目标架构与 ISA 特性、ABI、报告和缓存格式版本，以及影响代码生成的配置。模型权重、插件、工具链、目标 ISA/ABI 或编译配置发生变化时，新部署应使用新的缓存命名空间。存活进程继续使用原库，服务完成切换后再清理旧命名空间。
 
-当前实现的签名由三段构成：模型结构签名前缀 `annc-ep-cache-key-v1`（`annc_ep_graph_export.cc`）、工具链+配置指纹（`annc_ep.cpp` 的 `CacheToolchainFingerprint`，前缀 `annc-ep-config-v1`，把 `ANNC_EP_PIPELINE`、`ANNC_GEMM_CONFIG`、`ANNC_GEMM`、`ANNC_KERNEL_LIB_PATH`、`ANNC_CLANG`、`LIBRARY_PATH`、`CPATH`、`C_INCLUDE_PATH`、`CPLUS_INCLUDE_PATH` 以长度前缀编码），以及 kernel 归档身份（同函数追加 `annc-ep-kernel-libs-v1`，逐一记录 `ANNC_KERNEL_LIB_PATH` 下每个 `.a` 的大小与修改时间）。签名对前缀、工具链指纹与规范化模型字节求 SHA-256，缓存目录使用固定 `v1` 命名空间。规范化剔除 producer 元数据与图名；initializer 载荷**仅在图中同时含 `Mul` 与 `MatMul` 时保留数值**（其余情况清空数值字段），以覆盖可被折叠进 BMM kernel 的常量。EP 身份、目标 ISA、ABI 与完整编译配置尚未全部纳入，升级失效规则也待补齐（GAP-01）。
+当前实现的签名由三段构成：模型结构签名前缀 `annc-ep-cache-key-v1`（`annc_ep_graph_export.cc`）、工具链+配置指纹（`annc_ep.cpp` 的 `CacheToolchainFingerprint`，前缀 `annc-ep-config-v2`，把 `ANNC_EP_PIPELINE`、`ANNC_GEMM_CONFIG`、`ANNC_GEMM`、`ANNC_KERNEL_LIB_PATH`、`ANNC_CLANG`、`LIBRARY_PATH`、`CPATH`、`C_INCLUDE_PATH`、`CPLUS_INCLUDE_PATH`、四个 `ANNC_EP_FUSION_*` 与 `ANNC_MLAS_LIB_DIR` 以长度前缀编码，未设置的变量记为 `=unset`），以及 kernel 归档身份（同函数追加 `annc-ep-kernel-libs-v1`，逐一记录 `ANNC_KERNEL_LIB_PATH` 下每个 `.a` 的大小与修改时间）。`config` 指纹升到 v2 是因为四个融合开关的默认语义由开启改为关闭，旧缓存不可复用。签名对前缀、工具链指纹与规范化模型字节求 SHA-256，缓存目录使用固定 `v1` 命名空间。规范化剔除 producer 元数据与图名；initializer 载荷**仅在图中同时含 `Mul` 与 `MatMul` 时保留数值**（其余情况清空数值字段），以覆盖可被折叠进 BMM kernel 的常量。EP 身份、目标 ISA、ABI 与完整编译配置尚未全部纳入，升级失效规则也待补齐（GAP-01）。
 
 该缺口在以下条件下可能触发：两个模型结构、同名 initializer 的形状与类型相同，数值不同，且常量进入生成代码（属性化或随体保留通道，见 [fusion-design.md](fusion-design.md) §4.4），而该图又不在“同时含 `Mul` 与 `MatMul`”的保留集合内。它们可能共用缓存键，后创建的会话因而加载与自身常量语义不符的 kernel，调用仍可能返回成功。模型仅更新权重是必须覆盖的验证场景。上述静默错误风险由源码推导，尚待端到端实测。GAP-01 与执行路径覆盖/验证缺口（GAP-02）、并发导出覆盖（GAP-03）同属 P0 收敛项，见 [README](README.md) §7。
 
@@ -514,6 +516,8 @@ stateDiagram-v2
 | L3 会话失败 | 申报接口调用或接受后的计划建立 | `AddNodesToFuse` 返回错误；调用计划无法为已接受区域建立        | 会话初始化失败                                    | 当前申报错误直接返回 ORT；已接受区域在 `Compile` 中建立计划失败时须显式报错 |
 | L4 执行失败 | 责任承诺点之后（执行）     | 内核未解析、计划不完整、输入秩超限、输出形状不可确定、kernel 返回非 0     | 该次请求返回错误                                   | 依 D7 将错误返回调用方，供诊断与服务侧处理                       |
 
+表中 L4 仅覆盖 kernel 以返回状态码报告失败的情形。ORT 的 EP 边界（`ComputeImpl`）声明为 `noexcept`，调用直接进入上下文执行且沿途不捕获异常，因此 **kernel 若抛出 C++ 异常，会越过 `noexcept` 边界终止宿主进程，而不是返回本次请求错误**。内置 kernel 为 C 风格、不抛异常；该风险适用于第三方或自定义 kernel。
+
 ### 7.2 降级与关闭加速
 
 降级按 §7.1 的阶段边界实施：候选准备失败时放弃接管，相关节点继续参与 provider 分配；已接受区域发生错误时，会话初始化或当前请求失败。
@@ -596,7 +600,7 @@ stateDiagram-v2
 | EP-L01 | 缓存健壮性       | 损坏产物视为未命中并受控重建；零区域结果可复用                                           | 报告解析失败或缺库按未命中处理，获锁后二次检查并重建；零站点报告可无共享库热命中；`KEEP_TEMPS` 控制失败工作目录的保留。共享库加载失败与符号缺失不触发重建，只丢弃站点并负缓存                                                              | 报告损坏与缺库已可重建；“零区域无法热命中”的旧结论已不适用；剩余影响集中在库加载失败与符号缺失的恢复路径须换路径或重启进程                                              |
 | EP-L02 | 资源与生命周期     | 总初始化与加载预算；条目、工作文件和句柄分开管理；发布运维配置 quota/retention/清理；升级使用新命名空间与进程切换 | 仅子进程超时；锁无期限；无自动淘汰；句柄及负缓存不释放；临时导出目录不回收，`KEEP_TEMPS` 仅覆盖失败工作目录                                     | 初始化等待与长期资源增长缺乏上限，新会话无法刷新全部升级状态                    |
 | EP-L03 | 可诊断性        | 结构化的失败记录；接入 ORT Logger                                            | 标准错误上的调试输出，部分丢弃路径无输出                                                            | 故障定位依赖人工排查                                        |
-| GAP-07 | 失败注入测试      | L1–L4 各级失败具备可注入触发与外显断言，覆盖动态形状及边界映射等正确性基准（§8.6）                    | 已注册并随 ctest 运行：`annc-ep-compile-test`（站点校验 18 例）、`annc-ep-execution-test`（执行上下文与参数绑定 16 例）、`AnncEpAotFixture`（正常、缺符号、缺库、报告损坏、并发、缓存配置、缺驱动、编译失败、零站点）、`AnncEpContextFixture`（正常、多线程、嵌套、并发、同会话、执行错误、坏槽位），以及 `AnncEpFtdmmAotE2e` 与四个上下文端到端用例（`AnncEpFtdmmContextE2e`、`AnncEpMaskedMulContextE2e`、`AnncEpLayerNormContextE2e`、`AnncEpBatchedMatMulAddContextE2e`，按 pipeline 目标条件注册）；L1–L4 的完整等级矩阵、动态形状与边界映射用例尚未落地                                                           | 现有用例覆盖站点校验、执行上下文与有限端到端链路，尚不足以证明完整失败隔离与发布门禁（P0，发布阻断）                         |
+| GAP-07 | 失败注入测试      | L1–L4 各级失败具备可注入触发与外显断言，覆盖动态形状及边界映射等正确性基准（§8.6）                    | 已注册并随 ctest 运行：`annc-ep-compile-test`（站点校验 20 例、模型签名 2 例、融合开关 4 例，合计 26 例）、`annc-ep-execution-test`（执行上下文与参数绑定 20 例）、`AnncEpFusionToggles`（融合开关集成测试）、`AnncEpAotFixture`（正常、缺符号、缺库、报告损坏、并发、缓存配置、缺驱动、编译失败、零站点）、`AnncEpContextFixture`（正常、多线程、嵌套、并发、同会话、执行错误、坏槽位），以及 `AnncEpFtdmmAotE2e` 与四个上下文端到端用例（`AnncEpFtdmmContextE2e`、`AnncEpMaskedMulContextE2e`、`AnncEpLayerNormContextE2e`、`AnncEpBatchedMatMulAddContextE2e`，按 pipeline 目标条件注册）；L1–L4 的完整等级矩阵、动态形状与边界映射用例尚未落地                                                           | 现有用例覆盖站点校验、执行上下文与有限端到端链路，尚不足以证明完整失败隔离与发布门禁（P0，发布阻断）                         |
 | GAP-08 | 并行执行接入       | Compute 调用前把绑定 OrtKernelContext 的线程池放入执行上下文，复用 ORT intra-op 池（§6.6）          | 已实现：EP 经 ABI v3 的 `thread_pool` 字段注入适配器，kernel 经 `resolveThreadPool` 取池（§6.6），已在新基线上闭合；另有受版本校验的原生池路径与默认关闭的 MLAS 路径                               | 剩余风险：EP 与 kernel 必须同源构建（`thread_pool` 句柄背后的 C++ 虚表不在上下文尺寸/版本校验覆盖内）；原生池私有布局须随宿主版本重新验证；嵌套并行判定依赖 `thread_local`；池不可用时静默回退本线程执行 |
 
 编号沿用 [README](README.md) 第 7 节的全局差距登记；`EP-Lxx` 为仅在本模块记录的局部差距，编号稳定、不复用。登记项多数对应整体方案设计中的风险（R-01 至 R-13）与工作包（WP-03/04），治理与实施沿用这些登记。
@@ -617,4 +621,3 @@ stateDiagram-v2
 | `addons/onnxruntime/CMakeLists.txt`          | 可选插件构建（默认关闭，要求外部 ORT SDK 头文件目录）                              |
 | `addons/onnxruntime/README.md`               | 使用说明与接入示例。其中少量表述与代码不符，见 §10 与各节注记                            |
 | `annc/lib/Support/ThreadPool/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/annc_fused_op.cc` |
-
