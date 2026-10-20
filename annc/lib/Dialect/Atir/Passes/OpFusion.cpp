@@ -3,6 +3,7 @@
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Dialect/Atir/Passes/Patterns/FusionBoundaryUtils.h"
+#include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
 #include "Dialect/Atir/TemplateFingerprint.h"
 #include "Helper.h"
 #include "Kernel/KernelPriorityResolver.h"
@@ -393,19 +394,6 @@ static ReluOp findUniqueAddReluUser(AddOp addOp) {
     found = reluOp;
   }
   return found;
-}
-
-static bool isExecutionV2BuiltinCompatible(MatMulOp matmul, AddOp add,
-                                           ReluOp relu) {
-  if (!matmul || !add || !relu) return false;
-  if (matmul.getWithBias() || matmul.getDoRelu() ||
-      matmul.getRightTranspose() || matmul.getLeftTranspose() ||
-      matmul.getOutputTranspose() || matmul.getMStart() || matmul.getNStart() ||
-      matmul.getKStart() || matmul.getMSize() || matmul.getNSize() ||
-      matmul.getKSize() || matmul->getAttr("rhs_format"))
-    return false;
-  if (add.getDoRelu() || add.getScalar()) return false;
-  return relu.getReluLimit().convertToFloat() == -1.0f;
 }
 
 template <typename OpT>
@@ -1447,6 +1435,184 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
     return success();
   }
 };
+
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+// Outlines a GEMM chain as an AOT kdnn site on the annc_execution_v2 ABI
+// (one calling convention for the TF and ONNX hosts; the kernel takes its
+// thread pool from the execution context). Only active at ANNC_GEMM=1;
+// level 2 belongs to the epilogue path. Greedy prefix truncation from
+// matmul_add_relu down to matmul: intermediate results must be single-use
+// (a single-output kernel cannot reproduce them), while consumers of the
+// terminal result stay in the main graph.
+struct FuseKdnnMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
+  FuseKdnnMatMulAsFuncCallPattern(MLIRContext *context,
+                                  const CustomOpTypeFilter &customOpFilter)
+      : OpRewritePattern<MatMulOp>(context, /*benefit=*/2),
+        customOpFilter(customOpFilter) {}
+
+  LogicalResult matchAndRewrite(MatMulOp matmulOp,
+                                PatternRewriter &rewriter) const override {
+    if (annc::anncGemmFusionLevel() != 1) return failure();
+    if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
+    if (matmulOp->hasAttr("annc.postop_fused")) return failure();
+    if (matmulOp.getWithBias() || matmulOp.getDoRelu() ||
+        matmulOp.getRightTranspose() || matmulOp.getLeftTranspose() ||
+        matmulOp.getOutputTranspose() || matmulOp.getMStart() ||
+        matmulOp.getNStart() || matmulOp.getKStart() || matmulOp.getMSize() ||
+        matmulOp.getNSize() || matmulOp.getKSize() ||
+        matmulOp->getAttr("rhs_format"))
+      return failure();
+    if (!matmulOp.getEpilogueInputs().empty()) return failure();
+
+    ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
+    if (!module) return failure();
+
+    auto hasUsersBeyond = [](Value value, Operation *allowed) {
+      for (Operation *user : value.getUsers())
+        if (user != allowed) return true;
+      return false;
+    };
+    Value bias;
+    AddOp addOp = findUniqueMatMulAddUser(matmulOp, bias);
+    if (addOp && (addOp.getDoRelu() || addOp.getScalar() ||
+                  hasUsersBeyond(matmulOp.getResult(), addOp.getOperation())))
+      addOp = nullptr;
+    ReluOp reluOp = addOp ? findUniqueAddReluUser(addOp) : nullptr;
+    if (reluOp && (reluOp.getReluLimit().convertToFloat() != -1.0f ||
+                   hasUsersBeyond(addOp.getResult(), reluOp.getOperation())))
+      reluOp = nullptr;
+
+    SmallVector<Operation *> fusedOps = {matmulOp.getOperation()};
+    if (addOp) fusedOps.push_back(addOp.getOperation());
+    if (reluOp) fusedOps.push_back(reluOp.getOperation());
+    Operation *terminal = reluOp ? reluOp.getOperation() : addOp.getOperation();
+    if (!terminal) terminal = matmulOp.getOperation();
+    SmallVector<Value> escaping = collectEscapingResults(fusedOps);
+    if (escaping.size() != 1 || escaping[0] != terminal->getResult(0))
+      return failure();
+
+    StringRef formOpType = reluOp  ? StringRef("MatMulAddRelu")
+                           : addOp ? StringRef("MatMulAdd")
+                                   : StringRef("MatMul");
+    if (!customOpFilter.isEnabled(formOpType)) return failure();
+
+    // Site-level availability probe (kdnn registers f32 kernels only); opt
+    // runs before asm so the annc.enable_kdnn module attribute is not set.
+    CustomOpSchema schema = CustomOpSchema::get(formOpType)
+                                .TypeVar("T")
+                                .MemRefArg("lhs", 2, "T")
+                                .MemRefArg("rhs", 2, "T");
+    if (addOp) schema.MemRefArg("bias", 1, "T");
+    schema.Result(reluOp  ? StringRef("relu")
+                  : addOp ? StringRef("add")
+                          : StringRef("output"),
+                  2, "T");
+    SmallVector<Type> schemaInputTypes = {matmulOp.getLhs().getType(),
+                                          matmulOp.getRhs().getType()};
+    if (addOp) schemaInputTypes.push_back(bias.getType());
+    auto typeConstraints = inferTypeConstraintsFromSchema(
+        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
+        TypeRange{terminal->getResult(0).getType()});
+    if (!typeConstraints) {
+      llvm::consumeError(typeConstraints.takeError());
+      return failure();
+    }
+    annc::kernels::KernelResolveRequest request;
+    request.op_type = formOpType;
+    request.abi = "annc_execution_v2";
+    request.type_constraints = std::move(*typeConstraints);
+    if (!annc::kernels::hasAnyAvailableKernel(request, /*enableKdnn=*/true))
+      return failure();
+
+    StringRef pattern = reluOp  ? StringRef("matmul_add_relu")
+                        : addOp ? StringRef("matmul_add")
+                                : StringRef("matmul");
+    std::string matmulName = getTfName(matmulOp);
+    std::string outputName =
+        addOp ? getFusionOutputName(terminal->getResult(0)) : matmulName;
+    if (outputName.empty()) outputName = getTfName(terminal);
+    std::string kernelName = uniquifySymbolName(
+        module, getStableMatMulFusionKernelName(matmulOp, pattern));
+    std::string clusterName =
+        uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
+
+    // Fixed (weight-like) vs dynamic (batch-carrying) args follow the JIT
+    // matmul sites. The v2 host passes inputs positionally after the
+    // execution pointer and resolves dynamic output dims from the input at
+    // index num_fixed, so the kernel signature and the metadata args share
+    // the fixed-first order.
+    Type outputType = terminal->getResult(0).getType();
+    bool lhsIsDynamic =
+        hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
+    bool rhsIsDynamic =
+        hasMatchingBatchDim(matmulOp.getRhs().getType(), outputType);
+    if (lhsIsDynamic == rhsIsDynamic) {
+      lhsIsDynamic = true;
+      rhsIsDynamic = false;
+    }
+    Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
+    Value dynamicInput = lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
+    SmallVector<Value> boundaryInputs = {fixedInput};
+    if (addOp) boundaryInputs.push_back(bias);
+    boundaryInputs.push_back(dynamicInput);
+    SmallVector<Value> boundaryOutputs = {terminal->getResult(0)};
+
+    auto kernelFunc = createExecutionV2KernelFunc(
+        module, rewriter, kernelName, fusedOps, boundaryInputs, boundaryOutputs);
+    kernelFunc->setAttr("fusion.pattern", rewriter.getStringAttr(pattern));
+    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
+
+    SmallVector<FusionArgSpec> argSpecs;
+    argSpecs.push_back(
+        {"fixed", getValueName(fixedInput), fixedInput.getType()});
+    if (addOp)
+      argSpecs.push_back({"fixed", getValueName(bias), bias.getType()});
+    argSpecs.push_back(
+        {"dynamic", getValueName(dynamicInput), dynamicInput.getType()});
+
+    SmallVector<NamedAttribute> metadata;
+    metadata.push_back(rewriter.getNamedAttr("fusion.pattern",
+                                             rewriter.getStringAttr(pattern)));
+    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_name", rewriter.getStringAttr(kernelName)));
+    metadata.push_back(
+        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
+    SmallVector<FusionArgSpec> outputSpecs;
+    outputSpecs.push_back({"output", outputName, outputType});
+    metadata.push_back(rewriter.getNamedAttr(
+        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
+    metadata.push_back(rewriter.getNamedAttr(
+        "abi", rewriter.getStringAttr("annc_execution_v2")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+    metadata.push_back(rewriter.getNamedAttr(
+        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+    metadata.push_back(
+        rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "fallback_function", rewriter.getStringAttr("original_subgraph")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "member_node_names",
+        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+    kernelFunc->setAttr("fusion.metadata",
+                        DictionaryAttr::get(rewriter.getContext(), metadata));
+
+    // The v2 ABI needs an execution context that only exists at the host
+    // boundary, so the main-graph region stays as the fallback and is only
+    // marked to keep other patterns from building a site on it.
+    for (Operation *op : fusedOps) {
+      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+    }
+    return success();
+  }
+
+ private:
+  CustomOpTypeFilter customOpFilter;
+};
+#endif  // ANNC_ENABLE_KDNN_ADAPTOR
 
 struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
   using OpRewritePattern<MatMulOp>::OpRewritePattern;
@@ -5342,6 +5508,15 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
       patterns.add<FuseLayerNormAsFuncCallPattern>(&getContext());
     if (annc::fusionPatternEnabled("batched_matmul_add"))
       patterns.add<FuseBatchedMatMulAddAsFuncCallPattern>(&getContext());
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+    SmallVector<std::string, 4> envEnabledCustomOps;
+    appendCustomOpTypesFromEnv(kEnableCustomOpsEnv, envEnabledCustomOps);
+    SmallVector<std::string, 4> envDisabledCustomOps;
+    appendCustomOpTypesFromEnv(kDisableCustomOpsEnv, envDisabledCustomOps);
+    patterns.add<FuseKdnnMatMulAsFuncCallPattern>(
+        &getContext(),
+        CustomOpTypeFilter(envEnabledCustomOps, envDisabledCustomOps));
+#endif
     patterns.add<FuseKpEmbeddingActionIdGatherAsFuncCallPattern>(
         &getContext());
     patterns.add<FuseKpTargetBehaviorInteractionAsFuncCallPattern>(

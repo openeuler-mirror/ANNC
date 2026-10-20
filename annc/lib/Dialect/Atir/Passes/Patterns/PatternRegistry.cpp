@@ -1,8 +1,24 @@
 #include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
 
+#include <cstdlib>
+
 #include "Support/Log.h"
 
 namespace atir {
+
+void appendCustomOpTypesFromEnv(const char *envName,
+                                llvm::SmallVectorImpl<std::string> &types) {
+  const char *value = std::getenv(envName);
+  if (!value || !*value) return;
+
+  llvm::SmallVector<llvm::StringRef, 4> entries;
+  llvm::StringRef(value).split(entries, ',', /*MaxSplit=*/-1,
+                               /*KeepEmpty=*/false);
+  for (llvm::StringRef entry : entries) {
+    entry = entry.trim();
+    if (!entry.empty()) types.push_back(entry.str());
+  }
+}
 
 PatternRegistry &PatternRegistry::instance() {
   static PatternRegistry inst;

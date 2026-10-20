@@ -15,6 +15,14 @@
 
 namespace atir {
 
+// Shared by FastCodegen (asm) and OpFusion (kdnn AOT outlining) so both
+// stages make identical per-form decisions from the same environment.
+constexpr char kEnableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS";
+constexpr char kDisableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS";
+
+void appendCustomOpTypesFromEnv(const char *envName,
+                                llvm::SmallVectorImpl<std::string> &types);
+
 // Controls which final custom op types a fusion pattern may materialize.
 // An empty allowlist enables all types; the denylist always takes precedence.
 class CustomOpTypeFilter {

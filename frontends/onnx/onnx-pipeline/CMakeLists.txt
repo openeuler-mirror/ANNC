@@ -19,6 +19,12 @@ target_include_directories(annc-onnx-pipeline PRIVATE
     "${LLVM_INCLUDE_DIRS}"
 )
 
+# Keep in sync with the kdnn outlining pattern compiled into annc-opt: the
+# asm invocation must carry --enable-kdnn in the same build.
+if(ANNC_ENABLE_KDNN_ADAPTOR)
+    target_compile_definitions(annc-onnx-pipeline PRIVATE ANNC_ENABLE_KDNN_ADAPTOR)
+endif()
+
 target_link_libraries(annc-onnx-pipeline PRIVATE
     AtirDialect
     ANNCFusionMetadata

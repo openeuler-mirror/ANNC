@@ -41,18 +41,6 @@ bool hasAddAndReluBoundary(ArrayRef<Operation *> fusedOps) {
          outputs[1] == relu.getResult();
 }
 
-bool isExecutionV2BuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu) {
-  if (!matmul || !add || !relu) return false;
-  if (matmul.getWithBias() || matmul.getDoRelu() ||
-      matmul.getRightTranspose() || matmul.getLeftTranspose() ||
-      matmul.getOutputTranspose() || matmul.getMStart() || matmul.getNStart() ||
-      matmul.getKStart() || matmul.getMSize() || matmul.getNSize() ||
-      matmul.getKSize() || matmul->getAttr("rhs_format"))
-    return false;
-  if (add.getDoRelu() || add.getScalar()) return false;
-  return relu.getReluLimit().convertToFloat() == -1.0f;
-}
-
 }  // namespace
 
 struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
@@ -79,6 +67,10 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
           // The multi-output add+relu contract is owned by
           // MatMulAddReluWithAddOutputRewrite; let it handle that case.
           if (hasAddAndReluBoundary(fusedOps)) return failure();
+        } else if (!relu && !add.getDoRelu() && !add.getScalar() &&
+                   rank1BiasOperandOf(anchor, add)) {
+          // MatMulAdd form: the builtin kernel takes a rank-1 bias.
+          fusedOps.push_back(add);
         }
       }
       return success();

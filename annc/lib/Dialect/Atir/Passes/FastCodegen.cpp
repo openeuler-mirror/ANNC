@@ -13,25 +13,6 @@ using namespace llvm;
 using namespace mlir;
 
 namespace atir {
-namespace {
-
-constexpr char kEnableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS";
-constexpr char kDisableCustomOpsEnv[] = "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS";
-
-void appendCustomOpTypesFromEnv(const char *name,
-                                SmallVectorImpl<std::string> &types) {
-  const char *value = std::getenv(name);
-  if (!value || !*value) return;
-
-  SmallVector<StringRef> entries;
-  StringRef(value).split(entries, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
-  for (StringRef entry : entries) {
-    entry = entry.trim();
-    if (!entry.empty()) types.push_back(entry.str());
-  }
-}
-
-}  // namespace
 
 class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
  public:
