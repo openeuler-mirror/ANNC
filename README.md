@@ -566,8 +566,8 @@ ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
-| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
-| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置。构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析 |
+| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录；构建期提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`，EP 开启时必填；运行期也用于定位四个 MLAS 归档 |
+| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置。构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_EP_ORT_BUILD_TREE` 定位 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 的 JIT 汇编源码编译期默认值，运行时同名环境变量可覆盖 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
@@ -598,6 +598,7 @@ ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面
 |------|------|--------|------|
 | `ANNC_CLANG` | clang 可执行文件路径 | `clang` | 链接阶段使用的 clang 路径 |
 | `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_PREFIX}/lib` | 覆盖内置 kernel、线程池和 LLVM 静态库的搜索目录 |
+| `ANNC_EP_ORT_BUILD_TREE` | ORT 构建树 `Release/` | 空 | 按 `<tree>/` 与 `<tree>/_deps/*-build/` 的已知布局定位四个 MLAS 归档 |
 | `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | **内部使用**，动态测试编译时由 driver 自动设置，测试 driver 据此加载共享库 |
 
 也可以对单次编译使用命令行参数 `--kernel-lib-path <dir>`。命令行参数优先于

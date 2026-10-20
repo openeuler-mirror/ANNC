@@ -27,8 +27,8 @@ set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the nativ
 # native pool (AnncThreadPool::native_pool; the ORT EP does) may pass it
 # straight to MlasGemmBatch.  It needs the ORT source tree's mlas.h to compile;
 # the annc driver resolves the four ORT archives at link time from
-# ANNC_MLAS_LIB_DIR, then ANNC_KERNEL_LIB_PATH.
-option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR; runtime archives resolved via ANNC_MLAS_LIB_DIR or ANNC_KERNEL_LIB_PATH)" OFF)
+# ANNC_EP_ORT_BUILD_TREE.
+option(ANNC_KERNEL_MLAS "Let builtin kernels call MLAS GEMM entries with the host's native pool (requires ANNC_MLAS_INCLUDE_DIR; runtime archives resolved via ANNC_EP_ORT_BUILD_TREE)" OFF)
 set(ANNC_MLAS_INCLUDE_DIR "" CACHE PATH "ORT source tree's onnxruntime/core/mlas/inc directory (holding mlas.h), required by ANNC_KERNEL_MLAS")
 # The ORT EP always uses the MLAS-backed kernel path; enabling the EP enables
 # the MLAS backend automatically.  TF-only builds keep it off unless the user
