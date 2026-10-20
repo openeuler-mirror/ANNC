@@ -14,10 +14,17 @@
 使用方式（示例）：
 
 ```bash
-build/bin/annc tests/e2e/annc-driver/demo.mlir -o /tmp/demo.so --shared
-ANNC_LIBRARY_NAME=/tmp/demo.so \
-  build/bin/annc tests/e2e/annc-driver/demo.mlir \
-  -t tests/e2e/annc-driver/driver_dynamic.c -o /tmp/driver -v --shared
+# 静态驱动：demo2.mlir 的导出函数与 driver_static.c 的 extern 符号一致
+build/bin/annc tests/e2e/annc-driver/demo2.mlir \
+  -t tests/e2e/annc-driver/driver_static.c -o /tmp/driver_static
+
+# 动态驱动：`--shared` 与 `-t` 同时使用时 `-o` 会被共享库和测试可执行文件共用，
+# 因此先由 annc 生成 .so，再单独编译驱动。库文件名须与 MLIR 导出符号同名，
+# 并以 ./ 开头引用，否则 dlopen 不搜索当前目录、driver 也无法派生符号。
+build/bin/annc tests/e2e/annc-driver/demo.mlir --shared -o fused_matmul.so
+clang -O3 tests/e2e/annc-driver/driver_dynamic.c \
+  -DM=1536 -DK=1344 -DN=1152 -o /tmp/driver_dynamic -ldl -lm
+ANNC_LIBRARY_NAME=./fused_matmul.so /tmp/driver_dynamic
 ```
 
 如果后续要把其中任何一个变成自动测试，应把 driver、输入和断言放到对应的

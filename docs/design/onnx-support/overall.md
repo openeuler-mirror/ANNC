@@ -3,10 +3,10 @@
 | 文档控制项 | 内容                                                                                                                                           |
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | 文档编号  | ANNC-ONNX-HLD-001                                                                                                                            |
-| 版本与日期 | 2.0，2026-10-16；迁移至新基线 `4c5435fd`（masked_mul / batched_matmul_add / layer_norm 三个上下文站点合入）；同步白名单、参数契约、并行路径、缓存身份与测试基础事实。                                                                                                                              |
+| 版本与日期 | 2.2，2026-10-20；迁移至新基线 `11bef0d0`（原基线 `c1622b87`）；同步 KDNN adaptor 构建下 plain `matmul` 的 AOT 分支与 EP 白名单边界。                                                                                                                              |
 | 文档状态  | 待架构评审；方案建议尚未成为发布承诺                                                                                                                           |
 | 评审对象  | ANNC 架构师、产品负责人、开发负责人、测试负责人、交付负责人                                                                                                             |
-| 源码基线  | Git 提交 `4c5435fd`（分支 `upstream/dev`）；现状描述以该工作区中的源码为准                                                                                                  |
+| 源码基线  | Git 提交 `11bef0d0`（分支 `upstream/dev`）；现状描述以该工作区中的源码为准                                                                                                  |
 | 文档层级  | 整体方案设计，覆盖需求、架构、接口、质量、验证和交付；模块实现细节在详细设计中展开                                                                                                    |
 | 关联文档  | [ANNC 总体架构](../../architecture/overview.md)、[架构决策索引](../../decisions/README.md)、模块详细设计（[文档集索引](README.md)：EP / ONNX 前端 / 融合与算子实现） |
 
@@ -72,7 +72,7 @@ ONNX 算子版本以现有默认域 opset 13 为起点；ORT SDK 与宿主以仓
 | `batched_matmul_add` | 将批量矩阵乘法和偏置加法合并       | batch 形状、广播语义及输入输出类型       |
 | `layer_norm`         | 将一组层归一化计算合并          | 归约轴、epsilon 标量输入、数值误差和完整边界 |
 
-四个候选模式均已作为上下文 ABI（`annc_execution_v2`）站点合入当前基线（patterns 由 `!249` 引入）。ONNX AOT 链路的实际载体为 #11 `tensordot_matmul`（FTDMM）与 #12–#14 三个上下文站点；`matmul` 家族走模板/JIT 路径，在 prune 阶段被裁剪，EP 白名单含 `matmul` 不代表存在可接管产物。“可交付”的结论保留给通过指定平台验收的组合；当前组合的能力状态以模块详细设计的差距登记为准。M0/M1 固定具体输入范围和首期候选清单；验收通过的组合进入正式发布清单。
+四个候选模式均已作为上下文 ABI（`annc_execution_v2`）站点合入当前基线（patterns 见 `annc/lib/Dialect/Atir/Passes/OpFusion.cpp`）。默认构建的 ONNX AOT 载体为 #11 `tensordot_matmul`（FTDMM）与 #12–#14 三个上下文站点；`matmul` 家族走模板/JIT 路径，在 prune 阶段被裁剪，EP 白名单含 `matmul` 不代表存在可接管产物。KDNN adaptor 构建且 `ANNC_GEMM=1` 时，plain `matmul` 由条件注册的 #15 产出 AOT 上下文站点；`matmul_add`／`matmul_add_relu` 虽同样生成 AOT 站点，但不在 EP 白名单内。“可交付”的结论保留给通过指定平台验收的组合；当前组合的能力状态以模块详细设计的差距登记为准。M0/M1 固定具体输入范围和首期候选清单；验收通过的组合进入正式发布清单。
 
 ### 2.3 不纳入首期的范围
 
@@ -438,13 +438,13 @@ kernel 的并行执行复用 ORT 的 intra-op 线程池：EP 在执行上下文�
 
 **执行时必须复核：** 实际输入类型、rank、固定维度及容量乘积无溢出；输出尺寸可确定且非负；每个输出只分配一次。参数顺序按完整排列校验，覆盖长度、取值范围和唯一性。
 
-`annc_execution_v2`（执行上下文 ABI，当前版本 v3）是主路径：kernel 首参为执行上下文，输出经上下文回调分配，站点不带 `kernel_arg_order`。`mlir_ciface`（预分配输出、按 `kernel_arg_order` 排列实参）为兼容路径。EP 在申报前按 `execution_mode`/`abi` 过滤，要求 `execution_mode=aot`，模式白名单为 `matmul`、`tensordot_matmul`、`masked_mul`、`layer_norm`、`batched_matmul_add`（白名单包含 `matmul`，但当前它只产生 JIT 站点、无 AOT 产物）。执行上下文 ABI 的设计依据见 [ADR-013](../../decisions/decisions.md#adr-013) 与模块详细设计。
+`annc_execution_v2`（执行上下文 ABI，当前版本 v3）是主路径：kernel 首参为执行上下文，输出经上下文回调分配，站点不带 `kernel_arg_order`。`mlir_ciface`（预分配输出、按 `kernel_arg_order` 排列实参）为兼容路径。EP 在申报前按 `execution_mode`/`abi` 过滤，要求 `execution_mode=aot`，模式白名单为 `matmul`、`tensordot_matmul`、`masked_mul`、`layer_norm`、`batched_matmul_add`（默认构建中 `matmul` 只产生 JIT 站点、无 AOT 产物；KDNN adaptor 构建且 `ANNC_GEMM=1` 时 plain `matmul` 产生 AOT 上下文站点，`matmul_add`／`matmul_add_relu` 不在白名单内）。执行上下文 ABI 的设计依据见 [ADR-013](../../decisions/decisions.md#adr-013) 与模块详细设计。
 
 ### 7.5 缓存语义和生命周期
 
 缓存的作用是避免重复编译，**缓存命中必须意味着生成代码的语义和运行环境相同**。
 
-现有缓存位于 `<cache>/v1/<签名前两位>/<签名>/`，包含报告、共享库和 `DONE` 标记，冷缓存使用 `flock` 控制相同签名的跨进程编译。当前模型签名（前缀 `annc-ep-cache-key-v1`）剔除 producer/doc/图名等易变字段，并在图中**同时含 Mul 与 MatMul** 时保留 initializer 数值、其余情况清空 initializer 载荷；工具链+配置指纹（前缀 `annc-ep-config-v1`）覆盖工具链输出与代码生成相关环境变量，并以 `annc-ep-kernel-libs-v1` 记录 `ANNC_KERNEL_LIB_PATH` 下每个 kernel 归档的大小与修改时间。完整发布身份（EP 构建版本、目标 ISA、全部编译期常量）仍需补齐。
+现有缓存位于 `<cache>/v1/<签名前两位>/<签名>/`，包含报告、共享库和 `DONE` 标记，冷缓存使用 `flock` 控制相同签名的跨进程编译。当前模型签名（前缀 `annc-ep-cache-key-v1`）剔除 producer/doc/图名等易变字段，并在图中**同时含 Mul 与 MatMul** 时保留 initializer 数值、其余情况清空 initializer 载荷；工具链+配置指纹（前缀 `annc-ep-config-v2`）覆盖工具链输出与代码生成相关环境变量（含四个 `ANNC_EP_FUSION_*` 与 `ANNC_MLAS_LIB_DIR`，未设置记为 `=unset`），并以 `annc-ep-kernel-libs-v1` 记录 `ANNC_KERNEL_LIB_PATH` 下每个 kernel 归档的大小与修改时间。完整发布身份（EP 构建版本、目标 ISA、全部编译期常量）仍需补齐。
 
 这仍有正确性风险：某些融合模式（如 `masked_mul` 的 padding）将常量写入生成代码，而当前仅在“同时含 Mul 与 MatMul”的图上保留 initializer 数值，其余图仍清空载荷。若两个模型结构、dtype 和 shape 相同，仅这类常量不同，签名可能相同，后一个模型会使用前一个模型的代码。常量是否影响生成代码取决于其用途；运行参数与编译期内嵌常量需分别确认。
 
@@ -535,10 +535,10 @@ ONNX 图边按张量名连接，经 NodeInfo 进入公共 Builder，来源信息
 | `ANNC_EP_KEEP_TEMPS`             | 可保留工作文件                 | 限诊断使用，明确权限和清理期限          |
 | `ANNC_EP_NOOP`                   | 测量辅助，分配输出而不计算           | 生产禁用，验收配置确认未开启           |
 | `ANNC_EP_NUM_THREADS`            | 声明 intra-op 并行度，供 kernel 并行判定 | 当前实现未读取该变量，适配器按硬件并发度取值；接入后应与会话 intra_op_num_threads 一致 |
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | 值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
-| `ANNC_EP_FUSION_LAYER_NORM`      | 值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
-| `ANNC_EP_FUSION_MASKED_MUL`      | 值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | 值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 默认开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | EP 链路中未设置或值为 0 时 OpFusion 跳过 FusedTensordotMatmul matcher，不生成该算子 | 默认关闭，须显式设为非 0 值开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_LAYER_NORM`      | EP 链路中未设置或值为 0 时 OpFusion 跳过 LayerNormalization matcher，不生成该算子 | 默认关闭，须显式设为非 0 值开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_MASKED_MUL`      | EP 链路中未设置或值为 0 时 OpFusion 跳过 FusedMaskedMul matcher，不生成该算子 | 默认关闭，须显式设为非 0 值开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
+| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | EP 链路中未设置或值为 0 时 OpFusion 跳过 FusedBatchedMatmulAdd matcher，不生成该算子 | 默认关闭，须显式设为非 0 值开启；EP 申报过滤作为兜底；开关进入缓存指纹 |
 
 插件加载应使用绝对路径。安装包须同时提供 `libannc_ep.so`、配套 ANNC 工具、LLVM 工具和 kernel 归档。共享配置或 CLI 参数变化须同步 help、README、测试与版本清单。
 

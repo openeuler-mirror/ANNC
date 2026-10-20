@@ -7,9 +7,9 @@
 | 文档 | 位置 |
 | --- | --- |
 | ANNC 总体架构设计 | [overview.md](overview.md) |
+| 运行时接入（TensorFlow / ONNX Runtime） | [runtime-integration.md](runtime-integration.md) |
 
 ## 规划内容
 
 - `compilation-pipeline.md`：ATIR → lowering → AArch64 代码生成的编译流水线
-- `runtime-integration.md`：TensorFlow / ONNX Runtime 两种接入方式
 - `quality-attributes.md`：可靠性、安全、性能等非功能质量属性

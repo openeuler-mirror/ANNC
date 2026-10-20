@@ -1,135 +1,74 @@
-# ANNC-Next
+# ANNC
+
+**ANNC（Accelerated Neural Network Compiler）** 是基于 MLIR 的 AI 推理编译器：把 TensorFlow GraphDef 与 ONNX 模型编译为 AArch64 原生 kernel，再回接到原框架执行。
+
+- **统一中间表示 ATIR**：把 CPU 微架构优化（算子融合、多级 tiling、数据打包、向量化）从推理框架中解耦，一次优化、多框架复用。
+- **AOT 原生 kernel**：编译期产出 `.so`；TensorFlow GEMM 融合另支持运行时 JIT 特化。
+- **回接成本因框架而异**：TensorFlow 由 Grappler 插件在优化期自动重写图，业务代码无需改动；ONNX Runtime 需注册 EP 插件并把它的执行设备加入会话选项（一行注册代码，见下）。
 
 ## 项目简介
 
-ANNC-Next 是基于 MLIR 的 AI 编译工具链，面向 openEuler 操作系统，将 TensorFlow GraphDef 编译为 AArch64 原生代码。项目利用 MLIR 多级中间表示的优势，实现从高层 AI 算子到底层机器码的完整编译流程。
+ANNC 面向 CPU 推理场景，重点解决搜索/推荐/广告（搜推广）模型中 Embedding 层与算子融合优化无法跨框架复用的问题。它把优化能力下沉到与框架无关的统一 IR，再由各框架前端/插件负责「取图—回接」：
 
-## 环境要求
+| 维度   | 说明                                                                             |
+| ---- | ------------------------------------------------------------------------------ |
+| 前端   | `annc-tf2atir`（TensorFlow GraphDef）、`annc-onnx2atir`（ONNX）                     |
+| 中间表示 | ATIR（AI Tensor IR），承载 shape 推导、算子融合与 kernel 选择                                 |
+| 后端   | AArch64 GEMM 规划/分块/微内核 lowering，产出原生 kernel                                    |
+| 回接   | TensorFlow Grappler 插件 `ANNCOptimizer` + 自定义 Op `ANNCFused`；ONNX Runtime EP 插件 |
 
-### 硬件与系统
+## 支持范围与接入前提
 
-| 项目 | 要求 |
-| --- | --- |
-| 操作系统 | openEuler-24.03-LTS-SP4 |
-| 处理器 | 鲲鹏 920X |
-| LLVM 版本 | 21.1.3 |
+| 维度              | 现状                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------ |
+| 平台              | openEuler-24.03-LTS-SP4 + 鲲鹏 920X（AArch64）；其他平台组合未声明支持                                           |
+| 框架              | TensorFlow（GraphDef / SavedModel）；ONNX Runtime 1.26.0                                            |
+| 加速范围            | 命中 ANNC fusion pattern 的子图；未命中区域原样保留，继续由原框架 / CPU EP 执行                                          |
+| TensorFlow 接入   | 会话启用 Grappler 插件 `ANNCOptimizer` 并加载 `ANNCFused` Op（均由本仓库构建）；模型与业务代码无需改动                         |
+| ONNX Runtime 接入 | 注册 `libannc_ep.so` 并把其执行设备加入 `SessionOptions`（见[注册示例](addons/onnxruntime/README.md#运行)）；模型文件无需改动 |
 
-### 磁盘空间说明
+判定依据与验收范围见 [ONNX 支持整体方案](docs/design/onnx-support/overall.md) 与 [addons/onnxruntime/README.md](addons/onnxruntime/README.md)。
 
-- 完整编译（含 LLVM 从源码编译）需要约 50GB 磁盘空间
-- LLVM 源码从 Gitee 镜像下载
-- 首次编译 LLVM 需要 30-60 分钟，增量构建仅重新编译变更文件
+## 快速开始
 
-### 软件依赖安装
-
-```shell
-# Python 依赖（也可使用：pip install -r requirements.txt）
-pip install pybind11 nanobind
-
-# TensorFlow 2.20（仅 TF addon 需要；CMake 会在 configure 时自动检测）
-pip install tensorflow==2.20.0
-
-# 系统工具、Protobuf、OpenSSL Crypto 和 GoogleTest C++ 开发库
-yum install cmake clang ninja-build protobuf-devel openssl-devel gtest-devel
-```
-
-> **注意**：部分命令可能需要 `sudo` 权限执行
->
-> `build.sh` 会自动检测并安装 `pybind11` 和 `nanobind`；如不需要自动安装，可传入 `--no-install-deps`。TensorFlow 需要预先手动安装。
-> `build.sh` 会在系统 `protoc` 版本变化后自动重新生成最小 TensorFlow protobuf 源码；也可用 `--regen-tf-protos` 强制重新生成。
->
-> **框架依赖随构建开关生效**：TensorFlow Python 包只在构建 TF addon 时需要；`protobuf-devel`/`protoc` 只在启用任一新前端（TF 或 ONNX）时需要。关闭对应开关后 `build.sh` 跳过其 proto 生成与依赖检查，详见「CMake / 构建选项参考」。
-
-### LLVM & MLIR + nlohmann/json
-
-LLVM/MLIR 21.1.3 和 nlohmann/json 由 CMake `FetchContent` 在 configure 时自动从 Gitee 镜像下载到 `third_party/llvm/` 和 `third_party/json/`，并作为 ANNC 构建的一部分从源码编译，无需手动克隆或预编译。
-
-> **注意**：LLVM 首次编译需要 30-60 分钟，约 50GB 磁盘空间。增量构建仅重新编译变更文件。
-
-## 构建 ANNC
-
-### 方式一：一键构建（推荐）
-
-LLVM 和 nlohmann/json 自动拉取并编译：
+环境要求与依赖安装见[安装 ANNC](docs/getting-started/installation.md)。
 
 ```shell
-./build.sh --install-prefix /opt/ANNC --build-type Debug
-```
-
-> **build.sh 常用选项：**
-> - `--build-type [Debug|Release|RelWithDebInfo]`：设置构建类型（默认 Release）
-> - `--install-prefix <path>`：设置安装路径（默认 ./install）
-> - `--enable-libcxx`：启用 libc++
-> - `--clean`：清理构建目录后重新构建
-> - `--no-install-deps`：跳过 pybind11/nanobind 自动安装
-> - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：选择 KDNN 来源（默认 RELEASE）
-> - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
-> - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party（LLVM/json）保持原构建类型、不重编
-> - 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名
->   `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 是一个整体，总是同时
->   构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，
->   ORT EP 关闭）。
-> - `--dry-run`：打印解析后的四个框架开关并退出，不 configure/build
-> - `--disable-tensorflow`：关闭 TensorFlow 前端及其 addon（legacy/custom 模式；
->   与 `--enable-tf`/`--all` 冲突）
-> - `--disable-tensorflow-addon`：只关闭 TF addon，TF 前端工具仍构建
->   （legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
-> - `--disable-onnx`：关闭 ONNX 前端（legacy/custom 模式；与
->   `--enable-ort`/`--all` 冲突）
-> - `--regen-onnx-protos`：强制重新生成 ONNX protobuf 源码（需启用 ONNX 前端）
-
-只调试 ANNC、不重编 LLVM（`--build-type Debug` 会把 LLVM 一起重编）：
-
-```shell
-./build.sh --annc-debug
-```
-
-RELEASE 模式会自动从 release zip 下载 KDNN 并解压：
-
-```shell
-./build.sh --kdnn-source RELEASE --kdnn-lib-variant sve-threadpool
-```
-
-### 方式二：手动构建
-
-```shell
-# 克隆仓库
+# 1. 获取源码
 git clone https://gitcode.com/openeuler/ANNC.git --branch dev
-
-# 进入目录
 cd ANNC
 
-# 创建构建目录
-mkdir -p build && cd build
+# 2. 安装依赖（详见「安装 ANNC」）
+pip3 install -r requirements.txt
+sudo yum install -y cmake clang ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
+sudo yum install -y protobuf-devel protobuf-compiler
 
-# CMake 配置
-cmake -G Ninja .. \
-  -DCMAKE_INSTALL_PREFIX=/opt/ANNC \
-  -DCMAKE_BUILD_TYPE=Debug
+# 3. 一键构建（LLVM/MLIR 与 nlohmann/json 由 CMake 自动拉取并从源码编译）
+#    安装到无写权限前缀时请改用有权限的目录，或确保当前用户可写
+./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 
-# 编译并安装
-ninja && ninja install
-```
-
-## 验证安装
-
-```bash
-# 设置环境变量
-export PATH=/opt/ANNC/bin:$PATH
-
-# 检查工具是否可用
+# 4. 验证
+export PATH="$HOME/ANNC/bin:$PATH"
 which annc-opt annc-asm
-
-# 运行测试
-python3 -m pytest tests/          # 全部测试
-python3 -m pytest tests/integration/fusion/test_config_fusion_kp_fused_gather.py -v  # 单个测试文件
+python3 -m pytest tests/
 ```
 
-## 架构概览
+全部构建选项、CMake 选项、C++ 单元测试与覆盖率流程见[从源码构建](docs/guides/build-from-source.md)。
 
-### 编译流水线
+## 从哪里开始
 
-```
+| 你是              | 入口                                                                                                                                                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 第一次接触 ANNC      | [安装 ANNC](docs/getting-started/installation.md) → [从源码构建](docs/guides/build-from-source.md) → [CLI 工作流](docs/guides/cli-workflows.md)                                                                     |
+| TensorFlow 用户   | [端到端 GraphDef 重写](docs/guides/cli-workflows.md#端到端-graphdef-重写) → [运行时接入（Grappler / ANNCFused）](docs/architecture/runtime-integration.md)                                                                 |
+| ONNX Runtime 用户 | [addons/onnxruntime/README.md](addons/onnxruntime/README.md)：`--enable-ort`（别名 `--enable-ort-ep`）构建 → 注册 EP → 端到端验证（真实示例 `tests/integration/ort_ep/ftdmm_context_e2e.py`）→ [EP 接入设计](docs/design/onnx-support/ep-design.md) |
+| 编译器开发者          | [AGENTS.md](AGENTS.md)（工作原则与导航）→ [总体架构](docs/architecture/overview.md) → [特性与模块设计](docs/design/README.md) → [文档索引](docs/README.md)                                                                     |
+
+完整文档索引（按分区组织）见 [docs/README.md](docs/README.md)。
+
+## 架构速览
+
+```text
 TF SavedModel/GraphDef
   └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
 
@@ -137,608 +76,43 @@ ONNX .onnx
   └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
 
 ATIR MLIR
-  ├─→ annc-opt (--atir-rank-inference, --atir-identity-canonicalize, --atir-gemm-epilogue-fusion, --atir-op-fusion) → 融合后的 ATIR
+  ├─→ annc-opt（--atir-rank-inference、--atir-identity-canonicalize、--atir-op-fusion；epilogue 融合仅在 ANNC_GEMM=2 时启用）→ 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
-  ├─→ annc-asm (--atir-fast-codegen, --annc-aarch64-gemm-pipeline)
-  │     └─→ lowered MLIR (linalg/affine/scf)
-  ├─→ annc → .so / 可执行文件（driver: mlir-opt → mlir-translate → opt → llc → clang link）
+  ├─→ annc-asm（--atir-fast-codegen、--annc-aarch64-gemm-pipeline）
+  │     └─→ lowered MLIR（linalg/affine/scf）
+  ├─→ annc → .so / 可执行文件（driver：mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证
-  └─→ annc-converter → TF GraphDef（ANNCFused 图重写）
+  └─→ annc-converter → TF GraphDef（基于融合元数据重写为 ANNCFused 图）
 
 annc-tf-pipeline → 端到端编排上述所有步骤
 
 annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点报告 → annc-asm → annc
-                     （bytecode 中间件；一次产出模型全部站点的 kernel .so）
+                     （bytecode 中间件；只把 AOT 站点编译进 kernel .so）
 ```
 
-### 自定义方言：ATIR（AI Tensor IR）
-
-ATIR 是 ANNC 的核心自定义 MLIR 方言，专为 AI 张量计算设计。
-
-- **源码位置**：`annc/lib/Dialect/Atir/`（实现），`annc/include/Dialect/Atir/`（TableGen TD 定义）
-- **核心 Op**：`MatMulOp`、`AddOp`、`ReluOp`、`ConcatOp`、`CustomizeOp`、`ConstantOp`、`VariableOp`、`ForOp`、`IfOp`、`ParallelOp`、`BufferOp`、`LoadOp`
-- **优化 Pass**：`RankInference`、`IdentityCanonicalize`、`GemmEpilogueFusion`、`OpFusion`、`ConfigFusion`、`PruneFunc`、`SelectKernel`、`SpecializeShapes`、`FastCodegen`、`FoldBatchNorm`
-- **接口**：`ShapeInfer`（形状推导）、`Interpret`（解释执行）
-- **验证**：OpVerify（通过 `kpGenLibPath` 指定 kernel，执行正确性验证）
-
-### Lowering 路径
-
-| 路径 | 说明 |
-|------|------|
-| `Conversion/AtirToLinalg/` | ATIR → Linalg（通用路径） |
-| `Target/aarch64/` | AArch64 GEMM 规划、分块与微内核 lowering |
-
-### 工具矩阵
-
-| 工具 | 功能 |
-|------|------|
-| `annc-tf2atir` | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤） |
-| [`annc-onnx2atir`](docs/design/onnx-support/frontend-design.md) | ONNX 模型 → ATIR MLIR（复用 builder 引擎，op 表按框架分离） |
-| `annc-onnx-pipeline` | ONNX 模型 → AOT kernel `.so` + 站点报告（融合区域成员名单），供 ONNX Runtime EP 的运行时编译模式使用 |
-| `annc-opt` | ATIR 优化（算子融合、块融合等） |
-| `annc-fusion-metadata` | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式） |
-| `annc-asm` | ATIR → lowered MLIR（affine/linalg） |
-| `annc` | 编译驱动：MLIR → .so / 可执行文件 |
-| `annc-verify` | Kernel 正确性验证 |
-| `annc-converter` | 基于融合元数据重写 TF GraphDef |
-| `annc-tf-pipeline` | 端到端编排 |
-
-### TensorFlow 集成
-
-- `tensorflow_addons/annc_optimizer.cc` — TF Grappler 插件，自动调用 `annc-tf-pipeline` 重写计算图
-- `tensorflow_addons/annc_fused_op.cc` — `ANNCFused` 自定义 TF Op，通过 dlopen 加载 .so 调用 `_mlir_ciface_` 接口
-- `tensorflow_addons/annc_fused_op_register.cc` / `annc_optimizer_register.cc` — 注册模块
-
-### Python 绑定
-
-- `python/` 使用 pybind11 将 ATIR 方言暴露给 Python（nanobind 为 MLIR 自带 Python 绑定的传递依赖）
-- `python/annc/` 提供：`builder`、`ops`、`types`、`helper`、`enums`、`dialects/atir`
-
-### 目录结构
-
-| 目录 | 内容 |
-|------|------|
-| `annc/tools/` | CLI 工具（8 个） |
-| `frontends/` | 框架前端：`onnx/onnx2atir/`（ONNX → ATIR，含 GTest）与 `onnx/protos/`（ONNX schema 与生成脚本），按框架开关注册 |
-| `addons/onnxruntime/` | ONNX Runtime EP 插件（`annc_ep.cpp` + 清单脚本）；默认不参与根构建，`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时构建并安装 `libannc_ep.so` |
-| `annc/lib/Dialect/Atir/` | ATIR 方言：Op 实现、Passes、Interfaces、OpVerify |
-| `annc/lib/Conversion/` | ATIR → Affine / ATIR → Linalg lowering |
-| `annc/lib/Target/aarch64/` | AArch64 代码生成 |
-| `annc/lib/Builder/` | MLIR Op 构建器 |
-| `annc/lib/Kernel/` | 内置 kernel（`builtin_kernels/matmul_aarch64`）+ 线程池（`threadpool/`） |
-| `annc/lib/CAPI/` | C API（Dialect + Passes） |
-| `annc/include/` | 头文件（TableGen 定义、Pass 声明、Kernel API） |
-| `annc/include/Dialect-c/` | C API 头文件（`Dialects.h`, `Passes.h`） |
-| `python/` | Python 绑定 |
-| `tensorflow_addons/` | TF Grappler 插件 + ANNCFused Op |
-| `tests/` | 测试 |
-| `third_party/json/` | nlohmann/json（CMake FetchContent 自动下载，header-only） |
-| `third_party/llvm/` | LLVM/MLIR 21.1.3（CMake FetchContent 自动下载，从源码编译） |
-| `third_party/tensorflow/` | TF C++ 依赖（CMakeLists.txt，configure 时自动检测 pip TF） |
-
-## 组件使用方法
-
-### 端到端 GraphDef 重写
-`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
-
-```shell
-annc-tf-pipeline \
-  --input_graphdef input.pb \
-  --output_graphdef rewritten.pb \
-  --work_dir /tmp/annc_work \
-  --keep_temps \
-  --verbose
-```
-
-常用参数：
-
-| 参数 | 说明 |
-|------|------|
-| `--input_graphdef <path>` | 输入 TensorFlow GraphDef，必填 |
-| `--output_graphdef <path>` | 输出 GraphDef，必填 |
-| `--shared_lib_path <path>` | 写入 GraphDef 的运行时 `.so` 路径；不传时使用 pipeline 生成的 kernel |
-| `--kernel_name <name>` | 覆盖 `ANNCFused` 使用的 kernel 名称 |
-| `--fusion-config <path>` | 外部 fusion pattern JSON；示例见 `configs/fusion/` |
-| `--work_dir <dir>` | 中间文件目录 |
-| `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
-| `--verbose` / `-v` | 打印每一步命令 |
-
-### 分步编译命令
-
-以下命令等价于手动执行一次 GraphDef 到 `ANNCFused` GraphDef 的主流程。
-
-```shell
-# 1. TensorFlow GraphDef -> ATIR MLIR
-annc-tf2atir input.pb -o raw.mlir
-
-# 2. ATIR 算子融合
-annc-opt raw.mlir \
-  --atir-identity-canonicalize \
-  --atir-op-fusion \
-  -o fused.mlir
-
-# 3. 提取 ANNCFused 元数据
-annc-fusion-metadata fused.mlir \
-  -o fusion_metadata.json
-
-# 4. 筛选 AOT kernel，再 lowering 到低层 MLIR
-annc-opt fused.mlir --atir-prune-func=execution-mode=aot -o aot.mlir
-annc-asm aot.mlir \
-  --atir-fast-codegen \
-  --annc-aarch64-gemm-pipeline \
-  -o lowered.mlir
-
-# 5. lowered MLIR -> 共享库
-annc lowered.mlir \
-  --shared \
-  -o kernel.so
-
-# 6. 使用 ANNCFused 重写 GraphDef
-annc-converter --input_graphdef input.pb \
-  --output_graphdef rewritten.pb \
-  --shared_lib_path "$(pwd)/kernel.so" \
-  --metadata_json fusion_metadata.json
-```
-
-### `annc-tf2atir`
-
-`annc-tf2atir` 将 TensorFlow GraphDef 直接转换为 ATIR MLIR，不经过 JSON 中间格式。
-
-```shell
-annc-tf2atir input.pb -o model_raw_atir.mlir
-```
-
-### `annc-opt`
-
-`annc-opt` 是注册了 ATIR 方言和 ANNC pass 的 `mlir-opt` 风格工具，用于 ATIR 优化。
-
-```shell
-annc-opt model_raw_atir.mlir --atir-identity-canonicalize --atir-op-fusion -o model_fused_atir.mlir
-annc-opt input.mlir --atir-op-fusion -o output.bin -emit-bytecode
-```
-
-常用 pass：
-
-| Pass | 说明 |
-|------|------|
-| `--atir-identity-canonicalize` | 清理语义等价的 Identity 透传，供后续融合匹配规范化图形 |
-| `--atir-op-fusion` | 算子融合 |
-| `--atir-rank-inference` | 推断未知张量秩 |
-| `--atir-gemm-epilogue-fusion` | 识别 GEMM epilogue 融合候选 |
-
-### `annc-onnx-pipeline`
-
-`annc-onnx-pipeline` 把整个 ONNX 模型编译成「一个模型一个 `.so`」的 AOT kernel 库，并同时产出
-**站点报告 `sites.json`**：每个融合站点的 kernel 名、实参/输出契约、ABI，以及该站点的**成员节点名单**
-（`member_node_names`，被融合吞并的图节点）。它供 ONNX Runtime EP 插件
-（`addons/onnxruntime/`）调用——EP 在 `GetCapability` 内导出整图、调用本工具、按报告精确申报融合区域。
-
-```shell
-annc-onnx-pipeline --model model.onnx --out-dir <dir> [--work-dir <dir>] [--verbose]
-annc-onnx-pipeline --toolchain-info     # 打印工具链指纹 JSON（缓存键用）
-```
-
-产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。中间件走 MLIR bytecode
-（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方
-应回落到 CPU 执行而不是让会话失败。
-
-前置：`annc` 链接阶段从**单一目录** `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib`）解析全部归档
-（ANNC kernel 归档 + `libLLVMSupport.a` 等 LLVM 归档），因此该目录必须来自 `ninja install` 的安装树；
-工具启动时会预检并给出明确报错。同理，`annc` 以裸名调用 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`，
-本工具会把自身 bin 目录（构建树另加 `_deps/llvm-build/bin`）前置到子进程 `PATH`。
-
-### `annc-fusion-metadata`
-
-`annc-fusion-metadata` 从融合后的 ATIR 中提取 `ANNCFused` 元数据 JSON，供 `annc-converter` 使用。
-
-```shell
-annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
-```
-
-当 `--atir-op-fusion` 在同一个计算图中融合出多个独立 kernel 时，`fusion_metadata.json` 使用顶层 `fusions` 数组保存所有融合信息。每个 fusion 只保存结构化 `args`、`outputs` 和不能从 tensor contract 推导的 ABI 信息；GraphDef rewrite 所需的输入计数、rank 和 output shape 在构造 `ANNCFused` 节点时派生，不在 metadata 中重复保存。
-
-示例：
-
-```json
-{
-  "fusions": [
-    {
-      "name": "annc_fused_dense_MatMul",
-      "pattern": "matmul",
-      "kernel_name": "fused_matmul_abcd1234",
-      "args": [
-        {
-          "role": "fixed",
-          "tf_name": "dense/kernel",
-          "shape": [128, 64],
-          "rank": 2,
-          "dtype": "f32"
-        },
-        {
-          "role": "dynamic",
-          "tf_name": "input",
-          "shape": [-1, 128],
-          "rank": 2,
-          "dtype": "f32"
-        }
-      ],
-      "outputs": [
-        {
-          "role": "output",
-          "tf_name": "dense/MatMul",
-          "shape": [-1, 64],
-          "rank": 2,
-          "dtype": "f32"
-        }
-      ],
-      "abi": "mlir_ciface",
-      "dynamic_dims": [0],
-      "kernel_arg_order": [1, 0, 2],
-      "symbolic_signature": "F:0|S:1;?,?",
-      "fallback_function": "original_subgraph",
-      "pattern_attrs": {}
-    }
-  ]
-}
-```
-
-### `annc-asm`
-
-`annc-asm` 是注册了 ATIR、转换 pass 和 AArch64 target pass 的 `mlir-opt` 风格工具，用于将 ATIR lowering 到低层 MLIR。
-
-```shell
-annc-opt model_fused_atir.mlir --atir-prune-func=execution-mode=aot -o model_aot_atir.mlir
-annc-asm model_aot_atir.mlir \
-  --atir-fast-codegen \
-  --annc-aarch64-gemm-pipeline \
-  -o model_lowered.mlir
-```
-
-`--atir-fast-codegen` 默认允许非 GEMM 的已注册自定义算子类型；`MatMul`、
-`MatMulAdd` 和 `MatMulAddRelu` 默认禁用，以便交给
-`--annc-aarch64-gemm-pipeline`。可以按最终生成的 `custom.op_name` 使用 allowlist
-或 denylist 控制改写；名称区分大小写，显式 allowlist 可重新启用 GEMM pattern，
-denylist 优先级更高：
-
-```shell
-# 只允许 MatMulAdd，其他自定义算子保持原 ATIR
-annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=enable-custom-ops=MatMulAdd" \
-  --annc-aarch64-gemm-pipeline -o model_lowered.mlir
-
-# 禁用 MatMul，MatMulAdd / MatMulAddRelu 等其他类型仍可改写
-annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=disable-custom-ops=MatMul" \
-  --annc-aarch64-gemm-pipeline -o model_lowered.mlir
-```
-
-端到端流程或其他不便修改 `annc-asm` 参数的调用方，可设置进程环境变量：
-`ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` 和
-`ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS`。它们是逗号分隔的类型列表，会由
-`annc-tf-pipeline` 启动的 `annc-asm` 自动继承。
-
-### `annc`
-
-`annc` 是编译 driver，将 lowered MLIR 编译成可执行文件或共享库。内部流程为 `mlir-opt -> mlir-translate -> opt -> llc -> clang link`。
-
-```shell
-annc model_lowered.mlir -o app
-annc model_lowered.mlir --shared -o kernel.so
-annc model_lowered.mlir -t tests/e2e/annc-driver/driver_dynamic.c -o test_app -v --shared
-```
-
-常用参数：
-
-| 参数 | 说明 |
-|------|------|
-| `-o <file>` | 输出文件 |
-| `-t <file>` | C 测试 driver，默认 `test.c` |
-| `-v` / `--verbose` | 打印详细命令 |
-| `--shared` / `-shared` | 生成 `.so`，否则生成可执行文件 |
-
-`annc` 链接阶段默认调用系统 `clang`，可通过环境变量 `ANNC_CLANG` 覆盖，详见[环境变量参考](#环境变量参考)。
-
-```shell
-ANNC_CLANG=/path/to/clang annc model_lowered.mlir --shared -o kernel.so
-```
-
-### `annc-verify`
-
-`annc-verify` 用于验证生成 kernel 的正确性。
-
-```shell
-annc-verify output.bin \
-  --atir-op-verify="kpGenLibPath=path/to/generated_kernel.so"
-```
-
-### `annc-converter`
-
-`annc-converter` 根据融合 metadata 重写二进制 TensorFlow GraphDef，将融合子图替换为 `ANNCFused` 节点。独立调用时可传入 `--metadata_json`；省略该参数时，使用位置参数提供融合后的 ATIR 以提取 metadata。
-
-```shell
-annc-converter --input_graphdef input.pb \
-  --output_graphdef output.pb \
-  --shared_lib_path /abs/path/kernel.so \
-  --metadata_json fusion_metadata.json
-```
-
-GraphDef 输出固定为二进制 protobuf。常用参数：
-
-| 参数 | 说明 |
-|------|------|
-| `--verbose` | 打印图重写详情 |
-| `--input_graphdef <path>` | GraphDef 重写模式输入 |
-| `--output_graphdef <path>` | GraphDef 重写模式输出 |
-| `--shared_lib_path <path>` | `ANNCFused` 运行时共享库路径 |
-| `--atir_module_path <path>` | JIT 模式下 fusion-only ATIR 的绝对路径 |
-| `--metadata_json <path>` | 可选的 `annc-fusion-metadata` 输出；省略时需提供融合后的 ATIR 位置参数 |
-| `--kernel_name <name>` | 覆盖融合 kernel 名称 |
-
-### TensorFlow 集成
-
-`tensorflow_addons/` 提供 Grappler 插件和 `ANNCFused` 自定义 TensorFlow Op。
-
-| 文件 | 说明 |
-|------|------|
-| `tensorflow_addons/annc_optimizer.cc` | Grappler 优化器插件，自动调用 `annc-tf-pipeline` 重写计算图 |
-| `tensorflow_addons/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
-| `tensorflow_addons/annc_fused_op_register.cc` | 注册 `ANNCFused` Op |
-| `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
-
-Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 `annc_generated_kernel.so`。重写后的 GraphDef 会把该 `.so` 路径写入每个 `ANNCFused` 节点的 `shared_lib_path`，运行时 `ANNCFused` 需要通过 `dlopen` 加载它。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
-
-GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和与名字无关的
-`template_fingerprint`，运行时根据实际输入和输出 shape 选择并特化当前 fusion func，
-再同步执行 `annc-asm` 和 `annc`。非 GEMM fusion 节点写入 AOT 共享库路径。进程内缓存按
-Grappler 生成的 `template_fingerprint`（包含影响 codegen 的 module 属性）和实际参数
-shape 复用 `.so`；工具链、GEMM 配置和 ABI 作为进程级固定上下文，不进入运行时 key，
-`kernel_name` 不进入 key。相同 key 的并发 miss 只编译一次，不同 key 可并行编译。
-Ready entry 使用有界 LRU，默认保留 64 个；编译失败不缓存，后续请求可重试。
-
-多 fusion 的 GraphDef 重写会为每个 fusion 生成一个独立的 `ANNCFused` 节点。`fusion_metadata.json` 中如果某个 fusion 带有 `dynamic_dims`，`annc-converter` 写入 `ANNCFused.output_shapes` 时会把这些维度保留为 `?`，由 `ANNCFused` 在运行时根据动态输入的实际维度推导输出形状，避免 Serving 请求 batch 与编译样例 batch 不一致时按固定维度分配输出。
-
-MatMul fusion metadata 保持 `ANNCFused` 的运行时输入约定：fixed shape 输入在前，dynamic shape 输入在后。`OpFusion` 会根据 MatMul 的 lhs/rhs 哪个输入承载输出 batch 维来生成 `kernel_arg_order`，保证 GraphDef 输入顺序满足运行时形状推导，同时 `_mlir_ciface_` 调用仍按 kernel 函数签名接收 lhs、rhs、output。
-
-`ANNCFused` 运行时默认只保留错误日志，避免 Serving 并发请求时 INFO 调试日志影响吞吐和日志可读性。`dlopen`、`dlsym`、memref 构造、输出分配、参数顺序和 kernel 调用失败会输出 `LOG(ERROR)`，用于定位服务启动或运行阶段的关键失败原因。Serving 目录中的 `tensorflow_serving_addons` 需要与 `tensorflow_addons` 保持对应修改一致。
-
-`ANNCFused` 通过 `zero_initialize_outputs` 控制输出 Tensor 是否在调用 kernel 前清零。该 attr 默认 `true`，保持旧 GraphDef 和非全量写输出 kernel 的保守行为；运行时对 `fusion_pattern=dnn_embedding_hash_bucket` 自动关闭清零，因为生成的 embedding kernel 会完整覆盖 `[batch, embedding_dim]` 输出，跳过清零可消除 `avg_output_init` 带来的主要包装层开销。该优化不要求 GraphDef 写入新 attr，避免不同 Serving OpDef 版本下 unknown attr 被忽略。
-
-`ANNCFused` 运行时性能打点默认关闭，排查融合 Op 延迟时可通过 `ANNC_FUSED_PROFILE` 与 `ANNC_FUSED_PROFILE_INTERVAL` 开启，详见[环境变量参考](#环境变量参考)。
-
-```bash
-ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ...
-```
-
-开启后每隔 `ANNC_FUSED_PROFILE_INTERVAL` 次 `ANNCFused` 调用按 profile key 汇总输出平均耗时；未设置时默认每 100000 次输出一次，避免高 QPS 测试时 profile 日志本身干扰压测。key 规则如下：
-
-- MatMul 类融合保持兼容格式：`kernel_name_MxKxN`，如果节点带有 `fusion_pattern`，追加 `pattern=<fusion_pattern>`。
-- `dnn_embedding_hash_bucket` 使用 embedding 专用格式：`kernel_name_pattern=dnn_embedding_hash_bucket_weight=<weight_shape>_input=<runtime_input_shape>_out=<metadata_output_shape>`，避免把 embedding weight 和 string/id 输入误解释为 MatMul 的 lhs/rhs。
-- 其他融合算子使用通用格式：`kernel_name_pattern=<fusion_pattern>_inputs=<runtime_input_shapes>_out=<metadata_output_shapes>`。
-
-日志字段含义如下：
-
-单次调用的耗时采样保存在 `Compute()` 局部变量中，只有汇总统计写入全局表时加锁，避免并发请求时多个线程改写同一个 `OpKernel` 成员导致统计互相覆盖。
-
-| 字段 | 含义 |
-|------|------|
-| `avg_load_library` | AOT 模式下首次加载或 `.so` 路径变化时 `dlopen`/`dlsym` 的平均耗时，缓存命中时为 0；JIT 模式恒为 0（JIT 的 `dlopen`/`dlsym` 归入 `avg_jit_compile`） |
-| `avg_jit_arg_shapes` | JIT 运行时构建参数形状/签名的平均耗时（均摊到总调用数） |
-| `avg_jit_cache_key` | JIT 构建 cache key（SHA256）的平均耗时（均摊到总调用数） |
-| `avg_jit_cache_lookup` | JIT `GetOrCompile` 每次调用的平均耗时（hit/miss/wait 混合，均摊到总调用数） |
-| `avg_jit_hit_lookup` | 纯命中（`kHit`）时查表的平均耗时，按命中次数（`jit_hits`）取平均，衡量稳态命中路径 |
-| `avg_jit_compile` | JIT cache miss 时单次编译的平均耗时，按编译次数（`jit_compiles`）取平均（`fork/exec annc-asm` → `annc` → `dlopen`/`dlsym`），衡量首次编译/冷启动成本 |
-| `steady_calls` / `avg_steady_total` / `avg_steady_kernel` / `avg_steady_overhead` | 稳态热路径统计：仅统计 JIT cache 命中（或 AOT 已加载）的调用，不含首次编译与 wait 等冷启动成本；`avg_steady_overhead = avg_steady_total - avg_steady_kernel`，衡量稳态接入层开销，无需靠减法从全量均值推导 |
-| `jit_hits` / `jit_compiles` / `jit_waits` | JIT cache 命中/编译/等待并发编译的调用计数 |
-| `avg_threadpool_setup` | 获取 TensorFlow CPU threadpool 并安装 ANNC TLS threadpool 的平均耗时 |
-| `avg_input_memref` | 输入 Tensor 构造成 MLIR memref descriptor 的平均耗时 |
-| `avg_output_alloc` | TensorFlow 输出 Tensor 分配的平均耗时 |
-| `avg_output_init` | 输出 Tensor 清零初始化的平均耗时 |
-| `avg_output_memref` | 输出 Tensor 构造成 MLIR memref descriptor 的平均耗时 |
-| `avg_arg_order` | 构造 `_mlir_ciface_` 实参顺序的平均耗时 |
-| `avg_kernel` | `_mlir_ciface_<kernel_name>` 真正执行生成 kernel 的平均耗时 |
-| `avg_total` | `ANNCFusedOp::Compute` 端到端平均耗时 |
-| `avg_overhead` | `avg_total - avg_kernel`，用于判断 TensorFlow Op 包装层开销 |
-
-远端增量编译可按 `env.md` 中环境执行：
-
-```bash
-cd /annc/ANNC_E2E/ANNC_zch
-source env.sh
-cd build
-ninja && ninja install
-```
-
-Serving 侧建议用以下命令对比开启和关闭 ANNC 的延迟，并在开启 ANNC 时打开打点：
-
-```bash
-cd <ANNC 源码根目录>
-ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 1
-ANNC_BACKEND=kdnn START_CPU=0 bash tests/e2e/tf/test_model_zoo_annc.sh wide_and_deep 1 -1 1 0
-```
-
-## CMake / 构建选项参考
-
-| CMake 选项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
-| `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并生成 TF proto；对应 `build.sh --disable-tensorflow` |
-| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
-| `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并生成 ONNX proto；对应 `build.sh --disable-onnx` |
-| `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
-| `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
-| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
-| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置。构建期需要 `ANNC_MLAS_INCLUDE_DIR`，运行期四个归档由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析 |
-| `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
-| `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 的 JIT 汇编源码编译期默认值，运行时同名环境变量可覆盖 |
-| `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `RELEASE` | KDNN 来源模式 |
-| `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
-| `ANNC_KDNN_RELEASE_DIR` | 路径 | `third_party/kdnn-release` | RELEASE 模式下 release 包解压与整理目录 |
-| `ANNC_KDNN_RELEASE_URL` | URL | `https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip` | RELEASE 模式 zip 包下载地址 |
-| `ANNC_KDNN_RELEASE_SHA256` | 字符串 | `61a4b0b55a80ca742b43dde638b7fdd63c7ef36f26f3615e4f1ad008750217a8` | RELEASE 模式 zip 包 SHA256 校验值；留空则跳过校验 |
-| `ANNC_KDNN_LIB_VARIANT` | 字符串 | `sve-threadpool` | RELEASE 模式下库变体，可选 `sve-threadpool`、`sve-omp`、`sve2-threadpool`、`sve2-omp` |
-
-> **注意：**
-> - KDNN backend（`ANNC_ENABLE_KDNN_ADAPTOR=ON`）仅支持 AArch64 平台。
-> - RELEASE 模式需要系统安装 `unzip`、`rpm2cpio`、`cpio`；openEuler 上可通过 `sudo yum install -y unzip rpm cpio` 安装。
-> - RELEASE 模式当前不支持 `ANNC_ENABLE_CONSTANT_FOLDING=ON`。
-
-## 环境变量参考
-
-ANNC 的工具与插件通过环境变量控制部分行为，下表汇总了面向用户/运维的变量。CMake / 构建脚本内部变量（如 `ANNC_PATCH_FILE`）和已废弃变量未包含在内。
-
-### 通用（所有 ANNC 工具与插件）
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_LOG_LEVEL` | `off` / `error` / `warn` / `info` / `debug`（大小写不敏感） | `error` | ANNC 内部分级日志级别（`annc/include/Support/Log.h`），输出统一走 stderr；例如 `ANNC_LOG_LEVEL=info` 可查看内置 kernel 注册明细，`off` 可完全静默；无法识别的取值回退 `error` 并向 stderr 输出一次性提示 |
-
-### `annc` driver
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_CLANG` | clang 可执行文件路径 | `clang` | 链接阶段使用的 clang 路径 |
-| `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_PREFIX}/lib` | 覆盖内置 kernel、线程池和 LLVM 静态库的搜索目录 |
-| `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | **内部使用**，动态测试编译时由 driver 自动设置，测试 driver 据此加载共享库 |
-
-也可以对单次编译使用命令行参数 `--kernel-lib-path <dir>`。命令行参数优先于
-`ANNC_KERNEL_LIB_PATH`；未指定时使用构建时配置的安装路径。移动 ANNC 安装目录后，需要通过
-命令行参数或环境变量指定新的 `lib` 目录。
-
-### `annc-asm` / FastCodegen
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 allowlist；非空时仅改写列出的类型，并可显式启用默认禁用的 GEMM 类型 |
-| `ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 denylist；始终优先于 allowlist |
-| `ANNC_GEMM_CONFIG` | JSON 文件路径 | 空 | AArch64 GEMM 调优配置；AOT 与 JIT 的 GEMM pipeline 均要求提供 |
-
-环境变量是默认策略。`--atir-fast-codegen=enable-custom-ops=...` 非空时覆盖环境
-allowlist；命令行和环境的 denylist 会合并。allowlist 为空时，`MatMul`、
-`MatMulAdd` 和 `MatMulAddRelu` 仍默认禁用。
-
-### `ANNCOptimizer`（Grappler 插件）
-
-这些变量也可通过 `RewriterConfig.CustomGraphOptimizer.parameter_map` 配置，参数名见说明。
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_ENABLE` | `1`/`0`/`true`/`false`/`yes`/`no` | `false` | 是否启用 ANNC 图改写 |
-| `ANNC_PIPELINE_PATH` | 路径 | `/usr/local/bin/annc-tf-pipeline` | `annc-tf-pipeline` 可执行文件路径；JIT 从其同目录查找 `annc-asm` 和 `annc`（参数名：`pipeline_path` / `annc_pipeline_path`） |
-| `ANNC_WORK_DIR` | 目录路径 | 临时目录 | Grappler pipeline 与运行时 JIT 的编译产物工作目录（参数名：`work_dir` / `annc_work_dir`） |
-| `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`） |
-| `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
-| `ANNC_TIMEOUT` | 正整数（秒） | `300` | pipeline 调用超时时间（参数名：`timeout_seconds`） |
-| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
-| `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
-
-### `ANNCFusedOp` 运行时
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_FUSED_PROFILE` | 非空且非 `0` | 关闭 | 开启融合 Op 性能打点 |
-| `ANNC_FUSED_PROFILE_INTERVAL` | 正整数 | `100000` | 每隔多少次调用输出一次汇总统计 |
-| `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅对 `openblas` MatMul 路径做特殊判断 |
-| `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存 |
-
-### ONNX Runtime EP 插件（`libannc_ep.so`）
-
-仅在宿主进程通过 `RegisterExecutionProviderLibrary` 注册 EP 后生效。融合开关默认开启，精确 `0` 关闭。
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_EP_PIPELINE` | 可执行文件路径 | 本 `.so` 同目录 → `../bin` → `PATH` | `annc-onnx-pipeline` 路径；设置但文件不存在时直接禁用运行时编译，不回退 |
-| `ANNC_EP_CACHE_DIR` | 目录路径 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` | 运行时编译缓存根 |
-| `ANNC_EP_COMPILE` | `0` 关闭 | 启用 | 关闭运行时编译，模型整体回落 CPU |
-| `ANNC_EP_COMPILE_TIMEOUT_S` | 正整数（秒） | `600` | 单次编译超时 |
-| `ANNC_EP_KEEP_TEMPS` | 非空且非 `0` | 关闭 | 保留编译失败的工作目录 |
-| `ANNC_EP_DEBUG` | 存在即开启 | 关闭 | 编译/申报诊断；设 `0` 仍然开启 |
-| `ANNC_EP_TIMING` | 存在即开启 | 关闭 | 每节点耗时拆分；设 `0` 仍然开启 |
-| `ANNC_EP_NOOP` | 存在即开启 | 关闭 | 只分配输出不计算；设 `0` 仍然开启 |
-| `ANNC_EP_FUSION_TENSORDOT_MATMUL` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedTensordotMatmul 站点申报 |
-| `ANNC_EP_FUSION_LAYER_NORM` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 LayerNormalization 站点申报 |
-| `ANNC_EP_FUSION_MASKED_MUL` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedMaskedMul 站点申报 |
-| `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedBatchedMatmulAdd 站点申报 |
-
-四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0`
-关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在编译期跳过
-对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。关闭只影响该特定
-融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
-
-EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
-
-构建 EP 插件需要 `ANNC_ONNXRUNTIME_INCLUDE_DIR` 指向 ORT 1.26.0 的 session 头文件目录，并需要 `ANNC_EP_ORT_BUILD_TREE` 指向同一次 ORT 构建的 `Release/` 目录（原生池归档）。`--enable-ort`/`--all` 会自动强制 `ANNC_KERNEL_MLAS=ON`（CMake 在 `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时同样强制），并转发 `ANNC_EP_ORT_BUILD_TREE` 与 `ANNC_MLAS_INCLUDE_DIR`；`ANNC_GEMM_ASM_SOURCE_DIR` 仅 TF 侧 AOT/JIT GEMM 路径需要，ORT EP 的 fused context 站点不依赖它。`--enable-ort` 只构建 ORT 加速栈（ONNX 前端与 EP
-作为一体），`--enable-tf` 只构建 TF。
-
-### 构建与测试
-
-| 变量 | 取值 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
-| `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
-| `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | `1` | TensorFlow C++11 ABI |
-| `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
-| `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
-| `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
-| `ANNCOPT` / `ANNASM` / `FILECHECK` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
-
-### 模型压测脚本 `tests/e2e/tf/test_model_zoo_annc.sh`
-
-脚本控制变量：`START_CPU` / `SERVER_START_CPU` / `CLIENT_START_CPU` / `CLIENT_NUMA_NODE` / `RUN_BOTH` / `LATENCY_THRESHOLD` / `WARMUP_REQUESTS` / `BASE_PORT` / `ENABLE_PROFILER`。
-
-ANNC / Serving 路径与参数：`ANNC_PIPELINE_PATH` / `LLVM_PATH` / `TF_PY_SITE_PACKAGES` / `ANNC_BACKEND` / `ANNC_WORK_BASE` / `TFSERVER_PATH` / `MODEL_BASE` / `ADDONS_DIR` / `CONFIG_FILE` / `BASELINE_CONFIG_FILE` / `ANNC_FUSED_OP_PATH`。
-
-其中 `ANNC_ENABLE`、`ANNC_VERBOSE`、`ANNC_WORK_DIR`、`ANNC_SAVEDMODEL_PATH`、`ANNC_BACKEND`、`ANNC_FUSED_OP_PATH` 等会注入 serving 子进程，由 `ANNCOptimizer` 与 `ANNCFusedOp` 读取。更详细的说明和默认值见脚本头部注释。
-
-### Python 绑定
-
-`python/annc` 使用 pybind11 暴露 ATIR 构建接口（nanobind 为 MLIR 自带 Python 绑定的传递依赖）。
-
-| 模块 | 说明 |
-|------|------|
-| `annc.builder` | `MLIRBuilder`，创建 MLIR module/function |
-| `annc.helper` | `kp.jit`，从 Python 函数构建 ATIR module |
-| `annc.ops` | `matmul`、`add`、`relu`、`constant`、`ret`、`for_loop` 等 ATIR Op 构建函数 |
-| `annc.types` | `TensorType`、`ElemType`、`Value` |
-| `annc.dialects` | ATIR dialect 注册 |
-
-示例：
-
-```python
-import numpy as np
-
-from annc.helper import kp
-from annc.ops import matmul
-from annc.types import ElemType
-
-
-@kp.jit
-def fused_matmul(inputs, **kwargs):
-    lhs = inputs[0]
-    rhs = inputs[1]
-    cm = inputs[2]
-    matmul(ElemType.FP32(), [1024, 1024], lhs, rhs, cm, False)
-
-
-module = fused_matmul(
-    name="demo",
-    outputs=["out"],
-    inputs=[
-        np.random.randn(1024, 1024).astype(np.float32),
-        np.random.randn(1024, 1024).astype(np.float32),
-        np.zeros((1024, 1024)).astype(np.float32),
-        np.random.randn(1024).astype(np.float32),
-    ],
-)
-
-module.operation.print(large_elements_limit=16)
-```
-
-## 常见问题
-
-1. **编译失败**：请确认已安装所有依赖（pybind11、nanobind、tensorflow、cmake、ninja-build）
-2. **编译内存不足**：减少并行编译任务数，使用 `ninja -j4` 等方式限制
-3. **LLVM 下载缓慢**：Gitee 镜像偶尔不稳定，可重试或手动下载 LLVM 源码到 `third_party/llvm/`
+- 自定义方言 ATIR 位于 `annc/lib/Dialect/Atir/`，提供 `ShapeInfer`（形状推导）与 `Interpret`（解释执行）接口，以及 OpVerify kernel 正确性验证；Op / Pass 定义在 `annc/include/Dialect/Atir/`。
+- Lowering 路径：`annc/lib/Conversion/Common/`（公共 lowering 工具）、`annc/lib/Conversion/AtirToLinalg/`（ATIR → Linalg）、`annc/lib/Target/aarch64/`（AArch64 GEMM 规划、分块与微内核 lowering）。
+- 各模块职责与目录导航见 [总体架构设计](docs/architecture/overview.md)。
+
+## 工具矩阵
+
+两条框架接入入口：**`annc-tf-pipeline`**（TensorFlow）与 **`annc-onnx-pipeline`**（ONNX Runtime）。
+
+| 工具                         | 功能                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------- |
+| `annc-tf-pipeline`         | TensorFlow 端到端：GraphDef → 融合 → AOT kernel `.so` → 重写后的 GraphDef                             |
+| `annc-onnx-pipeline`       | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告 `sites.json`，供 ONNX Runtime EP 调用                     |
+| `annc-tf2atir`             | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤）                                                  |
+| `annc-onnx2atir`           | [ONNX 模型 → ATIR MLIR](docs/design/onnx-support/frontend-design.md)（复用 builder 引擎，op 表按框架分离） |
+| `annc-opt`                 | ATIR 优化（identity 规范化、算子融合、AOT 筛选等）                                                          |
+| `annc-fusion-metadata`     | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式）                                                          |
+| `annc-asm`                 | ATIR → lowered MLIR（linalg/affine/scf）                                                      |
+| `annc`                     | 编译驱动：lowered MLIR → `.so` / 可执行文件                                                           |
+| `annc-model-kernel-export` | 导出 lowered MLIR 中生成的 AArch64 微内核（`.S` + `manifest.json`），由 `annc` 在链接前自动调用                 |
+| `annc-verify`              | Kernel 正确性验证                                                                                |
+| `annc-converter`           | 基于融合元数据重写 TF GraphDef（把融合子图替换为 `ANNCFused` 节点）                                              |
+
+各工具的典型用法与分步编译见[CLI 工作流](docs/guides/cli-workflows.md)。
 
 ## 相关项目
 

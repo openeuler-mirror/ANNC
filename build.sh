@@ -186,7 +186,7 @@ while [[ $# -gt 0 ]]; do
       echo "                                (default: OFF; requires TensorFlow; conflicts with --enable-ort)"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
-      echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: LOCAL)"
+      echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: RELEASE)"
       echo "  --kdnn-dir <path>             Local KDNN root, only valid with --kdnn-source LOCAL (default: ./third_party/KDNN)"
       echo "  --kdnn-lib-variant <variant>  KDNN library variant for RELEASE mode (default: ${KDNN_LIB_VARIANT})"
       echo "  --clean                       Clean build directory before build (forces full reconfigure)"
@@ -1035,14 +1035,20 @@ if [ $? -ne 0 ]; then
 fi
 
 ninja install
+if [ $? -ne 0 ]; then
+    echo "Installation failed, aborting"
+    exit 1
+fi
 
 # LLVM keeps the build-tree llvm-lit path when LLVM_INSTALL_UTILS is disabled.
 # Rewrite that generated install config to use its relocatable tools directory
 # so the package does not expose the machine-local build path.
 LLVM_INSTALL_CONFIG="${INSTALL_PREFIX}/lib/cmake/llvm/LLVMConfig.cmake"
 if [ -f "${LLVM_INSTALL_CONFIG}" ]; then
-  sed -i 's|^set(LLVM_DEFAULT_EXTERNAL_LIT .*)$|set(LLVM_DEFAULT_EXTERNAL_LIT "${LLVM_TOOLS_BINARY_DIR}/llvm-lit")|' \
-    "${LLVM_INSTALL_CONFIG}"
+  if ! sed -i 's|^set(LLVM_DEFAULT_EXTERNAL_LIT .*)$|set(LLVM_DEFAULT_EXTERNAL_LIT "${LLVM_TOOLS_BINARY_DIR}/llvm-lit")|' \
+      "${LLVM_INSTALL_CONFIG}"; then
+    echo "Warning: failed to rewrite ${LLVM_INSTALL_CONFIG}" >&2
+  fi
 fi
 
 echo "Build and installation completed successfully"
