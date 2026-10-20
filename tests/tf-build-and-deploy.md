@@ -113,6 +113,8 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
 ```
 
 - `--enable-tf`：仅 TensorFlow 前端 + addon，自动关闭 ORT 加速栈。
+- constant folding 默认关闭；需要时显式加 `--enable-constant-folding`，并按
+  §1.3 提供 GEMM 微内核归档。`--enable-ort` 下该特性不可用（组合会直接报错）。
 - `--all`：同时构建 TensorFlow 与 ORT 加速栈；ORT 侧额外需要 ORT 头文件、
   ORT 构建树与 MLAS 头文件目录，见
   [ort-ep-build-and-deploy.md](ort-ep-build-and-deploy.md)。

@@ -182,7 +182,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
       echo "  --enable-libcxx               Enable libc++"
       echo "  --disable-assertions          Disable assertions"
-      echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support (default: OFF)"
+      echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support"
+      echo "                                (default: OFF; requires TensorFlow; conflicts with --enable-ort)"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
       echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: LOCAL)"
@@ -277,6 +278,14 @@ case "${FRAMEWORK_MODE}" in
     ;;
 esac
 
+# Constant folding is a TensorFlow-path feature.  It stays off by default,
+# including every --enable-ort build; --enable-tf/--all still require an
+# explicit --enable-constant-folding to turn it on.
+if [ "${ENABLE_CONSTANT_FOLDING}" == "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
+  echo "ERROR: --enable-constant-folding requires TensorFlow (--enable-tf or --all); it conflicts with --enable-ort." >&2
+  exit 1
+fi
+
 # The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
 # the kernel MLAS backend automatically.  TF-only builds keep it off.
 if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
@@ -300,6 +309,7 @@ if [ "${DRY_RUN}" == "YES" ]; then
   echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
   echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
   echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
+  echo "ANNC_ENABLE_CONSTANT_FOLDING=${ENABLE_CONSTANT_FOLDING}"
   exit 0
 fi
 

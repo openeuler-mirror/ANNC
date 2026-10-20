@@ -18,4 +18,19 @@ else()
   message(STATUS
       "AArch64 GEMM microkernel archive unavailable; regular ANNC targets remain enabled")
 endif()
+
+if(ANNC_ENABLE_CONSTANT_FOLDING AND NOT ANNC_ENABLE_TENSORFLOW)
+  message(FATAL_ERROR
+      "ANNC_ENABLE_CONSTANT_FOLDING=ON requires "
+      "ANNC_ENABLE_TENSORFLOW=ON.")
+endif()
+
+if(ANNC_ENABLE_CONSTANT_FOLDING AND NOT ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+  message(FATAL_ERROR
+      "ANNC_ENABLE_CONSTANT_FOLDING=ON requires the AArch64 GEMM microkernel "
+      "archive; place libannc_gemm_microkernels.a under "
+      "third_party/annc-gemm-kernels/ or set "
+      "-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>.")
+endif()
+
 unset(_annc_gemm_processor)

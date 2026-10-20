@@ -73,6 +73,6 @@ add_mlir_library(AArch64Codegen
         AtirPasses
 )
 
-if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE AND ANNC_ENABLE_CONSTANT_FOLDING)
   target_link_libraries(AArch64Codegen PUBLIC ANNC::AArch64GemmMicrokernels)
 endif()
