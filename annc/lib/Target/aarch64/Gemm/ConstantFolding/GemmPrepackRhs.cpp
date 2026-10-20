@@ -15,6 +15,12 @@
 
 using namespace mlir;
 
+// The prepack path is only reachable when constant folding is enabled
+// (SelectGemmStrategy is created with enablePrepack, and the pipeline adds this
+// pass under the same switch). Keep it out of builds that do not enable
+// constant folding, including ORT-only builds, which do not need the optional
+// GEMM microkernel archive.
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
 namespace annc {
 namespace {
 
@@ -25,6 +31,7 @@ int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k, int64_t n);
 void annc_aarch64_neon_packb_f32(const float *rhs, float *packed, int32_t kSize,
                                  int32_t nSize, int32_t ldb);
 }
+
 std::vector<float> packGemmLayout(
     const float *rhs, int64_t k, int64_t n,
     const aarch64::gemm::GemmTuningConfig &config) {
@@ -313,3 +320,33 @@ std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
 }
 
 }  // namespace annc
+#else
+namespace annc {
+namespace {
+
+// Keep the pass registered for Passes.td/CAPI consumers, but fail loudly
+// instead of compiling in references to the optional microkernel archive.
+struct AArch64GemmPrepackRhsDisabled
+    : public AArch64GemmPrepackRhsBase<AArch64GemmPrepackRhsDisabled> {
+  AArch64GemmPrepackRhsDisabled() = default;
+  explicit AArch64GemmPrepackRhsDisabled(llvm::StringRef) {}
+
+  void runOnOperation() override {
+    getOperation().emitError(
+        "aarch64-gemm-prepack-rhs requires ANNC_ENABLE_CONSTANT_FOLDING");
+    signalPassFailure();
+  }
+};
+
+}  // namespace
+
+std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs() {
+  return std::make_unique<AArch64GemmPrepackRhsDisabled>();
+}
+
+std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(llvm::StringRef) {
+  return std::make_unique<AArch64GemmPrepackRhsDisabled>();
+}
+
+}  // namespace annc
+#endif
