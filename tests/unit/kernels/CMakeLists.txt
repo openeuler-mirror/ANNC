@@ -43,6 +43,7 @@ void registerAutoKernelSpecsForTest() {
 
 set(ANNC_BUILTIN_KERNEL_WRAPPERS_GEN "${ANNC_KERNEL_TEST_GENERATED_DIR}/builtin_kernel_wrappers.gen.cpp")
 set(ANNC_BUILTIN_KERNEL_WRAPPER_SOURCE [=[
+#include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
 #define ANNC_SPEC_TOKEN_PREFIX matmul_kernel_specs_inc
 #define ANNC_BUILTIN_KERNEL_SPECS_FILE "matmul_kernel_specs.inc"

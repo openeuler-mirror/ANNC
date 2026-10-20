@@ -267,11 +267,8 @@ public:
         log("Mode: " + string(config.sharedLibrary ? "Shared Library" : "Executable"));
         
         try {
-            //  0:  MLIR 
-            // if (!extractDimensionsFromMLIR()) {
-            //     log("Failed to extract dimensions from MLIR file");
-            //     return false;
-            // }
+            //  0: 从输入 MLIR 提取 M/K/N；失败时保留默认值（0）
+            (void)extractDimensionsFromMLIR();
 
             //  1: MLIR -> LLVM-dialect MLIR
             if (!step1_MLIRToLLVMDialect()) {
@@ -369,35 +366,52 @@ private:
                     size_t x1 = memrefType.find('x');
                     size_t x2 = memrefType.rfind('x');
 
+                    auto isNumber = [](const string &value) {
+                        if (value.empty()) return false;
+                        for (char c : value) {
+                            if (c < '0' || c > '9') return false;
+                        }
+                        return true;
+                    };
+
                     if (x1 != string::npos && x2 != string::npos && x1 < x2) {
-                        try {
-                            int dim1 = stoi(memrefType.substr(0, x1));
-                            int dim2 = stoi(memrefType.substr(x1 + 1, x2 - x1 - 1));
+                        string first = memrefType.substr(0, x1);
+                        string second =
+                            memrefType.substr(x1 + 1, x2 - x1 - 1);
 
-                            // 
-                            // %arg0: memref<M x K x f32> ( A)
-                            // %arg1: memref<K x N x f32> ( B)
-                            // %arg2: memref<M x N x f32> ( C)
-                            // %arg3: memref<N x f32> (bias)
+                        // 只接受静态二维形状；动态维（?）或多维形状跳过。
+                        if (isNumber(first) && isNumber(second)) {
+                            try {
+                                int dim1 = stoi(first);
+                                int dim2 = stoi(second);
 
-                            if (config.M == 0 && config.K == 0) {
-                                //  memref  M x K
-                                config.M = dim1;
-                                config.K = dim2;
-                            } else if (config.N == 0) {
-                                //  memref  K x N N = dim2
-                                config.N = dim2;
+                                // 位置启发式：假定 %arg0/%arg1 为静态二维
+                                // A(M x K)/B(K x N)；动态或非 matmul 输入可能
+                                // 不满足该前提，此时不要依赖 -DM/-DK/-DN。
+                                // %arg0: memref<M x K x f32> (A)
+                                // %arg1: memref<K x N x f32> (B)
+                                // %arg2: memref<M x N x f32> (C)
+                                // %arg3: memref<N x f32> (bias)
+                                if (config.M == 0 && config.K == 0) {
+                                    config.M = dim1;
+                                    config.K = dim2;
+                                } else if (config.N == 0) {
+                                    config.N = dim2;
+                                }
+
+                                foundDimensions = true;
+                                log("Found dimensions: M=" +
+                                    to_string(config.M) + ", K=" +
+                                    to_string(config.K) + ", N=" +
+                                    to_string(config.N));
+                            } catch (const exception &e) {
+                                log("Error parsing dimensions from memref type: " +
+                                    memrefType);
                             }
-
-                            foundDimensions = true;
-                            log("Found dimensions: M=" + to_string(config.M) + ", K=" + to_string(config.K) + ", N=" + to_string(config.N));
-                        } catch (const exception& e) {
-                            log("Error parsing dimensions from memref type: " + memrefType);
-                            continue;
                         }
                     }
 
-                    //  memref
+                    // 无论是否解析成功都推进，避免 catch 分支死循环。
                     memrefPos = line.find("memref<", end);
                 }
             }
@@ -681,9 +695,12 @@ private:
         command += " -Wl,-rpath," KDNN_LIB_DIR;
         command += " " ANNC_KDNN_OPENMP_LINK_FLAGS;
 #endif
-        command += " -DM=" + to_string(config.M);
-        command += " -DK=" + to_string(config.K);
-        command += " -DN=" + to_string(config.N);
+        // 仅在成功提取静态形状时覆盖 driver 的默认维度。
+        if (config.M > 0 && config.K > 0 && config.N > 0) {
+            command += " -DM=" + to_string(config.M);
+            command += " -DK=" + to_string(config.K);
+            command += " -DN=" + to_string(config.N);
+        }
         command += " -o \"" + (fs::path(config.outputFile)).string() + "\"";
         command += " -lstdc++ -lm";
         
@@ -755,9 +772,12 @@ private:
         // 
         string command = getClangPath() + " -O3 \"" + config.testFile + "\"";
         // 
-        command += " -DM=" + to_string(config.M);
-        command += " -DK=" + to_string(config.K);
-        command += " -DN=" + to_string(config.N);
+        // 仅在成功提取静态形状时覆盖 driver 的默认维度。
+        if (config.M > 0 && config.K > 0 && config.N > 0) {
+            command += " -DM=" + to_string(config.M);
+            command += " -DK=" + to_string(config.K);
+            command += " -DN=" + to_string(config.N);
+        }
         command += " -o \"" + (fs::path(config.outputFile)).string() + "\"";
         command += " -ldl -lm";
         
@@ -776,7 +796,7 @@ void printUsage() {
     cout << "ANNC Driver - MLIR to Executable/Shared Library Compiler" << endl;
     cout << "Usage: annc [options] <input.mlir>" << endl;
     cout << "Options:" << endl;
-    cout << "  -o <file>              Output file (default: a.out or input.so)" << endl;
+    cout << "  -o <file>              Output file (default: <input stem>.out or <input stem>.so)" << endl;
     cout << "  -t <file>              Test C file (default: test.c)" << endl;
     cout << "  --kernel-lib-path <dir> Kernel library directory (default: env ANNC_KERNEL_LIB_PATH or install prefix)" << endl;
     cout << "  --packed-rhs-c <file>  Link generated GEMM packed RHS C source" << endl;

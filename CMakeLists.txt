@@ -5,7 +5,7 @@ project(annc LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
-option(ANNC_ENABLE_COVERAGE "Enable source-based code coverage (clang only)" OFF)
+option(ANNC_ENABLE_COVERAGE "Enable gcov source coverage instrumentation" OFF)
 option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG); third-party build type unchanged" OFF)
 
 # Framework frontends and their addons. A framework switch gates its frontend

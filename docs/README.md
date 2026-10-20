@@ -18,8 +18,8 @@
 
 | 目录 | 内容 | 状态 |
 | --- | --- | --- |
-| [getting-started/](getting-started/README.md) | 安装与快速开始（教学） | 规划中 |
-| [guides/](guides/README.md) | 面向任务的操作指南 | 规划中 |
+| [getting-started/](getting-started/README.md) | 安装与快速开始（教学） | 部分就位 |
+| [guides/](guides/README.md) | 面向任务的操作指南 | 部分就位 |
 | [architecture/](architecture/README.md) | 总体架构与概念解释 | 已就位 |
 | [design/](design/README.md) | 特性与模块详细设计（HLD/LLD） | 已就位 |
 | [decisions/](decisions/README.md) | 架构决策记录（ADR） | 已就位 |
@@ -30,6 +30,8 @@
 ## 迁移状态
 
 历史文档已全部迁入新结构：架构总览（[architecture/](architecture/README.md)）、JIT 常量折叠与 ONNX 支持（[design/](design/README.md)）、架构决策（[decisions/](decisions/README.md)）。原 `docs/Feature/`、`docs/ADR/` 目录已移除。
+
+用户文档开始落位：安装（[getting-started/installation.md](getting-started/installation.md)），从源码构建、CLI 工作流、环境变量、Python 绑定与排障（[guides/](guides/README.md)），运行时接入（[architecture/runtime-integration.md](architecture/runtime-integration.md)）。仓库根 `README.md` 已收敛为项目名片，只保留定位、支持范围与接入前提、快速开始、按角色导航、架构速览、工具矩阵与相关项目。
 
 ## 编写约定
 
