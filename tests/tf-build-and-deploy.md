@@ -12,18 +12,18 @@
 
 ## 0. 路径约定
 
-| 占位符 | 本机当前值（示例） |
+| 占位符 | 说明（按实际环境替换） |
 |---|---|
-| `<ANNC_ROOT>` | `/home/yyf/ANNC` |
-| `<ANNC_PREFIX>` | `/opt/ANNC`（或 `<ANNC_ROOT>/install`） |
-| `<TF_ROOT>` | `/workspace/tensorflow` |
-| `<MODEL_ROOT>` | `/workspace/benchmark` |
-| `<BRPC_CLIENT>` | `/usr/local/bin/brpc_client` |
-| `<GEMM_ASM>` | `/home/yyf/GEMM-ASM` |
-| `<GEMM_CONFIG>` | `/home/yyf/ANNC/benchmark/annc-bench/configs/gemm-hip09-multi.json`（外部 JSON，仓库不跟踪） |
-| `<ORT_ROOT>` | `/home/yyf/onnx/onnxruntime.bak`（仅 `--all` 需要） |
-| `<ORT_BUILD>` | `/home/yyf/onnx/onnxruntime.bak/build/Linux/Release`（仅 `--all` 需要） |
-| `<PYTHON>` | 构建用 Python（需 pybind11/nanobind） |
+| `<ANNC_ROOT>` | ANNC 源码根目录 |
+| `<ANNC_PREFIX>` | 安装前缀（如 `/opt/ANNC` 或 `<ANNC_ROOT>/install`） |
+| `<TF_ROOT>` | TensorFlow 构建/安装根目录（含 `install/bin/predictor_server`） |
+| `<MODEL_ROOT>` | 模型与压测数据根目录 |
+| `<BRPC_CLIENT>` | brpc 压测客户端可执行文件 |
+| `<GEMM_ASM>` | GEMM-ASM 源码/include 树（含 `Sve/`、`Neon/`） |
+| `<GEMM_CONFIG>` | 外部 AArch64 GEMM tuning JSON（仓库不跟踪） |
+| `<ORT_ROOT>` | ORT 1.26.0 源码树（仅 `--all` 需要） |
+| `<ORT_BUILD>` | 同一次 ORT 构建的 `Release/` 目录（仅 `--all` 需要） |
+| `<PYTHON>` | 构建用 Python（启用 Python 绑定时需 pybind11/nanobind） |
 
 ## 1. 前置条件
 
@@ -57,12 +57,20 @@ git log -1 --oneline
 
   ```shell
   yum install cmake ninja-build protobuf-devel protobuf-compiler \
-              gcc gcc-c++ openssl-devel python3-devel numactl unzip rpm cpio
-  pip install pybind11 nanobind numpy pytest
+              gcc gcc-c++ openssl-devel python3-devel numactl unzip rpm cpio \
+              llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+              llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+              llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+              llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+              llvm-toolset-20-clang
+  pip install numpy pytest
+  # 仅在 --enable-python（Python 绑定）时需要：
+  # pip install pybind11 nanobind
   ```
 
-- LLVM/MLIR 21.1.3 与 nlohmann/json 由 CMake `FetchContent` 下载并编译；首次构建
-  约 30–60 分钟、约 50GB。
+- LLVM/MLIR 来自外部工具链（本机验证 `llvm-toolset-20`；CMake `find_package` 使用
+  预装工具链与库，不锁定版本）；nlohmann/json 由 CMake `FetchContent` 下载。构建不再编译 LLVM，
+  无需 50GB 磁盘或 30–60 分钟 LLVM 编译。
 
 ### 1.3 特性前置条件（本地/外部组件）
 
@@ -75,7 +83,7 @@ git log -1 --oneline
 | AArch64 GEMM 微内核/小形状 | `third_party/annc-gemm-kernels/libannc_gemm_microkernels.a`（或 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`） | `ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=OFF`；不链接微内核，`GemmSmallShapeMicrokernel` 测试不注册，其余目标可构建 |
 | AOT/JIT kernel 汇编（生成 `.S`） | `<GEMM_ASM>` 的 `Sve/`、`Neon/` include 树 | `annc` 无法汇编生成的 `.S`，报 `ANNC_GEMM_ASM_SOURCE_DIR must point to ...`；不是预编译 kernel 二进制 |
 | KDNN 加速 | `third_party/KDNN`（LOCAL）或网络/Release（RELEASE）/git（REMOTE），并在构建时 `--enable-kdnn-adaptor` | 不启用 KDNN kernel；不要设置 `ANNC_BACKEND=kdnn`，它不能替代构建开关 |
-| 离线构建 | 预置 `third_party/llvm/`、`third_party/json/` | FetchContent 需要网络或预置源码 |
+| 离线构建 | 预置 `third_party/json/`；LLVM/MLIR 20 由系统包提供 | FetchContent（json）需要网络或预置源码 |
 
 > `ANNC_GEMM_CONFIG` 是 AArch64 GEMM 编译的硬前置，不是可选调优项。没有
 > `annc-bench` 时，需要提供一份兼容的 tuning JSON。
@@ -113,6 +121,7 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
 ```
 
 - `--enable-tf`：仅 TensorFlow 前端 + addon，自动关闭 ORT 加速栈。
+- Python 绑定默认不构建；需要时加 `--enable-python`（同时安装 pybind11/nanobind）。
 - constant folding 默认关闭；需要时显式加 `--enable-constant-folding`，并按
   §1.3 提供 GEMM 微内核归档。`--enable-ort` 下该特性不可用（组合会直接报错）。
 - `--all`：同时构建 TensorFlow 与 ORT 加速栈；ORT 侧额外需要 ORT 头文件、
@@ -129,6 +138,19 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
 - 需要 AArch64 GEMM 微内核时，把 `libannc_gemm_microkernels.a` 放到
   `third_party/annc-gemm-kernels/`，或设置
   `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`；否则该特性为 OFF，对应测试不注册。
+- LLVM/MLIR 查找顺序：`-DLLVM_DIR`/`-DMLIR_DIR` → 环境变量 `ANNC_LLVM_BIN` →
+  `LLVM_ROOT`/`MLIR_ROOT` → `llvm-config-{22,21,20} --cmakedir`。标准
+  `llvm-toolset-20` 安装且 `llvm-config-20` 在 `PATH` 时无需导出；工具链在自定义
+  前缀时：
+
+  ```shell
+  export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
+  # 或：export LLVM_DIR=<.../lib64/cmake/llvm>
+  #     export MLIR_DIR=<.../lib64/cmake/mlir>
+  ```
+
+  运行期 `annc`/`annc-onnx-pipeline` 仍从 `ANNC_LLVM_BIN`（缺省为构建期记录值）
+  解析工具；目标机路径与构建机不同时需在运行环境导出。
 
 等价的直接 `cmake` 配置：
 
@@ -143,7 +165,12 @@ cmake -S <ANNC_ROOT> -B <ANNC_ROOT>/build -G Ninja \
   -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
   -DANNC_TENSORFLOW_PRELOAD=ON \
   -DANNC_TENSORFLOW_CXX11_ABI=1 \
-  -DANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM> \
+  -DANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
+```
+
+需要 Python 绑定时（默认不构建），追加 `-DANNC_ENABLE_PYTHON=ON` 与：
+
+```shell
   -Dpybind11_DIR="$(<PYTHON> -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
   -Dnanobind_DIR="$(<PYTHON> -c 'import nanobind; print(nanobind.cmake_dir())')" \
   -DPython_EXECUTABLE="$(command -v <PYTHON>)"
@@ -169,16 +196,16 @@ ninja -C <ANNC_ROOT>/build install
 <ANNC_PREFIX>/bin/annc
 <ANNC_PREFIX>/bin/annc-opt
 <ANNC_PREFIX>/bin/annc-asm
-<ANNC_PREFIX>/lib/libannc_optimizer.so   # 或 lib64
-<ANNC_PREFIX>/lib/libannc_fused_op.so   # 或 lib64
-<ANNC_PREFIX>/lib/libANNC*.a
-<ANNC_PREFIX>/lib/libannc_gemm_microkernels.a   # 仅当外部微内核归档存在时
-<ANNC_PREFIX>/lib/libLLVM*.a
+<ANNC_PREFIX>/lib64/libannc_optimizer.so   # lib/ 布局时为 lib/
+<ANNC_PREFIX>/lib64/libannc_fused_op.so   # lib/ 布局时为 lib/
+<ANNC_PREFIX>/lib64/libANNC*.a
+<ANNC_PREFIX>/lib64/libannc_gemm_microkernels.a   # 仅当外部微内核归档存在时
 ```
 
-- LLVM 归档与 ANNC 归档必须在同一目录；`ANNC_KERNEL_LIB_PATH` 指向该目录
-  （本机为 `<ANNC_PREFIX>/lib`）。若安装布局把归档放到 `lib64`，相应改为
-  `<ANNC_PREFIX>/lib64`。
+- `ANNC_KERNEL_LIB_PATH` 指向 ANNC 归档目录（安装时由 GNUInstallDirs 决定：
+  aarch64 为 `<ANNC_PREFIX>/lib64`，其它布局可能为 `<ANNC_PREFIX>/lib`）。
+- LLVM 静态归档（`libLLVMSupport.a`/`libLLVMDemangle.a`）不在 ANNC 安装树，
+  由 `ANNC_LLVM_BIN` 的父目录推导（`lib64` 或 `lib`），见下表。
 
 ## 3. 特性使能
 
@@ -193,8 +220,8 @@ ninja -C <ANNC_ROOT>/build install
 | `ANNC_WORK_DIR` | JIT kernel 工作根目录 | 系统临时目录 |
 | `ANNC_GEMM_CONFIG` | 外部 AArch64 GEMM 调优 JSON | 无（需外部提供） |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | GEMM-ASM 源码/include 树（`Sve/`、`Neon/`），用于汇编生成的 `.S` | `annc` 编译期默认值 |
-| `ANNC_KERNEL_LIB_PATH` | ANNC/LLVM/微内核归档目录 | `<ANNC_PREFIX>/lib` |
-| `ANNC_CLANG` | clang 路径或 GCC triple 包装脚本 | 构建期检测值 |
+| `ANNC_KERNEL_LIB_PATH` | ANNC 归档与微内核归档目录 | `<ANNC_PREFIX>/lib64`（GNUInstallDirs；aarch64） |
+| `ANNC_LLVM_BIN` | LLVM 20 bin 目录；其父目录的 `lib64`/`lib` 提供 LLVM 静态归档 | 构建期写入的工具目录 |
 | `ANNC_BACKEND` | 可选后端名（如 `kdnn`） | `generic` |
 | `ANNC_KEEP_TEMPS` | 保留 pipeline 中间文件 | 关闭 |
 | `ANNC_VERBOSE` | 打印 pipeline 命令与诊断 | 关闭 |
@@ -215,11 +242,11 @@ export ANNC_ENABLE=1
 export ANNC_VERBOSE=1
 export ANNC_GEMM=2                       # 完整 GEMM/epilogue 融合；不设则默认关闭
 export ANNC_PIPELINE_PATH=<ANNC_PREFIX>/bin/annc-tf-pipeline
-export ANNC_FUSED_OP_PATH=<ANNC_PREFIX>/lib/libannc_fused_op.so
+export ANNC_FUSED_OP_PATH=<ANNC_PREFIX>/lib64/libannc_fused_op.so
 export ANNC_WORK_DIR=/var/tmp/annc-tf
 export ANNC_GEMM_CONFIG=<GEMM_CONFIG>
 export ANNC_TIMEOUT=1800
-export LD_PRELOAD=<ANNC_PREFIX>/lib/libannc_optimizer.so   # lib64 布局改为 lib64/
+export LD_PRELOAD=<ANNC_PREFIX>/lib64/libannc_optimizer.so   # lib/ 布局时改为 lib/
 
 export TF_NUM_INTEROP_THREADS=16
 export TF_NUM_INTRAOP_THREADS=16
