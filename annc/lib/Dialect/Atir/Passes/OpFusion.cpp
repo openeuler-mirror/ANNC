@@ -3474,16 +3474,27 @@ static bool isFtdmmAxesGatherOf(Value value, Value data,
   return isFtdmmConstInts(gather.getIndices(), axes);
 }
 
-// value == ExpandDims(Prod(Gather(Shape(data), indices == axes), axis=0), 0)。
+// value == ExpandDims(Prod(Gather(Shape(data), indices == axes), axis=0), 0)
+// 或 Prod{keep_dims=true}(Gather(Shape(data), indices == axes), axis=0)。
 //
 // Unsqueeze 的轴恒为 0：被扩的是 ReduceProd 产生的 0 维标量，ONNX 对 0 维
 // 输入的合法轴是 [-1, 0]——轴 1 连 onnxruntime 的 shape inference 都拒绝。
+// keep_dims=true 的 Prod 与 ExpandDims(Prod) 语义等价（结果同为 [1] 秩 1
+// 张量），对应 TF reduce_prod(keepdims=true) 的直译 lowering。
 static bool isFtdmmAxesProdExpandDimsOf(Value value, Value data,
                                         ArrayRef<int64_t> axes) {
-  auto expand = value.getDefiningOp<ExpandDimsOp>();
-  if (!expand) return false;
-  if (!isFtdmmConstInts(expand.getAxis(), {0})) return false;
-  auto prod = expand.getInput().getDefiningOp<ProdOp>();
+  auto prodOf = [](Value v) -> ProdOp {
+    if (auto expand = v.getDefiningOp<ExpandDimsOp>()) {
+      if (!isFtdmmConstInts(expand.getAxis(), {0})) return {};
+      return expand.getInput().getDefiningOp<ProdOp>();
+    }
+    if (auto prod = v.getDefiningOp<ProdOp>()) {
+      if (!prod.getKeepDims()) return {};
+      return prod;
+    }
+    return {};
+  };
+  auto prod = prodOf(value);
   if (!prod) return false;
   if (!isFtdmmConstInts(prod.getIndices(), {0})) return false;
   return isFtdmmAxesGatherOf(prod.getInput(), data, axes);
@@ -3595,17 +3606,22 @@ static FailureOr<TensordotMatMulMatch> matchTensordotMatMul(MatMulOp matmul) {
     return failure();
   }
 
-  // (3) 展平的数据输入来自恒等 perm 的 Transpose，rank 固定为 3。
-  auto transpose = flattenReshape.getInput().getDefiningOp<TransposeOp>();
-  if (!transpose || transpose.getResult() != flattenReshape.getInput()) {
-    return failure();
+  // (3) 展平的数据输入 rank 固定为 3；恒等 perm 的 Transpose 可选。TF 动态
+  // batch 图里 tensordot 展平输入直接来自上游算子（Concat/BiasAdd 等），
+  // 转换器只在部分形态下保留恒等 Transpose。无 Transpose 时输入布局与
+  // kernel 假设的 row-major 3D 一致（末维等于 contractDim 校验兜底）；
+  // 有 Transpose 时仍须恒等 perm，非恒等转置由上面 (L3406) 的旗标拒绝
+  // 与本处 isFtdmmIdentityTranspose 双重挡住。
+  Value input = flattenReshape.getInput();
+  constexpr int64_t kRank = 3;
+  if (auto transpose = input.getDefiningOp<TransposeOp>()) {
+    if (transpose.getResult() != input) return failure();
+    if (!isFtdmmIdentityTranspose(transpose, kRank)) return failure();
+    input = transpose.getInput();
   }
-  Value input = transpose.getInput();
   auto inputType = dyn_cast<atir::TensorType>(input.getType());
   if (!inputType || inputType.getShape().size() != 3) return failure();
   if (!inputType.getElementType().isF32()) return failure();
-  constexpr int64_t kRank = 3;
-  if (!isFtdmmIdentityTranspose(transpose, kRank)) return failure();
   const int64_t inputContractDim = inputType.getShape()[kRank - 1];
   if (inputContractDim >= 0 && inputContractDim != contractDim) return failure();
 
