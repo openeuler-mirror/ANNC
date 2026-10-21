@@ -18,9 +18,53 @@
 #include <onnxruntime_c_api.h>
 
 #include "annc_ep_execution.h"
+#include "Kernel/PackedB.h"
 
 namespace annc_ep {
 namespace {
+
+// Packed-B description contract: full-shape matching, broadcast slice
+// selection and the v2/v3/v4 size-and-version gate on the packed-B field.
+TEST(PackedBContract, MatchesFullShapeAndSelectsBroadcastSlices) {
+  float first = 1.0f, second = 2.0f;
+  const float* slices[] = {&first, &second};
+  AnncPackedB rank4{4, {2, 1, 4, 8}, 2, slices};
+  const int64_t shape4[] = {2, 1, 4, 8};
+  const int64_t wrong4[] = {1, 2, 4, 8};
+  EXPECT_TRUE(annc::kernels::packedBMatches(&rank4, shape4, 4));
+  EXPECT_FALSE(annc::kernels::packedBMatches(&rank4, wrong4, 4));
+  EXPECT_EQ(annc::kernels::packedBSlice(&rank4, 0, 0), &first);
+  EXPECT_EQ(annc::kernels::packedBSlice(&rank4, 1, 0), &second);
+  EXPECT_EQ(annc::kernels::packedBSlice(&rank4, 1, 1), nullptr);
+
+  AnncPackedB rank3{3, {2, 4, 8, 0}, 2, slices};
+  const int64_t shape3[] = {2, 4, 8};
+  EXPECT_TRUE(annc::kernels::packedBMatches(&rank3, shape3, 3));
+  EXPECT_EQ(annc::kernels::packedBSlice(&rank3, 1, 0), &second);
+  EXPECT_EQ(annc::kernels::packedBSlice(&rank3, 2, 0), nullptr);
+
+  AnncPackedB wrong_count{3, {2, 4, 8, 0}, 1, slices};
+  EXPECT_FALSE(annc::kernels::packedBMatches(&wrong_count, shape3, 3));
+  const float* null_slice[] = {&first, nullptr};
+  AnncPackedB null_entry{3, {2, 4, 8, 0}, 2, null_slice};
+  EXPECT_FALSE(annc::kernels::packedBMatches(&null_entry, shape3, 3));
+}
+
+TEST(PackedBContract, ContextAbiReadsOnlyFieldsPresentInTheReportedLayout) {
+  AnncExecutionContext context{};
+  context.struct_size = ANNC_EXECUTION_V2_CONTEXT_SIZE;
+  context.abi_version = ANNC_EXECUTION_V2_ABI_VERSION;
+  context.packed_b = reinterpret_cast<const AnncPackedB*>(uintptr_t{1});
+  EXPECT_EQ(annc::packedBOf(&context), nullptr);
+
+  context.struct_size = ANNC_EXECUTION_V3_CONTEXT_SIZE;
+  context.abi_version = ANNC_EXECUTION_V3_ABI_VERSION;
+  EXPECT_EQ(annc::packedBOf(&context), nullptr);
+
+  context.struct_size = ANNC_EXECUTION_V4_CONTEXT_SIZE;
+  context.abi_version = ANNC_EXECUTION_ABI_VERSION;
+  EXPECT_EQ(annc::packedBOf(&context), context.packed_b);
+}
 
 // One tagged fake status per call; only identity and lifetime matter here.
 struct FakeStatus {

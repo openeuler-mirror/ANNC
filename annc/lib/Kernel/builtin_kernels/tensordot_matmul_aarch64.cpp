@@ -14,6 +14,7 @@
 #endif
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "Kernel/PackedB.h"
 #include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
@@ -115,10 +116,22 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
       MLAS_SGEMM_DATA_PARAMS gemm;
       gemm.A = x;
       gemm.lda = static_cast<size_t>(k);
-      gemm.B = w;
+      const AnncPackedB* packed = annc::packedBOf(execution);
+      const float* packed_weight =
+          annc::kernels::packedBMatches(packed, weight->sizes, 2)
+              ? annc::kernels::packedBSlice(packed, 0, 0)
+              : nullptr;
+      gemm.B = packed_weight != nullptr ? packed_weight : w;
       gemm.ldb = static_cast<size_t>(n);
       gemm.C = out;
       gemm.ldc = static_cast<size_t>(n);
+      gemm.BIsPacked = packed_weight != nullptr;
+      if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+        static std::atomic<int> packed_printed{0};
+        if (packed_printed.fetch_add(1) == 0) {
+          std::fprintf(stderr, "[annc-kernel] ftdmm: packed-B selected\\n");
+        }
+      }
       MlasGemmBatch(CblasNoTrans, CblasNoTrans, static_cast<size_t>(m),
                     static_cast<size_t>(n), static_cast<size_t>(k), &gemm,
                     /*BatchSize=*/1,

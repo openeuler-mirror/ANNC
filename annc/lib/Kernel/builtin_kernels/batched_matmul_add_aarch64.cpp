@@ -13,6 +13,7 @@
 #endif
 
 #include "Kernel/ExecutionContextUtils.h"
+#include "Kernel/PackedB.h"
 #include "Support/ThreadPool/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
@@ -216,10 +217,24 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
             MLAS_SGEMM_DATA_PARAMS& p = params[batch];
             p.A = x + ((di * d1 + dj) * m) * k;
             p.lda = static_cast<size_t>(k);
-            p.B = w + (wi * w1 + wj) * k * n;
+            const AnncPackedB* packed = annc::packedBOf(execution);
+            const float* packed_weight =
+                annc::kernels::packedBMatches(packed, weight->sizes, 4)
+                    ? annc::kernels::packedBSlice(packed, wi, wj)
+                    : nullptr;
+            p.B = packed_weight != nullptr
+                      ? packed_weight
+                      : w + (wi * w1 + wj) * k * n;
             p.ldb = static_cast<size_t>(n);
             p.C = out + batch * m * n;
             p.ldc = static_cast<size_t>(n);
+            p.BIsPacked = packed_weight != nullptr;
+            if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+              static std::atomic<int> packed_printed{0};
+              if (packed_printed.fetch_add(1) == 0) {
+                std::fprintf(stderr, "[annc-kernel] bmm: packed-B selected\\n");
+              }
+            }
             p.beta = singleKTile ? 1.0f : 0.0f;
           }
         }
@@ -350,10 +365,25 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
           MLAS_SGEMM_DATA_PARAMS& p = params[i];
           p.A = x + (dataBatch == 1 ? 0 : i * d1 * k);
           p.lda = static_cast<size_t>(k);
-          p.B = w + (weightBatch == 1 ? 0 : i * k * n);
+          const AnncPackedB* packed = annc::packedBOf(execution);
+          const float* packed_weight =
+              annc::kernels::packedBMatches(packed, weight->sizes, 3)
+                  ? annc::kernels::packedBSlice(packed,
+                                                weightBatch == 1 ? 0 : i, 0)
+                  : nullptr;
+          p.B = packed_weight != nullptr
+                    ? packed_weight
+                    : w + (weightBatch == 1 ? 0 : i * k * n);
           p.ldb = static_cast<size_t>(n);
           p.C = out + i * d1 * n;
           p.ldc = static_cast<size_t>(n);
+          p.BIsPacked = packed_weight != nullptr;
+          if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+            static std::atomic<int> packed_printed{0};
+            if (packed_printed.fetch_add(1) == 0) {
+              std::fprintf(stderr, "[annc-kernel] bmm: packed-B selected\\n");
+            }
+          }
           p.beta = singleKTile ? 1.0f : 0.0f;
         }
         if (singleKTile) fillBiasRows(out, b, batchCount, d1, n);

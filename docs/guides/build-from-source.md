@@ -84,8 +84,8 @@ ninja && ninja install
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
 | `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
-| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
-| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR`，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
+| `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
+| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR` 与宿主 MLAS/KleidiAI 归档，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 汇编生成微内核的编译期默认值，运行时同名环境变量可覆盖；生成 `model_generated_kernels/*.S` 时未配置则 `annc` 报错退出 |
 | `ANNC_ENABLE_KDNN_ADAPTOR` | `ON`/`OFF` | `OFF` | 构建 KDNN 后端的内置 kernel adaptor；对应 `build.sh --enable-kdnn-adaptor`，仅 AArch64 |

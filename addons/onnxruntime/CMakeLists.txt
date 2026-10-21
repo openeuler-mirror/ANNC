@@ -71,6 +71,15 @@ if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
 endif()
 target_link_libraries(annc_ep PRIVATE ${CMAKE_THREAD_LIBS_INIT})
 
+# The EP performs the one-time packed-B conversion in CreateState, using the
+# same MLAS headers the builtin kernels compile against. PackB entry points
+# are private to ORT, so link the host build's MLAS/KleidiAI archives into the
+# plugin below, as the annc driver does for generated kernel libraries.
+if(ANNC_KERNEL_MLAS)
+  target_include_directories(annc_ep SYSTEM PRIVATE "${ANNC_MLAS_INCLUDE_DIR}")
+  target_compile_definitions(annc_ep PRIVATE ANNC_KERNEL_MLAS=1)
+endif()
+
 # Back the EP's thread pool with ORT's native operator pool: the scheduling
 # decision (serial versus parallel, block size, real degree of parallelism)
 # moves from ANNC's port of Eigen's cost model to ORT's own TryParallelFor,
@@ -82,8 +91,14 @@ set(ANNC_EP_ORT_COMMON_ARCHIVE
     "${ANNC_EP_ORT_BUILD_TREE}/libonnxruntime_common.a")
 set(ANNC_EP_ORT_CPUINFO_ARCHIVE
     "${ANNC_EP_ORT_BUILD_TREE}/_deps/pytorch_cpuinfo-build/libcpuinfo.a")
+set(ANNC_EP_ORT_MLAS_ARCHIVE
+    "${ANNC_EP_ORT_BUILD_TREE}/libonnxruntime_mlas.a")
+set(ANNC_EP_ORT_KLEIDIAI_ARCHIVE
+    "${ANNC_EP_ORT_BUILD_TREE}/_deps/kleidiai-build/libkleidiai.a")
 foreach(archive IN ITEMS "${ANNC_EP_ORT_COMMON_ARCHIVE}"
-                         "${ANNC_EP_ORT_CPUINFO_ARCHIVE}")
+                         "${ANNC_EP_ORT_CPUINFO_ARCHIVE}"
+                         "${ANNC_EP_ORT_MLAS_ARCHIVE}"
+                         "${ANNC_EP_ORT_KLEIDIAI_ARCHIVE}")
   if(NOT EXISTS "${archive}")
     message(FATAL_ERROR
       "Building the ANNC EP needs ${archive}: point ANNC_EP_ORT_BUILD_TREE "
@@ -96,6 +111,8 @@ target_compile_definitions(annc_ep PRIVATE
     ANNC_EP_NATIVE_POOL_ORT_VERSION="${ANNC_EP_NATIVE_POOL_ORT_VERSION}")
 target_link_libraries(annc_ep PRIVATE
     "-Wl,--start-group"
+    "${ANNC_EP_ORT_MLAS_ARCHIVE}"
+    "${ANNC_EP_ORT_KLEIDIAI_ARCHIVE}"
     "${ANNC_EP_ORT_COMMON_ARCHIVE}"
     "${ANNC_EP_ORT_CPUINFO_ARCHIVE}"
     "-Wl,--end-group")

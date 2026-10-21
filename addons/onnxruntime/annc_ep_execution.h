@@ -20,6 +20,7 @@
 #include <onnxruntime_c_api.h>
 
 #include "Kernel/ExecutionContext.h"
+#include "Kernel/PackedB.h"
 #include "Support/ThreadPool/ThreadPool.h"
 
 #include "annc_ep_native_pool.h"
@@ -106,6 +107,8 @@ class OnnxExecutionContext {
 
   // The ANNC ABI struct handed to the kernel as its first argument.
   AnncExecutionContext* abi() { return &context_; }
+
+  void SetPackedB(const AnncPackedB* packed_b) { context_.packed_b = packed_b; }
 
   // Ownership of the returned status (the first error the callbacks recorded)
   // transfers to the caller; nullptr when the call reported no error.
@@ -204,6 +207,8 @@ struct ContextCall {
   // ORT input index each argument resolves to; same order as arg_ranks.
   std::vector<int64_t> arg_indices;
   std::vector<OutputContract> outputs;
+  // Optional packed-B state (ABI v4). NULL keeps every kernel on its raw path.
+  const AnncPackedB* packed_b = nullptr;
   // ORT output index each declared output slot maps to; empty = identity.
   std::vector<uint32_t> output_slots;
 };

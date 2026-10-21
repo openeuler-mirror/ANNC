@@ -101,14 +101,27 @@ include guard，重复 include 会让其中每个结构体重复定义。
 
 EP 构建时**始终**编译原生池路径，没有开关；它需要宿主 ORT 构建树的 `Release/`
 归档。MLAS 是 EP 使用的 kernel GEMM 后端，构建 EP 时自动启用（`ANNC_KERNEL_MLAS`
-被强制为 `ON`）：构建期只需要 ORT 源码的 `mlas.h`，运行时由
-`ANNC_EP_ORT_BUILD_TREE` 定位四个归档。
+被强制为 `ON`）：构建期需要 ORT 源码的 `mlas.h`，以及宿主构建的
+common、cpuinfo、MLAS、KleidiAI 四个归档。EP 的 packed-B 初始化直接调用私有
+MLAS 打包接口，因此插件也必须链接 MLAS/KleidiAI，不能依赖宿主导出这些符号。
+运行时由 `ANNC_EP_ORT_BUILD_TREE` 定位同一组归档以链接生成的 kernel。
+GEMM-ASM 微内核归档是可选依赖；ORT 的 MLAS 路径无需该归档。
+
+`ANNC_EP_PACKED_B=1` 在 session 创建时打包固定 f32 权重；默认关闭，未设置、
+空字符串或 `0` 均关闭，非空且非 `0` 开启。关闭仅使用 raw-B，保留融合；
+修改后须新建 session。完整使能与验证步骤见
+[构建与部署手册](../../tests/ort-ep-build-and-deploy.md#37-packed-b-特性)。BMM 的 pre-affine
+折叠与打包可同时开启：编译库通过
+`_mlir_ciface___annc_effective_weight_<kernel_name>() -> uint64_t` 暴露内核实际
+使用的权重地址；返回 0 表示仍使用原始 initializer。折叠权重读取入口引用与
+内核相同的模块常量，不在 Compute 中重复折叠或打包。旧库缺少该入口时 BMM
+安全回退 raw-B；缓存指纹已更新，运行时编译会重建产物。
 
 | CMake 选项 | 启用配置 |
 |---|---|
-| `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 native pool 所需的 common/cpuinfo 归档；构建 EP 时必需 |
+| `ANNC_EP_ORT_BUILD_TREE` | 宿主 ORT 构建树，提供 common/cpuinfo 与 packed-B 所需的 MLAS/KleidiAI 归档；构建 EP 时必需 |
 | `ANNC_EP_NATIVE_POOL_ORT_VERSION` | 默认 `1.26.0`，须与已验证的私有布局一致 |
-| `ANNC_KERNEL_MLAS` | 构建 EP 时自动为 `ON`，无需手动设置；构建期只需要 `mlas.h` |
+| `ANNC_KERNEL_MLAS` | 构建 EP 时自动为 `ON`，无需手动设置；构建期需要 `mlas.h` 与宿主 MLAS/KleidiAI 归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | ORT 源码的 `onnxruntime/core/mlas/inc`，包含 `mlas.h` |
 
 运行时 `ANNC_EP_ORT_BUILD_TREE` 必须指向 ORT 构建树（`<build_dir>/Linux/Release`），

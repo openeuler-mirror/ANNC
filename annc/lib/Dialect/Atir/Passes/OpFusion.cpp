@@ -5250,6 +5250,8 @@ static func::FuncOp createBatchedMatMulAddKernelFunc(
         func.getLoc(), weightType.cloneWithCacheData(match.foldedWeight),
         rewriter.getStringAttr("pre_affine_weight"),
         rewriter.getStringAttr("private"));
+    weight.getDefiningOp()->setAttr("annc.effective_weight",
+                                   rewriter.getUnitAttr());
     bias = rewriter.create<ConstantOp>(
         func.getLoc(), biasType.cloneWithCacheData(match.foldedBias),
         rewriter.getStringAttr("pre_affine_bias"),
