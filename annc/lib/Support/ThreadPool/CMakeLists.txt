@@ -5,4 +5,4 @@ add_library(ANNCThreadPool STATIC
 
 install(TARGETS ANNCThreadPool
         EXPORT MLIRTargets
-        ARCHIVE DESTINATION lib)
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

@@ -137,7 +137,7 @@ Type TensorType::parse(AsmParser &odsParser) {
     if (!odsParser.parseOptionalKeyword(kTensorData)) {
       if (odsParser.parseEqual())
         PARSE_TENSOR_ERROR(kTensorData)
-      auto stringEncoding = dyn_cast_or_null<StringAttr>(encoding);
+      auto stringEncoding = ::llvm::dyn_cast_or_null<StringAttr>(encoding);
       if (stringEncoding && stringEncoding.getValue() == "string") {
         if (odsParser.parseKeyword(kTensorStringData) ||
             odsParser.parseLSquare())
@@ -232,7 +232,7 @@ void TensorType::print(AsmPrinter &odsPrinter) const {
   }
   if (getCacheData()) {
     odsPrinter << ", " << kTensorData << " = ";
-    if (auto stringData = dyn_cast<DenseStringElementsAttr>(getCacheData())) {
+    if (auto stringData = ::llvm::dyn_cast<DenseStringElementsAttr>(getCacheData())) {
       odsPrinter << kTensorStringData << "[";
       for (auto [index, value] : llvm::enumerate(
                stringData.getValues<StringRef>())) {

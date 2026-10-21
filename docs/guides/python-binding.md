@@ -2,6 +2,8 @@
 
 `python/annc` 使用 pybind11 暴露 ATIR 构建接口（nanobind 为 MLIR 自带 Python 绑定的传递依赖）。
 
+> Python 绑定默认不构建；使用 `./build.sh --enable-python`（或 `-DANNC_ENABLE_PYTHON=ON`）开启。
+
 | 模块 | 说明 |
 |------|------|
 | `annc.builder` | `MLIRBuilder`，创建 MLIR module/function |
@@ -45,4 +47,4 @@ module.operation.print(large_elements_limit=16)
 
 ## 常见问题
 
-- **导入失败**：确认已安装 `pybind11` 与 `nanobind`，且构建时使用了正确的 Python 解释器（`build.sh` 读取 `PYTHON`，并传递给 `Python_EXECUTABLE` / `Python3_EXECUTABLE`）。
+- **导入失败**：确认构建时加了 `--enable-python`、已安装 `pybind11` 与 `nanobind`，且使用了正确的 Python 解释器（`build.sh` 读取 `PYTHON`，并传递给 `Python_EXECUTABLE` / `Python3_EXECUTABLE`）。

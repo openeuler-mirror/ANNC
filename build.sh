@@ -3,12 +3,11 @@
 # Default configuration
 BUILD_TYPE="Release"
 INSTALL_PREFIX="${PWD}/install"
-ENABLE_LIBCXX="OFF"
-ENABLE_ASSERTIONS="ON"
 ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="OFF"
 ENABLE_COVERAGE="OFF"
 ANNC_DEBUG="OFF"
+ENABLE_PYTHON="OFF"
 KDNN_SOURCE="RELEASE"
 KDNN_DIR="${PWD}/third_party/KDNN"
 KDNN_LIB_VARIANT="sve-threadpool"
@@ -58,14 +57,6 @@ while [[ $# -gt 0 ]]; do
     --install-prefix)
       INSTALL_PREFIX="$2"
       shift 2
-      ;;
-    --enable-libcxx)
-      ENABLE_LIBCXX="ON"
-      shift
-      ;;
-    --disable-assertions)
-      ENABLE_ASSERTIONS="OFF"
-      shift
       ;;
     --enable-constant-folding)
       ENABLE_CONSTANT_FOLDING="ON"
@@ -175,13 +166,19 @@ while [[ $# -gt 0 ]]; do
       ANNC_DEBUG="ON"
       shift
       ;;
+    --enable-python)
+      ENABLE_PYTHON="ON"
+      shift
+      ;;
+    --disable-python)
+      ENABLE_PYTHON="OFF"
+      shift
+      ;;
     -h|--help)
       echo "Usage: $0 [options]"
       echo "Options:"
       echo "  --build-type [Debug|Release|RelWithDebInfo]  Set build type (default: Release)"
       echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
-      echo "  --enable-libcxx               Enable libc++"
-      echo "  --disable-assertions          Disable assertions"
       echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support"
       echo "                                (default: OFF; requires TensorFlow; conflicts with --enable-ort)"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
@@ -211,8 +208,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --dry-run                     Print the resolved framework switches and exit"
       echo "                                (no configure/build; useful for CI checks)"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
+      echo "  --enable-python               Build the ANNC Python bindings (default OFF;"
+      echo "                                requires pybind11 + nanobind)"
+      echo "  --disable-python              Disable the ANNC Python bindings (default)"
       echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
-      echo "                                third_party (LLVM/json) build type is unchanged"
+      echo "                                third_party (json) build type is unchanged"
       echo "  TensorFlow addon env vars:"
       echo "    ANNC_TENSORFLOW_PRELOAD=ON|OFF        TF addon preload mode (default: ON)"
       echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
@@ -401,8 +401,8 @@ if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
   fi
 fi
 
-# Coverage note: keep the existing build type (forcing Debug would recompile
-# LLVM). Line coverage is accurate in Release; branch coverage is approximate.
+# Coverage note: keep the existing build type (forcing Debug recompiles the
+# bundled json). Line coverage is accurate in Release; branch coverage is approximate.
 # The gcovr dependency is handled below alongside the other Python deps.
 if [ "${ENABLE_COVERAGE}" == "ON" ] && [ "${BUILD_TYPE}" == "Release" ]; then
   echo "NOTE: --coverage with Release build: line coverage accurate, branch coverage approximate."
@@ -520,7 +520,8 @@ DEP_ERRORS=0
 
 echo "Checking Python environment (${PYTHON})..."
 
-# pybind11 and nanobind are lightweight build-time deps. Auto-install if missing.
+# pybind11 and nanobind are only needed when the Python bindings are enabled.
+if [ "${ENABLE_PYTHON}" == "ON" ]; then
 for dep in pybind11 nanobind; do
   if ! python_module_available "${dep}"; then
     if [ "${INSTALL_DEPS}" == "YES" ]; then
@@ -541,6 +542,7 @@ for dep in pybind11 nanobind; do
     fi
   fi
 done
+fi
 
 # gcovr is the coverage report tool, only needed with --coverage.
 if [ "${ENABLE_COVERAGE}" == "ON" ]; then
@@ -598,14 +600,18 @@ if [ ${DEP_ERRORS} -ne 0 ]; then
 fi
 
 # At this point the required modules must be importable.
-PYBIND11_DIR=$(get_pybind11_dir) || {
-  echo "ERROR: Unable to determine pybind11 CMake directory." >&2
-  exit 1
-}
-NANOBIND_DIR=$(get_nanobind_dir) || {
-  echo "ERROR: Unable to determine nanobind CMake directory." >&2
-  exit 1
-}
+PYBIND11_DIR=""
+NANOBIND_DIR=""
+if [ "${ENABLE_PYTHON}" == "ON" ]; then
+  PYBIND11_DIR=$(get_pybind11_dir) || {
+    echo "ERROR: Unable to determine pybind11 CMake directory." >&2
+    exit 1
+  }
+  NANOBIND_DIR=$(get_nanobind_dir) || {
+    echo "ERROR: Unable to determine nanobind CMake directory." >&2
+    exit 1
+  }
+fi
 
 # -----------------------------------------------------------------------------
 # TensorFlow proto generation
@@ -716,7 +722,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Create build directory (preserve LLVM build if exists)
+# Create build directory (preserve existing build artifacts if present)
 # -----------------------------------------------------------------------------
 
 if [ -d "build" ] && [ "$CLEAN_BUILD" != "YES" ]; then
@@ -758,11 +764,10 @@ check_cache_consistency() {
     "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
     "Python_EXECUTABLE:$(command -v ${PYTHON})"
     "Python3_EXECUTABLE:$(command -v ${PYTHON})"
-    "LLVM_ENABLE_LIBCXX:${ENABLE_LIBCXX}"
-    "LLVM_ENABLE_ASSERTIONS:${ENABLE_ASSERTIONS}"
     "ANNC_ENABLE_CONSTANT_FOLDING:${ENABLE_CONSTANT_FOLDING}"
     "ANNC_ENABLE_KDNN_ADAPTOR:${ENABLE_KDNN_ADAPTOR}"
     "ANNC_ENABLE_COVERAGE:${ENABLE_COVERAGE}"
+    "ANNC_ENABLE_PYTHON:${ENABLE_PYTHON}"
     "ANNC_KDNN_SOURCE:${KDNN_SOURCE}"
     "ANNC_KDNN_DIR:${KDNN_DIR}"
     "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
@@ -905,10 +910,9 @@ check_source_glob_changes() {
   mv -f "${tmp}" "${snapshot}"
 }
 
-# --annc-debug 只影响 ANNC 自有代码的编译选项（在 CMakeLists.txt 中位于
-# add_subdirectory(llvm) 之后），因此切换它不需要 --clean：删除 CMakeCache.txt
-# 触发就地重新配置即可，build/ 与 _deps 中的第三方构建产物原样保留，LLVM/json
-# 的编译命令不变、不会被 ninja 重编。cache 中缺失该键视为 OFF（旧构建）。
+# --annc-debug 只影响 ANNC 自有代码的编译选项，因此切换它不需要 --clean：
+# 删除 CMakeCache.txt 触发就地重新配置即可，build/ 中的第三方（json）构建产物
+# 原样保留、不会被 ninja 重编。cache 中缺失该键视为 OFF（旧构建）。
 check_annc_debug_toggle() {
   [ -f "CMakeCache.txt" ] || return 0
   local cached
@@ -923,7 +927,7 @@ check_annc_debug_toggle() {
 
 # 增量构建: 若 build/CMakeCache.txt 已存在且参数一致, 跳过 cmake 重新配置,
 # 直接复用既有 cache。避免对已存在 cache 重复传 -D 触发的 cache 变量时序问题
-# (如 CMAKE_BUILD_TYPE / pybind11_DIR 在 LLVM add_subdirectory 作用域不可见)。
+# (如 CMAKE_BUILD_TYPE / pybind11_DIR 在子目录作用域不可见)。
 # 若参数不一致, 必须先使用 --clean 重新配置。
 SKIP_CMAKE="NO"
 if [ -f "CMakeCache.txt" ]; then
@@ -972,6 +976,7 @@ else
   fi
   echo "  GEMM-ASM Source Dir: ${ANNC_GEMM_ASM_SOURCE_DIR:-<runtime env only>}"
   echo "  Coverage: ${ENABLE_COVERAGE}"
+  echo "  Python Bindings: ${ENABLE_PYTHON}"
   echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
   echo "  KDNN Source: ${KDNN_SOURCE}"
   if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
@@ -987,12 +992,11 @@ else
   cmake .. \
     -G Ninja \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
-    -DLLVM_ENABLE_LIBCXX="${ENABLE_LIBCXX}" \
-    -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTIONS}" \
     -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
     -DANNC_DEBUG="${ANNC_DEBUG}" \
+    -DANNC_ENABLE_PYTHON="${ENABLE_PYTHON}" \
     -DANNC_ENABLE_TENSORFLOW="${ENABLE_TENSORFLOW}" \
     -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
     -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
@@ -1038,17 +1042,6 @@ ninja install
 if [ $? -ne 0 ]; then
     echo "Installation failed, aborting"
     exit 1
-fi
-
-# LLVM keeps the build-tree llvm-lit path when LLVM_INSTALL_UTILS is disabled.
-# Rewrite that generated install config to use its relocatable tools directory
-# so the package does not expose the machine-local build path.
-LLVM_INSTALL_CONFIG="${INSTALL_PREFIX}/lib/cmake/llvm/LLVMConfig.cmake"
-if [ -f "${LLVM_INSTALL_CONFIG}" ]; then
-  if ! sed -i 's|^set(LLVM_DEFAULT_EXTERNAL_LIT .*)$|set(LLVM_DEFAULT_EXTERNAL_LIT "${LLVM_TOOLS_BINARY_DIR}/llvm-lit")|' \
-      "${LLVM_INSTALL_CONFIG}"; then
-    echo "Warning: failed to rewrite ${LLVM_INSTALL_CONFIG}" >&2
-  fi
 fi
 
 echo "Build and installation completed successfully"

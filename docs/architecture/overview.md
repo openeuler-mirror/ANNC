@@ -214,7 +214,7 @@ flowchart TB
 | **优化能力复用效率**        | 新框架接入时仅需开发前端适配器，复用已有 ATIR 优化和算子接入能力  | 定义稳定的 NodeInfo 接口契约，降低前端适配成本        |
 | **前端适配覆盖度**         | TF 前端完整；ONNX 前端已落地（覆盖融合子图所需算子子集），PyTorch 未纳入 | 优先覆盖客户量最大的框架，通过 NodeInfo 抽象降低边际适配成本 |
 | **TF Serving 启动时延** | 首次加载模型需执行编译 pipeline                 | 离线预编译、图优化缓存（未来）、合理设置 timeout        |
-| **磁盘空间**            | 构建 LLVM/MLIR 需约 50GB                 | 构建机独立环境、增量构建                        |
+| **磁盘空间**            | ANNC 构建目录约 1–3GB（LLVM/MLIR 由系统包提供） | 构建机独立环境、增量构建                        |
 | **构建环境**            | 依赖 openEuler、鲲鹏 920X、TensorFlow 2.20 | 明确依赖清单，提供 build.sh 一键构建             |
 | **运维监控**            | 需要观察编译失败、超时、回退事件                     | 统一日志、关键事件埋点                         |
 | **模型兼容性**           | 部分 TF 算子/动态 shape 可能不支持              | 失败自动回退，持续扩展算子覆盖                     |
@@ -614,7 +614,7 @@ flowchart TB
 | 非功能需求    | 设计说明                                            |
 | -------- | ----------------------------------------------- |
 | **性能**   | AOT 编译消除首次推理 JIT 开销；算子融合与 tiling 提升 kernel 执行效率 |
-| **资源**   | 构建阶段消耗大量磁盘（\~50GB）和内存；运行期 `.so` 加载占用进程地址空间      |
+| **资源**   | 构建阶段消耗数 GB 磁盘（LLVM 不参与编译）和内存；运行期 `.so` 加载占用进程地址空间 |
 | **可维护性** | ANNC 框架对接层、工具链前端、工具链后端三层解耦；各层独立演进               |
 | **可观测性** | 通过 `annc_verbose`、TF 日志、临时文件保留进行问题定位            |
 | **兼容性**  | 失败自动回退原生执行；保留 GraphDef → ATIR 与 GraphDef 重写能力    |
@@ -748,7 +748,7 @@ flowchart TB
 - **运行时 profiling**：`ANNCFusedOp` 支持 `ANNC_FUSED_PROFILE` / `ANNC_FUSED_PROFILE_INTERVAL` 环境变量，分项统计 load/threadpool/memref/alloc/kernel 耗时。
 - **临时文件保留**：`keep_temp_files=true` 便于问题复现。
 - **工作目录隔离**：`work_dir` 可按模型/实例指定，便于并行调试。
-- **版本信息**：当前未在构建产物中嵌入 LLVM/MLIR 版本（无 `--version` 输出）；版本基线以根 `CMakeLists.txt` 的 FetchContent 声明（LLVM 21.1.3、nlohmann/json v3.11.3）为准，CI 构建日志（Jenkinsfile）记录 cmake/ninja/clang/python 版本。
+- **版本信息**：当前未在构建产物中嵌入 LLVM/MLIR 版本（无 `--version` 输出）；版本基线为外部 LLVM/MLIR 工具链（本机验证 `llvm-toolset-20` 20.1.8），由根 `CMakeLists.txt` 的 `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 确定（不锁定版本）；nlohmann/json 仍为 FetchContent v3.11.3。CI 构建日志（Jenkinsfile）记录 cmake/ninja/clang/python 版本。
 
 ### 7.3 可演进性
 
@@ -829,8 +829,8 @@ flowchart TB
 - 目标硬件为 AArch64 服务器（当前优先支持鲲鹏 920X），未来可扩展至其他 CPU 架构。
 - 目标操作系统为 openEuler 24.03 LTS SP4 或兼容版本。
 - 用户已安装 TensorFlow 2.20.0、pybind11、nanobind。
-- 构建环境具备约 50GB 磁盘空间和足够的编译内存。
-- 构建依赖还包括 protobuf-devel、gtest-devel、clang、ninja-build；LLVM 21.1.3、nlohmann/json v3.11.3（由 CMake 自动拉取/定位）。
+- 构建环境具备足够的编译内存（ANNC 构建目录约数 GB）。
+- 构建依赖还包括 protobuf-devel、gtest-devel、ninja-build、llvm-toolset-20（LLVM/MLIR 20.1.8，含 clang 与 MLIR Python 绑定源码）；nlohmann/json v3.11.3 由 CMake FetchContent 获取。
 
 ### 9.2 约束
 

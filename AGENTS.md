@@ -94,7 +94,7 @@ TF 路径：`annc-converter` 把元数据转为 GraphDef 节点属性供 `ANNCFu
 
 ### 受管依赖与生成物
 
-- 不改 `third_party/llvm/`、`third_party/json/`；补丁经 `patches/` 与 CMake 流程应用。
+- 不改 `third_party/json/`；LLVM/MLIR 由系统工具链提供，ANNC 源码通过 `LLVMCompat.h` 兼容不同版本。补丁经 `patches/` 与 CMake 流程应用。
 - 不改 protoc 生成产物（`frontends/onnx/protos/gen_code/`）；改 schema 或生成脚本后重新生成。
 
 ### 提交边界

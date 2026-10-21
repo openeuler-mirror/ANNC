@@ -11,16 +11,16 @@
 
 ## 0. 路径约定
 
-| 占位符 | 本机当前值（示例） |
+| 占位符 | 说明（按实际环境替换） |
 |---|---|
-| `<ANNC_ROOT>` | `/home/yyf/ANNC` |
-| `<ANNC_PREFIX>` | `/opt/ANNC`（或 `<ANNC_ROOT>/install`） |
-| `<ORT_ROOT>` | `/home/yyf/onnx/onnxruntime.bak`（ORT 源码树） |
-| `<ORT_BUILD_ROOT>` | `/home/yyf/onnx/onnxruntime.bak/build`（ORT `--build_dir`） |
+| `<ANNC_ROOT>` | ANNC 源码根目录 |
+| `<ANNC_PREFIX>` | 安装前缀（如 `/opt/ANNC` 或 `<ANNC_ROOT>/install`） |
+| `<ORT_ROOT>` | ORT 1.26.0 源码树 |
+| `<ORT_BUILD_ROOT>` | ORT `--build_dir` 构建根目录 |
 | `<ORT_BUILD>` | `<ORT_BUILD_ROOT>/Linux/Release` |
-| `<ONNX_MODEL_DIR>` | `/home/yyf/onnx/model`（`model1~4.onnx`） |
-| `<BENCH_SCRIPT>` | `/home/yyf/onnx/onnxruntime_test/onnxruntime_test/onnx_benchmark_all.py` |
-| `<PYTHON>` | `/home/yyf/onnx/venv-ort/bin/python3`（需 onnx/onnxruntime） |
+| `<ONNX_MODEL_DIR>` | 四个测试模型（`model1~4.onnx`）所在目录 |
+| `<BENCH_SCRIPT>` | ONNX 压测脚本路径 |
+| `<PYTHON>` | 带 onnx/onnxruntime 的 Python 解释器 |
 
 ## 1. 前置条件
 
@@ -31,12 +31,21 @@
 
   ```shell
   yum install cmake ninja-build protobuf-devel protobuf-compiler \
-              gcc gcc-c++ openssl-devel python3-devel numactl
-  pip install pybind11 nanobind numpy
+              gcc gcc-c++ openssl-devel python3-devel numactl \
+              llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+              llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+              llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+              llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+              llvm-toolset-20-clang
+  pip install numpy
+  # 仅在 --enable-python（Python 绑定）时需要：
+  # pip install pybind11 nanobind
   ```
 
-- LLVM/MLIR 21.1.3 与 nlohmann/json 由 CMake `FetchContent` 下载并编译。首次构建
-  约 30–60 分钟、约 50GB；离线环境预置 `third_party/llvm/` 与 `third_party/json/`。
+- LLVM/MLIR 来自外部工具链（本机验证 `llvm-toolset-20`；CMake `find_package` 使用
+  预装工具链与库，不锁定版本）；nlohmann/json 由 CMake `FetchContent` 下载。构建不再编译 LLVM，
+  无需 50GB 磁盘或 30–60 分钟 LLVM 编译；离线环境只需预置 `third_party/json/`。
+  运行期通过 `ANNC_LLVM_BIN`（缺省为构建期记录的工具目录）解析 LLVM 20 工具。
 
 ### 1.2 ONNX Runtime 1.26.0
 
@@ -111,12 +120,26 @@ export ANNC_MLAS_INCLUDE_DIR=<ORT_ROOT>/onnxruntime/core/mlas/inc
 ```
 
 - `--enable-ort`：仅构建 ONNX 前端 + EP；`--enable-ort-ep` 是别名。
+- Python 绑定默认不构建；需要时加 `--enable-python`（同时安装 pybind11/nanobind）。
 - `--dry-run`：先确认框架开关，不 configure/build。
 - MLAS 是 ORT EP 的必需组件，构建 ORT EP 时自动启用，不需要手动设置。
   构建日志应出现 `Kernel MLAS: ON`。
 - 四个 MLAS 运行期归档由 `ANNC_EP_ORT_BUILD_TREE` 定位；该变量必须指向 ORT
   构建树的 `Release/` 目录（不是源码树），driver 按 `<tree>/` 与
   `<tree>/_deps/*-build/` 的布局查找四个归档。
+- LLVM/MLIR 查找顺序：`-DLLVM_DIR`/`-DMLIR_DIR` → 环境变量 `ANNC_LLVM_BIN` →
+  `LLVM_ROOT`/`MLIR_ROOT` → `llvm-config-{22,21,20} --cmakedir`。标准
+  `llvm-toolset-20` 安装且 `llvm-config-20` 在 `PATH` 时无需导出；工具链在自定义
+  前缀时：
+
+  ```shell
+  export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
+  # 或：export LLVM_DIR=<.../lib64/cmake/llvm>
+  #     export MLIR_DIR=<.../lib64/cmake/mlir>
+  ```
+
+  运行期 `annc-onnx-pipeline`/`annc` 仍从 `ANNC_LLVM_BIN`（缺省为构建期记录值）
+  解析工具；目标机路径与构建机不同时需在运行环境导出。
 
 等价的直接 `cmake` 配置：
 
@@ -130,7 +153,12 @@ cmake -S <ANNC_ROOT> -B <ANNC_ROOT>/build -G Ninja \
   -DANNC_ENABLE_ONNXRUNTIME_EP=ON \
   -DANNC_ONNXRUNTIME_INCLUDE_DIR=<ORT_ROOT>/include/onnxruntime/core/session \
   -DANNC_EP_ORT_BUILD_TREE=<ORT_BUILD> \
-  -DANNC_MLAS_INCLUDE_DIR=<ORT_ROOT>/onnxruntime/core/mlas/inc \
+  -DANNC_MLAS_INCLUDE_DIR=<ORT_ROOT>/onnxruntime/core/mlas/inc
+```
+
+需要 Python 绑定时（默认不构建），追加 `-DANNC_ENABLE_PYTHON=ON` 与：
+
+```shell
   -Dpybind11_DIR="$(<PYTHON> -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
   -Dnanobind_DIR="$(<PYTHON> -c 'import nanobind; print(nanobind.cmake_dir())')" \
   -DPython_EXECUTABLE="$(command -v <PYTHON>)"
@@ -159,12 +187,10 @@ ninja -C <ANNC_ROOT>/build install
 <ANNC_PREFIX>/bin/annc-opt
 <ANNC_PREFIX>/bin/annc-asm
 <ANNC_PREFIX>/lib64/libannc_ep.so      # lib/ 布局时为 lib/libannc_ep.so
-<ANNC_PREFIX>/lib/libANNC*.a
-<ANNC_PREFIX>/lib/libLLVM*.a
+<ANNC_PREFIX>/lib64/libANNC*.a      # lib/ 布局时为 lib/libANNC*.a
 ```
 
-- `libLLVMSupport.a` 等 LLVM 归档与 ANNC 归档必须在同一目录；`ANNC_KERNEL_LIB_PATH`
-  指向该目录（本机为 `<ANNC_PREFIX>/lib`）。
+- `ANNC_KERNEL_LIB_PATH` 指向 ANNC 归档目录（aarch64 安装为 `<ANNC_PREFIX>/lib64`）。
 - `libannc_ep.so` 由 GNUInstallDirs 决定安装到 `lib` 或 `lib64`，注册时使用实际
   路径；本机为 `<ANNC_PREFIX>/lib64/libannc_ep.so`。
 - MLAS 四个归档在运行时由 `ANNC_EP_ORT_BUILD_TREE` 定位。构建期只需要
@@ -183,10 +209,10 @@ ANNC 安装前缀保持默认相对布局时大多数变量可省略。常用变
 | `ANNC_EP_FUSION_MASKED_MUL` | 对应 `masked_mul` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | 对应 `batched_matmul_add` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
 | `ANNC_EP_PIPELINE` | `annc-onnx-pipeline` 绝对路径 | 与 EP 同目录 → `../bin` → `PATH` |
-| `ANNC_KERNEL_LIB_PATH` | ANNC/LLVM 归档目录 | `<ANNC_PREFIX>/lib` |
+| `ANNC_KERNEL_LIB_PATH` | ANNC 归档目录 | `<ANNC_PREFIX>/lib64`（GNUInstallDirs；aarch64） |
+| `ANNC_LLVM_BIN` | LLVM  bin 目录；其父目录的 `lib64`/`lib` 提供 LLVM 静态归档 | 构建期写入的工具目录 |
 | `ANNC_EP_ORT_BUILD_TREE` | ORT 构建树 `Release/`；用于定位四个 MLAS 归档 | 构建期值/未设置 |
 | `ANNC_EP_CACHE_DIR` | EP 编译缓存目录 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` |
-| `ANNC_CLANG` | clang 路径或 GCC triple 包装脚本（`crtbeginS.o` 问题见 §4.1） | 构建期检测值 |
 | `ANNC_EP_DEBUG=1` | 打印站点申报、编译与缓存诊断 | 关闭 |
 
 要点：
@@ -296,12 +322,6 @@ model4 只开 `tensordot_matmul` 时预期 `sites=15 claimed=15 dropped=0`；`=0
 warning: unsupported op 'Gemm' at node '...' lowered to atir.opaque
 warning: unsupported op 'Slice' at node '...' lowered to atir.opaque
 ```
-
-ATIR 尚未覆盖这些 op，或该节点的形状/属性不满足映射条件（例如 `Gemm` 没有
-OpSpec 行，`Slice` 只支持 stride-1 的静态 begin/size）；节点保留为
-`atir.opaque`，被融合 pattern 吸收的节点进入编译，未吸收的节点由 ORT CPU EP
-执行。`annc-onnx2atir` 用退出码 2 表示“导入成功但有 opaque 节点”，pipeline
-将其视为正常，不影响已编译站点的计数。
 
 **各模型/特性的站点数**（单独开启对应开关、其余保持默认关闭）：
 

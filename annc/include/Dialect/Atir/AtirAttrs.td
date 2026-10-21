@@ -56,7 +56,7 @@ def Atir_TilingAttr : AttrDef<Atir_Dialect, "Tiling", []> {
     std::vector<int64_t> TilingAttr::getTilingAxes() const {
       std::vector<int64_t> axes;
       for (auto& attr : getAxes()) {
-        axes.push_back(dyn_cast<::mlir::IntegerAttr>(attr).getInt());
+        axes.push_back(::llvm::dyn_cast<::mlir::IntegerAttr>(attr).getInt());
       }
       return axes;
     }
@@ -64,8 +64,8 @@ def Atir_TilingAttr : AttrDef<Atir_Dialect, "Tiling", []> {
       std::vector<std::vector<int64_t>> starts;
       for (auto& arr : getStart()) {
         std::vector<int64_t> start;
-        for (auto& attr : dyn_cast<::mlir::ArrayAttr>(arr)) {
-          start.push_back(dyn_cast<::mlir::IntegerAttr>(attr).getInt());
+        for (auto& attr : ::llvm::dyn_cast<::mlir::ArrayAttr>(arr)) {
+          start.push_back(::llvm::dyn_cast<::mlir::IntegerAttr>(attr).getInt());
         }
         starts.push_back(start);
       }
@@ -75,8 +75,8 @@ def Atir_TilingAttr : AttrDef<Atir_Dialect, "Tiling", []> {
       std::vector<std::vector<int64_t>> sizes;
       for (auto& arr : getSize()) {
         std::vector<int64_t> size;
-        for (auto& attr : dyn_cast<::mlir::ArrayAttr>(arr)) {
-          size.push_back(dyn_cast<::mlir::IntegerAttr>(attr).getInt());
+        for (auto& attr : ::llvm::dyn_cast<::mlir::ArrayAttr>(arr)) {
+          size.push_back(::llvm::dyn_cast<::mlir::IntegerAttr>(attr).getInt());
         }
         sizes.push_back(size);
       }

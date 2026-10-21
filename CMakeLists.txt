@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 project(annc LANGUAGES CXX C)
 
+include(GNUInstallDirs)
+
+# Python bindings are off by default: the inference acceleration path (TF
+# addons, ORT EP, AOT kernels) is pure C++ and does not load them. Enable with
+# -DANNC_ENABLE_PYTHON=ON (build.sh --enable-python); this pulls in pybind11,
+# nanobind, FindPython and the python/ subdirectory.
+option(ANNC_ENABLE_PYTHON "Build the ANNC Python bindings" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
@@ -117,97 +125,215 @@ if(NOT json_POPULATED)
   endif()
 endif()
 add_subdirectory(${json_SOURCE_DIR} ${json_BINARY_DIR})
-# nlohmann_json is referenced by libraries in the MLIR export set
-install(TARGETS nlohmann_json EXPORT MLIRTargets)
 include(${CMAKE_SOURCE_DIR}/cmake/ThirdPartyKDNN.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/ThirdPartyGemmKernels.cmake)
 
 set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 
-set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable assertions")
-
-# Fetch LLVM/MLIR source at configure time
-
-# LLVM 裁剪选项 — 只编译 AArch64 后端 + MLIR
-set(LLVM_TARGETS_TO_BUILD "AArch64" CACHE STRING "")
-set(LLVM_ENABLE_PROJECTS "mlir;clang" CACHE STRING "")
-set(LLVM_ENABLE_RTTI ON CACHE BOOL "")
-set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "")
-set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "")
-set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "")
-set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "")
-set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "")
-set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "")
-set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "")
-set(LLVM_ENABLE_EH ON CACHE BOOL "")
-set(LLVM_ENABLE_WERROR OFF CACHE BOOL "")
-set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "")
-
-FetchContent_Declare(llvm
-  GIT_REPOSITORY https://gitee.com/mirrors/LLVM.git
-  GIT_TAG        llvmorg-21.1.3
-  GIT_SHALLOW    TRUE
-  SOURCE_DIR     ${CMAKE_SOURCE_DIR}/third_party/llvm
-)
-FetchContent_GetProperties(llvm)
-if(NOT llvm_POPULATED)
-  if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/llvm/llvm/CMakeLists.txt")
-    message(STATUS "LLVM source already exists, skipping fetch")
-    set(llvm_POPULATED ON CACHE INTERNAL "LLVM populated" FORCE)
-    set(llvm_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/llvm" CACHE INTERNAL "LLVM source dir" FORCE)
-    set(llvm_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/llvm-build" CACHE INTERNAL "LLVM binary dir" FORCE)
-  else()
-    message(STATUS "Fetching LLVM/MLIR from gitee.com/mirrors/LLVM.git (llvmorg-21.1.3) ...")
-    # TODO: CMake 3.29+ 使用 FetchContent_MakeAvailable 替代 FetchContent_Populate
-    FetchContent_Populate(llvm)
-  endif()
+# ── LLVM/MLIR 来源 ──────────────────────────────────────────────────────────
+# LLVM/MLIR 由外部工具链提供，通过 find_package 使用预装工具链与库；ANNC 不再
+# 在 configure 期下载或从源码编译 LLVM。**不锁定具体版本**：外部可传入任意与
+# ANNC API 兼容的 LLVM/MLIR（本机验证版本为 openEuler llvm-toolset-20 20.1.8）。
+# openEuler 24.03 SP3 及以后可用的安装命令：
+#   sudo dnf install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+#     llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+#     llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+#     llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+#     llvm-toolset-20-clang
+#
+# 查找提示优先级：显式 -DLLVM_DIR/-DMLIR_DIR（find_package 自身行为）高于
+# ANNC_LLVM_BIN 环境变量，最后回退 llvm-config --cmakedir。
+set(_annc_llvm_hints "")
+set(_annc_mlir_hints "")
+if(DEFINED ENV{ANNC_LLVM_BIN} AND NOT "$ENV{ANNC_LLVM_BIN}" STREQUAL "")
+  get_filename_component(_annc_llvm_prefix "$ENV{ANNC_LLVM_BIN}/.." ABSOLUTE)
+  list(APPEND _annc_llvm_hints
+    "${_annc_llvm_prefix}/lib64/cmake/llvm"
+    "${_annc_llvm_prefix}/lib/cmake/llvm")
+  list(APPEND _annc_mlir_hints
+    "${_annc_llvm_prefix}/lib64/cmake/mlir"
+    "${_annc_llvm_prefix}/lib/cmake/mlir")
 endif()
-
-# CMake 3.22 FindPython 规避：本工程一次 configure 内混合了多种 Python 组件组合
-# （MLIR 的 Development.Module-only、mlir/python 的 Module+Embed、ANNC 顶层的全量
-# Development），后一次 find 会改写/清空 _Python_DEVELOPMENT_*_SIGNATURE，导致下一次
-# configure 时 MLIR 的 Module-only 检测签名失配，报
-# "Could NOT find Python (missing: Development.Module)"。
-# 在进入 LLVM 子构建前清空上一轮残留的 FindPython 内部状态，使每次 configure 都从
-# 全新发现开始（解释器可执行文件仍由 Python_EXECUTABLE/Python3_EXECUTABLE 缓存锚定）。
-get_cmake_property(_annc_py_cache_vars CACHE_VARIABLES)
-foreach(_v IN LISTS _annc_py_cache_vars)
-  if(_v MATCHES "^_Python3?_")
-    unset(${_v} CACHE)
+# LLVM_ROOT / MLIR_ROOT（环境变量或 CMake 变量）可指向安装前缀，也可直接指向
+# 含 LLVMConfig.cmake / MLIRConfig.cmake 的目录。
+foreach(_annc_root IN ITEMS
+    "$ENV{LLVM_ROOT}" "${LLVM_ROOT}" "$ENV{MLIR_ROOT}" "${MLIR_ROOT}")
+  if(NOT "${_annc_root}" STREQUAL "")
+    list(APPEND _annc_llvm_hints
+      "${_annc_root}"
+      "${_annc_root}/lib64/cmake/llvm"
+      "${_annc_root}/lib/cmake/llvm")
+    list(APPEND _annc_mlir_hints
+      "${_annc_root}"
+      "${_annc_root}/lib64/cmake/mlir"
+      "${_annc_root}/lib/cmake/mlir")
   endif()
 endforeach()
-unset(_annc_py_cache_vars)
+if(NOT DEFINED LLVM_DIR)
+  find_program(ANNC_LLVM_CONFIG NAMES
+    llvm-config-22 llvm-config-21 llvm-config-20 llvm-config)
+  if(ANNC_LLVM_CONFIG)
+    execute_process(COMMAND "${ANNC_LLVM_CONFIG}" --cmakedir
+      OUTPUT_VARIABLE _annc_llvm_cmake_dir
+      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(EXISTS "${_annc_llvm_cmake_dir}/LLVMConfig.cmake")
+      list(APPEND _annc_llvm_hints "${_annc_llvm_cmake_dir}")
+    endif()
+  endif()
+endif()
+# MLIR 的 CMake 配置目录通常与 LLVM 的同级（<prefix>/lib{,64}/cmake/mlir）。
+foreach(_hint IN LISTS _annc_llvm_hints LLVM_DIR)
+  if(EXISTS "${_hint}/LLVMConfig.cmake")
+    get_filename_component(_annc_llvm_cmake_root "${_hint}" DIRECTORY)
+    list(APPEND _annc_mlir_hints "${_annc_llvm_cmake_root}/mlir")
+  endif()
+endforeach()
 
-# LLVM monorepo: CMakeLists.txt 入口在 llvm/ 子目录
-add_subdirectory(${llvm_SOURCE_DIR}/llvm ${llvm_BINARY_DIR})
+find_package(LLVM CONFIG QUIET HINTS ${_annc_llvm_hints})
+if(NOT LLVM_FOUND)
+  message(FATAL_ERROR
+    "LLVM not found (no LLVMConfig.cmake). Install an LLVM/MLIR toolchain "
+    "(on openEuler 24.03 the verified packages are):\n"
+    "  sudo dnf install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel "
+    "llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static "
+    "llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel "
+    "llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir "
+    "llvm-toolset-20-clang\n"
+    "or pass -DLLVM_DIR=<directory containing LLVMConfig.cmake>, "
+    "-DLLVM_ROOT=<install prefix> or set ANNC_LLVM_BIN. "
+    "(LLVM_DIR='${LLVM_DIR}', LLVM_ROOT='${LLVM_ROOT}')")
+endif()
+# Required form (find_package caches the hit above): keeps the canonical
+# "REQUIRED CONFIG" contract while the QUIET probe supplies the package hint.
+find_package(LLVM REQUIRED CONFIG HINTS ${_annc_llvm_hints})
+find_package(MLIR CONFIG QUIET HINTS ${_annc_mlir_hints})
+if(NOT MLIR_FOUND)
+  message(FATAL_ERROR
+    "MLIR not found (no MLIRConfig.cmake). Install the matching MLIR "
+    "development package (e.g. llvm-toolset-20-llvm-mlir-devel and "
+    "llvm-toolset-20-python3-mlir for the Python binding sources), or pass "
+    "-DMLIR_DIR=<directory containing MLIRConfig.cmake>, "
+    "-DMLIR_ROOT=<install prefix> or set ANNC_LLVM_BIN. "
+    "(MLIR_DIR='${MLIR_DIR}', MLIR_ROOT='${MLIR_ROOT}')")
+endif()
+find_package(MLIR REQUIRED CONFIG HINTS ${_annc_mlir_hints})
 
-set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
-set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
+# 发行版同时提供 libMLIR.so、libMLIR-C.so 与逐 dialect 的静态归档。同一个进程
+# 里混用多份 MLIR 实现会出现多份 TypeID/StorageUniquer：libMLIR-C.so 内嵌了一份
+# 隐藏可见性的 MLIR，它创建的 MLIRContext 交给 libMLIR.so 的 C++ 代码使用时会
+# 命中 ParametricStorageUniquer 空指针断言（Python 绑定实测）。llvm-toolset-20-
+# python3-mlir 提供的 libMLIRPythonCAPI.so 是一份自包含、导出符号的 MLIR C API
+# 实现，与 libMLIR.so 组合使用已验证（发行版自带的 mlir Python 包即如此构建）。
+# 因此：C API 目标统一指向 libMLIRPythonCAPI.so，其余 MLIR 静态目标指向
+# libMLIR.so；执行引擎、运行时与测试目标不在 libMLIR.so 中，保持原样。
+get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION)
+foreach(_cfg _RELWITHDEBINFO _RELEASE _DEBUG _MINSIZEREL)
+  if(NOT _annc_mlir_shared)
+    get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION${_cfg})
+  endif()
+endforeach()
+if(NOT _annc_mlir_shared)
+  if(ANNC_ENABLE_PYTHON)
+    message(FATAL_ERROR
+      "Python bindings require a shared libMLIR (the ANNC extension must share "
+      "the MLIR implementation with libMLIRPythonCAPI.so). Build the external "
+      "LLVM/MLIR with a shared MLIR library, or configure with "
+      "-DANNC_ENABLE_PYTHON=OFF.")
+  endif()
+  message(STATUS "ANNC: no shared MLIR target; using the toolchain's static "
+                 "libraries")
+endif()
 
-# LLVM/MLIR cmake 模块路径不能通过 add_subdirectory 自动传播到顶层作用域
-list(APPEND CMAKE_MODULE_PATH "${llvm_SOURCE_DIR}/llvm/cmake/modules")
-list(APPEND CMAKE_MODULE_PATH "${llvm_SOURCE_DIR}/mlir/cmake/modules")
+if(ANNC_ENABLE_PYTHON)
+  find_file(ANNC_MLIR_PYTHON_CAPI_LIBRARY
+    NAMES libMLIRPythonCAPI.so
+    HINTS
+      "${LLVM_INSTALL_PREFIX}/python_packages/mlir_core/mlir/_mlir_libs"
+      "${LLVM_INSTALL_PREFIX}/lib/python_packages/mlir_core/mlir/_mlir_libs"
+      "${MLIR_INSTALL_PREFIX}/python_packages/mlir_core/mlir/_mlir_libs")
+  if(NOT ANNC_MLIR_PYTHON_CAPI_LIBRARY)
+    message(FATAL_ERROR
+      "libMLIRPythonCAPI.so not found. Install llvm-toolset-20-python3-mlir "
+      "(it provides the MLIR Python C API library) or pass "
+      "-DANNC_MLIR_PYTHON_CAPI_LIBRARY=<path>.")
+  endif()
+  message(STATUS "ANNC: MLIR Python C API: ${ANNC_MLIR_PYTHON_CAPI_LIBRARY}")
+endif()
+
+get_property(_annc_imported_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+if(_annc_mlir_shared)
+foreach(_annc_tgt IN LISTS _annc_imported_targets)
+  if(NOT _annc_tgt MATCHES "^MLIR")
+    continue()
+  endif()
+  get_target_property(_annc_type ${_annc_tgt} TYPE)
+  if(NOT _annc_type STREQUAL "STATIC_LIBRARY")
+    continue()
+  endif()
+  # Not part of libMLIR.so / libMLIRPythonCAPI.so.
+  if(_annc_tgt MATCHES "^mlir_" OR _annc_tgt MATCHES "^MLIRExecutionEngine" OR
+     _annc_tgt MATCHES "Test")
+    continue()
+  endif()
+  if(_annc_tgt MATCHES "^MLIRCAP")
+    if(ANNC_ENABLE_PYTHON)
+      set(_annc_shared "${ANNC_MLIR_PYTHON_CAPI_LIBRARY}")
+    else()
+      continue()
+    endif()
+  else()
+    set(_annc_shared "${_annc_mlir_shared}")
+  endif()
+  set_target_properties(${_annc_tgt} PROPERTIES
+    IMPORTED_LOCATION "${_annc_shared}"
+    IMPORTED_LOCATION_RELEASE "${_annc_shared}"
+    IMPORTED_LOCATION_RELWITHDEBINFO "${_annc_shared}"
+    IMPORTED_LOCATION_DEBUG "${_annc_shared}"
+    IMPORTED_LOCATION_MINSIZEREL "${_annc_shared}")
+endforeach()
+message(STATUS "ANNC: linking MLIR via ${_annc_mlir_shared} (shared)")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
-# LLVM_INCLUDE_DIRS/MLIR_INCLUDE_DIRS 只在安装配置中存在, 构建树中需显式指定
-include_directories(${llvm_SOURCE_DIR}/llvm/include)
-include_directories(${llvm_BINARY_DIR}/include)
-include_directories(${llvm_SOURCE_DIR}/mlir/include)
-include_directories(${llvm_BINARY_DIR}/tools/mlir/include)
+include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${MLIR_INCLUDE_DIRS})
+separate_arguments(_annc_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+add_definitions(${_annc_llvm_definitions})
 
-# 供下游工具的 find_package(MLIR) 使用 (build-tree MLIRConfig.cmake)
-set(MLIR_DIR "${CMAKE_BINARY_DIR}/lib/cmake/mlir")
+# Toolchain locations the ANNC driver and pipeline use at build and run time.
+if(NOT LLVM_LIBRARY_DIRS)
+  message(FATAL_ERROR "LLVM_LIBRARY_DIRS is empty; LLVMConfig.cmake is incomplete.")
+endif()
+list(GET LLVM_LIBRARY_DIRS 0 ANNC_LLVM_LIB_DIR)
+set(ANNC_LLVM_BIN_DIR "${LLVM_TOOLS_BINARY_DIR}")
+# Build-time default for tests/FileCheck/run.sh (the script also accepts the
+# ANNC_LLVM_BIN environment variable, which takes precedence).
+file(WRITE "${CMAKE_BINARY_DIR}/annc_llvm_bin.txt" "${ANNC_LLVM_BIN_DIR}\n")
 
-set(PYBIND11_FINDPYTHON ON)
-find_package(pybind11 REQUIRED)
-include_directories(${pybind11_INCLUDE_DIRS})
+message(STATUS "ANNC: using LLVM/MLIR ${LLVM_PACKAGE_VERSION} "
+               "(version not pinned; external toolchain)")
+message(STATUS "ANNC: LLVM_DIR=${LLVM_DIR}")
+message(STATUS "ANNC: MLIR_DIR=${MLIR_DIR}")
+message(STATUS "ANNC: LLVM tools: ${ANNC_LLVM_BIN_DIR}")
+message(STATUS "ANNC: LLVM libraries: ${ANNC_LLVM_LIB_DIR}")
 
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(nanobind CONFIG REQUIRED)
+# 绑定所需的 MLIR Python 源码目标由 llvm-toolset-20-python3-mlir 提供
+# （<prefix>/src/python），因此不需要内建 LLVM。
+if(ANNC_ENABLE_PYTHON)
+  set(PYBIND11_FINDPYTHON ON)
+  find_package(pybind11 REQUIRED)
+  include_directories(${pybind11_INCLUDE_DIRS})
+
+  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+  find_package(nanobind CONFIG REQUIRED)
+endif()
 
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -220,35 +346,33 @@ include_directories(${CMAKE_BINARY_DIR}/annc/include)
 include_directories(${json_SOURCE_DIR}/include)
 
 # Keep ANNC-owned debug information relocatable in build/install artifacts.
-# This is deliberately added after the LLVM sub-build so third-party LLVM is
-# not rebuilt just to remap its own source paths.
+# LLVM/MLIR are prebuilt system libraries, so these flags apply to ANNC code
+# only.
 add_compile_options(
   "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
   "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
   "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=./build"
 )
 
-# Code coverage via gcov (--coverage, portable across gcc/clang). Set AFTER the
-# LLVM/MLIR sub-build so LLVM is neither recompiled nor relinked with --coverage;
-# the options apply only to directories processed afterwards (annc/, python/,
-# frontends/, tests/, and the enabled addons). Both compile and link flags are required: compile flags
-# instrument objects (referencing __gcov_* symbols), link flags pull in the gcov
-# runtime that resolves them — so any ANNC executable linking an instrumented
-# object (e.g. libANNCKernel) must also get the link flag, which the global
-# scope guarantees. Toggling coverage recompiles ANNC sources only, not LLVM.
+# Code coverage via gcov (--coverage, portable across gcc/clang). The options
+# apply only to directories processed afterwards (annc/, python/, frontends/,
+# tests/, and the enabled addons), so system LLVM/MLIR are never instrumented.
+# Both compile and link flags are required: compile flags instrument objects
+# (referencing __gcov_* symbols), link flags pull in the gcov runtime that
+# resolves them — so any ANNC executable linking an instrumented object (e.g.
+# libANNCKernel) must also get the link flag, which the global scope guarantees.
 if(ANNC_ENABLE_COVERAGE)
   add_compile_options(--coverage)
   add_link_options(--coverage)
   message(STATUS "ANNC code coverage enabled (--coverage / gcov).")
 endif()
 
-# ANNC-scoped debug mode (--annc-debug). Set AFTER the LLVM/MLIR sub-build, for
-# the same reason as coverage above: directory-level compile options apply only
-# to targets defined afterwards (annc/, python/, frontends/, tensorflow_addons/,
-# addons/onnxruntime/, tests/), so third-party LLVM/json compile commands are untouched and ninja does not
-# rebuild them. The flags are appended at the end of the compile command, so
-# -O0 overrides the Release -O3 and -UNDEBUG re-enables assert() in ANNC code
-# even when CMAKE_BUILD_TYPE=Release.
+# ANNC-scoped debug mode (--annc-debug). Directory-level compile options apply
+# only to targets defined afterwards (annc/, python/, frontends/,
+# tensorflow_addons/, addons/onnxruntime/, tests/), so third-party json compile
+# commands are untouched. The flags are appended at the end of the compile
+# command, so -O0 overrides the Release -O3 and -UNDEBUG re-enables assert() in
+# ANNC code even when CMAKE_BUILD_TYPE=Release.
 if(ANNC_DEBUG)
   add_compile_options(-g3 -O0 -fno-omit-frame-pointer -UNDEBUG)
   message(STATUS "ANNC debug mode enabled: ANNC-only -g3 -O0 -UNDEBUG; third-party build type unchanged.")
@@ -257,7 +381,9 @@ endif()
 include(CTest)
 
 add_subdirectory(annc)
-add_subdirectory(python)
+if(ANNC_ENABLE_PYTHON)
+  add_subdirectory(python)
+endif()
 # TensorFlow configuration is owned by the addon subdirectory alone, so it is
 # entered only when the addon is enabled: with the addon off no TensorFlow
 # headers or OpenSSL are looked up.

@@ -178,34 +178,75 @@ void printToolchainInfo(const char *argv0) {
   std::cout << out.str() << "\n";
 }
 
+#ifndef ANNC_LLVM_BIN_DEFAULT
+#define ANNC_LLVM_BIN_DEFAULT ""
+#endif
+#ifndef ANNC_LLVM_LIB_DIR_DEFAULT
+#define ANNC_LLVM_LIB_DIR_DEFAULT ""
+#endif
+#ifndef ANNC_KERNEL_LIB_PATH
+#define ANNC_KERNEL_LIB_PATH ""
+#endif
+
+// LLVM 20 toolchain: ANNC_LLVM_BIN overrides the directory baked in at
+// configure time. Every tool is resolved from here, so a system LLVM 17 of the
+// same name is never picked up through PATH.
+std::string llvmBinDir() {
+  if (const char *value = std::getenv("ANNC_LLVM_BIN")) {
+    if (value[0] != '\0') return value;
+  }
+  return ANNC_LLVM_BIN_DEFAULT;
+}
+
+// The LLVM static archives live in the toolchain lib directory next to the
+// selected bin directory.
+std::string llvmLibDir() {
+  if (const char *value = std::getenv("ANNC_LLVM_BIN")) {
+    if (value[0] != '\0') {
+      const fs::path prefix = fs::path(value).parent_path();
+      for (const char *sub : {"lib64", "lib"}) {
+        const fs::path candidate = prefix / sub;
+        if (fs::exists(candidate / "libLLVMSupport.a") &&
+            fs::exists(candidate / "libLLVMDemangle.a")) {
+          return candidate.string();
+        }
+      }
+      return (prefix / "lib64").string();
+    }
+  }
+  return ANNC_LLVM_LIB_DIR_DEFAULT;
+}
+
 // Directories the pipeline tools and the LLVM tools they shell out to live in.
-// The installed layout keeps everything in <prefix>/bin; a build tree keeps the
-// LLVM tools under _deps/llvm-build/bin instead, so both are searched.
+// The pipeline tools are siblings in <prefix>/bin; mlir-opt/clang/etc. come
+// from the LLVM 20 toolchain directory selected above.
 std::vector<std::string> toolSearchDirs(const char *argv0) {
   std::vector<std::string> dirs;
-  const std::string binDir = selfDir(argv0);
-  dirs.push_back(binDir);
-  const fs::path llvmBuildBin =
-      fs::path(prefixOf(argv0)) / "_deps" / "llvm-build" / "bin";
-  if (fs::exists(llvmBuildBin)) dirs.push_back(llvmBuildBin.string());
+  dirs.push_back(selfDir(argv0));
+  const std::string llvmBin = llvmBinDir();
+  if (!llvmBin.empty() && llvmBin != dirs.front()) dirs.push_back(llvmBin);
   return dirs;
 }
 
-// The annc driver links the generated kernels with a single `-L<dir>`: that
-// directory must hold the ANNC kernel archives *and* the LLVM archives they
-// reference (libLLVMSupport.a, libLLVMDemangle.a). Only the installed layout
-// (<prefix>/lib) satisfies this; a build tree keeps the LLVM archives under
-// _deps/llvm-build/lib, so the caller must set ANNC_KERNEL_LIB_PATH there.
+// The annc driver links the generated kernels against the ANNC kernel archives
+// in ANNC_KERNEL_LIB_PATH and the LLVM support archives in the LLVM 20 lib
+// directory. The installed layout (<prefix>/<libdir>) satisfies both; a build
+// tree has no install libdir, so the caller must set ANNC_KERNEL_LIB_PATH.
 std::string kernelLibPathOf(const char *argv0) {
   if (const char *value = std::getenv("ANNC_KERNEL_LIB_PATH")) {
     if (value[0] != '\0') return value;
   }
+  // Installed layout: the configured libdir (lib64 on aarch64). A build tree
+  // has no such directory, so fall back to <prefix>/lib.
+  std::error_code ec;
+  const std::string compiled = ANNC_KERNEL_LIB_PATH;
+  if (!compiled.empty() && fs::exists(compiled, ec)) return compiled;
   return (fs::path(prefixOf(argv0)) / "lib").string();
 }
 
-// Child environment: the annc driver calls mlir-opt/mlir-translate/opt/llc/clang
-// by bare name and reads its kernel archives from ANNC_KERNEL_LIB_PATH, so the
-// pipeline must not rely on the host's PATH or install layout.
+// Child environment: the annc driver resolves mlir-opt/mlir-translate/opt/llc/
+// clang from ANNC_LLVM_BIN and its kernel archives from ANNC_KERNEL_LIB_PATH,
+// so the pipeline must not rely on the host's PATH or install layout.
 std::vector<std::string> buildChildEnv(const char *argv0) {
   std::vector<std::string> env;
   const std::string prefix = prefixOf(argv0);
@@ -227,15 +268,11 @@ std::vector<std::string> buildChildEnv(const char *argv0) {
   if (const char *value = std::getenv("ANNC_KERNEL_LIB_PATH")) {
     env.push_back(std::string("ANNC_KERNEL_LIB_PATH=") + value);
   } else {
-    env.push_back("ANNC_KERNEL_LIB_PATH=" +
-                  (fs::path(prefix) / "lib").string());
+    env.push_back("ANNC_KERNEL_LIB_PATH=" + kernelLibPathOf(argv0));
   }
-  if (const char *value = std::getenv("ANNC_CLANG")) {
-    env.push_back(std::string("ANNC_CLANG=") + value);
-  } else {
-    fs::path clang = fs::path(binDir) / "clang";
-    if (fs::exists(clang)) env.push_back("ANNC_CLANG=" + clang.string());
-  }
+
+  // Pin the driver to the same LLVM 20 toolchain this process resolves.
+  env.push_back("ANNC_LLVM_BIN=" + llvmBinDir());
   // GEMM tuning config and the fusion switches travel with the caller: they
   // change what the ANNC matcher accepts, so the EP's graph view and this
   // compile must agree on them. The four ANNC_EP_FUSION_* switches are read by
@@ -383,13 +420,20 @@ int runPipeline(int argc, char **argv, const Options &opts) {
   // support libraries -- from this single directory.
   {
     const fs::path kernelLib = kernelLibPathOf(argv[0]);
-    // The annc driver resolves every archive -- the ANNC kernels and the LLVM
-    // support libraries -- from this single directory.
-    for (const char *required : {"libANNCBuiltinKernels.a", "libLLVMSupport.a"}) {
-      if (!fs::exists(kernelLib / required)) {
-        std::cerr << "[annc-onnx-pipeline] " << (kernelLib / required).string()
+    const fs::path llvmLib = llvmLibDir();
+    // The annc driver resolves the ANNC archives from the kernel lib directory
+    // and the LLVM support archives from the LLVM 20 toolchain lib directory.
+    const std::pair<fs::path, const char *> required[] = {
+        {kernelLib, "libANNCBuiltinKernels.a"},
+        {llvmLib, "libLLVMSupport.a"},
+        {llvmLib, "libLLVMDemangle.a"},
+    };
+    for (const auto &[dir, name] : required) {
+      if (!fs::exists(dir / name)) {
+        std::cerr << "[annc-onnx-pipeline] " << (dir / name).string()
                   << " is missing; set ANNC_KERNEL_LIB_PATH to a complete ANNC "
-                     "install lib directory (install/lib), or run `ninja install`\n";
+                     "install lib directory (install/lib64 or install/lib), "
+                     "install llvm-toolset-20-llvm-static, or run `ninja install`\n";
         return 2;
       }
     }

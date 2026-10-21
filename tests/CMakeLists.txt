@@ -52,7 +52,7 @@ if(ANNC_ENABLE_COVERAGE)
     # instruments other ANNC code linked into production executables that ctest
     # never runs; without this filter those 0%-covered files drown the report.)
     # Search path is limited to the build tree so gcovr doesn't walk into
-    # third_party/llvm's committed .gcno/.gcda test fixtures.
+    # third-party test fixtures.
     if(GCOVR_BIN)
         add_custom_target(coverage
             COMMAND ${CMAKE_COMMAND} -E make_directory ${ANNC_COVERAGE_DIR}

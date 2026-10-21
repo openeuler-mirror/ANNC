@@ -1,4 +1,5 @@
 #include "Conversion/Common/InputTypeConverter.h"
+#include "Support/LLVMCompat.h"
 
 #include <mlir/Dialect/Bufferization/IR/Bufferization.h>
 
@@ -41,6 +42,6 @@ InputTypeConverter::InputTypeConverter()
 
     addTargetMaterialization(
     [](OpBuilder& builder, mlir::MemRefType memrefType, ValueRange inputs, Location loc){
-        return builder.create<bufferization::ToBufferOp>(loc, memrefType, inputs[0]).getResult();
+        return builder.create<annc::ToBufferOp>(loc, memrefType, inputs[0]).getResult();
     });
 }

@@ -3,6 +3,7 @@
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistry.h"
+#include "Support/LLVMCompat.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
@@ -31,7 +32,7 @@ class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
     }
 
     GreedyRewriteConfig config;
-    config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
+    annc::setRegionSimplificationLevel(config, GreedySimplifyRegionLevel::Disabled);
 
     RewritePatternSet patterns(ctx);
     SmallVector<std::string> environmentEnabledCustomOps;

@@ -85,7 +85,6 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
       "ANNC_GEMM_CONFIG",
       "ANNC_GEMM",
       "ANNC_KERNEL_LIB_PATH",
-      "ANNC_CLANG",
       "LIBRARY_PATH",
       "CPATH",
       "C_INCLUDE_PATH",

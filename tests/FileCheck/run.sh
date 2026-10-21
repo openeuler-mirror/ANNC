@@ -12,11 +12,26 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ANNCOPT="${ANNCOPT:-$REPO_ROOT/build/bin/annc-opt}"
 ANNASM="${ANNASM:-$REPO_ROOT/build/bin/annc-asm}"
 ANNCFUSIONMETADATA="${ANNCFUSIONMETADATA:-$REPO_ROOT/build/bin/annc-fusion-metadata}"
-MLIROPT="${MLIROPT:-$REPO_ROOT/build/_deps/llvm-build/bin/mlir-opt}"
-FILECHECK="${FILECHECK:-$REPO_ROOT/build/_deps/llvm-build/bin/FileCheck}"
+
+# LLVM 20 tools: ANNC_LLVM_BIN (if exported) wins; otherwise use the toolchain
+# directory recorded by CMake at configure time. Never fall back to a bare
+# mlir-opt/FileCheck on PATH, which may belong to a different LLVM version.
+if [ -z "${ANNC_LLVM_BIN:-}" ] && [ -r "$REPO_ROOT/build/annc_llvm_bin.txt" ]; then
+    ANNC_LLVM_BIN="$(cat "$REPO_ROOT/build/annc_llvm_bin.txt")"
+fi
+if [ -z "${ANNC_LLVM_BIN:-}" ]; then
+    echo "ERROR: ANNC_LLVM_BIN is not set and $REPO_ROOT/build/annc_llvm_bin.txt is missing." >&2
+    echo "       Configure the build (writes the file) or export ANNC_LLVM_BIN=<llvm-20-bin>." >&2
+    exit 1
+fi
+MLIROPT="${MLIROPT:-$ANNC_LLVM_BIN/mlir-opt}"
+FILECHECK="${FILECHECK:-$ANNC_LLVM_BIN/FileCheck}"
+# Some RUN lines invoke LLVM's `not` and `split-file` by bare name.
+export PATH="$ANNC_LLVM_BIN:$PATH"
 FILTER='grep -vE "^\[ANNC "'
 
-for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK"; do
+for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK" \
+         "$ANNC_LLVM_BIN/not" "$ANNC_LLVM_BIN/split-file"; do
     [ -x "$t" ] || { echo "ERROR: $t 不存在或不可执行" >&2; exit 1; }
 done
 

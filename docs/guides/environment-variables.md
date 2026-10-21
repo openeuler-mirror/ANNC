@@ -12,9 +12,9 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_CLANG` | clang 可执行文件路径 | `clang` | 链接阶段使用的 clang 路径 |
-| `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_PREFIX}/lib` | 覆盖内置 kernel、线程池和 LLVM 静态库的搜索目录 |
-| `ANNC_MLAS_LIB_DIR` | 目录路径 | 空（回落到 `ANNC_KERNEL_LIB_PATH`） | `ANNC_KERNEL_MLAS=ON` 构建时，解析 MLAS 归档 `libonnxruntime_mlas.a`、`libkleidiai.a`、`libonnxruntime_common.a`、`libcpuinfo.a` 的目录；缺任一归档即拒绝链接，避免产出带未解析符号的 `.so` |
+| `ANNC_LLVM_BIN` | LLVM 20 的 bin 目录 | 构建期由 `LLVM_TOOLS_BINARY_DIR` 写入 | 解析 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`/`FileCheck`；未设置时使用构建期默认值，工具缺失则明确报错。工具链 lib 目录（含 `libLLVMSupport.a`/`libLLVMDemangle.a`）由其父目录推导 |
+| `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_FULL_LIBDIR}`（aarch64 为 `<prefix>/lib64`） | 覆盖内置 kernel、线程池归档的搜索目录；LLVM 静态归档不在其中，由 `ANNC_LLVM_BIN` 的父目录解析 |
+| `ANNC_EP_ORT_BUILD_TREE` | 目录路径 | 构建期值/未设置 | 宿主 ORT 构建树的 `Release/` 目录；按 `<tree>/` 与 `<tree>/_deps/*-build/` 的布局定位四个 MLAS 归档 `libonnxruntime_mlas.a`、`libkleidiai.a`、`libonnxruntime_common.a`、`libcpuinfo.a`；缺任一归档即拒绝链接 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 目录路径 | 构建期 `-DANNC_GEMM_ASM_SOURCE_DIR` | GEMM-ASM checkout 根目录（须含 `Sve/`、`Neon/`）；`annc` 在存在 `model_generated_kernels/*.S` 时用它汇编微内核，未配置且未编译期指定则报错退出 |
 | `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | 动态测试使用；`annc` 的 step6 会自动设置，手工两步动态驱动流程需自行设为 `./<符号>.so` |
 
@@ -96,4 +96,5 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
-| `ANNCOPT` / `ANNASM` / `ANNCFUSIONMETADATA` / `MLIROPT` / `FILECHECK` | 可执行文件路径 | `build/bin/...`（`MLIROPT`、`FILECHECK` 为 `build/_deps/llvm-build/bin/...`） | `tests/FileCheck/run.sh` 覆盖工具路径 |
+| `ANNCOPT` / `ANNASM` / `ANNCFUSIONMETADATA` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
+| `MLIROPT` / `FILECHECK` | 可执行文件路径 | `$ANNC_LLVM_BIN/...`（未设置时读取 `build/annc_llvm_bin.txt`） | `tests/FileCheck/run.sh` 覆盖工具路径 |

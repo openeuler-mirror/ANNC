@@ -37,7 +37,7 @@ tests/
 ├── e2e/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
 │   ├── build/              # build.sh 选项契约、双框架安装冒烟
-│   ├── python/             # Python 绑定手工 smoke
+│   ├── python/             # Python 绑定手工 smoke（需 --enable-python）
 │   └── tf/                 # TF predictor / KP embedding / model zoo 脚本
 └── fixtures/
     ├── kp_fused_gather_match.pbtxt
@@ -56,8 +56,9 @@ python3 -m pytest tests/ -v
 ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 
 # FileCheck
-PATH="$PWD/build/bin:$PWD/build/_deps/llvm-build/bin:$PATH" \
-LIBRARY_PATH="$PWD/install/lib:$PWD/build/lib" \
+# ANNC_LLVM_BIN 不设置时读取 build/annc_llvm_bin.txt（configure 写入）
+PATH="$PWD/build/bin:$ANNC_LLVM_BIN:$PATH" \
+LIBRARY_PATH="$PWD/install/lib64:$PWD/build/lib" \
 ANNC_GEMM_ASM_SOURCE_DIR=/path/to/GEMM-ASM \
 bash tests/FileCheck/run.sh
 ```
@@ -100,7 +101,7 @@ bash tests/FileCheck/run.sh
 | `e2e/tf/test_model_zoo_annc.sh` | L4 | model zoo 性能/正确性对拍 |
 | `e2e/build/build_mode_selection_test.sh` | L2/build | `build.sh --dry-run` 选项契约 |
 | `e2e/build/dual_framework_smoke.sh` | L4/build | 双框架安装前缀冒烟 |
-| `e2e/python/matmul_api_smoke.py` | L4/manual | Python 绑定导入与 TensorType 手工 smoke（不被 pytest 收集） |
+| `e2e/python/matmul_api_smoke.py` | L4/manual | Python 绑定导入与 TensorType 手工 smoke（不被 pytest 收集；需 `--enable-python`） |
 | `e2e/annc-driver/` | L4/manual | 历史 driver/demo 资产，未接 CTest |
 | `fixtures/legacy/config-fusion-parser-smoke.json` | 夹具 | 暂未被引用的历史 parser-smoke 配置 |
 

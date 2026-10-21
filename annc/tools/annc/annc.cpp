@@ -29,12 +29,88 @@ string getKernelLibPath() {
 #define ANNC_AARCH64_GEMM_KERNELS_AVAILABLE 0
 #endif
 
-static string getClangPath() {
-    const char* env_clang = getenv("ANNC_CLANG");
-    if (env_clang && env_clang[0] != '\0') {
-        return string(env_clang);
+// LLVM 20 toolchain location baked in at configure time. The ANNC_LLVM_BIN
+// environment variable overrides it; all tools are resolved to absolute paths
+// so a system LLVM 17 tool of the same name on PATH is never used.
+#ifndef ANNC_LLVM_BIN_DEFAULT
+#define ANNC_LLVM_BIN_DEFAULT ""
+#endif
+#ifndef ANNC_LLVM_LIB_DIR_DEFAULT
+#define ANNC_LLVM_LIB_DIR_DEFAULT ""
+#endif
+
+static string getLlvmBinDir() {
+    const char* env_bin = getenv("ANNC_LLVM_BIN");
+    if (env_bin && env_bin[0] != '\0') {
+        return string(env_bin);
     }
-    return "clang";
+    return string(ANNC_LLVM_BIN_DEFAULT);
+}
+
+static string llvmToolPath(const char* name) {
+    return (fs::path(getLlvmBinDir()) / name).string();
+}
+
+// The LLVM support archives (libLLVMSupport.a / libLLVMDemangle.a) live in the
+// toolchain lib directory next to the bin directory selected by ANNC_LLVM_BIN.
+static string getLlvmLibDir() {
+    const char* env_bin = getenv("ANNC_LLVM_BIN");
+    if (env_bin && env_bin[0] != '\0') {
+        fs::path prefix = fs::path(env_bin).parent_path();
+        for (const char* sub : {"lib64", "lib"}) {
+            fs::path candidate = prefix / sub;
+            std::error_code ec;
+            if (fs::exists(candidate / "libLLVMSupport.a", ec) &&
+                fs::exists(candidate / "libLLVMDemangle.a", ec)) {
+                return candidate.string();
+            }
+        }
+        return (prefix / "lib64").string();
+    }
+    return string(ANNC_LLVM_LIB_DIR_DEFAULT);
+}
+
+// Fail early and explicitly instead of letting the shell resolve a bare name
+// to the system LLVM 17 tools.
+static bool validateLlvmToolchain() {
+    const string bin = getLlvmBinDir();
+    if (bin.empty()) {
+        cerr << "ANNC error: no LLVM 20 toolchain configured. Set ANNC_LLVM_BIN "
+                "to the LLVM 20 bin directory." << endl;
+        return false;
+    }
+    for (const char* name : {"mlir-opt", "mlir-translate", "opt", "llc"}) {
+        std::error_code ec;
+        fs::path tool = fs::path(bin) / name;
+        if (!fs::is_regular_file(tool, ec)) {
+            cerr << "ANNC error: required LLVM tool '" << tool.string()
+                 << "' is missing. Set ANNC_LLVM_BIN to the LLVM 20 bin "
+                    "directory (for example the llvm-toolset-20 tools "
+                    "directory)." << endl;
+            return false;
+        }
+    }
+    std::error_code ec;
+    if (!fs::is_regular_file(fs::path(bin) / "clang", ec)) {
+        cerr << "ANNC error: 'clang' is missing from " << bin
+             << "; install llvm-toolset-20-clang or set ANNC_LLVM_BIN to a "
+                "complete LLVM 20 toolchain." << endl;
+        return false;
+    }
+    const fs::path libDir = getLlvmLibDir();
+    for (const char* name : {"libLLVMSupport.a", "libLLVMDemangle.a"}) {
+        if (!fs::is_regular_file(libDir / name, ec)) {
+            cerr << "ANNC error: required LLVM archive '" << (libDir / name).string()
+                 << "' is missing; install llvm-toolset-20-llvm-static or set "
+                    "ANNC_LLVM_BIN to a complete LLVM 20 toolchain." << endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+static string getClangPath() {
+    return llvmToolPath("clang");
 }
 
 #ifdef ANNC_KERNEL_MLAS
@@ -433,7 +509,7 @@ private:
         string inputFile = fs::path(config.inputFile).filename().string();
         string outputFile = "step1_llvm.mlir";
         
-        string command = "mlir-opt \"" + config.inputFile + "\"";
+        string command = "\"" + llvmToolPath("mlir-opt") + "\" \"" + config.inputFile + "\"";
         command += " --canonicalize";
         command += " --cse";
         command += " --lower-affine";
@@ -468,7 +544,7 @@ private:
         string inputFile = "step1_llvm.mlir";
         string outputFile = "step2.ll";
         
-        string command = "mlir-translate --mlir-to-llvmir \"" + (tempDir / inputFile).string() + "\"";
+        string command = "\"" + llvmToolPath("mlir-translate") + "\" --mlir-to-llvmir \"" + (tempDir / inputFile).string() + "\"";
         command += " -o \"" + (tempDir / outputFile).string() + "\"";
         
         logCommand(command);
@@ -481,7 +557,7 @@ private:
         string inputFile = "step2.ll";
         string outputFile = "step3_opt.ll";
         
-        string command = "opt -O3 -march=native \"" + (tempDir / inputFile).string() + "\"";
+        string command = "\"" + llvmToolPath("opt") + "\" -O3 -march=native \"" + (tempDir / inputFile).string() + "\"";
         command += " -S";
         command += " -o \"" + (tempDir / outputFile).string() + "\"";
         
@@ -495,7 +571,7 @@ private:
         string inputFile = "step3_opt.ll";
         string outputFile = "step4.o";
         
-        string command = "llc -filetype=obj \"" + (tempDir / inputFile).string() + "\"";
+        string command = "\"" + llvmToolPath("llc") + "\" -filetype=obj \"" + (tempDir / inputFile).string() + "\"";
         command += " -o \"" + (tempDir / outputFile).string() + "\"";
         
         logCommand(command);
@@ -675,6 +751,7 @@ private:
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
+        command += " -L\"" + getLlvmLibDir() + "\"";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
@@ -728,6 +805,7 @@ private:
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
+        command += " -L\"" + getLlvmLibDir() + "\"";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
 #ifdef ANNC_KERNEL_MLAS
@@ -825,7 +903,11 @@ int main(int argc, char **argv) {
     try {
         CompilationConfig config;
         config.parseArgs(argc, argv);
-        
+
+        if (!validateLlvmToolchain()) {
+            return 1;
+        }
+
         CompilationPipeline pipeline(config);
         bool success = pipeline.run();
         

@@ -8,7 +8,7 @@
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 ```
 
-LLVM/MLIR 与 nlohmann/json 由 CMake 在 configure 时自动拉取到 `third_party/` 并从源码编译，无需手动准备。
+LLVM/MLIR 使用系统 `llvm-toolset-20`（CMake `find_package`，不锁定版本），不再下载或编译 LLVM；nlohmann/json 由 CMake 在 configure 时 `FetchContent` 获取到 `third_party/json/`。
 
 RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不启用 KDNN 后端，需同时打开 adaptor）：
 
@@ -18,7 +18,7 @@ RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不�
 
 `--kdnn-source` 只决定 KDNN 源码/预编译包的来源；未设置 `--enable-kdnn-adaptor`（即 CMake `ANNC_ENABLE_KDNN_ADAPTOR=OFF`，默认）时 KDNN 不会进入构建，得到的产物不含 KDNN 后端。
 
-只调试 ANNC 代码、不重编 LLVM：
+只调试 ANNC 代码、不重编 third_party（json）：
 
 ```shell
 ./build.sh --annc-debug
@@ -31,6 +31,14 @@ RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不�
 ```shell
 bash tf_protos_minimal.sh -d "$PWD"
 bash frontends/onnx/protos/onnx_protos_minimal.sh -d "$PWD"
+```
+
+LLVM/MLIR 的查找顺序为 `-DLLVM_DIR`/`-DMLIR_DIR` → 环境变量 `ANNC_LLVM_BIN` → `LLVM_ROOT`/`MLIR_ROOT` → `llvm-config-{22,21,20} --cmakedir`。标准 `llvm-toolset-20` 安装且 `llvm-config-20` 在 `PATH` 时无需导出；工具链在自定义前缀时：
+
+```shell
+export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
+# 或：export LLVM_DIR=<.../lib64/cmake/llvm>
+#     export MLIR_DIR=<.../lib64/cmake/mlir>
 ```
 
 然后配置并构建。默认启用 TensorFlow addon，必须显式指定 `ANNC_TENSORFLOW_CXX11_ABI`：
@@ -48,9 +56,9 @@ ninja && ninja install
 
 - `--build-type [Debug|Release|RelWithDebInfo]`：构建类型（默认 Release）
 - `--install-prefix <path>`：安装路径（默认 `./install`）
-- `--enable-libcxx`：启用 libc++
+- `--enable-python` / `--disable-python`：构建 / 不构建 ANNC Python 绑定（默认关闭；开启时自动安装 pybind11 / nanobind）
 - `--clean`：清理构建目录后重新构建
-- `--no-install-deps`：跳过 pybind11 / nanobind 自动安装
+- `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
 - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party 保持原构建类型、不重编
 - 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
 - `--dry-run`：打印解析后的框架开关并退出，不 configure/build
@@ -61,7 +69,6 @@ ninja && ninja install
 - `--enable-kdnn-adaptor` / `--disable-kdnn-adaptor`：启用/关闭内置 KDNN adaptor kernel（默认关闭）；关闭时 KDNN 来源选项不产生实际集成
 - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
 - `--enable-constant-folding`：启用常量折叠与 KDNN packed-B 支持（默认关闭；需要 TensorFlow 前端，与 `--enable-ort` 互斥）
-- `--disable-assertions`：关闭断言（默认开启断言）
 - `--kdnn-dir <path>`：LOCAL 模式下的本地 KDNN 树（默认 `third_party/KDNN`；仅 `--kdnn-source LOCAL` 有效）
 - `--regen-tf-protos` / `--regen-onnx-protos`：强制重新生成 TF / ONNX protobuf 源码
 - `--coverage`：以覆盖率插桩方式配置；首次启用需配合 `--clean`（会重建 `build/`），复用既有构建目录的绕过方式见[覆盖率报告](#覆盖率报告gcov)
@@ -75,9 +82,10 @@ ninja && ninja install
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并编译预生成的 ONNX proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
+| `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 `libonnxruntime_common.a` 与 `libcpuinfo.a`；EP 开启时必填 |
-| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR`，运行期由 `ANNC_MLAS_LIB_DIR` 或 `ANNC_KERNEL_LIB_PATH` 解析四个归档 |
+| `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR`，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 汇编生成微内核的编译期默认值，运行时同名环境变量可覆盖；生成 `model_generated_kernels/*.S` 时未配置则 `annc` 报错退出 |
 | `ANNC_ENABLE_KDNN_ADAPTOR` | `ON`/`OFF` | `OFF` | 构建 KDNN 后端的内置 kernel adaptor；对应 `build.sh --enable-kdnn-adaptor`，仅 AArch64 |
@@ -100,7 +108,7 @@ cd build && ctest --output-on-failure   # C++ 单元测试（GTest，随开关�
 
 ### 覆盖率报告（gcov）
 
-覆盖率插桩只作用于 ANNC 作用域（在 LLVM 子构建之后启用，LLVM 不插桩）。但 `build.sh` 的缓存一致性检查会把 `ANNC_ENABLE_COVERAGE` 与既有 `CMakeCache.txt` 比对：在已存在的构建目录上直接加 `--coverage` 会被拒绝并要求 `--clean`，而 `--clean` 会清空整个 `build/`（含 third_party，LLVM 将重编）。
+覆盖率插桩只作用于 ANNC 作用域（LLVM 为外部工具链，不插桩）。但 `build.sh` 的缓存一致性检查会把 `ANNC_ENABLE_COVERAGE` 与既有 `CMakeCache.txt` 比对：在已存在的构建目录上直接加 `--coverage` 会被拒绝并要求 `--clean`，而 `--clean` 会清空整个 `build/`（含 third_party/json，将重新获取）。
 
 ```shell
 ./build.sh --coverage --clean      # 首次启用覆盖率（会重建 build/）
@@ -121,5 +129,5 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 - KDNN backend（`ANNC_ENABLE_KDNN_ADAPTOR=ON`）仅支持 AArch64 平台。
 - RELEASE 模式需要系统安装 `unzip`、`rpm2cpio`、`cpio`（openEuler：`sudo yum install -y unzip rpm cpio`）。
 - `--enable-constant-folding` 需要 TensorFlow 前端与 AArch64 GEMM 微内核归档（放在 `third_party/annc-gemm-kernels/`，或设置 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`）；`--enable-ort` 下传该选项会直接报错。
-- `--build-type Debug` 会把 third_party（LLVM/json）一起重编；只调试 ANNC 时改用 `--annc-debug`。
+- `--build-type Debug` 会把 third_party（json）一起重编；只调试 ANNC 时改用 `--annc-debug`。
 - 切换 Python 环境或 TensorFlow 版本后需重新运行 CMake（configure 时自动检测 TF）。
