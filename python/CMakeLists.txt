@@ -54,20 +54,48 @@ declare_mlir_python_extension(ANNCPythonSources.Extension
 ################################################################################
 # Common CAPI
 ################################################################################
-
-add_mlir_python_common_capi_library(ANNCPythonCAPI
-  INSTALL_COMPONENT ANNCPythonModules
-  INSTALL_DESTINATION python_packages/annc/_mlir_libs
-  OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs"
-  RELATIVE_INSTALL_ROOT "../../../.."
-  DECLARED_SOURCES
-    ANNCPythonSources
-    MLIRPythonExtension.RegisterEverything
-    MLIRPythonSources.Core
+# The distro MLIR is installed without MLIR_INSTALL_AGGREGATE_OBJECTS, so the
+# stock add_mlir_python_common_capi_library() cannot rebuild an aggregate from
+# the imported MLIR CAPI targets. llvm-toolset-20-python3-mlir ships
+# libMLIRPythonCAPI.so, a self-contained MLIR C API that composes correctly with
+# libMLIR.so (the distro's own mlir Python package uses it). Link that and embed
+# only ANNC's own C API objects.
+add_mlir_aggregate(ANNCPythonCAPI
+  SHARED
+  DISABLE_INSTALL
+  EMBED_LIBS
+    AtirCAPIDialect
+    AtirCAPIPasses
+  PUBLIC_LIBS
+    ${ANNC_MLIR_PYTHON_CAPI_LIBRARY}
+)
+set_target_properties(ANNCPythonCAPI PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs"
+  BINARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs"
+)
+mlir_python_setup_extension_rpath(ANNCPythonCAPI
+  RELATIVE_INSTALL_ROOT "../../../..")
+install(TARGETS ANNCPythonCAPI
+  COMPONENT ANNCPythonModules
+  LIBRARY DESTINATION python_packages/annc/_mlir_libs
+  RUNTIME DESTINATION python_packages/annc/_mlir_libs
 )
 
 # Force AtirPasses into the common CAPI shared library with whole-archive
 target_link_libraries(ANNCPythonCAPI PRIVATE "-Wl,--whole-archive" AtirPasses "-Wl,--no-whole-archive")
+
+# Every Python extension is linked with an $ORIGIN RPATH. Stage the distro's
+# self-contained MLIR Python C API library next to them so the modules resolve
+# libMLIRPythonCAPI.so.20.1 without relying on the host's loader path.
+get_filename_component(_annc_mlir_py_capi_real "${ANNC_MLIR_PYTHON_CAPI_LIBRARY}" REALPATH)
+get_filename_component(_annc_mlir_py_capi_name "${_annc_mlir_py_capi_real}" NAME)
+set(_annc_python_libs_dir "${CMAKE_SOURCE_DIR}/build/python_packages/annc/_mlir_libs")
+file(MAKE_DIRECTORY "${_annc_python_libs_dir}")
+file(COPY "${_annc_mlir_py_capi_real}" DESTINATION "${_annc_python_libs_dir}")
+install(FILES "${_annc_mlir_py_capi_real}"
+        DESTINATION python_packages/annc/_mlir_libs)
 
 ################################################################################
 # Instantiation of all Python modules

@@ -1,3 +1,4 @@
+#include "Support/LLVMCompat.h"
 #include "Target/aarch64/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 
@@ -12,8 +13,7 @@ namespace annc
             ModuleOp op = getOperation();
 
             bufferization::OneShotBufferizationOptions options;
-            bufferization::BufferizationState bufferizationState;
-            if (failed(runOneShotBufferize(op, options, bufferizationState))) {
+            if (failed(annc::runOneShotBufferize(op, options))) {
               return signalPassFailure();
             }
         }

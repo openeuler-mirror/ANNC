@@ -238,10 +238,10 @@ ANNC_LIBRARY_NAME=./fused_matmul.so ./test_app
 | `-v` / `--verbose` | 打印详细命令 |
 | `--shared` / `-shared` | 生成 `.so`，否则生成可执行文件 |
 
-`annc` 链接阶段默认调用系统 `clang`，可通过环境变量 `ANNC_CLANG` 覆盖；kernel 归档的搜索目录可用 `--kernel-lib-path <dir>` 或 `ANNC_KERNEL_LIB_PATH` 指定。详见[环境变量参考](environment-variables.md)。
+`annc` 链接阶段调用 `ANNC_LLVM_BIN`（缺省为构建期记录的 LLVM 20 bin 目录）下的 `clang`；该目录缺少 `clang` 时启动即报错，不会回退到 PATH 中的其他 clang。kernel 归档的搜索目录可用 `--kernel-lib-path <dir>` 或 `ANNC_KERNEL_LIB_PATH` 指定。详见[环境变量参考](environment-variables.md)。
 
 ```shell
-ANNC_CLANG=/path/to/clang annc model_lowered.mlir --shared -o kernel.so
+ANNC_LLVM_BIN=/path/to/llvm20/bin annc model_lowered.mlir --shared -o kernel.so
 ```
 
 链接前还会自动调用 `annc-model-kernel-export`，把 lowered MLIR 中标记的 AArch64 微内核导出为 `.S` 并汇编进产物。
@@ -289,7 +289,7 @@ annc-onnx-pipeline --toolchain-info     # 打印工具链指纹 JSON（缓存键
 
 产物：`<dir>/sites.json`、`<dir>/libannc_kernels.so`（零站点时不产 `.so`）。`.so` **只包含 AOT 站点**：站点报告在 prune 之前生成，因此默认构建的 `sites.json` 可能列出 JIT（`matmul` 家族）站点，但这些站点不会进入 `.so`，EP 也会拒绝申报。`ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建会自动向 FastCodegen 传 `enable-kdnn=true`；再设 `ANNC_GEMM=1` 时，plain `matmul` 以 AOT 站点进入 `.so`（`matmul_add`/`matmul_add_relu` 不在 EP 白名单内）。中间件走 MLIR bytecode（大模型文本 ATIR 可达数百 MB）。退出码 0 表示流程跑完（含零站点），非 0 表示某阶段失败——调用方应回落到 CPU 执行而不是让会话失败。
 
-前置：`annc` 链接阶段从**单一目录** `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib`）解析全部归档（ANNC kernel 归档 + `libLLVMSupport.a` 等 LLVM 归档），因此该目录必须来自 `ninja install` 的安装树；工具启动时会预检并给出明确报错。同理，`annc` 以裸名调用 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`，本工具会把自身 bin 目录（构建树另加 `_deps/llvm-build/bin`）前置到子进程 `PATH`。
+前置：`annc` 链接阶段从 `ANNC_KERNEL_LIB_PATH`（缺省 `<prefix>/lib64`，aarch64）解析 ANNC kernel 归档；`libLLVMSupport.a`/`libLLVMDemangle.a` 由 `ANNC_LLVM_BIN` 的父目录（`lib64`/`lib`）解析，不在 ANNC 安装树。工具启动时会预检归档与 `clang` 并给出明确报错。同理，`annc` 的 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang` 全部从 `ANNC_LLVM_BIN` 解析绝对路径，不会误用 PATH 中的系统 LLVM 17。
 
 ## Model Zoo 端到端脚本
 

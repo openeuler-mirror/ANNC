@@ -240,7 +240,7 @@ ORT 通过 `GetCapability` 分配节点或子图；独立插件导出 `CreateEpF
 
 | 依赖                     | 当前关系                                   | 交付约束                                 |
 | ---------------------- | -------------------------------------- | ------------------------------------ |
-| LLVM 与 MLIR            | 默认源码基线 21.1.3，公共后端复用                   | 外部工具链模式需单独固定并验证版本                    |
+| LLVM 与 MLIR            | 外部工具链（本机验证 `llvm-toolset-20` 20.1.8），公共后端复用 | `find_package(LLVM/MLIR CONFIG)` 不锁版本；换版本需复验 API |
 | protobuf 与 ONNX schema | 复用仓库 schema 和 protobuf，构建脚本生成 proto 源码 | protoc 与链接库匹配；手工 CMake 前准备好生成文件      |
 | nlohmann json          | 公共报告和 EP 使用                            | 默认基线 3.11.3；system JSON 与 EP 组合需专门验证 |
 | ORT SDK 与宿主            | EP 可选依赖，默认构建不下载 SDK                    | 首期按 1.26.0 成套验证；新增版本逐项验收             |
@@ -444,7 +444,7 @@ kernel 的并行执行复用 ORT 的 intra-op 线程池：EP 在执行上下文�
 
 缓存的作用是避免重复编译，**缓存命中必须意味着生成代码的语义和运行环境相同**。
 
-现有缓存位于 `<cache>/v1/<签名前两位>/<签名>/`，包含报告、共享库和 `DONE` 标记，冷缓存使用 `flock` 控制相同签名的跨进程编译。当前模型签名（前缀 `annc-ep-cache-key-v1`）剔除 producer/doc/图名等易变字段，并在图中**同时含 Mul 与 MatMul** 时保留 initializer 数值、其余情况清空 initializer 载荷；工具链+配置指纹（前缀 `annc-ep-config-v2`）覆盖工具链输出与代码生成相关环境变量（含四个 `ANNC_EP_FUSION_*` 与 `ANNC_MLAS_LIB_DIR`，未设置记为 `=unset`），并以 `annc-ep-kernel-libs-v1` 记录 `ANNC_KERNEL_LIB_PATH` 下每个 kernel 归档的大小与修改时间。完整发布身份（EP 构建版本、目标 ISA、全部编译期常量）仍需补齐。
+现有缓存位于 `<cache>/v1/<签名前两位>/<签名>/`，包含报告、共享库和 `DONE` 标记，冷缓存使用 `flock` 控制相同签名的跨进程编译。当前模型签名（前缀 `annc-ep-cache-key-v1`）剔除 producer/doc/图名等易变字段，并在图中**同时含 Mul 与 MatMul** 时保留 initializer 数值、其余情况清空 initializer 载荷；工具链+配置指纹（前缀 `annc-ep-config-v2`）覆盖工具链输出与代码生成相关环境变量（含四个 `ANNC_EP_FUSION_*` 与 `ANNC_EP_ORT_BUILD_TREE`，未设置记为 `=unset`），并以 `annc-ep-kernel-libs-v1` 记录 `ANNC_KERNEL_LIB_PATH` 下每个 kernel 归档的大小与修改时间。完整发布身份（EP 构建版本、目标 ISA、全部编译期常量）仍需补齐。
 
 这仍有正确性风险：某些融合模式（如 `masked_mul` 的 padding）将常量写入生成代码，而当前仅在“同时含 Mul 与 MatMul”的图上保留 initializer 数值，其余图仍清空载荷。若两个模型结构、dtype 和 shape 相同，仅这类常量不同，签名可能相同，后一个模型会使用前一个模型的代码。常量是否影响生成代码取决于其用途；运行参数与编译期内嵌常量需分别确认。
 

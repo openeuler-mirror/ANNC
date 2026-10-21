@@ -40,10 +40,15 @@ cd ANNC
 
 # 2. 安装依赖（详见「安装 ANNC」）
 pip3 install -r requirements.txt
-sudo yum install -y cmake clang ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
+sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+  llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+  llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+  llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+  llvm-toolset-20-clang
 
-# 3. 一键构建（LLVM/MLIR 与 nlohmann/json 由 CMake 自动拉取并从源码编译）
+# 3. 一键构建（LLVM/MLIR 使用系统 llvm-toolset-20；nlohmann/json 由 CMake FetchContent 获取）
 #    安装到无写权限前缀时请改用有权限的目录，或确保当前用户可写
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 

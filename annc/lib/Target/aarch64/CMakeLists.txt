@@ -40,7 +40,7 @@ target_include_directories(ANNCGemmSupport
 )
 install(TARGETS ANNCGemmSupport
         EXPORT MLIRTargets
-        ARCHIVE DESTINATION lib)
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 add_mlir_library(AArch64Codegen
         ${_srcs}

@@ -5,6 +5,6 @@ add_library(ANNCKernel
 
 install(TARGETS ANNCKernel
         EXPORT MLIRTargets
-        ARCHIVE DESTINATION lib)
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 add_subdirectory(builtin_kernels)

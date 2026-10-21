@@ -11,7 +11,7 @@ if(_annc_gemm_processor MATCHES "^(aarch64|arm64)$" AND
       IMPORTED_LOCATION "${ANNC_AARCH64_GEMM_KERNEL_LIBRARY}")
   set(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE ON)
   install(FILES "${ANNC_AARCH64_GEMM_KERNEL_LIBRARY}"
-          DESTINATION lib
+          DESTINATION ${CMAKE_INSTALL_LIBDIR}
           RENAME libannc_gemm_microkernels.a)
   message(STATUS "AArch64 GEMM microkernels: ${ANNC_AARCH64_GEMM_KERNEL_LIBRARY}")
 else()

@@ -3,9 +3,10 @@
 # Install manually with:
 #   pip3 install -r requirements.txt
 #
-# Or let build.sh automatically install the lightweight build-time packages
-# (pybind11 and nanobind). TensorFlow is checked but not auto-installed because
-# it is large and version-sensitive.
+# Or let build.sh --enable-python automatically install the lightweight
+# build-time packages (pybind11 and nanobind). They are only needed for the
+# optional ANNC Python bindings (default off). TensorFlow is checked but not
+# auto-installed because it is large and version-sensitive.
 
 pybind11==2.11.1
 nanobind>=2.4,<3

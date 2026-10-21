@@ -37,9 +37,15 @@ target_link_libraries(annc-onnx-pipeline PRIVATE
 )
 
 # The annc driver links the generated kernels against the archives in
-# <prefix>/lib (ANNC_KERNEL_LIB_PATH); keep the tool relocatable with the
-# same relative layout the other tools use.
+# <prefix>/<libdir> (ANNC_KERNEL_LIB_PATH) and the LLVM support archives in the
+# LLVM 20 lib directory. Bake both in as build-time defaults; the runtime
+# ANNC_LLVM_BIN overrides the toolchain location.
+target_compile_definitions(annc-onnx-pipeline PRIVATE
+    ANNC_KERNEL_LIB_PATH="${CMAKE_INSTALL_FULL_LIBDIR}"
+    ANNC_LLVM_BIN_DEFAULT="${ANNC_LLVM_BIN_DIR}"
+    ANNC_LLVM_LIB_DIR_DEFAULT="${ANNC_LLVM_LIB_DIR}"
+)
 set_target_properties(annc-onnx-pipeline PROPERTIES
-    INSTALL_RPATH "$ORIGIN/../lib"
+    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 install(TARGETS annc-onnx-pipeline DESTINATION bin)

@@ -177,7 +177,7 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
       if (getStride() == nullptr) return {};
       std::vector<int64_t> strides;
       for (auto& i : getStride()) {
-        strides.push_back(dyn_cast<mlir::IntegerAttr>(i).getInt());
+        strides.push_back(::llvm::dyn_cast<mlir::IntegerAttr>(i).getInt());
       }
       return strides;
     }
@@ -191,7 +191,7 @@ def Atir_Tensor : Atir_TypeDef<"Tensor", "tensor"> {
     }
     int64_t TensorType::getValueOfAddress() {
       if (getAddress() == nullptr) return -1;
-      return dyn_cast<mlir::IntegerAttr>(getAddress()).getInt();
+      return ::llvm::dyn_cast<mlir::IntegerAttr>(getAddress()).getInt();
     }
   }];
 

@@ -116,7 +116,7 @@ target_include_directories(ANNCKernel PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-install(TARGETS ANNCBuiltinKernels ARCHIVE DESTINATION lib)
+install(TARGETS ANNCBuiltinKernels ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 foreach(src ${KERNEL_SOURCES})
     get_filename_component(kernel_name ${src} NAME_WE)

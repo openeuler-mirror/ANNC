@@ -17,9 +17,9 @@
 //    - 若报 "AccessDeniedException: /home/jenkins"，说明目录未创建或权限不对。
 //
 // 3. Agent 必须预装 Python 依赖
-//    - tensorflow==2.15.0
-//    - pybind11==2.11.1
-//    - nanobind>=2.4,<3（LLVM/MLIR 21.1.3 的 Python 绑定要求 nanobind 2.4+）
+//    - tensorflow==2.15.0（TF addon 开启时；默认开启）
+//    - pybind11==2.11.1、nanobind>=2.4,<3（仅在勾选 ENABLE_PYTHON 时需要；
+//      ANNC Python 绑定默认不构建）
 //    - 建议为 jenkins 用户配置国内 PyPI 镜像，否则 TensorFlow 等大包下载极慢：
 //        sudo -u jenkins mkdir -p /var/lib/jenkins/.config/pip
 //        sudo -u jenkins tee /var/lib/jenkins/.config/pip/pip.conf <<'EOF'
@@ -36,8 +36,8 @@
 //      勾选 DISABLE_ONNX 则跳过 ONNX 前端的构建与安装校验。
 //
 // 4. 磁盘空间要求
-//    - 首次编译 LLVM 需要约 50GB 磁盘空间
-//    - 请确保 /home 分区空间充足
+//    - LLVM/MLIR 20 使用系统 llvm-toolset-20 软件包，不再从源码编译
+//    - 构建目录（ANNC + json）通常数 GB；请确保 /home 分区空间充足
 //
 // 5. 部分第三方仓库需要 Git 账号授权
 //    - 当前配置方式：在 Jenkins 节点上为 jenkins 用户配置全局 git credential
@@ -54,12 +54,17 @@
 //      或 401 / 403，请检查 jenkins 用户的 Git 凭据是否已正确配置。
 //
 // 6. 其他系统依赖
-//    - agent 必须预装：cmake、clang、ninja-build
+//    - agent 必须预装：cmake、ninja-build、llvm-toolset-20（含 clang/MLIR）
 //    - 安装示例（openEuler）：
-//        sudo dnf install -y cmake clang ninja-build
+//        sudo dnf install -y cmake ninja-build \
+//          llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+//          llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+//          llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+//          llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+//          llvm-toolset-20-clang
 //    - 若 Prepare 阶段报 "clang: command not found" 或 Build 阶段报
-//      "./build.sh: Permission denied"，请检查 clang 是否已安装、build.sh
-//      是否具有可执行权限。
+//      "./build.sh: Permission denied"，请检查 llvm-toolset-20 是否已安装、
+//      build.sh 是否具有可执行权限。
 //    - 可参考 jenkins/README.md 中的落地说明
 //
 // 7. KDNN RELEASE 模式（nightly 默认）
@@ -125,6 +130,11 @@ pipeline {
             defaultValue: false,
             description: '关闭 ONNX 前端（映射 build.sh --disable-onnx）'
         )
+        booleanParam(
+            name: 'ENABLE_PYTHON',
+            defaultValue: false,
+            description: '构建 ANNC Python 绑定（映射 build.sh --enable-python；默认关闭）'
+        )
     }
 
     environment {
@@ -145,6 +155,7 @@ pipeline {
         ANNC_TF_ENABLED = "${params.DISABLE_TENSORFLOW ? '0' : '1'}"
         ANNC_TF_ADDON_ENABLED = "${params.DISABLE_TENSORFLOW || params.DISABLE_TENSORFLOW_ADDON ? '0' : '1'}"
         ANNC_ONNX_ENABLED = "${params.DISABLE_ONNX ? '0' : '1'}"
+        ANNC_PYTHON_ENABLED = "${params.ENABLE_PYTHON ? '1' : '0'}"
     }
 
     stages {
@@ -185,7 +196,9 @@ pipeline {
                     python3 - <<'PY'
 import os
 import sys
-required = ['pybind11', 'nanobind']
+required = []
+if os.environ.get('ANNC_PYTHON_ENABLED', '0') == '1':
+    required.extend(['pybind11', 'nanobind'])
 if os.environ.get('ANNC_TF_ADDON_ENABLED', '1') == '1':
     required.append('tensorflow')
 missing = []
@@ -217,6 +230,7 @@ PY
                         params.DISABLE_TENSORFLOW ? '--disable-tensorflow' : '',
                         (!params.DISABLE_TENSORFLOW && params.DISABLE_TENSORFLOW_ADDON) ? '--disable-tensorflow-addon' : '',
                         params.DISABLE_ONNX ? '--disable-onnx' : '',
+                        params.ENABLE_PYTHON ? '--enable-python' : '',
                     ].findAll { it }.join(' ')
                     // 使用 RELEASE 模式拉取 KDNN：CMake 在 configure 阶段从
                     // gitcode release 下载预编译 zip，解 rpm 后 staging 成

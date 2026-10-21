@@ -40,7 +40,7 @@
 | 执行上下文结构版本 | 3；校验同时接受 v3（按结构尺寸＋版本 3）与 v2（按 `ANNC_EXECUTION_V2_CONTEXT_SIZE`＋版本 2） | `AnncExecutionContext` 的结构字段；v3 在尾部增加不透明 `thread_pool`（[ep-design.md](ep-design.md) §6.7、[ADR-013](../../decisions/decisions.md#adr-013)） |
 | 站点报告 schema | `annc-ep-site-report/1` | 报告顶层字段，EP 读取并校验，不符即按未命中处理（[fusion-design.md](fusion-design.md) §6.4） |
 | 报告契约版本 | `contract_version = 1.0.0` | 由 pipeline 写出；EP 当前**不读取**该字段（GAP-04） |
-| 缓存命名空间 | `v1`（`<cache>/v1/<签名前两位>/<签名>/`） | 磁盘缓存目录；签名另有三个前缀：`annc-ep-cache-key-v1`（模型结构）、`annc-ep-config-v2`（工具链与配置，含四个 `ANNC_EP_FUSION_*` 与 `ANNC_MLAS_LIB_DIR`）与 `annc-ep-kernel-libs-v1`（kernel 归档大小＋修改时间）（[ep-design.md](ep-design.md) §6.2） |
+| 缓存命名空间 | `v1`（`<cache>/v1/<签名前两位>/<签名>/`） | 磁盘缓存目录；签名另有三个前缀：`annc-ep-cache-key-v1`（模型结构）、`annc-ep-config-v2`（工具链与配置，含四个 `ANNC_EP_FUSION_*` 与 `ANNC_EP_ORT_BUILD_TREE`）与 `annc-ep-kernel-libs-v1`（kernel 归档大小＋修改时间）（[ep-design.md](ep-design.md) §6.2） |
 
 ### 2.3 当前能力摘要
 

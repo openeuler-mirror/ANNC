@@ -78,8 +78,6 @@ def main():
     gcc_runtime = Path("/usr/lib/gcc/aarch64-openEuler-linux/12")
     if gcc_runtime.is_dir() and not env.get("LIBRARY_PATH"):
         env["LIBRARY_PATH"] = str(gcc_runtime)
-    if not env.get("ANNC_CLANG") and Path("/tmp/annc-clang-wrapper").is_file():
-        env["ANNC_CLANG"] = "/tmp/annc-clang-wrapper"
     o = ort.SessionOptions()
     o.intra_op_num_threads = 1
     o.inter_op_num_threads = 1
