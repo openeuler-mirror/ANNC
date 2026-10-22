@@ -307,28 +307,159 @@ export TF_ENABLE_ONEDNN_OPTS=0
 
 ### 3.4 其他融合算子
 
-- 打开：`ANNC_ENABLE=1` 启用 `ANNCOptimizer`；pipeline 的通用图融合
-  （OpFusion 等）随图重写流程执行，没有单独的运行时开关。
-- 与 `ANNC_GEMM` 独立：`ANNC_GEMM` 只控制 MatMul/epilogue，其他融合由图重写
-  流程处理。
+除 3.3 的 MatMul/epilogue 融合外，ANNC 还会在图重写流程中尝试其他通用图融合。
+当前 TF 路径主要包括 DNN embedding 和 KP 系列融合，不由 `ANNC_GEMM` 控制。
+下面列出 pattern 与融合算子的对应关系，再说明启用方式和 predictor 通用验收。
+本节 predictor 测试以默认图重写流程中的 9 类融合为范围；显式配置融合另见
+3.4.4，不计入 predictor 默认测试的验收项。
 
-证明：
+#### 3.4.1 融合 pattern 与算子
 
-- `ANNCOptimizer initialized`；
-- `Invoking annc-tf-pipeline graph rewrite` 与
-  `ANNCOptimizer graph rewrite completed successfully`；
-- `ANNC_WORK_DIR` 下生成 `kernel.so`，且日志无 `compile_failed` /
-  `Running model failed`；
-- baseline（不设置 `LD_PRELOAD`、使用 `baseline_session_config.pbtxt`）与
-  ANNC 臂同输入数值一致。
+下表列出默认 `OpFusion` 在 TF 路径中注册的 9 类其他融合。`pattern` 对应融合
+元数据中的 `fusion.pattern`；融合算子名称对应 `custom.op_name`。
+MatMul/epilogue 仍见 3.3，不在此重复；这 9 类不代表 TF 路径支持的全部融合。
 
-具体融合 pattern 清单后续完善；当前以 predictor 日志、JIT kernel 数和数值/
-性能对照作为通用证据。
+| pattern | 融合算子 |
+| --- | --- |
+| `dnn_embedding_hash_bucket` | `KPFusedDnnEmbeddingWithHashBucket` |
+| `kp_embedding_action_id_gather` | `KPFusedEmbeddingActionIdGatherR{r1}x{r2}` |
+| `kp_target_behavior_interaction` | `KPFusedTargetBehaviorInteraction` |
+| `kp_sparse_dynamic_stitch` | `KPFusedSparseDynamicStitchN{n}` |
+| `kp_sparse_segment_reduce` | `KPFusedSparseSegmentReduce{I32,I64}{Sum,Mean}` |
+| `kp_embedding_padding` | `KPFusedEmbeddingPadding` |
+| `kp_embedding_padding_fast` | `KPFusedEmbeddingPaddingFast` |
+| `kp_sparse_reshape` | `KPFusedSparseReshape{I32,I64}[DynLimit]` |
+| `kp_sparse_select` | `KPFusedSparseSelect` |
+
+表中花括号和方括号表示名称变体，不是算子名字面量：`r1`、`r2` 是两个输入的
+rank；`n` 是 stitch 分支数；`I32` / `I64` 和 `Sum` / `Mean` 按匹配结果选取；
+`DynLimit` 是可选后缀。例如实际名称可以是
+`KPFusedEmbeddingActionIdGatherR2x2` 或 `KPFusedSparseSegmentReduceI64Mean`。
+
+实际命中取决于模型子图和 kernel 支持情况，并非启用 optimizer 后全部都会命中。
+
+#### 3.4.2 启用图融合
+
+设置 `ANNC_ENABLE=1` 后，TensorFlow 加载 `ANNCOptimizer`，并由 optimizer 调用
+`annc-tf-pipeline` 重写计算图。pipeline 中的通用融合流程（包括 OpFusion 等）会随
+图重写执行；默认表中的 DNN embedding / KP 融合没有逐类的独立环境变量。
+
+`ANNC_GEMM` 只控制 MatMul/epilogue 融合：设为 `0` 可在验证其他图融合时关闭
+GEMM 路径；设为 `1` 或 `2` 时，GEMM 按 3.3 的定义参与执行。改变环境变量后需
+重启 predictor 才会生效。沿用 3.2 的 predictor 启动配置，单独验证其他融合时可用：
+
+```shell
+export ANNC_ENABLE=1
+export ANNC_VERBOSE=1
+export ANNC_GEMM=0
+export ANNC_WORK_DIR=/var/tmp/annc-tf-other-fusions
+# 然后按 3.2 的 predictor_server 命令启动服务
+```
+
+上述 predictor 启动方式不会自动加载额外的 JSON 融合配置；需要显式配置的
+`KPFusedGather` 不在此测试范围内，其启用与测试方式见 3.4.4。
+
+#### 3.4.3 通用验收
+
+使用与 baseline 相同的模型、输入和请求参数运行 predictor。baseline 不设置
+`LD_PRELOAD`，并使用 `tensorflow_addons/baseline_session_config.pbtxt`；ANNC 臂按
+3.2 设置 `LD_PRELOAD` 和 `tensorflow_addons/session_config.pbtxt`。两臂分别重启
+服务后，用同一输入发起请求并比较全部模型输出。
+
+通用验收应同时确认图重写流程、kernel 产物和模型结果：
+
+1. predictor 日志出现 `ANNCOptimizer initialized`，确认 optimizer 已加载；
+2. 日志出现 `Invoking annc-tf-pipeline graph rewrite` 和
+   `ANNCOptimizer graph rewrite completed successfully`，确认图重写流程完成；
+3. 检查对应的 kernel 产物：JIT 路径在运行时生成 `kernel.so`；AOT 路径由
+   pipeline 生成 `annc_generated_kernel.so`。日志中没有 `compile_failed` 或
+   `Running model failed`；不能用 JIT kernel 数验收 AOT 融合；
+4. 同一输入下 baseline 与 ANNC 输出符合该模型采用的数值容差；
+5. 如需评估收益，固定模型、batch、线程数和绑核方式比较两臂 QPS，测试方法见 3.5.1。
+
+**具体 pattern 的命中检查**
+
+按 3.4.2 设置 `ANNC_WORK_DIR` 后，optimizer 会为每次图重写创建独立子目录，并在
+`Invoking annc-tf-pipeline graph rewrite` 日志中输出 `work_dir=`。该目录保留
+`model_fused_atir.mlir`，可直接检查其中的 `fusion.pattern`，确认本次图重写命中了
+哪些融合规则。
+
+```shell
+# 替换为本次 predictor 日志中 work_dir= 后的实际路径
+PIPELINE_WORK_DIR=/path/to/current/pipeline_work_dir
+
+# 查看该图中命中的 pattern
+grep -n 'fusion.pattern' "$PIPELINE_WORK_DIR/model_fused_atir.mlir"
+
+# 例如，单独验证 sparse dynamic stitch
+grep -n 'fusion.pattern = "kp_sparse_dynamic_stitch"' \
+  "$PIPELINE_WORK_DIR/model_fused_atir.mlir"
+```
+
+针对 3.4.1 中的每一类融合，将示例中的 pattern 替换为表中对应名称。检查到目标
+`fusion.pattern`，说明该规则已在本次图重写中生成融合函数；没有匹配行时，不能
+将该图计为此 pattern 的命中用例。一次 predictor 启动可能重写多个图，应检查与
+待测模型和请求相关的各个 `work_dir`。
+
+#### 3.4.4 补充：显式配置融合（不属于 predictor 默认测试）
+
+TF 路径还支持通过 JSON 配置匹配子图、提取融合函数，再由 `FastCodegen` 生成
+融合算子的方式。当前已有以下补充项：
+
+| pattern | 融合算子 | 融合内容 |
+| --- | --- | --- |
+| `kp_fused_gather_external`（示例配置名） | `KPFusedGather` | StridedSlice + 两次 Unique + 两次 Gather |
+
+`kp_fused_gather_external` 来自
+`tests/FileCheck/Dialect/Atir/config-fusion-kp-fused-gather.json`，不是默认
+`OpFusion` 注册的 pattern。它已有对应的 C++ rewrite 和 kernel 实现，当前通过
+显式配置入口接入 TF 流水线。
+
+**启用入口**：直接调用 `annc-tf-pipeline` 并传入 `--fusion-config <JSON 路径>`。
+在完成第 2 节构建的环境中，针对符合配置约束的 GraphDef，可使用：
+
+```shell
+ANNC_GEMM=0 <ANNC_PREFIX>/bin/annc-tf-pipeline \
+  --input_graphdef /path/to/model.pb \
+  --output_graphdef /var/tmp/annc-gather/output.pb \
+  --work_dir /var/tmp/annc-gather \
+  --fusion-config <ANNC_ROOT>/tests/FileCheck/Dialect/Atir/config-fusion-kp-fused-gather.json \
+  --output_tensor output:0 \
+  --keep_temps --dump-fusion-metadata --verbose
+```
+
+替换模型文件、真实输出 tensor 名以及源码和安装路径；多输出时重复传入
+`--output_tensor`。此处是直接调用 pipeline 的配置入口；仅设置 `ANNC_ENABLE=1`
+启动 predictor，不会加载这份 JSON。
+
+**现有测试入口**：使用已构建源码树中的 TF GraphDef 集成测试：
+
+```shell
+cd <ANNC_ROOT>
+ANNC_BUILD_DIR=<ANNC_ROOT>/build <PYTHON> -m pytest \
+  tests/integration/fusion/test_config_fusion_kp_fused_gather.py -v
+```
+
+`ANNC_BUILD_DIR` 指向包含 `bin/annc-tf2atir`、`bin/annc-opt` 和 `bin/annc-asm`
+的实际构建目录，`<PYTHON>` 需安装 pytest。测试使用仓库中的 TF GraphDef fixture，
+依次执行 TF → ATIR 转换、外部 JSON 配置融合与 `FastCodegen` lowering。
+
+基本验收：
+
+1. `annc-tf2atir`、`annc-opt` 和 `annc-asm` 均执行成功，退出码为 `0`；
+2. `model_fused_atir.mlir` 中生成 `fused_kp_fused_gather_external_` 前缀的融合
+   函数，并包含 `fusion.pattern = "kp_fused_gather_external"`，确认配置融合命中；
+3. `model_fast_codegen.mlir` 中包含 `custom.op_name = "KPFusedGather"`，
+   确认融合结果已转换为目标自定义算子。
+
+以上检查由测试脚本自动完成；pytest 汇总结果为 `1 passed`，即该配置融合与
+lowering 测试通过。
 
 ### 3.5 使能所有特性
 
 同时开启 `ANNC_ENABLE=1` 与 `ANNC_GEMM=2`，并按 3.2 启动 predictor，即为当前
-文档覆盖的所有特性全开（其他图融合随 `ANNCOptimizer` 默认启用）。
+predictor 默认流程的特性全开（默认内置图融合随 `ANNCOptimizer` 启用）。
+3.4.4 的显式配置融合不包含在此启动方式中。
 
 #### 3.5.1 性能 A/B
 
