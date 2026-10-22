@@ -75,7 +75,7 @@ inline void addBiasRows(annc::threadpool::AnncThreadPool* thread_pool,
 // ANNC_EP_DEBUG=1: what the fused site actually ran on.  Capped like the EP's
 // own pool lines; the tag marks the kernel side of the decision.
 inline void logMlasBmm(int64_t batchCount, int64_t m, int64_t n, int64_t k) {
-  if (std::getenv("ANNC_EP_DEBUG") == nullptr) return;
+  if (!annc::kernels::packedBDebugEnabled()) return;
   static std::atomic<int> printed{0};
   if (printed.fetch_add(1) >= 4) return;
   std::fprintf(stderr,
@@ -229,7 +229,8 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
             p.C = out + batch * m * n;
             p.ldc = static_cast<size_t>(n);
             p.BIsPacked = packed_weight != nullptr;
-            if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+            if (packed_weight != nullptr &&
+                annc::kernels::packedBDebugEnabled()) {
               static std::atomic<int> packed_printed{0};
               if (packed_printed.fetch_add(1) == 0) {
                 std::fprintf(stderr, "[annc-kernel] bmm: packed-B selected\\n");
@@ -378,7 +379,8 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
           p.C = out + i * d1 * n;
           p.ldc = static_cast<size_t>(n);
           p.BIsPacked = packed_weight != nullptr;
-          if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+          if (packed_weight != nullptr &&
+              annc::kernels::packedBDebugEnabled()) {
             static std::atomic<int> packed_printed{0};
             if (packed_printed.fetch_add(1) == 0) {
               std::fprintf(stderr, "[annc-kernel] bmm: packed-B selected\\n");

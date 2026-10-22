@@ -110,7 +110,7 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
   // The execution context gained the optional packed-B field in ABI v4.
   // Old v3 kernels reject the larger context, so invalidate compiled kernel
   // caches built against the v3 layout and force a rebuild.
-  fingerprint += "\nannc-packed-b-abi-v2-effective-weight";
+  fingerprint += "\nannc-packed-b-abi-v3-effective-weight-size";
   for (const char* name : config_names) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
@@ -1340,7 +1340,20 @@ bool BuildPackedBPlan(const OrtGraph* graph, const OrtNode* fused_node,
         dlsym(handle->handle, name.c_str()));
     if (accessor == nullptr) return false;  // Unknown/legacy provenance: raw B.
     const uint64_t address = accessor();
-    if (address != 0) data = reinterpret_cast<const void*>(address);
+    if (address != 0) {
+      const std::string size_name =
+          "_mlir_ciface___annc_effective_weight_size_" + info.kernel_name;
+      auto size_accessor = reinterpret_cast<uint64_t (*)()>(
+          dlsym(handle->handle, size_name.c_str()));
+      if (size_accessor == nullptr) return false;
+      const uint64_t effective_elements = size_accessor();
+      if (effective_elements > std::numeric_limits<size_t>::max() ||
+          !annc::kernels::effectiveWeightSizeMatches(
+              static_cast<size_t>(effective_elements), bytes)) {
+        return false;
+      }
+      data = reinterpret_cast<const void*>(address);
+    }
     if (g_debug)
       std::fprintf(stderr, "[annc-ep] packed-B source: %s kernel=%s\n",
                    address ? "folded" : "initializer", info.kernel_name.c_str());

@@ -854,7 +854,7 @@ flowchart TB
 - ONNX 前端已实现（`frontends/onnx/onnx2atir/`），op 覆盖以目标融合子图所需子集为准，尚未做全量 op 覆盖与控制流。
 - ONNX EP 的执行上下文形态（`annc_execution_v2`，ADR-013）在默认构建有四个可达站点：`tensordot_matmul`（FTDMM）与 `masked_mul` / `layer_norm` / `batched_matmul_add`（patterns 见 `annc/lib/Dialect/Atir/Passes/OpFusion.cpp`，整体方案见 [ONNX 支持整体方案](../design/onnx-support/overall.md)）。这四个站点各由独立的 `ANNC_EP_FUSION_*` 开关控制且**默认关闭**，默认构建的站点报告为 0 个站点，须显式设非 `0` 值才启用对应融合。默认构建的 `matmul` 家族走模板/JIT 路径，在 prune 阶段被裁剪，无可接管产物；`ANNC_ENABLE_KDNN_ADAPTOR=ON` 构建且 `ANNC_GEMM=1` 时，plain `matmul` 由条件注册的 KDNN 模式产出 AOT 上下文站点，可进入 EP 白名单（`matmul_add`/`matmul_add_relu` 不在白名单内）。输入张量按连续行主序处理，非连续视图不在支持范围。
 - ONNX EP 未做 model-level 性能承诺；ORT 并行与 ANNC 并行区叠加的过订阅只记录、未调优。
-- BMM 的 pre-affine 折叠保持原 initializer 参数绑定，但内核使用模块内的折叠常量。ATIR→Linalg 在常量 lowering 后导出每站点的 effective-weight 读取入口；EP 的 packed-B 状态从该入口取得实际权重，并在 session 创建时打包。入口返回 0 表示未折叠，缺少入口的旧库回退 raw-B；详见 [EP 原生线程池与 MLAS](../../addons/onnxruntime/README.md#原生线程池与-mlas)。
+- BMM 的 pre-affine 折叠保持原 initializer 参数绑定，但内核使用模块内的折叠常量。ATIR→Linalg 在常量 lowering 后导出每站点的 effective-weight 地址与元素数入口；EP 校验元素数和 initializer 字节数匹配后才复制并打包。地址入口返回 0 表示未折叠；缺少长度入口或长度不匹配时禁用该站点 packed-B，避免使用未经界定的常量地址。详见 [EP 原生线程池与 MLAS](../../addons/onnxruntime/README.md#原生线程池与-mlas)。
 - `ANNCOptimizer` 会向 annc-tf-pipeline 透传 `--backend` 参数，但 pipeline 当前不解析该参数（静默忽略），存在接口漂移，需对齐。
 - `ANNCOptimizer::Init()` 未实现 `pipeline_path` 启动期校验（见 5.6 节），`timeout_seconds` 等配置无范围校验，需补强。
 

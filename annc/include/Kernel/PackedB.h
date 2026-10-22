@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 // A read-only description of MLAS-packed B slices.  The owner lives in the EP
 // compute state; kernels only borrow this descriptor for the duration of one
@@ -18,6 +19,21 @@ struct AnncPackedB {
 
 namespace annc {
 namespace kernels {
+
+// Cache the process-level diagnostic switch so batch loops do not repeatedly
+// scan the environment. Kernel debug configuration is read once per process.
+inline bool packedBDebugEnabled() {
+  static const bool enabled = std::getenv("ANNC_EP_DEBUG") != nullptr;
+  return enabled;
+}
+
+// The effective-weight accessor reports the number of float elements in the
+// returned buffer. Validate it against the initializer byte count before any
+// host-side copy so a future shape-changing fold cannot cause an over-read.
+inline bool effectiveWeightSizeMatches(size_t elements, size_t bytes) {
+  return elements <= static_cast<size_t>(-1) / sizeof(float) &&
+         elements * sizeof(float) == bytes;
+}
 
 inline bool packedBMatches(const AnncPackedB* packed, const int64_t* shape,
                            int32_t rank) {

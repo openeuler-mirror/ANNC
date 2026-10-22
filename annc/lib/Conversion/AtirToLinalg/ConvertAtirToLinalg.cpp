@@ -63,29 +63,55 @@ namespace atir {
                     kernels.push_back(func);
             for (auto func : kernels) {
                 std::string name = "__annc_effective_weight_" + func.getName().str();
-                if (getOperation().lookupSymbol(name)) continue;
-                OpBuilder builder(getOperation().getBodyRegion());
-                builder.setInsertionPointToEnd(getOperation().getBody());
-                auto accessor = builder.create<func::FuncOp>(
-                    func.getLoc(), name,
-                    builder.getFunctionType({}, {builder.getI64Type()}));
-                accessor->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
-                builder.setInsertionPointToStart(accessor.addEntryBlock());
-                Value address;
+                if (!getOperation().lookupSymbol(name)) {
+                    OpBuilder builder(getOperation().getBodyRegion());
+                    builder.setInsertionPointToEnd(getOperation().getBody());
+                    auto accessor = builder.create<func::FuncOp>(
+                        func.getLoc(), name,
+                        builder.getFunctionType({}, {builder.getI64Type()}));
+                    accessor->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
+                    builder.setInsertionPointToStart(accessor.addEntryBlock());
+                    Value address;
+                    if (auto globalName = func->getAttrOfType<StringAttr>(
+                            "annc.effective_weight_global")) {
+                        auto global = getOperation().lookupSymbol<memref::GlobalOp>(
+                            globalName.getValue());
+                        auto buffer = builder.create<memref::GetGlobalOp>(
+                            func.getLoc(), global.getType(), global.getSymName());
+                        auto index = builder.create<memref::ExtractAlignedPointerAsIndexOp>(
+                            func.getLoc(), buffer);
+                        address = builder.create<arith::IndexCastOp>(
+                            func.getLoc(), builder.getI64Type(), index);
+                    } else {
+                        address = builder.create<arith::ConstantIntOp>(func.getLoc(), 0, 64);
+                    }
+                    builder.create<func::ReturnOp>(func.getLoc(), address);
+                }
+
+                // Keep the payload length in a separate C-interface accessor;
+                // the EP validates it before copying from the returned address.
+                const std::string sizeName =
+                    "__annc_effective_weight_size_" + func.getName().str();
+                if (getOperation().lookupSymbol(sizeName)) continue;
+                OpBuilder sizeBuilder(getOperation().getBodyRegion());
+                sizeBuilder.setInsertionPointToEnd(getOperation().getBody());
+                auto sizeAccessor = sizeBuilder.create<func::FuncOp>(
+                    func.getLoc(), sizeName,
+                    sizeBuilder.getFunctionType({}, {sizeBuilder.getI64Type()}));
+                sizeAccessor->setAttr("llvm.emit_c_interface",
+                                      sizeBuilder.getUnitAttr());
+                sizeBuilder.setInsertionPointToStart(sizeAccessor.addEntryBlock());
+                int64_t elements = 0;
                 if (auto globalName = func->getAttrOfType<StringAttr>(
                         "annc.effective_weight_global")) {
                     auto global = getOperation().lookupSymbol<memref::GlobalOp>(
                         globalName.getValue());
-                    auto buffer = builder.create<memref::GetGlobalOp>(
-                        func.getLoc(), global.getType(), global.getSymName());
-                    auto index = builder.create<memref::ExtractAlignedPointerAsIndexOp>(
-                        func.getLoc(), buffer);
-                    address = builder.create<arith::IndexCastOp>(
-                        func.getLoc(), builder.getI64Type(), index);
-                } else {
-                    address = builder.create<arith::ConstantIntOp>(func.getLoc(), 0, 64);
+                    auto type = cast<MemRefType>(global.getType());
+                    if (type.hasStaticShape()) elements = type.getNumElements();
                 }
-                builder.create<func::ReturnOp>(func.getLoc(), address);
+                auto count = sizeBuilder.create<arith::ConstantIntOp>(
+                    func.getLoc(), elements, 64);
+                sizeBuilder.create<func::ReturnOp>(func.getLoc(), count.getResult());
             }
      }
  };

@@ -113,9 +113,13 @@ GEMM-ASM 微内核归档是可选依赖；ORT 的 MLAS 路径无需该归档。
 [构建与部署手册](../../tests/ort-ep-build-and-deploy.md#37-packed-b-特性)。BMM 的 pre-affine
 折叠与打包可同时开启：编译库通过
 `_mlir_ciface___annc_effective_weight_<kernel_name>() -> uint64_t` 暴露内核实际
-使用的权重地址；返回 0 表示仍使用原始 initializer。折叠权重读取入口引用与
-内核相同的模块常量，不在 Compute 中重复折叠或打包。旧库缺少该入口时 BMM
-安全回退 raw-B；缓存指纹已更新，运行时编译会重建产物。
+使用的权重地址；配对的
+`_mlir_ciface___annc_effective_weight_size_<kernel_name>() -> uint64_t` 返回其
+float 元素数。EP 在复制前要求该数量乘以 `sizeof(float)` 与 initializer
+字节数一致；长度不匹配或缺少 size 入口时禁用该站点的 packed-B。地址返回 0
+表示仍使用原始 initializer，此时不读取 size 入口。折叠权重读取入口引用与内核
+相同的模块常量，不在 Compute 中重复折叠或打包；缓存指纹已更新，运行时编译会
+重建产物。
 
 | CMake 选项 | 启用配置 |
 |---|---|

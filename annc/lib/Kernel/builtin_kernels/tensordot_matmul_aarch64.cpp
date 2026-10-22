@@ -126,7 +126,8 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
       gemm.C = out;
       gemm.ldc = static_cast<size_t>(n);
       gemm.BIsPacked = packed_weight != nullptr;
-      if (packed_weight != nullptr && std::getenv("ANNC_EP_DEBUG") != nullptr) {
+      if (packed_weight != nullptr &&
+          annc::kernels::packedBDebugEnabled()) {
         static std::atomic<int> packed_printed{0};
         if (packed_printed.fetch_add(1) == 0) {
           std::fprintf(stderr, "[annc-kernel] ftdmm: packed-B selected\\n");
@@ -137,7 +138,7 @@ annc::kernels::KernelStatus tensordotMatMulImpl(
                     /*BatchSize=*/1,
                     reinterpret_cast<MLAS_THREADPOOL*>(native),
                     /*BackendKernelSelectorConfig=*/nullptr);
-      if (std::getenv("ANNC_EP_DEBUG") != nullptr) {
+      if (annc::kernels::packedBDebugEnabled()) {
         static std::atomic<int> printed{0};
         if (printed.fetch_add(1) < 4) {
           std::fprintf(stderr,

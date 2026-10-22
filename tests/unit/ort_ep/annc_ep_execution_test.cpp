@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,13 @@ TEST(PackedBContract, MatchesFullShapeAndSelectsBroadcastSlices) {
   const float* null_slice[] = {&first, nullptr};
   AnncPackedB null_entry{3, {2, 4, 8, 0}, 2, null_slice};
   EXPECT_FALSE(annc::kernels::packedBMatches(&null_entry, shape3, 3));
+}
+
+TEST(PackedBContract, RejectsEffectiveWeightSizeMismatch) {
+  EXPECT_TRUE(annc::kernels::effectiveWeightSizeMatches(16, 16 * sizeof(float)));
+  EXPECT_FALSE(annc::kernels::effectiveWeightSizeMatches(15, 16 * sizeof(float)));
+  EXPECT_FALSE(annc::kernels::effectiveWeightSizeMatches(
+      std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()));
 }
 
 TEST(PackedBContract, ContextAbiReadsOnlyFieldsPresentInTheReportedLayout) {

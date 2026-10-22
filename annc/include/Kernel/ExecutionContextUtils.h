@@ -30,7 +30,8 @@ inline llvm::Error error(const AnncExecutionContext* context,
   return llvm::createStringError(llvm::inconvertibleErrorCode(), "%s", message);
 }
 
-inline bool isV3Context(const AnncExecutionContext* context) {
+// v4 appends the optional packed-B field to v3; earlier fields retain offsets.
+inline bool isV3OrV4Context(const AnncExecutionContext* context) {
   return context != nullptr &&
          ((context->struct_size == ANNC_EXECUTION_V3_CONTEXT_SIZE &&
            context->abi_version == ANNC_EXECUTION_V3_ABI_VERSION) ||
@@ -53,7 +54,7 @@ inline llvm::Error validateContext(const AnncExecutionContext* context) {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "execution context is null");
   }
-  if (!isV2Context(context) && !isV3Context(context)) {
+  if (!isV2Context(context) && !isV3OrV4Context(context)) {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "invalid execution context size or version");
   }
