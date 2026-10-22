@@ -1,11 +1,11 @@
 # ANNC ORT EP 构建与部署
 
-> 本文是 ANNC ORT EP 的整体端到端测试手册：构建、部署、EP 注册与四个融合特性的使能/验证。配套测试位于 `tests/integration/ort_ep/` 与 `tests/unit/ort_ep/`。
+> 本文是 ANNC ORT EP 的整体端到端测试手册：构建、部署、EP 注册、四个融合特性与可选 packed-B 的使能/验证。配套测试位于 `tests/integration/ort_ep/` 与 `tests/unit/ort_ep/`。
 
 > 目标：在 aarch64（openEuler + 鲲鹏）上构建 `libannc_ep.so`，在 ONNX Runtime
 > 1.26.0 推理进程中注册为 `AnncExecutionProvider`。
 > 验证基线：本地 ANNC 工作树（仓库地址
-> `https://gitcode.com/openeuler/ANNC.git`；含 ORT EP 自动启用 MLAS 的改动）。
+> `https://gitcode.com/openeuler/ANNC.git`；含 ORT EP 自动启用 MLAS、可选 packed-B 的改动）。
 > 远程合入后以 `dev` 为准。
 > MLAS 是 ORT EP 的必需组件，构建 ORT EP 时自动启用，不需要手动设置。
 
@@ -58,7 +58,7 @@ ORT 源码树：
 | EP 头文件 | `<ORT_ROOT>/include/onnxruntime/core/session/`（`onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`） |
 | MLAS 头文件 | `<ORT_ROOT>/onnxruntime/core/mlas/inc/mlas.h` |
 | 链接归档 | `<ORT_BUILD>/libonnxruntime_common.a`；`<ORT_BUILD>/_deps/pytorch_cpuinfo-build/libcpuinfo.a` |
-| MLAS 运行期归档 | `<ORT_BUILD>/libonnxruntime_mlas.a`、`<ORT_BUILD>/_deps/kleidiai-build/libkleidiai.a` |
+| MLAS 构建/运行期归档 | `<ORT_BUILD>/libonnxruntime_mlas.a`、`<ORT_BUILD>/_deps/kleidiai-build/libkleidiai.a` |
 | 宿主运行库 | 目标机上的 `libonnxruntime.so.1.26.0` |
 
 已验证的 ORT 构建口径（Release、aarch64；`<ORT_BUILD_ROOT>` 是 `--build_dir`，
@@ -124,6 +124,11 @@ export ANNC_MLAS_INCLUDE_DIR=<ORT_ROOT>/onnxruntime/core/mlas/inc
 - `--dry-run`：先确认框架开关，不 configure/build。
 - MLAS 是 ORT EP 的必需组件，构建 ORT EP 时自动启用，不需要手动设置。
   构建日志应出现 `Kernel MLAS: ON`。
+- packed-B 只有运行时开关，无需新增 CMake 选项。EP 构建时直接链接宿主的
+  MLAS/KleidiAI/common/cpuinfo 归档，以解析私有 PackB 接口，不能依赖宿主 `.so`
+  导出它们。即使运行时关闭 packed-B，构建 EP 也必须提供这四个归档。
+- ORT 的 MLAS 与 packed-B 路径均不需要 GEMM-ASM。可选
+  `libannc_gemm_microkernels.a` 不存在时仍可构建和运行该路径；无需安装 GEMM-ASM。
 - 四个 MLAS 运行期归档由 `ANNC_EP_ORT_BUILD_TREE` 定位；该变量必须指向 ORT
   构建树的 `Release/` 目录（不是源码树），driver 按 `<tree>/` 与
   `<tree>/_deps/*-build/` 的布局查找四个归档。
@@ -193,8 +198,11 @@ ninja -C <ANNC_ROOT>/build install
 - `ANNC_KERNEL_LIB_PATH` 指向 ANNC 归档目录（aarch64 安装为 `<ANNC_PREFIX>/lib64`）。
 - `libannc_ep.so` 由 GNUInstallDirs 决定安装到 `lib` 或 `lib64`，注册时使用实际
   路径；本机为 `<ANNC_PREFIX>/lib64/libannc_ep.so`。
-- MLAS 四个归档在运行时由 `ANNC_EP_ORT_BUILD_TREE` 定位。构建期只需要
-  `mlas.h`。
+- MLAS 四个归档在 EP 构建期用于链接插件，运行时由 `ANNC_EP_ORT_BUILD_TREE`
+  定位以链接生成的 kernel；构建期同时需要 `mlas.h`。
+- 更新 packed-B 特性时同步部署 `libannc_ep.so`、pipeline/编译工具与 kernel
+  归档；执行上下文已扩展为 ABI v4，不能只替换插件并沿用旧 kernel。
+  新插件的工具链指纹会使旧编译缓存失效，首次 session 会重新编译。
 
 ## 3. 特性使能
 
@@ -208,6 +216,7 @@ ANNC 安装前缀保持默认相对布局时大多数变量可省略。常用变
 | `ANNC_EP_FUSION_LAYER_NORM` | 对应 `layer_norm` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
 | `ANNC_EP_FUSION_MASKED_MUL` | 对应 `masked_mul` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | 对应 `batched_matmul_add` pattern；设为 `1` 开启，`0`/未设置关闭 | 关闭 |
+| `ANNC_EP_PACKED_B` | 固定 f32 B 权重的 MLAS 打包；非空且非 `0`（如 `1`）开启，`0`/空字符串/未设置关闭 | 关闭 |
 | `ANNC_EP_PIPELINE` | `annc-onnx-pipeline` 绝对路径 | 与 EP 同目录 → `../bin` → `PATH` |
 | `ANNC_KERNEL_LIB_PATH` | ANNC 归档目录 | `<ANNC_PREFIX>/lib64`（GNUInstallDirs；aarch64） |
 | `ANNC_LLVM_BIN` | LLVM  bin 目录；其父目录的 `lib64`/`lib` 提供 LLVM 静态归档 | 构建期写入的工具目录 |
@@ -219,7 +228,9 @@ ANNC 安装前缀保持默认相对布局时大多数变量可省略。常用变
 
 - 四个 `ANNC_EP_FUSION_*` 默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0`
   关闭。
-- 修改开关后需要新建 session，并会进入 EP 缓存签名。
+- 修改融合开关后需要新建 session，并会进入 EP 缓存签名。
+- packed-B 独立于融合开关，修改后需要新建 session；只改变运行时权重表示，
+  不改变融合边界，无需为 `0/1` 分开清理编译缓存。
 - `ANNC_EP_DEBUG` 是 presence-only：设置成 `1`、`0` 或空都会开启；生产环境用完
   记得 `unset`。
 
@@ -367,9 +378,45 @@ model2、model3。预期 model1 `21/21`、model2 `33/33`、model3 `3/3`；关闭
 预期 `sites=50 claimed=50`；关闭后 `sites=0 claimed=0`。通用 `matmul` 仍可能
 融合同一子图，因此“全部站点”不一定随目标 pattern 关闭而下降。
 
-### 3.7 使能所有特性
+### 3.7 packed-B 特性
 
-四个 `ANNC_EP_FUSION_*` 默认全部关闭；使能所有特性需要把四个开关都设为 `1`。
+- 打开：设置 `ANNC_EP_PACKED_B=1`（默认关闭）；`0`、空字符串或未设置均关闭。
+- model3 同时设置 `ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1`；model4 同时设置
+  `ANNC_EP_FUSION_TENSORDOT_MATMUL=1`。
+- 在创建 ORT session 前设置；修改开关后需新建 session。
+
+使用 3.2 的 ANNC 压测副本，分别关闭/开启 packed-B（以下为 model3，model4 则
+替换模型与对应融合开关），其他配置保持相同：
+
+```shell
+for packed in 0 1; do
+  ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1 \
+  ANNC_EP_FUSION_TENSORDOT_MATMUL=0 ANNC_EP_FUSION_LAYER_NORM=0 \
+  ANNC_EP_FUSION_MASKED_MUL=0 ANNC_EP_PACKED_B="$packed" ANNC_EP_DEBUG=1 \
+  numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
+    --model <ONNX_MODEL_DIR>/model3.onnx --thread_num 5 --max_qps 0 \
+    --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \
+    --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
+    --timeout_ms 30000 --output_md "packed-${packed}.md" --debug \
+    >"packed-${packed}.log" 2>&1
+done
+grep -E 'packed-B state:|packed-B selected' packed-1.log
+grep -E 'packed-B state:|packed-B selected' packed-0.log  # 预期无匹配
+```
+
+使能证据（需设置 `ANNC_EP_DEBUG=1`）：
+
+- 开启时，`packed-B state:` 日志包含 `rank/slices/K/N/bytes`，确认已创建打包状态；
+  推理日志出现 `bmm: packed-B selected`（model3）或
+  `ftdmm: packed-B selected`（model4），确认计算实际使用 packed-B。
+- 关闭时，以上两类日志均无匹配。
+- 按 3.3 的方法核对 `GetCapability`：两次运行保持相同融合，model3 的
+  `sites=50 claimed=50`、model4 的 `sites=15 claimed=15`，`dropped=0`。
+
+### 3.8 使能所有特性
+
+四个 `ANNC_EP_FUSION_*` 默认全部关闭；使能所有融合需要把四个开关都设为 `1`。
+同时开启 packed-B 时另设 `ANNC_EP_PACKED_B=1`；其开关与融合独立。
 基线用未修改的脚本（CPU EP），ANNC 臂用 3.2 的补丁副本：
 
 ```shell
@@ -380,9 +427,10 @@ numactl -C 48-63 <PYTHON> <BENCH_SCRIPT> \
   --test_duration_s 30 --intra_threads 16 --inter_threads 8 \
   --timeout_ms 30000 --output_md baseline.md
 
-# ANNC：四个融合开关全部设为 1
+# ANNC：四个融合开关与 packed-B 全部设为 1
 ANNC_EP_FUSION_TENSORDOT_MATMUL=1 ANNC_EP_FUSION_LAYER_NORM=1 \
 ANNC_EP_FUSION_MASKED_MUL=1 ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1 \
+ANNC_EP_PACKED_B=1 \
 ANNC_EP_DEBUG=1 numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
   --model <ONNX_MODEL_DIR>/model1.onnx --thread_num 5 --max_qps 0 \
   --max_inflight 100 --batch_size 32 --warmup_duration_s 5 \

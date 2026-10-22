@@ -18,7 +18,7 @@ endforeach()
 
 # annc_execution_v2 sites: the context callbacks, the pool the context
 # carries, and the failure paths of both.
-foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot)
+foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot legacy-packed)
   add_test(NAME AnncEpContextFixture.${mode}
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/ep_context_fixture.py
@@ -124,4 +124,16 @@ if(TARGET annc-onnx-pipeline)
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
       ${AnncEpKernelLibArgs})
   set_tests_properties(AnncEpBatchedMatMulAddContextE2e PROPERTIES TIMEOUT 600)
+  if(ANNC_KERNEL_MLAS)
+    add_test(NAME AnncEpBatchedMatMulAddPackedContextE2e
+      COMMAND ${CMAKE_COMMAND} -E env ANNC_EP_PACKED_B=1 ANNC_EP_DEBUG=1
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/batched_matmul_add_context_e2e.py
+        --packed-b-regression
+        --ep-library $<TARGET_FILE:annc_ep>
+        --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+        --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+        ${AnncEpKernelLibArgs})
+    set_tests_properties(AnncEpBatchedMatMulAddPackedContextE2e PROPERTIES TIMEOUT 600)
+  endif()
 endif()

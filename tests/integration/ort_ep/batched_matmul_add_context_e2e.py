@@ -22,6 +22,8 @@ from threading import Barrier
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -139,17 +141,46 @@ def main():
                         help="further archive directories the driver links "
                              "against (ANNCGemmSupport, GEMM microkernels)")
     parser.add_argument("--work-dir")
+    parser.add_argument("--packed-b-regression", action="store_true")
     args = parser.parse_args()
+    if args.packed_b_regression:
+        work = Path(args.work_dir or tempfile.mkdtemp(
+            prefix="annc-packed-b-switch-"))
+        for index, value in enumerate((None, "0", "", "1")):
+            env = dict(os.environ, ANNC_EP_DEBUG="1")
+            env.pop("ANNC_EP_PACKED_B", None)
+            if value is not None:
+                env["ANNC_EP_PACKED_B"] = value
+            child = subprocess.run(
+                [sys.executable, __file__,
+                 *(arg for arg in sys.argv[1:]
+                   if arg != "--packed-b-regression"),
+                 "--work-dir", str(work / f"mode-{index}")],
+                env=env, capture_output=True, text=True)
+            print(child.stdout)
+            print(child.stderr, file=sys.stderr)
+            assert child.returncode == 0, child.returncode
+            if value == "1":
+                # Silent raw fallback cannot satisfy the packed regression.
+                assert "packed-B source: folded" in child.stderr
+                assert "packed-B source: initializer" in child.stderr
+                assert "packed-B state: rank=4" in child.stderr
+            else:
+                # The child also verifies fused EP execution and numerics.
+                assert "packed-B state:" not in child.stderr, (
+                    f"packed-B must be disabled for {value!r}")
+            print(f"packed-B switch {value!r}: fused execution/numerics pass")
+        return
 
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-bmm-add-"))
     (work / "cache").mkdir(parents=True, exist_ok=True)
     merged = merge_kernel_libs(
         work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir])
     for required in ("libANNCBuiltinKernels.a", "libLLVMSupport.a",
-                     "libANNCGemmSupport.a", "libannc_gemm_microkernels.a"):
+                     "libANNCGemmSupport.a"):
         assert (merged / required).exists(), (
             f"{required} missing from {merged}; build annc-onnx-pipeline, "
-            "ANNCGemmSupport and make the GEMM microkernel archive available")
+            "and ANNCGemmSupport")
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)

@@ -20,6 +20,8 @@
 //                       claim time (TENSORDOT_MATMUL, LAYER_NORM,
 //                       MASKED_MUL, BATCHED_MATMUL_ADD); unset or "=0"
 //                       disables it (default: disabled)
+//   ANNC_EP_PACKED_B=1  pack constant MLAS B weights at session creation;
+//                       unset, empty or "0" disables it (default: disabled)
 //
 // Scope:
 //   * the ANNC toolchain decides the fusion boundaries (no matcher is replayed
@@ -42,18 +44,26 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <new>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#if defined(ANNC_KERNEL_MLAS)
+#include "mlas.h"
+#include "Kernel/PackedB.h"
+#endif
 
 namespace {
 
@@ -97,7 +107,10 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
   };
   // v2: ORT fusion switches default to disabled. Bump the version so caches
   // produced under the old default-on semantics are not reused.
-  fingerprint += "\nannc-ep-config-v2";
+  // The execution context gained the optional packed-B field in ABI v4.
+  // Old v3 kernels reject the larger context, so invalidate compiled kernel
+  // caches built against the v3 layout and force a rebuild.
+  fingerprint += "\nannc-packed-b-abi-v3-effective-weight-size";
   for (const char* name : config_names) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
@@ -326,6 +339,17 @@ struct ComputeState {
   int64_t x_index = -1, w_index = -1;
   // ANNC_EP_DEBUG: print this node's operand shapes once.
   std::atomic<bool> reported{false};
+#if defined(ANNC_KERNEL_MLAS)
+  struct PackedOwner {
+    AnncPackedB descriptor;
+    std::vector<void*> allocations;
+    std::vector<const float*> slices;
+    ~PackedOwner() {
+      for (void* pointer : allocations) std::free(pointer);
+    }
+  };
+  std::unique_ptr<PackedOwner> packed;
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -436,7 +460,20 @@ struct AnncNodeComputeInfo : OrtNodeComputeInfo {
   std::vector<int64_t> arg_indices;
   // Declared output slot -> the fused node's output index (empty = identity).
   std::vector<uint32_t> output_slots;
+#if defined(ANNC_KERNEL_MLAS)
+  struct PackedPlan {
+    int64_t arg_index = -1;
+    int32_t rank = 0;
+    int64_t shape[4] = {0, 0, 0, 0};
+    std::vector<float> raw;
+  } packed_plan;
+#endif
 };
+
+#if defined(ANNC_KERNEL_MLAS)
+bool BuildPackedState(const AnncNodeComputeInfo::PackedPlan& plan,
+                      ComputeState* state);
+#endif
 
 // ---------------------------------------------------------------------------
 // Context-ABI execution (annc_execution_v2 sites)
@@ -597,8 +634,8 @@ OrtStatus* ComputeContextSite(ComputeState* state,
     std::fprintf(stderr, ", %zu output slot(s)\n",
                  state->context_call.outputs.size());
   }
-  OrtStatus* status = annc_ep::ComputeWithContext(
-      g_api, kernel_context, state->context_call);
+  OrtStatus* status = annc_ep::ComputeWithContext(g_api, kernel_context,
+                                                  state->context_call);
   if (timing) {
     const auto t_end = std::chrono::steady_clock::now();
     Timing().NoteContextCall(
@@ -631,6 +668,11 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
   state->context_call.arg_indices = info->arg_indices;
   state->context_ready.store(!info->arg_indices.empty(),
                              std::memory_order_relaxed);
+#if defined(ANNC_KERNEL_MLAS)
+  if (!BuildPackedState(info->packed_plan, state)) {
+    state->packed.reset();
+  }
+#endif
   *compute_state = state;
   return nullptr;
 }
@@ -1167,6 +1209,245 @@ bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
   return true;
 }
 
+#if defined(ANNC_KERNEL_MLAS)
+bool BuildPackedBPlan(const OrtGraph* graph, const OrtNode* fused_node,
+                      const annc_ep::Site& site,
+                      const AnncNodeComputeInfo& info,
+                      AnncNodeComputeInfo::PackedPlan* plan) {
+  try {
+  if (graph == nullptr || plan == nullptr ||
+      (site.pattern != "tensordot_matmul" &&
+       site.pattern != "batched_matmul_add") ||
+      site.abi != "annc_execution_v2") {
+    return false;
+  }
+  auto api_ok = [](OrtStatus* status) {
+    if (status == nullptr) return true;
+    g_api->ReleaseStatus(status);
+    return false;
+  };
+
+  size_t initializer_count = 0;
+  if (!api_ok(g_api->Graph_GetNumInitializers(graph, &initializer_count))) {
+    return false;
+  }
+  std::vector<const OrtValueInfo*> initializers(initializer_count);
+  if (!api_ok(g_api->Graph_GetInitializers(graph, initializers.data(), initializer_count))) {
+    return false;
+  }
+
+  constexpr size_t weight_arg = 1;
+  if (site.args.size() <= weight_arg ||
+      site.args[weight_arg].role != "fixed" ||
+      site.args[weight_arg].dtype != "f32" ||
+      site.args[weight_arg].rank < 2 || site.args[weight_arg].rank > 4 ||
+      site.args[weight_arg].shape.size() !=
+          static_cast<size_t>(site.args[weight_arg].rank)) {
+    return false;
+  }
+  const auto& candidate = site.args[weight_arg];
+  const OrtValueInfo* selected_info = nullptr;
+  for (const OrtValueInfo* initializer : initializers) {
+    const char* name = nullptr;
+    if (initializer != nullptr &&
+        api_ok(g_api->GetValueInfoName(initializer, &name)) && name != nullptr &&
+        candidate.name == name) {
+      if (selected_info != nullptr) return false;
+      selected_info = initializer;
+    }
+  }
+  if (selected_info == nullptr || fused_node == nullptr) return false;
+
+  size_t input_count = 0;
+  if (!api_ok(g_api->Node_GetNumInputs(fused_node, &input_count))) return false;
+  std::vector<const OrtValueInfo*> inputs(input_count);
+  if (!api_ok(g_api->Node_GetInputs(fused_node, inputs.data(), input_count))) {
+    return false;
+  }
+  int64_t input_index =
+      weight_arg < info.arg_indices.size() ? info.arg_indices[weight_arg] : -1;
+  for (size_t input = 0; input < inputs.size(); ++input) {
+    const char* name = nullptr;
+    if (inputs[input] == nullptr ||
+        !api_ok(g_api->GetValueInfoName(inputs[input], &name)) || name == nullptr ||
+        candidate.name != name) {
+      continue;
+    }
+    if (input_index >= 0 && input_index != static_cast<int64_t>(input)) return false;
+    input_index = static_cast<int64_t>(input);
+  }
+  if (input_index < 0 || input_index >= static_cast<int64_t>(inputs.size())) {
+    return false;
+  }
+  plan->arg_index = input_index;
+
+  bool constant = false;
+  if (!api_ok(g_api->ValueInfo_IsConstantInitializer(selected_info, &constant)) ||
+      !constant) {
+    return false;
+  }
+  const OrtValue* value = nullptr;
+  if (!api_ok(g_api->ValueInfo_GetInitializerValue(selected_info, &value)) ||
+      value == nullptr) {
+    return false;
+  }
+  OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+  if (!api_ok(g_api->GetTensorTypeAndShape(value, &tensor_info)) ||
+      tensor_info == nullptr) {
+    return false;
+  }
+  ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  size_t rank = 0;
+  bool valid = api_ok(g_api->GetTensorElementType(tensor_info, &type)) &&
+               api_ok(g_api->GetDimensionsCount(tensor_info, &rank)) &&
+               type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && rank >= 2 && rank <= 4;
+  if (!valid || rank != static_cast<size_t>(candidate.rank)) {
+    g_api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+    return false;
+  }
+  std::vector<int64_t> shape(rank);
+  valid = api_ok(g_api->GetDimensions(tensor_info, shape.data(), rank));
+  g_api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+  if (!valid) return false;
+  for (size_t i = 0; i < rank; ++i) {
+    if (shape[i] != candidate.shape[i]) return false;
+  }
+
+  size_t elements = 1;
+  for (int64_t dim : shape) {
+    if (dim <= 0 || static_cast<size_t>(dim) >
+                        std::numeric_limits<size_t>::max() / elements) {
+      return false;
+    }
+    elements *= static_cast<size_t>(dim);
+  }
+  if (elements > std::numeric_limits<size_t>::max() / sizeof(float)) return false;
+  size_t bytes = 0;
+  if (!api_ok(g_api->GetTensorSizeInBytes(value, &bytes)) ||
+      bytes != elements * sizeof(float)) return false;
+  const void* data = nullptr;
+  if (!api_ok(g_api->GetTensorData(value, &data)) || data == nullptr) return false;
+
+  if (site.pattern == "batched_matmul_add") {
+    // Shape equality cannot identify a weight: pre-affine folding preserves
+    // the external initializer binding but makes the kernel consume its own
+    // transformed constant. Read that exact payload from the same library.
+    KernelHandle* handle = Kernels().Get(info.library, info.kernel_name);
+    if (handle == nullptr) return false;
+    const std::string name =
+        "_mlir_ciface___annc_effective_weight_" + info.kernel_name;
+    auto accessor = reinterpret_cast<uint64_t (*)()>(
+        dlsym(handle->handle, name.c_str()));
+    if (accessor == nullptr) return false;  // Unknown/legacy provenance: raw B.
+    const uint64_t address = accessor();
+    if (address != 0) {
+      const std::string size_name =
+          "_mlir_ciface___annc_effective_weight_size_" + info.kernel_name;
+      auto size_accessor = reinterpret_cast<uint64_t (*)()>(
+          dlsym(handle->handle, size_name.c_str()));
+      if (size_accessor == nullptr) return false;
+      const uint64_t effective_elements = size_accessor();
+      if (effective_elements > std::numeric_limits<size_t>::max() ||
+          !annc::kernels::effectiveWeightSizeMatches(
+              static_cast<size_t>(effective_elements), bytes)) {
+        return false;
+      }
+      data = reinterpret_cast<const void*>(address);
+    }
+    if (g_debug)
+      std::fprintf(stderr, "[annc-ep] packed-B source: %s kernel=%s\n",
+                   address ? "folded" : "initializer", info.kernel_name.c_str());
+  }
+
+  if (plan->arg_index < 0) return false;
+  plan->rank = static_cast<int32_t>(rank);
+  std::copy(shape.begin(), shape.end(), plan->shape);
+  plan->raw.resize(elements);
+  std::memcpy(plan->raw.data(), data, bytes);
+  return true;
+  } catch (const std::bad_alloc&) {
+    // Compile-time candidate construction is optional; leave the plan empty
+    // so CreateState and the kernel use the original raw B input.
+    return false;
+  }
+}
+#endif
+
+#if defined(ANNC_KERNEL_MLAS)
+bool BuildPackedState(const AnncNodeComputeInfo::PackedPlan& plan,
+                      ComputeState* state) {
+  try {
+  if (state == nullptr || plan.arg_index < 0 || plan.rank < 2 || plan.rank > 4 ||
+      plan.raw.empty()) {
+    return false;
+  }
+  const int64_t k = plan.shape[plan.rank - 2];
+  const int64_t n = plan.shape[plan.rank - 1];
+  if (k <= 0 || n <= 0 || static_cast<size_t>(k) >
+                              std::numeric_limits<size_t>::max() /
+                                  static_cast<size_t>(n) ||
+      static_cast<size_t>(k) * static_cast<size_t>(n) >
+          std::numeric_limits<size_t>::max() / sizeof(float)) {
+    return false;
+  }
+  size_t slices = 1;
+  for (int32_t dim = 0; dim < plan.rank - 2; ++dim) {
+    if (plan.shape[dim] <= 0 || static_cast<size_t>(plan.shape[dim]) >
+                                    std::numeric_limits<size_t>::max() / slices) {
+      return false;
+    }
+    slices *= static_cast<size_t>(plan.shape[dim]);
+  }
+  const size_t raw_slice_elements = static_cast<size_t>(k) * static_cast<size_t>(n);
+  if (slices > plan.raw.size() / raw_slice_elements ||
+      slices * raw_slice_elements != plan.raw.size()) {
+    return false;
+  }
+  const size_t packed_size = MlasGemmPackBSize(
+      CblasNoTrans, CblasNoTrans, static_cast<size_t>(n), static_cast<size_t>(k), nullptr);
+  if (packed_size == 0 || packed_size > std::numeric_limits<size_t>::max() / slices) {
+    return false;
+  }
+  auto packed = std::make_unique<ComputeState::PackedOwner>();
+  packed->allocations.reserve(slices);
+  packed->slices.reserve(slices);
+  const size_t alignment = MlasGetPreferredBufferAlignment();
+  for (size_t slice = 0; slice < slices; ++slice) {
+    void* buffer = nullptr;
+    if (alignment == 0 || posix_memalign(&buffer, alignment, packed_size) != 0 ||
+        buffer == nullptr) {
+      return false;
+    }
+    MlasGemmPackB(CblasNoTrans, CblasNoTrans, static_cast<size_t>(n),
+                  static_cast<size_t>(k),
+                  plan.raw.data() + slice * raw_slice_elements,
+                  static_cast<size_t>(n), buffer, nullptr);
+    packed->allocations.push_back(buffer);
+    packed->slices.push_back(reinterpret_cast<const float*>(buffer));
+  }
+  packed->descriptor.rank = plan.rank;
+  std::copy(std::begin(plan.shape), std::end(plan.shape),
+            std::begin(packed->descriptor.shape));
+  packed->descriptor.slice_count = slices;
+  packed->descriptor.slices = packed->slices.data();
+  state->packed = std::move(packed);
+  state->context_call.packed_b = &state->packed->descriptor;
+  if (g_debug) {
+    std::fprintf(stderr,
+                 "[annc-ep] packed-B state: rank=%d slices=%zu K=%lld N=%lld bytes=%zu\n",
+                 plan.rank, slices, static_cast<long long>(k),
+                 static_cast<long long>(n), packed_size * slices);
+  }
+  return true;
+  } catch (const std::bad_alloc&) {
+    // Packing is an optional optimization. Allocation pressure must leave the
+    // node on the raw-B path instead of failing session creation.
+    return false;
+  }
+}
+
+#endif
+
 OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
                                     const OrtNode** fused_nodes, size_t count,
                                     OrtNodeComputeInfo** node_compute_infos,
@@ -1197,6 +1478,15 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
                        "subgraph (outputs/ranks/types/names)\n",
                        site->kernelName.c_str());
         }
+#if defined(ANNC_KERNEL_MLAS)
+        const char* packed_b = std::getenv("ANNC_EP_PACKED_B");
+        if (packed_b != nullptr && packed_b[0] != '\0' &&
+            std::strcmp(packed_b, "0") != 0 &&
+            !BuildPackedBPlan(graphs[i], fused_nodes[i], *site, *info,
+                              &info->packed_plan)) {
+          info->packed_plan = {};
+        }
+#endif
       } else {
         // Unreachable while GetCapability claims only reported sites and every
         // claimed kernel resolved there; loud because it means the claim and

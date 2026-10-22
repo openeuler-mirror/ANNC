@@ -187,10 +187,10 @@ def main():
     merged = merge_kernel_libs(
         work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir])
     for required in ("libANNCBuiltinKernels.a", "libLLVMSupport.a",
-                     "libANNCGemmSupport.a", "libannc_gemm_microkernels.a"):
+                     "libANNCGemmSupport.a"):
         assert (merged / required).exists(), (
             f"{required} missing from {merged}; build annc-onnx-pipeline, "
-            "ANNCGemmSupport and make the GEMM microkernel archive available")
+            "and ANNCGemmSupport")
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)

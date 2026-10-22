@@ -86,6 +86,12 @@ const char *KernelMode() {
 extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     const AnncExecutionContext *context, void *input_arg, void *weight_arg) {
   if (context == nullptr) return 1;
+  if (std::getenv("ANNC_EP_FIXTURE_LEGACY_PACKED") != nullptr &&
+      annc::packedBOf(context) != nullptr) {
+    context->report_error(context->handle, ANNC_STATUS_INTERNAL,
+                          "legacy kernel received unverified packed weight");
+    return 1;
+  }
   if (std::strcmp(KernelMode(), "same-session") == 0) {
     static std::mutex mutex;
     static std::condition_variable cv;
@@ -329,6 +335,10 @@ def session(model, providers, threads=1):
 
 
 def run_test(args):
+    if args.mode == "legacy-packed":
+        os.environ.update(ANNC_EP_FIXTURE_PATTERN="batched_matmul_add",
+                          ANNC_EP_PACKED_B="1",
+                          ANNC_EP_FIXTURE_LEGACY_PACKED="1")
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ep-context-"))
     work.mkdir(parents=True, exist_ok=True)
     # The optionless dispatch is cut into min(rows, DoP) blocks, so the
@@ -540,7 +550,7 @@ def main():
     parser.add_argument("--work-dir")
     parser.add_argument("--mode",
                         choices=["normal", "threads", "nested", "concurrent", "same-session",
-                                 "error", "bad-slot"],
+                                 "error", "bad-slot", "legacy-packed"],
                         default="normal")
     args = parser.parse_args()
     if args.toolchain_info or args.model:

@@ -293,6 +293,9 @@ void ConstantLoweringToLinalg::Lowering(PatternRewriter& rewriter,
                 memrefType, type.getCacheData(), /*constant=*/false,
                 IntegerAttr());
           }
+          if (op->hasAttr("annc.effective_weight"))
+            parentFunc->setAttr("annc.effective_weight_global",
+                               rewriter.getStringAttr(global.getSymName()));
           rewriter.setInsertionPoint(op);
           auto buffer = rewriter.create<memref::GetGlobalOp>(
               op.getLoc(), memrefType, global.getSymName());

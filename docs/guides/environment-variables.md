@@ -78,6 +78,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_EP_FUSION_LAYER_NORM` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 LayerNormalization 站点申报 |
 | `ANNC_EP_FUSION_MASKED_MUL` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedMaskedMul 站点申报 |
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedBatchedMatmulAdd 站点申报 |
+| `ANNC_EP_PACKED_B` | 非空且非 `0` 开启（如 `1`）；`0`/空字符串/未设置关闭 | 关闭 | session 创建时为 MLAS 的固定 f32 B 权重打包，适用于 BMM / FTDMM；关闭保留融合并使用 raw-B。修改后须新建 session，详见[部署手册](../../tests/ort-ep-build-and-deploy.md#37-packed-b-特性) |
 
 四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0` 关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。关闭只影响该特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
 

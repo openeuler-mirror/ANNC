@@ -468,6 +468,7 @@ OnnxExecutionContext::OnnxExecutionContext(
   context_.thread_pool =
       reinterpret_cast<AnncThreadPoolHandle*>(static_cast<
           annc::threadpool::AnncThreadPool*>(&pool_));
+  context_.packed_b = nullptr;
 }
 
 OnnxExecutionContext::~OnnxExecutionContext() {
@@ -737,6 +738,7 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
                               : std::chrono::steady_clock::time_point{};
   OnnxExecutionContext context(api, kernel_context, request.outputs,
                                &request.output_slots);
+  context.SetPackedB(request.packed_b);
 
   std::vector<MemRefStorage> storage(request.arg_indices.size());
   std::vector<void*> args;
