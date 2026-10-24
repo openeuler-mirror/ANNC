@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 
-#include "Support/ThreadPool/Parallel.h"
+#include "Context/Parallel.h"
 
 namespace {
 

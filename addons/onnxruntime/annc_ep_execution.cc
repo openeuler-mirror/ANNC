@@ -318,7 +318,7 @@ void OrtThreadPool::parallel_for(
       // shard count is no longer ANNC's to estimate (the estimate was the
       // source of the 8x per-node dispatch gap and of 17-shard dispatches on
       // two-thread pools; task 20261013-019).  ANNC's cost units are already
-      // TensorOpCost's compute-cycles scale (Support/ThreadPool/
+      // TensorOpCost's compute-cycles scale (Context/
       // RowParallel.h), so the number passes through.  A null pool (intra-
       // op=1) is serial inside TryParallelFor itself.
       const double cost_per_unit = static_cast<double>(
@@ -376,14 +376,14 @@ void OrtThreadPool::parallel_for(
   // include/onnxruntime/core/platform/threadpool.h).  So this adapter applies
   // the framework's own rule -- the same Eigen model and the same block
   // calculation -- to the cost the kernel reports in ORT's units
-  // (include/Support/ThreadPool/RowParallel.h).  Eigen's constants
+  // (include/Context/RowParallel.h).  Eigen's constants
   // (unsupported/Eigen/CXX11/src/Tensor/TensorCostModel.h): kStartupCycles =
   // kPerThreadCycles = 100000.
   //
   // A kernel that reports only grain_size asks for fixed-size blocks instead:
   // that is the TF adapter's kFixedBlockSize path, honoured verbatim.  With
   // neither signal the range is split like the in-tree pool splits an
-  // optionless call (Support/ThreadPool/Parallel.cpp defaults grain_size to 1,
+  // optionless call (Context/Parallel.cpp defaults grain_size to 1,
   // one unit per block) and like ORT itself splits it when the caller passes
   // num_batches <= 0 ("it will be replaced to the value of
   // DegreeOfParallelism()", include/onnxruntime/core/platform/threadpool.h) --

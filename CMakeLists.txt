@@ -342,6 +342,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 include_directories(${CMAKE_SOURCE_DIR}/annc/include)
 include_directories(${CMAKE_BINARY_DIR}/annc/include)
+include_directories(${CMAKE_SOURCE_DIR}/context/include)
 
 include_directories(${json_SOURCE_DIR}/include)
 
@@ -380,6 +381,7 @@ endif()
 
 include(CTest)
 
+add_subdirectory(context)
 add_subdirectory(annc)
 if(ANNC_ENABLE_PYTHON)
   add_subdirectory(python)

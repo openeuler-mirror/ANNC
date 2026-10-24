@@ -7,7 +7,7 @@
 
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 #include "llvm/Support/Error.h"
 
 namespace annc::kernels::execution {

@@ -1,7 +1,7 @@
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
-#include "Support/ThreadPool/Parallel.h"
-#include "Support/ThreadPool/RowParallel.h"
+#include "Context/Parallel.h"
+#include "Context/RowParallel.h"
 
 namespace {
 

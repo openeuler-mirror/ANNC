@@ -9,11 +9,11 @@
 #endif
 
 #include "Kernel/ExecutionContextUtils.h"
-#include "Support/ThreadPool/RowParallel.h"
+#include "Context/RowParallel.h"
 #include "Kernel/KernelStatus.h"
 #include "Kernel/MemRefTypes.h"
-#include "Support/ThreadPool/Parallel.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/Parallel.h"
+#include "Context/ThreadPool.h"
 
 namespace {
 

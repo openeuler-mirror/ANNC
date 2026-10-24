@@ -1,4 +1,4 @@
-#include "Support/ThreadPool/Parallel.h"
+#include "Context/Parallel.h"
 
 #include <algorithm>
 
@@ -87,7 +87,8 @@ void parallel_for(AnncThreadPool* thread_pool, std::int64_t total,
       std::max<std::int64_t>(options.grain_size.value_or(1), 1);
   const bool should_run_parallel =
       thread_pool != nullptr && total > grain_size &&
-      num_threads(thread_pool) > 1 && !in_parallel_region(thread_pool);
+      num_threads(thread_pool) > 1 && options.max_parallelism.value_or(2) > 1 &&
+      !in_parallel_region(thread_pool);
 
   if (!should_run_parallel) {
     // A synchronous callback must not use the caller's pool for a nested

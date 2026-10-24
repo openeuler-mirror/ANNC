@@ -564,7 +564,7 @@ FileCheck 检验 IR 形态、成员名单、元数据与拒绝行为；已有 ke
 | `annc/lib/Conversion/AtirToLinalg/`                      | 通用 lowering 的算子覆盖；既可由 `--convert-atir-to-linalg` 直接触发，也随 AArch64 目标流水线（`--annc-aarch64-gemm-pipeline`）间接执行      |
 | `annc/lib/Target/aarch64/`                                | 矩阵类专用后端流水线与 pass 集合                              |
 | `annc/lib/Kernel/`、`annc/include/Kernel/`                 | kernel 注册表、优先级解析、内置 kernel，以及 memref、状态码与执行上下文契约 |
-| `annc/lib/Support/ThreadPool/`                            | 并行运行时与面向生成代码的 C 入口                               |
+| `context/`                            | 并行运行时与面向生成代码的 C 入口                               |
 | `annc/tools/annc*`                                        | 编译驱动、汇编工具与验证工具                                   |
 | `frontends/onnx/onnx-pipeline/annc-onnx-pipeline.cpp`     | 整图导入、融合、报告生成、AOT 筛选与产物链接的实际顺序                    |
 | `addons/onnxruntime/annc_ep.cpp`、`annc_ep_compile.cc`     | 报告读取、站点预检、参数/输出装配、缓存身份与已加载产物消费                   |

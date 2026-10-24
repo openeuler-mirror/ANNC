@@ -60,6 +60,7 @@ if(ANNC_ENABLE_COVERAGE)
             COMMAND ${GCOVR_BIN}
                     --root ${CMAKE_SOURCE_DIR}
                     --filter "${CMAKE_SOURCE_DIR}/annc/(lib|include)/Kernel"
+                    --filter "${CMAKE_SOURCE_DIR}/context/"
                     ${CMAKE_BINARY_DIR}
                     --html-details ${ANNC_COVERAGE_DIR}/index.html
                     --print-summary

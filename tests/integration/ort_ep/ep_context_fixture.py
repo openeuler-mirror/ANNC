@@ -51,7 +51,7 @@ KERNEL = r"""
 #include <vector>
 
 #include "Kernel/ExecutionContext.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 
 // The EP calls the kernel with one ranked-memref descriptor per site argument.
 struct MemRef3D {
@@ -281,7 +281,8 @@ def run_pipeline(args):
     source.write_text(KERNEL)
     include_dir = Path(__file__).resolve().parents[3] / "annc" / "include"
     subprocess.run(["c++", "-std=c++17", "-shared", "-fPIC", "-O2",
-                    "-I", str(include_dir), "-o",
+                    "-I", str(include_dir),
+                    "-I", str(include_dir.parents[1] / "context" / "include"), "-o",
                     str(output / "libannc_kernels.so"), str(source)],
                    check=True)
     columns = model.graph.initializer[0].dims[1]

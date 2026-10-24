@@ -352,7 +352,7 @@ ANNC 已有概念集中在此查阅；本次新增的类或称谓在正文首次
 | TF1.15 的 tensordot 图生成 | [TensorFlow v1.15.0 math_ops.py](https://github.com/tensorflow/tensorflow/blob/v1.15.0/tensorflow/python/ops/math_ops.py#L3636) |
 | 已有折叠与权重预打包 | [AtirOps.cpp](../../../annc/lib/Dialect/Atir/AtirOps.cpp) 中的 `SizeOp::fold`、[GemmPrepackRhs.cpp](../../../annc/lib/Target/aarch64/Gemm/ConstantFolding/GemmPrepackRhs.cpp)、[CheckpointReader.cpp](../../../annc/lib/Target/aarch64/Gemm/ConstantFolding/CheckpointReader.cpp) |
 | 常量折叠接入 | [JIT 编译入口](../../../tensorflow_addons/annc_fused_op_jit.cc)、[目录级宏定义](../../../annc/CMakeLists.txt) |
-| 线程池、缓存及 kernel 调用 | [ThreadPool.h](../../../annc/include/Support/ThreadPool/ThreadPool.h)、[annc_fused_op.cc](../../../tensorflow_addons/annc_fused_op.cc)、[annc_jit_cache.h](../../../tensorflow_addons/annc_jit_cache.h)、[annc_ciface_dispatch.h](../../../tensorflow_addons/annc_ciface_dispatch.h) |
+| 线程池、缓存及 kernel 调用 | [ThreadPool.h](../../../context/include/Context/ThreadPool.h)、[annc_fused_op.cc](../../../tensorflow_addons/annc_fused_op.cc)、[annc_jit_cache.h](../../../tensorflow_addons/annc_jit_cache.h)、[annc_ciface_dispatch.h](../../../tensorflow_addons/annc_ciface_dispatch.h) |
 | 测试组织 | [tests/README.md](../../../tests/README.md) |
 
 ## 附录 C 构建与功能配置

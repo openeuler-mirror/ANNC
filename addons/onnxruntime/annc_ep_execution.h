@@ -21,7 +21,7 @@
 
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/PackedB.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 
 #include "annc_ep_native_pool.h"
 
@@ -45,7 +45,7 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
 
   // ORT's C API exposes no pool-size query, so without the native pool this
   // is an advisory upper bound that only gates ANNC's serial/parallel
-  // decision (Support/ThreadPool/Parallel.cpp). The actual degree is ORT's
+  // decision (Context/Parallel.cpp). The actual degree is ORT's
   // scheduling decision: with intra-op=1 KernelContext_ParallelFor runs the
   // work inline.  With the native pool it is the real degree of parallelism
   // (ThreadPool::DegreeOfParallelism; 1 for a null pool).
