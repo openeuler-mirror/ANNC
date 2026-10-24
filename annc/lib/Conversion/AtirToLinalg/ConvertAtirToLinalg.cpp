@@ -3,6 +3,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "Conversion/Passes.h"
@@ -74,16 +75,34 @@ namespace atir {
                     Value address;
                     if (auto globalName = func->getAttrOfType<StringAttr>(
                             "annc.effective_weight_global")) {
-                        auto global = getOperation().lookupSymbol<memref::GlobalOp>(
-                            globalName.getValue());
+                      if (auto global =
+                              getOperation().lookupSymbol<LLVM::GlobalOp>(
+                                  globalName.getValue())) {
+                        auto pointer = builder.create<LLVM::AddressOfOp>(
+                            func.getLoc(), global);
+                        address = builder.create<LLVM::PtrToIntOp>(
+                            func.getLoc(), builder.getI64Type(), pointer);
+                      } else if (auto global =
+                                     getOperation()
+                                         .lookupSymbol<memref::GlobalOp>(
+                                             globalName.getValue())) {
                         auto buffer = builder.create<memref::GetGlobalOp>(
-                            func.getLoc(), global.getType(), global.getSymName());
-                        auto index = builder.create<memref::ExtractAlignedPointerAsIndexOp>(
-                            func.getLoc(), buffer);
+                            func.getLoc(), global.getType(),
+                            global.getSymName());
+                        auto index =
+                            builder
+                                .create<memref::ExtractAlignedPointerAsIndexOp>(
+                                    func.getLoc(), buffer);
                         address = builder.create<arith::IndexCastOp>(
                             func.getLoc(), builder.getI64Type(), index);
+                      } else {
+                        func.emitError("effective weight global not found");
+                        signalPassFailure();
+                        return;
+                      }
                     } else {
-                        address = builder.create<arith::ConstantIntOp>(func.getLoc(), 0, 64);
+                      address = builder.create<arith::ConstantIntOp>(
+                          func.getLoc(), 0, 64);
                     }
                     builder.create<func::ReturnOp>(func.getLoc(), address);
                 }
@@ -104,14 +123,32 @@ namespace atir {
                 int64_t elements = 0;
                 if (auto globalName = func->getAttrOfType<StringAttr>(
                         "annc.effective_weight_global")) {
-                    auto global = getOperation().lookupSymbol<memref::GlobalOp>(
-                        globalName.getValue());
+                  if (auto global = getOperation().lookupSymbol<LLVM::GlobalOp>(
+                          globalName.getValue())) {
+                    auto type =
+                        dyn_cast<LLVM::LLVMArrayType>(global.getGlobalType());
+                    if (!type) {
+                      func.emitError(
+                          "effective weight LLVM global must have array type");
+                      signalPassFailure();
+                      return;
+                    }
+                    elements = type.getNumElements();
+                  } else if (auto global =
+                                 getOperation().lookupSymbol<memref::GlobalOp>(
+                                     globalName.getValue())) {
                     auto type = cast<MemRefType>(global.getType());
                     if (type.hasStaticShape()) elements = type.getNumElements();
+                  } else {
+                    func.emitError("effective weight global not found");
+                    signalPassFailure();
+                    return;
+                  }
                 }
                 auto count = sizeBuilder.create<arith::ConstantIntOp>(
                     func.getLoc(), elements, 64);
-                sizeBuilder.create<func::ReturnOp>(func.getLoc(), count.getResult());
+                sizeBuilder.create<func::ReturnOp>(func.getLoc(),
+                                                   count.getResult());
             }
      }
  };

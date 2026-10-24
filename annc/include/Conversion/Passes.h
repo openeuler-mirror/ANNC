@@ -7,6 +7,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "Common/AtirLowering.h"
 #include "Dialect/Atir/AtirOps.h"
 
@@ -14,6 +15,7 @@ using namespace mlir;
 namespace atir {
 
 std::unique_ptr<mlir::Pass> createConvertAtirToLinalg();
+std::unique_ptr<mlir::Pass> createLowerContextKernelEntriesPass();
 
 #define GEN_PASS_REGISTRATION
 #define GEN_PASS_CLASSES

@@ -32,6 +32,7 @@ namespace annc
                                          int64_t intraThreadCount)
     {
         passManager.addPass(createAArch64AtirGemmEpilogueCommit());
+        passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
         passManager.addPass(createAArch64ResolveGemmPlan());

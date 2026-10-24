@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "Kernel/KernelRegistry.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -14,13 +16,11 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Error.h"
 
 namespace atir {
 
 class CustomOpSchema {
-public:
+ public:
   enum class ArgKind {
     MemRef,
     Scalar,
@@ -75,25 +75,26 @@ public:
     return *this;
   }
 
+  llvm::ArrayRef<Arg> args() const { return args_; }
   llvm::ArrayRef<ResultSpec> results() const { return results_; }
 
   mlir::DictionaryAttr toMetadata(mlir::MLIRContext *ctx) const;
 
-private:
+ private:
   std::string name_;
   std::vector<std::string> typeVars_;
   std::vector<Arg> args_;
   std::vector<ResultSpec> results_;
 };
 
-std::optional<annc::kernels::TypeConstraintInfo>
-inferTypeConstraint(llvm::StringRef typeVar, mlir::Type type);
+std::optional<annc::kernels::TypeConstraintInfo> inferTypeConstraint(
+    llvm::StringRef typeVar, mlir::Type type);
 
 llvm::Expected<std::vector<annc::kernels::TypeConstraintInfo>>
 inferTypeConstraintsFromSchema(mlir::DictionaryAttr metadata,
                                mlir::TypeRange operandTypes,
                                mlir::TypeRange resultTypes);
 
-} // namespace atir
+}  // namespace atir
 
-#endif // ANNC_DIALECT_ATIR_CUSTOMOPSCHEMA_H
+#endif  // ANNC_DIALECT_ATIR_CUSTOMOPSCHEMA_H

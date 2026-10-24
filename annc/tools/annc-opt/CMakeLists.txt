@@ -15,6 +15,7 @@ set(LIBS
   AtirPasses
   ANNCHelper
   AtirToLinalgConversion
+  ContextConversion
 )
 add_llvm_executable(annc-opt
   annc-opt.cpp

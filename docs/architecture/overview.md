@@ -327,6 +327,8 @@ flowchart LR
 
 > **路径说明**：GEMM 类融合函数走 `annc-opt → FastCodegen → ATIR→Linalg → AArch64 GEMM pipeline`。其他融合函数也由同一 `annc-asm` 命令处理，非 GEMM 自定义调用由 FastCodegen 与对应 lowering 处理。启用同步 JIT 时，fusion-only ATIR 在运行时按实际 shape 编译；进程内缓存按 Grappler 生成的 template fingerprint 和实际 shape 复用已加载产物，工具链、GEMM 配置和 ABI 固定于进程上下文。
 
+Context v3 手写 builtin 的入口改写由独立的 `--lower-context-kernel-entries` 模块 pass 负责，实现在 `annc/lib/Conversion/Context/`：校验单 builtin 融合边界、解析 kernel，并将入口转换为 `(!llvm.ptr) -> i32`。AArch64 pipeline 在形状特化、FastCodegen 与输入常量折叠之后、ATIR→Linalg 之前显式执行此 pass。普通生成式 GEMM 继续使用原有调用路径，ATIR→Linalg 本身不再隐式改写 context 入口。
+
 GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFlow intra-op 线程池（`ctx->device()->tensorflow_cpu_worker_threads()->workers->NumThreads()`）读取，通过 `--annc-aarch64-gemm-pipeline=intra-thread-count=N` 传给 `annc-asm` 的 GEMM lowering；Grappler/`annc-tf2atir` 阶段不再感知线程数。该 pool 在 session 创建时初始化、进程内恒定，因此线程数不进入 JIT cache key（cache 生命周期为 server 运行期，与 pool 生命周期一致）；template fingerprint（schema `annc-atir-template-v3`）亦不包含线程数，线程数只是 JIT 特化维度。直接调用工具时省略该选项则使用串行默认值（1）。
 
 > **现状注**：当前 `annc-tf-pipeline` 默认流水线执行 `annc-tf2atir [--batch_size N] -> annc-opt --atir-rank-inference --atir-identity-canonicalize --atir-gemm-epilogue-fusion --atir-op-fusion -> annc-opt --atir-prune-func=execution-mode=aot -> annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline -> annc --shared -> annc-converter`；没有 AOT kernel 时跳过 AOT 编译。`OpFusion` 创建 kernel func 时写入 `annc.execution_mode`；GEMM pattern 的 func 标记为 `jit`，其他 fusion func 标记为 `aot`。pipeline 保留完整 fusion-only ATIR 作为 JIT 模板，只将 AOT func lowering 后链接进共享库；converter 按每个 fusion 的 mode 分别写入 `shared_lib_path` 或 `atir_module_path`。运行时 JIT 根据实际输入 shape 特化当前 fusion func，并对 GEMM kernel 追加 `--annc-aarch64-gemm-pipeline=intra-thread-count=<runtime pool size>` 完成线程特化 lowering。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。
@@ -443,6 +445,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | ----------- | ----------------------------- | ---------------- | ---------------- |
 | Kernel 系统   | Kernel 注册、发现、优先级解析            | OpType + Backend | Kernel 符号        |
 | FastCodegen | 已注册自定义算子的代码生成准备             | ATIR MLIR        | 优化后 ATIR MLIR    |
+| Context 入口 pass | 手写 builtin 的 v3 边界校验与入口 ABI 改写 | 融合 ATIR | pointer/status 调用 |
 | Lowering    | ATIR → Linalg               | ATIR MLIR        | Lowered MLIR     |
 | AArch64 后端  | GEMM 规划、分块和微内核 lowering       | Lowered MLIR     | 优化后 Lowered MLIR |
 | annc driver | 调用 LLVM 工具链编译 `.so`           | Lowered MLIR     | 共享库 `.so`        |

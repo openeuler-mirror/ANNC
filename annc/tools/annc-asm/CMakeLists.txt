@@ -15,6 +15,7 @@ set(LIBS
   AtirBuilder
   AtirPasses
   AtirToLinalgConversion
+  ContextConversion
   AArch64Codegen
 )
 add_llvm_executable(annc-asm
@@ -34,6 +35,7 @@ target_link_libraries(annc-asm PRIVATE
   AtirDialect
   AtirBuilder
   AtirToLinalgConversion
+  ContextConversion
   AArch64Codegen
 )
 llvm_update_compile_flags(annc-asm)

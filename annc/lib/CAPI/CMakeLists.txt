@@ -18,5 +18,6 @@ add_mlir_public_c_api_library(AtirCAPIPasses
   AtirDialect
   AtirBuilder
   AtirToLinalgConversion
+  ContextConversion
   AArch64Codegen
 )

@@ -1,9 +1,9 @@
 #include "Dialect/Atir/CustomOpSchema.h"
-#include "Dialect/Atir/AtirOps.h"
 
+#include "Dialect/Atir/AtirOps.h"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 
@@ -29,16 +29,16 @@ ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
 
 std::string kindToString(CustomOpSchema::ArgKind kind) {
   switch (kind) {
-  case CustomOpSchema::ArgKind::MemRef:
-    return "memref";
-  case CustomOpSchema::ArgKind::Scalar:
-    return "scalar";
-  case CustomOpSchema::ArgKind::I64Attr:
-    return "i64_attr";
-  case CustomOpSchema::ArgKind::Opaque:
-    return "opaque";
-  case CustomOpSchema::ArgKind::Custom:
-    return "custom";
+    case CustomOpSchema::ArgKind::MemRef:
+      return "memref";
+    case CustomOpSchema::ArgKind::Scalar:
+      return "scalar";
+    case CustomOpSchema::ArgKind::I64Attr:
+      return "i64_attr";
+    case CustomOpSchema::ArgKind::Opaque:
+      return "opaque";
+    case CustomOpSchema::ArgKind::Custom:
+      return "custom";
   }
   return "custom";
 }
@@ -68,8 +68,7 @@ std::string cppTypeNameFromElementType(Type type) {
   return "";
 }
 
-std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata,
-                                      StringRef name) {
+std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata, StringRef name) {
   if (!metadata) {
     return std::nullopt;
   }
@@ -79,11 +78,12 @@ std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata,
   return std::nullopt;
 }
 
-} // namespace
+}  // namespace
 
 DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
   SmallVector<NamedAttribute> attrs;
   Builder builder(ctx);
+  SmallVector<int64_t> attrValues;
   SmallVector<std::string> argNames;
   SmallVector<std::string> argKinds;
   SmallVector<int64_t> argRanks;
@@ -98,6 +98,7 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
     argRanks.push_back(arg.rank);
     argTypeVars.push_back(arg.typeVar);
     if (arg.kind == ArgKind::I64Attr) {
+      attrValues.push_back(arg.i64Value);
       std::string attrName = "custom.attr." + arg.name;
       attrs.push_back(builder.getNamedAttr(
           attrName, builder.getI64IntegerAttr(arg.i64Value)));
@@ -128,11 +129,14 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
                                        makeI64Array(ctx, resultRanks)));
   attrs.push_back(builder.getNamedAttr("custom.result_type_vars",
                                        makeStringArray(ctx, resultTypeVars)));
+  if (!attrValues.empty())
+    attrs.push_back(builder.getNamedAttr("custom.attr_values",
+                                         makeI64Array(ctx, attrValues)));
   return DictionaryAttr::get(ctx, attrs);
 }
 
-std::optional<annc::kernels::TypeConstraintInfo>
-inferTypeConstraint(StringRef typeVar, Type type) {
+std::optional<annc::kernels::TypeConstraintInfo> inferTypeConstraint(
+    StringRef typeVar, Type type) {
   if (typeVar.empty()) {
     return std::nullopt;
   }
@@ -158,7 +162,8 @@ inferTypeConstraintsFromSchema(DictionaryAttr metadata, TypeRange operandTypes,
   std::vector<annc::kernels::TypeConstraintInfo> constraints;
   auto kindAttrs = getArrayAttr(metadata, "custom.arg_kinds");
   auto typeVarAttrs = getArrayAttr(metadata, "custom.arg_type_vars");
-  if (!kindAttrs || !typeVarAttrs || kindAttrs->size() != typeVarAttrs->size()) {
+  if (!kindAttrs || !typeVarAttrs ||
+      kindAttrs->size() != typeVarAttrs->size()) {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "invalid custom op argument metadata");
   }
@@ -203,8 +208,8 @@ inferTypeConstraintsFromSchema(DictionaryAttr metadata, TypeRange operandTypes,
           llvm::inconvertibleErrorCode(),
           "custom op has fewer operand types than schema");
     }
-    if (auto err = bindTypeVar(typeVar.getValue(),
-                               operandTypes[operandIndex])) {
+    if (auto err =
+            bindTypeVar(typeVar.getValue(), operandTypes[operandIndex])) {
       return std::move(err);
     }
     ++operandIndex;
@@ -241,4 +246,4 @@ inferTypeConstraintsFromSchema(DictionaryAttr metadata, TypeRange operandTypes,
   return constraints;
 }
 
-} // namespace atir
+}  // namespace atir
