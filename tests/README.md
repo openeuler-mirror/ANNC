@@ -32,6 +32,7 @@ tests/
 ├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
 ├── integration/
 │   ├── fusion/             # config fusion 集成 pytest
+│   ├── jit/                # JIT 缓存与预打包权重 pytest
 │   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
 │   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
 ├── e2e/
@@ -69,6 +70,8 @@ bash tests/FileCheck/run.sh
 - `integration/onnx2atir/` 需要 Python `onnx` 包与已构建的 `annc-onnx2atir`；
   缺任一条件时模块整体 skip。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
+- `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
+  `annc`/`annc-asm`；缺任一条件时 skip。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若构建用的解释器没有这两个包，configure 时用
@@ -96,6 +99,7 @@ bash tests/FileCheck/run.sh
 | `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
 | `integration/fusion/test_config_fusion_kp_fused_gather.py` | L2 | config fusion 集成 |
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
+| `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、FTDMM、fusion toggles、context-ABI e2e |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
 | `e2e/tf/e2e_kp_embedding_patterns.py` | L4 | KP embedding pattern 端到端 |
