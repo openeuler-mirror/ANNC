@@ -454,6 +454,11 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - GEMM lowering 采用 ATIR→Linalg 和 `annc-aarch64-gemm-pipeline`，由 AArch64 后端依次完成计划选择、线程划分、缓存/微内核分块和 ABI lowering。
 - Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
 - GEMM 常量折叠由 `ANNC_ENABLE_CONSTANT_FOLDING` 编译期开关控制（默认 OFF，`build.sh --enable-constant-folding` 开启；要求 TensorFlow 前端与 AArch64 GEMM 微内核归档，`--enable-ort` 下不可用）。开启后，若 AArch64 GEMM pipeline 收到非空 `packed-c` 路径且 MatMul 的常量 RHS 携带 checkpoint 变量名（`annc.aarch64.rhs_name`）并满足 `K*N >= 300`，策略在 `Autotune` 与 `Finalize` 之间插入 `aarch64-gemm-prepack-rhs`：从 checkpoint 读取 RHS，按 tuning 配置的 cache tile 调用 `pack_b` 生成 packed C 源文件，并把契约写入 `annc.aarch64.prepacked_rhs`；lowering 将其物化为外部 `memref.global`，由 `annc --packed-rhs-c` 链接进最终 `.so`，运行时不再执行 `pack_b`。关闭开关时即使传入 `packed-c` 也会被忽略，保持 runtime packed/direct 路线；该接线同时覆盖 AOT（`annc-tf-pipeline`）与 JIT（`ANNCFusedOp`）路径。
+- JIT 使用 jit-inputs 传入不可变参数索引，编译器仅生成布局元数据和调用现有 packb 的准备入口；不读取或链接模型权重。ANNCFusedOp 节点局部按输入槽与完整 layout 缓存 packed 数据，以原 RHS descriptor 传参。代码沿用进程级 single-flight/LRU，同形状不同权重共享代码但不共享数据。连续同 shape 直接复用 executable/binding，切换 shape 才查节点绑定，新 layout 才准备。
+- AOT/手工 pass 未提供 jit-inputs 时保留原 checkpoint/global 路径。默认内置 MatMul/GEMM fusion 标记为 JIT，AOT 分支按执行模式裁剪；不能据此断言当前这些 GEMM 在 AOT 中实际折叠。本次不扩展 AOT 或 ONNX EP。
+
+详见 [分离缓存实现契约](../design/jit-constant-folding/cache-separation.md) 和
+[ADR-017](../decisions/decisions.md#adr-017)。
 
 - 新编译策略可增量接入（如 XLA），不影响已有策略的稳定性。
 

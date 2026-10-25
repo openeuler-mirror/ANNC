@@ -193,3 +193,19 @@
 | **后果** | 版本差异有独立位置，前端语义集中，公共工具只构建一套。过渡期间新公共代码先由 TF1.15 使用，与 TF2.20 原目录存在必要重复；TF2.20 后续迁移单独实施。 |
 | **备选方案** | 在原插件中继续堆叠版本条件会增加后续维护成本；立即迁移 TF2.20 会扩大本次交付范围；复制两套 TF 前端缺乏源码差异依据，因此均不采用。 |
 | **详细方案** | [ANNC 支持 TensorFlow 1.15 设计方案](../design/tensorflow-1-15-support/overall.md) |
+
+<a id="adr-017"></a>
+
+## ADR-017：TensorFlow JIT GEMM 代码与权重缓存分离
+
+| 项目 | 内容 |
+| --- | --- |
+| **状态** | accepted / implemented，2026-10-25 |
+| **源码基线** | c0eee3dacd434d7bd0cf2bf9c1307dbf51fb611c |
+| **上下文** | 旧 prepack 将权重嵌入代码，但模板/shape key 不区分权重，导致同形状不同权重串用。修复应保持代码可共享，并避免每次请求扫描权重。 |
+| **决策** | 常量折叠构建固定采用共享无权重代码与只读 PackSpec/准备入口；各节点按输入槽与完整布局持有 packed 数据。不采用将权重摘要加入代码 key 的内嵌方案；关闭编译期开关仍使用普通 packed/direct。 |
+| **契约** | 候选 RHS 在 OpKernel 生命周期内不可变，换模型创建新实例。fixed/TensorBuffer 地址不证明内容不变。私有 ABI 与替换槽进入代码身份；继承固定工具链/配置/线程预算限制。 |
+| **实现取舍** | 复用代码 single-flight/LRU、现有 descriptor 和 packed-c 链接入口。仅单消费者、连续二维 F32 RHS 可替换。不合格用普通 packed。节点短 vector 保存完整布局，冷路径 mutex 串行准备，连续同 shape 直接使用已绑定代码与数据，无权重哈希或额外全局缓存查找。 |
+| **生命周期** | 节点绑定弱引用 executable，调用期间强引用代码与数据。packed 数据保留到节点卸载，代码淘汰重编可复用相同布局；不跨节点去重，也不新增全局权重 LRU。 |
+| **兼容与边界** | TF 公共 attrs/输入签名不变；保留 AOT/手工 checkpoint/global。不扩展可变权重、ONNX EP、execution_v2 JIT 特化或 fallback。节点数据内存随布局种类增长，不声称严格零成本。 |
+| **详细资料** | [实现契约与回归](../design/jit-constant-folding/cache-separation.md)。 |
