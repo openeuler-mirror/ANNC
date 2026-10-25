@@ -17,6 +17,8 @@ struct AnncJitCompileRequest {
   // fixed at session creation, so this is stable for the cache lifetime.
   int64_t intra_thread_count = 1;
   std::vector<std::vector<int64_t>> argument_shapes;
+  // Immutable kernel argument indices only; code generation never sees values.
+  std::vector<int64_t> immutable_arguments;
 };
 
 Status CompileAnncJitKernel(

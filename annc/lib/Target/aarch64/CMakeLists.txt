@@ -3,6 +3,7 @@ file(GLOB _srcs *.cpp)
 set(_gemm_srcs
         Gemm/GemmPlan.cpp
         Gemm/ConstantFolding/GemmPrepackRhs.cpp
+        Gemm/ConstantFolding/JitPrepack.cpp
         Gemm/ConstantFolding/CheckpointReader.cpp
         Gemm/ResolveGemmPlan.cpp
         Gemm/SelectGemmStrategy.cpp

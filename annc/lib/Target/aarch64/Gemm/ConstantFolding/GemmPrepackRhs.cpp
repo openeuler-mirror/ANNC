@@ -4,8 +4,10 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include "CheckpointReader.h"
+
 #include "../GemmPlan.h"
+#include "CheckpointReader.h"
+#include "JitPrepack.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -187,12 +189,21 @@ struct AArch64GemmPrepackRhsPass
     : public AArch64GemmPrepackRhsBase<AArch64GemmPrepackRhsPass> {
   using Base::Base;
 
-  explicit AArch64GemmPrepackRhsPass(llvm::StringRef path) : Base() {
+  explicit AArch64GemmPrepackRhsPass(llvm::StringRef path,
+                                     llvm::StringRef inputs)
+      : Base() {
     packedCPath = path.str();
+    jitInputsPath = inputs.str();
   }
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (!jitInputsPath.empty()) {
+      if (failed(prepareJitRhs(module, jitInputsPath, packedCPath)))
+        signalPassFailure();
+      return;
+    }
+
     RhsDataLoader rhsLoader;
     struct PendingPack {
       std::string dataSymbol;
@@ -315,8 +326,9 @@ std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs() {
 }
 
 std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
-    llvm::StringRef packedCPath) {
-  return std::make_unique<AArch64GemmPrepackRhsPass>(packedCPath);
+    llvm::StringRef packedCPath, llvm::StringRef jitInputsPath) {
+  return std::make_unique<AArch64GemmPrepackRhsPass>(packedCPath,
+                                                     jitInputsPath);
 }
 
 }  // namespace annc

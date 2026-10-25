@@ -1027,6 +1027,9 @@ annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
   request.intra_thread_count = intra_thread_count;
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  request.immutable_arguments = jit_immutable_arguments_;
+#endif
   request.argument_shapes.reserve(arguments.size());
   for (const auto& argument : arguments) {
     request.argument_shapes.push_back(argument.dims);
@@ -1069,6 +1072,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
 
   std::shared_ptr<annc::jit::JitExecutable> jit_executable;
+  std::shared_ptr<AnncJitBinding> jit_binding;
   void* kernel_function = mlir_ciface_func_;
   auto set_thread_pool = annc_set_current_threadpool_;
   auto get_thread_pool = annc_get_current_threadpool_;
@@ -1096,6 +1100,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       mutex_lock lock(jit_fastpath_mu_);
       if (last_jit_executable_ &&
           SameJitArguments(last_jit_arguments_, arguments)) {
+        jit_binding = last_jit_binding_;
         jit_executable = last_jit_executable_;
       }
     }
@@ -1109,16 +1114,21 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       }
       steady_call = true;
     } else {
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+      InitializeJitWeights(context);
+      const auto& identity = jit_identity_;
+#else
+      const auto& identity = template_fingerprint_;
+#endif
       annc::jit::JitCacheKey cache_key;
       std::string cache_key_error;
       auto t_jit_cache_key_start =
           profile_enabled ? Clock::now() : TimePoint{};
-      OP_REQUIRES(
-          context,
-          annc::jit::BuildJitCacheKey(template_fingerprint_, arguments,
-                                      &cache_key, &cache_key_error),
-          errors::Internal("Cannot build ANNC JIT cache key: ",
-                           cache_key_error));
+      OP_REQUIRES(context,
+                  annc::jit::BuildJitCacheKey(identity, arguments, &cache_key,
+                                              &cache_key_error),
+                  errors::Internal("Cannot build ANNC JIT cache key: ",
+                                   cache_key_error));
       if (profile_enabled) {
         profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
       }
@@ -1201,9 +1211,13 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       library_loaded_this_call =
           lookup.event != annc::jit::CacheEvent::kHit;
       steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+      OP_REQUIRES_OK(context, BindJitWeights(jit_executable, &jit_binding));
+#endif
       if (IsJitShapeFastPathEnabled()) {
         mutex_lock lock(jit_fastpath_mu_);
         last_jit_arguments_ = arguments;
+        last_jit_binding_ = jit_binding;
         last_jit_executable_ = jit_executable;
       }
     }
@@ -1238,11 +1252,13 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   }
 
   if (abi_ == "annc_execution_v2") {
-    execute_status = ExecuteExecutionV2Kernel(
-        context, kernel_function, profile_enabled, &profile_sample);
+    execute_status =
+        ExecuteExecutionV2Kernel(context, kernel_function, profile_enabled,
+                                 &profile_sample, jit_binding.get());
   } else {
-    execute_status = ExecuteMlirCifaceKernel(
-        context, kernel_function, profile_enabled, &profile_sample);
+    execute_status =
+        ExecuteMlirCifaceKernel(context, kernel_function, profile_enabled,
+                                &profile_sample, jit_binding.get());
   }
   OP_REQUIRES_OK(context, execute_status);
   auto t_threadpool_restore_start =
@@ -1307,7 +1323,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
 
 Status ANNCFusedOp::ExecuteExecutionV2Kernel(
     OpKernelContext* context, void* kernel_function, bool profile_enabled,
-    AnncFusedProfileSample* profile_sample) {
+    AnncFusedProfileSample* profile_sample, const AnncJitBinding* binding) {
   if (!kernel_function) {
     return errors::FailedPrecondition(
         "Execution V2 kernel symbol is not loaded");
@@ -1363,6 +1379,10 @@ Status ANNCFusedOp::ExecuteExecutionV2Kernel(
     TF_RETURN_IF_ERROR(BuildRankedMemRefArg(
         tensor, rank, &rank0[i], &rank1[i], &rank2[i], &rank3[i], &rank4[i],
         &rank5[i], &rank6[i], &memrefs[i], &string_storage[i]));
+    if (binding && !binding->packed.empty() && binding->packed[i]) {
+      rank2[i][0].allocated = binding->packed[i]->data;
+      rank2[i][0].aligned = binding->packed[i]->data;
+    }
   }
   if (profile_enabled && profile_sample) {
     profile_sample->input_memref_us = ElapsedUs(t_input_memref_start);
@@ -1448,10 +1468,9 @@ Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
   return OkStatus();
 }
 
-Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
-                                            void* kernel_function,
-                                            bool profile_enabled,
-                                            AnncFusedProfileSample* profile_sample) {
+Status ANNCFusedOp::ExecuteMlirCifaceKernel(
+    OpKernelContext* context, void* kernel_function, bool profile_enabled,
+    AnncFusedProfileSample* profile_sample, const AnncJitBinding* binding) {
   if (!kernel_function) {
     LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel symbol is null kernel="
                << kernel_name_;
@@ -1485,6 +1504,11 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
     Status status = BuildRankedMemRefArg(
         tensor, rank, &rank0[i], &rank1[i], &rank2[i], &rank3[i], &rank4[i],
         &rank5[i], &rank6[i], &memrefs[i], &string_storage[i]);
+    if (status.ok() && binding && !binding->packed.empty() &&
+        binding->packed[i]) {
+      rank2[i][0].allocated = binding->packed[i]->data;
+      rank2[i][0].aligned = binding->packed[i]->data;
+    }
     if (!status.ok()) {
       LOG(ERROR) << "[ANNC-FUSED-EXEC] failed to build input memref kernel="
                  << kernel_name_ << " input_index=" << i

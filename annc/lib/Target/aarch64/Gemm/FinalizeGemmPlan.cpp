@@ -73,6 +73,8 @@ LogicalResult appendPrepackedPlanFields(
                aarch64::gemm::getGemmPackedBSchema(strategy.isa));
   appendString(plan, builder, "pack_b_block_order", "pc-jc");
   appendString(plan, builder, "rhs_data_symbol", symbol.getValue());
+  if (contract.get("input"))
+    plan.append("rhs_data_input", builder.getUnitAttr());
   appendI64(plan, builder, "rhs_data_elements", elements.getInt());
   return success();
 }

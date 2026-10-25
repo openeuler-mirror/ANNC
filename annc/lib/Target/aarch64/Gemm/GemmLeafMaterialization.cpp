@@ -377,9 +377,9 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
   auto columnConstant = blockColumn.getDefiningOp<arith::ConstantIndexOp>();
   if (pcConstant && columnConstant) {
     offset = microBuilder.create<arith::ConstantIndexOp>(
-        loc, rowPrefix(plan.isa, plan.k, plan.n, plan.cacheTile,
+        loc, rowPrefix(plan.isa, plan.k, fullN, plan.cacheTile,
                        pcConstant.value() / plan.cacheTile.kc) +
-                 columnPrefix(plan.isa, *kSize, plan.n, plan.cacheTile.nc,
+                 columnPrefix(plan.isa, *kSize, fullN, plan.cacheTile.nc,
                               columnConstant.value() / plan.cacheTile.nc));
   } else {
     offset = materializePrepackedCacheOffset(microBuilder, loc, plan, fullN,
@@ -416,6 +416,18 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
         loc, offset, microBuilder.create<arith::AddIOp>(loc, groupOffset, lane));
   }
 
+  auto planDict =
+      op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName);
+  if (planDict.get("rhs_data_input")) {
+    Value root = rhsBlock;
+    while (auto subview = root.getDefiningOp<memref::SubViewOp>())
+      root = subview.getSource();
+    // The thread dispatcher passes the original descriptor, not a sliced
+    // packed pointer. Subviews above describe coordinates only.
+    return PackedBBlock{
+        aarch64::gemm::castToUnrankedF32MemRef(microBuilder, loc, root),
+        offset};
+  }
   FailureOr<Value> global =
       getPrepackedRhsGlobal(module, op, plan, microBuilder, loc);
   if (failed(global)) return failure();

@@ -170,6 +170,16 @@ Status CompileAnncJitKernel(
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
   const std::string packed_rhs_c = (work / "kernel_packed_rhs.c").string();
   const std::string so_path = (work / "kernel.so").string();
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  const std::string input_spec = (work / "immutable_inputs.json").string();
+  std::ofstream manifest(input_spec);
+  manifest << nlohmann::json(request.immutable_arguments).dump();
+  manifest.close();
+  if (!manifest) {
+    CleanupAnncJitWorkDir(work_dir);
+    return errors::Internal("Cannot write JIT immutable input manifest");
+  }
+#endif
   Status status = WriteRuntimeShapeSpec(shape_spec, request.kernel_name,
                                         request.argument_shapes);
   if (!status.ok()) {
@@ -189,7 +199,8 @@ Status CompileAnncJitKernel(
 #endif
   std::string gemm_pipeline_options;
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  gemm_pipeline_options += "packed-c=" + packed_rhs_c;
+  gemm_pipeline_options =
+      "packed-c=" + packed_rhs_c + " jit-inputs=" + input_spec;
 #endif
   if (request.intra_thread_count > 0) {
     if (!gemm_pipeline_options.empty()) gemm_pipeline_options += " ";
@@ -270,6 +281,29 @@ Status CompileAnncJitKernel(
   *executable = std::make_shared<annc::jit::JitExecutable>(
       work_dir, so_path, handle, kernel_function, set_thread_pool,
       get_thread_pool, EnvFlagEnabled("ANNC_KEEP_TEMPS"));
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  {
+    auto getter = reinterpret_cast<AnncGetPackedRhsSpecs>(
+        dlsym(handle, "annc_jit_packed_rhs_v1"));
+    auto prepare = reinterpret_cast<AnncPreparePackedRhs>(
+        dlsym(handle, "annc_jit_prepare_rhs_v1"));
+    int64_t count = -1;
+    const AnncPackedRhsSpec* specs = getter ? getter(&count) : nullptr;
+    if (!specs || !prepare || count < 0 ||
+        count > static_cast<int64_t>(request.immutable_arguments.size())) {
+      executable->reset();
+      return errors::Internal("Missing or invalid JIT packed RHS ABI v1");
+    }
+    for (int64_t i = 0; i < count; ++i) {
+      if (!annc::jit::ValidatePackedRhsSpec(specs[i])) {
+        executable->reset();
+        return errors::Internal("Invalid JIT packed RHS layout");
+      }
+    }
+    (*executable)->packed_rhs_specs.assign(specs, specs + count);
+    (*executable)->prepare_rhs = prepare;
+  }
+#endif
   return OkStatus();
 }
 
