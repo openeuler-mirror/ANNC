@@ -3,7 +3,6 @@
 # Default configuration
 BUILD_TYPE="Release"
 INSTALL_PREFIX="${PWD}/install"
-ENABLE_CONSTANT_FOLDING="OFF"
 ENABLE_KDNN_ADAPTOR="OFF"
 ENABLE_COVERAGE="OFF"
 ANNC_DEBUG="OFF"
@@ -57,10 +56,6 @@ while [[ $# -gt 0 ]]; do
     --install-prefix)
       INSTALL_PREFIX="$2"
       shift 2
-      ;;
-    --enable-constant-folding)
-      ENABLE_CONSTANT_FOLDING="ON"
-      shift
       ;;
     --enable-kdnn-adaptor)
       ENABLE_KDNN_ADAPTOR="ON"
@@ -179,8 +174,6 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --build-type [Debug|Release|RelWithDebInfo]  Set build type (default: Release)"
       echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
-      echo "  --enable-constant-folding     Enable constant folding and KDNN packed-B support"
-      echo "                                (default: OFF; requires TensorFlow; conflicts with --enable-ort)"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
       echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: RELEASE)"
@@ -278,14 +271,6 @@ case "${FRAMEWORK_MODE}" in
     ;;
 esac
 
-# Constant folding is a TensorFlow-path feature.  It stays off by default,
-# including every --enable-ort build; --enable-tf/--all still require an
-# explicit --enable-constant-folding to turn it on.
-if [ "${ENABLE_CONSTANT_FOLDING}" == "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
-  echo "ERROR: --enable-constant-folding requires TensorFlow (--enable-tf or --all); it conflicts with --enable-ort." >&2
-  exit 1
-fi
-
 # The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
 # the kernel MLAS backend automatically.  TF-only builds keep it off.
 if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
@@ -309,7 +294,6 @@ if [ "${DRY_RUN}" == "YES" ]; then
   echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
   echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
   echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
-  echo "ANNC_ENABLE_CONSTANT_FOLDING=${ENABLE_CONSTANT_FOLDING}"
   exit 0
 fi
 
@@ -764,7 +748,6 @@ check_cache_consistency() {
     "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
     "Python_EXECUTABLE:$(command -v ${PYTHON})"
     "Python3_EXECUTABLE:$(command -v ${PYTHON})"
-    "ANNC_ENABLE_CONSTANT_FOLDING:${ENABLE_CONSTANT_FOLDING}"
     "ANNC_ENABLE_KDNN_ADAPTOR:${ENABLE_KDNN_ADAPTOR}"
     "ANNC_ENABLE_COVERAGE:${ENABLE_COVERAGE}"
     "ANNC_ENABLE_PYTHON:${ENABLE_PYTHON}"
@@ -959,7 +942,6 @@ else
   echo "  C Compiler: ${C_COMPILER}"
   echo "  C++ Compiler: ${CXX_COMPILER}"
   echo "  Python: ${PYTHON}"
-  echo "  Constant Folding: ${ENABLE_CONSTANT_FOLDING}"
   echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
   echo "  Framework Selection: ${FRAMEWORK_MODE:-legacy}"
   echo "  TensorFlow Frontend: ${ENABLE_TENSORFLOW}"
@@ -992,7 +974,6 @@ else
   cmake .. \
     -G Ninja \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
-    -DANNC_ENABLE_CONSTANT_FOLDING="${ENABLE_CONSTANT_FOLDING}" \
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
     -DANNC_DEBUG="${ANNC_DEBUG}" \

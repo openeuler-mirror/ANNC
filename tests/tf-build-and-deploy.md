@@ -80,7 +80,7 @@ git log -1 --oneline
 | 特性 | 需要的前置 | 缺失时的行为 |
 |---|---|---|
 | AArch64 GEMM 编译/调优 | `ANNC_GEMM_CONFIG` 指向的 GEMM tuning JSON（通常来自 `benchmark/annc-bench`） | GEMM pass 报 `requires --config-path or ANNC_GEMM_CONFIG for AArch64 GEMM`，AOT/JIT 无法完成 |
-| AArch64 GEMM 微内核/小形状 | `third_party/annc-gemm-kernels/libannc_gemm_microkernels.a`（或 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`） | `ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=OFF`；不链接微内核，`GemmSmallShapeMicrokernel` 测试不注册，其余目标可构建 |
+| AArch64 GEMM 微内核/小形状 | `third_party/annc-gemm-kernels/libannc_gemm_microkernels.a`（或 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`） | `ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=OFF`；不链接微内核，`GemmSmallShapeMicrokernel` 测试不注册，其余目标可构建；静态 RHS 预打包及 SVE 主机布局校验请求明确报错，补库后需重新配置和构建 |
 | AOT/JIT kernel 汇编（生成 `.S`） | `<GEMM_ASM>` 的 `Sve/`、`Neon/` include 树 | `annc` 无法汇编生成的 `.S`，报 `ANNC_GEMM_ASM_SOURCE_DIR must point to ...`；不是预编译 kernel 二进制 |
 | KDNN 加速 | `third_party/KDNN`（LOCAL）或网络/Release（RELEASE）/git（REMOTE），并在构建时 `--enable-kdnn-adaptor` | 不启用 KDNN kernel；不要设置 `ANNC_BACKEND=kdnn`，它不能替代构建开关 |
 | 离线构建 | 预置 `third_party/json/`；LLVM/MLIR 20 由系统包提供 | FetchContent（json）需要网络或预置源码 |
@@ -122,8 +122,8 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
 
 - `--enable-tf`：仅 TensorFlow 前端 + addon，自动关闭 ORT 加速栈。
 - Python 绑定默认不构建；需要时加 `--enable-python`（同时安装 pybind11/nanobind）。
-- constant folding 默认关闭；需要时显式加 `--enable-constant-folding`，并按
-  §1.3 提供 GEMM 微内核归档。`--enable-ort` 下该特性不可用（组合会直接报错）。
+- GEMM 预打包能力随构建产物一同提供，运行时由 `ANNC_GEMM=3/99` 启用，
+  无需额外编译选项；预打包需要 §1.3 的 GEMM 微内核归档。
 - `--all`：同时构建 TensorFlow 与 ORT 加速栈；ORT 侧额外需要 ORT 头文件、
   ORT 构建树与 MLAS 头文件目录，见
   [ort-ep-build-and-deploy.md](ort-ep-build-and-deploy.md)。

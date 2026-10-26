@@ -106,6 +106,8 @@ class ANNCFusedOp : public OpKernel {
   bool zero_initialize_outputs_;
 
   // Runtime state
+  // Snapshotted at construction; consulted only on JIT shape misses.
+  const bool constant_folding_enabled_;
   // Shared-library path associated with the currently resolved kernel symbol.
   std::string current_so_path_;
   // dlopen handle owned by the process-wide library cache.

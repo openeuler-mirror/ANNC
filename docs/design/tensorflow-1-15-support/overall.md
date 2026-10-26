@@ -242,23 +242,21 @@ flowchart LR
 
 **常量折叠沿用 ANNC 已有能力及其适用条件。** ATIR 已有算子折叠继续复用，例如静态形状下的 `SizeOp::fold`。本次不新增常量折叠规则，也不扩大可折叠的运算范围。
 
-需要接入的编译开关 `ANNC_ENABLE_CONSTANT_FOLDING` 控制 GEMM 固定权重预打包：编译时从模型权重文件（checkpoint）读取权重，按 kernel 所需布局完成 PackB 重排，运行时复用。**已有算子折叠与权重预打包分别沿用各自的触发条件和执行路径。** 权重读取与预计算算法沿用，修改集中在前端迁移和新插件构建两处。
+GEMM 固定权重预打包由运行时模式 `ANNC_GEMM=3/99` 启用：从模型权重文件（checkpoint）读取权重，按 kernel 所需布局完成 PackB 重排，运行时复用。预打包能力随构建产物一同提供，不需要额外编译开关。**已有算子折叠与权重预打包分别沿用各自的触发条件和执行路径。** 权重读取与预计算算法沿用，修改集中在前端迁移和新插件构建两处。
 
-**为迁移后的 `annc-tf-pipeline` 保留宏定义**
+**迁移后的 `annc-tf-pipeline` 接通预打包参数**
 
-KDNN 和常量折叠的宏定义目前从 `annc` 目录向下传递，**`annc-tf-pipeline` 迁入 `frontends` 后不会自动继承**，原有预计算和链接分支将无法启用。
-
-在迁移后的 `annc-tf-pipeline` 构建目标上显式设置原宏定义，继续生成权重预计算 C 源文件并交给后续链接步骤。
+`annc-tf-pipeline` 迁入 `frontends` 后，按运行时 `ANNC_GEMM` 模式（`3`/`99`）判断是否启用预打包，继续生成权重预计算 C 源文件并交给后续链接步骤，不再依赖从 `annc` 目录向下传递的宏定义。
 
 **为 TF1.15 JIT 接通预计算与链接参数**
 
-现有 JIT 实现通过 `ANNC_ENABLE_CONSTANT_FOLDING` 决定是否传递预计算及链接参数；**新插件目标不会自动继承原插件的宏定义**，仅保留这些参数的代码还不能启用该路径。
+现有 JIT 实现在模式启用预打包时传递预计算及链接参数；`annc_fused_op_tf1_15` 直接编入 `common/annc_fused_op_jit.cc`，与现有插件共用同一套运行时模式判断，无需为插件单独设置宏定义。
 
-为 `annc_fused_op_tf1_15` 设置原有宏定义，使直接编入该插件的 `common/annc_fused_op_jit.cc` 获得相同设置。沿用 `packed-c` 指定权重预计算 C 源文件的输出路径、`--packed-rhs-c` 将该文件编译并链入 kernel 共享库的参数传递。
+沿用 `packed-c` 指定权重预计算 C 源文件的输出路径、`--packed-rhs-c` 将该文件编译并链入 kernel 共享库的参数传递。
 
 ```mermaid
 flowchart LR
-  Frontend["迁移后的 TF 前端<br/>补齐宏定义"] --> Pack["已有 PackB<br/>权重预计算"]
+  Frontend["迁移后的 TF 前端<br/>按模式选择预打包"] --> Pack["已有 PackB<br/>权重预计算"]
   Jit["TF1.15 插件 JIT<br/>接通预计算参数"] --> Pack
   Weight["模型权重文件<br/>checkpoint"] --> Pack
   Pack --> Lib["kernel 共享库"]
@@ -387,8 +385,7 @@ TF1.15 新增以下独立配置。TF2.20 保留现有 `ANNC_TENSORFLOW_*` 配置
 
 | 配置 | 行为 |
 | --- | --- |
-| `ANNC_GEMM` | `1` 启用已有 MatMul 优化，`2` 同时允许已有后续算子融合；未设置或为 `0` 时关闭该优化 |
-| `ANNC_ENABLE_CONSTANT_FOLDING` | 启用已有 GEMM 固定权重预打包编译路径，不控制所有 ATIR 算子折叠 |
+| `ANNC_GEMM` | `0`/未设置关闭自动 GEMM 优化，`1`=Basic，`2`=Epilogue，`3`=Prepack，`99`=All；模式编号非累进，`99` 固定保留。模式 `3`/`99` 同时启用已有 GEMM 固定权重预打包路径，但仅控制 GEMM 预打包，不控制所有 ATIR 算子折叠 |
 | `ANNC_DEMO_CHECKPOINT_DIR` | 指定固定权重的 checkpoint 目录 |
 
 沿用上述配置的原有行为；本次不增加 tensordot 专属融合开关，ORT 的现有规则与默认启用策略保持不变。

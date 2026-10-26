@@ -449,11 +449,11 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 
 **关键设计要点**：
 
-- Kernel 优先级链为 `kdnn_packed > kdnn > aarch64`（受 `enableKdnn`/packed-RHS/`ANNC_ENABLE_CONSTANT_FOLDING` 门控）；不存在"手动 vs 自动"之分，所有 builtin kernel 经 `ANNC_KERNEL` 宏注册，同签名 last-registered-wins。
+- Kernel 优先级链为 `kdnn_packed > kdnn > aarch64`（受 `enableKdnn`/packed-RHS/已注册的 KDNN 能力与 ANNC_GEMM 预打包模式门控）；不存在"手动 vs 自动"之分，所有 builtin kernel 经 `ANNC_KERNEL` 宏注册，同签名 last-registered-wins。
 - `annc-tf-pipeline` 负责 AOT 编译和 GraphDef 重写；运行时 JIT 通过 `atir-select-kernel`、`atir-specialize-shapes` 处理单个融合函数。
 - GEMM lowering 采用 ATIR→Linalg 和 `annc-aarch64-gemm-pipeline`，由 AArch64 后端依次完成计划选择、线程划分、缓存/微内核分块和 ABI lowering。
 - Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
-- GEMM 常量折叠由 `ANNC_ENABLE_CONSTANT_FOLDING` 编译期开关控制（默认 OFF，`build.sh --enable-constant-folding` 开启；要求 TensorFlow 前端与 AArch64 GEMM 微内核归档，`--enable-ort` 下不可用）。开启后，若 AArch64 GEMM pipeline 收到非空 `packed-c` 路径且 MatMul 的常量 RHS 携带 checkpoint 变量名（`annc.aarch64.rhs_name`）并满足 `K*N >= 300`，策略在 `Autotune` 与 `Finalize` 之间插入 `aarch64-gemm-prepack-rhs`：从 checkpoint 读取 RHS，按 tuning 配置的 cache tile 调用 `pack_b` 生成 packed C 源文件，并把契约写入 `annc.aarch64.prepacked_rhs`；lowering 将其物化为外部 `memref.global`，由 `annc --packed-rhs-c` 链接进最终 `.so`，运行时不再执行 `pack_b`。关闭开关时即使传入 `packed-c` 也会被忽略，保持 runtime packed/direct 路线；该接线同时覆盖 AOT（`annc-tf-pipeline`）与 JIT（`ANNCFusedOp`）路径。
+- GEMM 优化统一由 ANNC_GEMM 模式控制：0/未设置关闭自动 GEMM fusion，1=Basic，2=Epilogue，3=Prepack，99=All。预打包与 epilogue 独立，99 固定保留。原生预打包 pass 始终注册，由运行时模式选择；主机静态打包及 SVE 布局校验要求构建时提供可选的 AArch64 微内核归档，缺库时普通编译工具仍可构建，实际请求上述能力时明确报错；KDNN packed-B 适配器按依赖接口能力自动构建注册，不限制原生预打包。非法模式提示并回退 0。配置首次读取后固定，Op 构造时保存预打包标志，只在 JIT last-shape miss 使用，连续同 shape 热路径不新增检查。TF pipeline 自动 AOT 预打包及 packed KDNN 候选遵循该策略；显式手工 pass 和已生成 AOT 库不受改写。非空 packed-c 启用预打包候选选择；策略/线程规划确定 KC/NC/ISA 后，aarch64-gemm-prepack-rhs 在 Finalize 前建立布局契约。关闭时保持 runtime packed/direct。
 - JIT 在每个节点首次初始化、查询共享代码缓存前，复用 annc-fusion-metadata 提取 ATIR 中已有原始名称，按既有 checkpoint 名称匹配、F32 类型和字节数检查筛选可缓存输入；未通过的输入保持 runtime-packed/direct，后续 shape 切换不重复检查。使用 jit-inputs 传入获准的不可变参数索引，编译器仅生成布局元数据和调用现有 packb 的准备入口；不读取或链接模型权重。ANNCFusedOp 节点局部按输入槽与完整 layout 缓存 packed 数据，以原 RHS descriptor 传参。代码沿用进程级 single-flight/LRU，同形状不同权重共享代码但不共享数据。连续同 shape 直接复用 executable/binding，切换 shape 才查节点绑定，新 layout 才准备。
 - AOT/手工 pass 未提供 jit-inputs 时保留原 checkpoint/global 路径。默认内置 MatMul/GEMM fusion 标记为 JIT，AOT 分支按执行模式裁剪；不能据此断言当前这些 GEMM 在 AOT 中实际折叠。本次不扩展 AOT 或 ONNX EP。
 

@@ -8,6 +8,7 @@
 #include "Helper.h"
 #include "Kernel/KernelPriorityResolver.h"
 #include "Support/FusionSwitch.h"
+#include "Support/GemmConfig.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -1454,8 +1455,10 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
 // Outlines a GEMM chain as an AOT kdnn site on the annc_execution_v2 ABI
 // (one calling convention for the TF and ONNX hosts; the kernel takes its
-// thread pool from the execution context). Only active at ANNC_GEMM=1;
-// level 2 belongs to the epilogue path. Greedy prefix truncation from
+// thread pool from the execution context). Only active at ANNC_GEMM=1.
+// Epilogue (2), Prepack (3), and All (99) use the native GEMM path; All
+// combines epilogue fusion and prepacking without enabling this AOT pattern.
+// Greedy prefix truncation from
 // matmul_add_relu down to matmul: intermediate results must be single-use
 // (a single-output kernel cannot reproduce them), while consumers of the
 // terminal result stay in the main graph.
@@ -1467,7 +1470,7 @@ struct FuseKdnnMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
-    if (annc::anncGemmFusionLevel() != 1) return failure();
+    if (annc::gemmConfig().mode != annc::GemmMode::Basic) return failure();
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu() ||
@@ -1634,8 +1637,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
   LogicalResult matchAndRewrite(MatMulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
-    const int gemmLevel = annc::anncGemmFusionLevel();
-    if (gemmLevel == 0) return failure();
+    const auto& gemm = annc::gemmConfig();
+    if (gemm.mode == annc::GemmMode::Off) return failure();
     if (matmulOp->hasAttr("annc.fusion_materialized")) return failure();
     if (matmulOp->hasAttr("annc.postop_fused")) return failure();
     if (matmulOp.getWithBias() || matmulOp.getDoRelu()) return failure();
@@ -1759,9 +1762,9 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     }
 
     std::optional<EpilogueProgram> epilogue;
-    // Epilogue candidates are only consumed at ANNC_GEMM=2 (the pipeline only
-    // emits the attr at that level; this also guards direct annc-opt runs).
-    auto candidate = gemmLevel == 2
+    // Only Epilogue and All consume candidates, including direct annc-opt
+    // runs. Prepack is independent and keeps the original tail operations.
+    auto candidate = gemm.epilogue
                          ? matmulOp->getAttrOfType<DictionaryAttr>(
                                kGemmEpilogueCandidateAttr)
                          : DictionaryAttr();

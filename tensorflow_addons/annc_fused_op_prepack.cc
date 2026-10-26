@@ -1,9 +1,7 @@
 #include "annc_fused_op.h"
 #include "annc_fused_op_jit.h"
 #include "tensorflow/core/lib/core/errors.h"
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
 #include "Support/CheckpointReader.h"
-#endif
 
 namespace tensorflow {
 void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
@@ -20,7 +18,6 @@ void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
       }
     }
     jit_weights_.resize(inputs);
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
     const auto input_names = ReadAnncJitInputNames(
         atir_module_path_, kernel_name_, template_fingerprint_, num_constants_,
         num_fixed_, num_dynamic_);
@@ -43,7 +40,6 @@ void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
           checkpoint.size() == tensor.TotalBytes())
         jit_weights_[slot] = tensor;
     }
-#endif
     for (size_t argument = 0; argument < jit_argument_order_.size();
          ++argument) {
       int slot = jit_argument_order_[argument];

@@ -23,30 +23,6 @@ float apFloatToFloat(const llvm::APFloat &v);
 
 double apFloatToDouble(const llvm::APFloat &v);
 
-// Reads ANNC_GEMM, the MatMul fusion level switch. Consumers that must stay
-// in sync on this contract:
-//   - OpFusion (FuseMatMulAsFuncCallPattern): fusion gate + epilogue
-//     candidate consumption;
-//   - annc-tf-pipeline: runs the epilogue discovery pass at level 2 (the
-//     candidate attr also reaches Target/aarch64 GEMM strategy selection,
-//     so discovery must not run unconditionally).
-// Levels: unset/"0" = off (default), "1" = plain MatMul only,
-// "2" = MatMul + epilogue tail fusion (needs ANNC_GEMM_ASM_SOURCE_DIR).
-// Surrounding whitespace is tolerated; anything unrecognized is 0.
-// Read once on first use and cached for the process lifetime (function-local
-// static: thread-safe init, consistent view — same pattern as Support/Log.h).
-inline int anncGemmFusionLevel() {
-  static const int level = [] {
-    const char *value = std::getenv("ANNC_GEMM");
-    if (!value) return 0;
-    StringRef trimmed = StringRef(value).trim();
-    if (trimmed == "1") return 1;
-    if (trimmed == "2") return 2;
-    return 0;
-  }();
-  return level;
-}
-
 #define CHECK_LOGICAL_SUCCESS(f) \
   if (!(f)) return failure();
 

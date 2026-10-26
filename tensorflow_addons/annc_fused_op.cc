@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 
+#include "Support/GemmConfig.h"
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
 #include "Context/ThreadPool.h"
@@ -921,6 +922,7 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
       num_fixed_(0),
       num_dynamic_(0),
       zero_initialize_outputs_(true),
+      constant_folding_enabled_(annc::gemmConfig().prepack),
       handle_(nullptr),
       mlir_ciface_func_(nullptr),
       annc_set_current_threadpool_(nullptr),
@@ -1027,9 +1029,8 @@ annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
   request.intra_thread_count = intra_thread_count;
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+  request.enable_constant_folding = constant_folding_enabled_;
   request.immutable_arguments = jit_immutable_arguments_;
-#endif
   request.argument_shapes.reserve(arguments.size());
   for (const auto& argument : arguments) {
     request.argument_shapes.push_back(argument.dims);
@@ -1114,12 +1115,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       }
       steady_call = true;
     } else {
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-      InitializeJitWeights(context);
-      const auto& identity = jit_identity_;
-#else
-      const auto& identity = template_fingerprint_;
-#endif
+      if (constant_folding_enabled_) InitializeJitWeights(context);
+      const auto& identity =
+          constant_folding_enabled_ ? jit_identity_ : template_fingerprint_;
       annc::jit::JitCacheKey cache_key;
       std::string cache_key_error;
       auto t_jit_cache_key_start =
@@ -1211,9 +1209,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       library_loaded_this_call =
           lookup.event != annc::jit::CacheEvent::kHit;
       steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-      OP_REQUIRES_OK(context, BindJitWeights(jit_executable, &jit_binding));
-#endif
+      if (constant_folding_enabled_) {
+        OP_REQUIRES_OK(context, BindJitWeights(jit_executable, &jit_binding));
+      }
       if (IsJitShapeFastPathEnabled()) {
         mutex_lock lock(jit_fastpath_mu_);
         last_jit_arguments_ = arguments;
