@@ -293,8 +293,7 @@
       "name": "kp_sparse_dynamic_stitch_n2",
       "pattern": "kp_sparse_dynamic_stitch",
       "kernel": "fused_kp_sparse_dynamic_stitch_n2",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 120,
       "graph": [
         "size = Size(x)",

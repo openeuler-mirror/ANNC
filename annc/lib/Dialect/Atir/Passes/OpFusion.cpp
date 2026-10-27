@@ -452,9 +452,9 @@ static LogicalResult outlineContextBuiltin(
     ModuleOp module, PatternRewriter &rewriter, Operation *anchor,
     StringRef opName, StringRef pattern, ArrayRef<Value> inputs,
     ArrayRef<Value> outputs, ArrayRef<Operation *> fusedOps,
-    StringRef executionMode, int64_t numBuckets = 0,
+    StringRef executionMode, int64_t i64Attribute = 0,
     ArrayRef<StringRef> roles = {}, bool enableKdnn = false) {
-  auto schema = getContextKernelSchema(opName, {numBuckets});
+  auto schema = getContextKernelSchema(opName, {i64Attribute});
   if (!schema || outputs.size() != schema->results().size() ||
       (!roles.empty() && roles.size() != inputs.size()))
     return failure();
@@ -1347,7 +1347,7 @@ struct KpSparseDynamicStitchMatch {
 static LogicalResult matchKpSparseDynamicStitch(
     ParallelDynamicStitchOp anchor, KpSparseDynamicStitchMatch &match) {
   const int64_t N = anchor.getIndices().size();
-  if (N < 2 || N > 16) return failure();
+  if (N < 2) return failure();
   if (anchor.getData().size() != N) return failure();
 
   // Left branch: indices[0] and all other indices come from the same
@@ -1458,44 +1458,6 @@ static LogicalResult matchKpSparseDynamicStitch(
   if (!isClosedKernelOpSet(match.kernelOps, boundaryValues)) return failure();
 
   return success();
-}
-
-static func::FuncOp createKpSparseDynamicStitchKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Value> inputs, Value outputBuffer, ArrayRef<Operation *> kernelOps) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes;
-  for (Value v : inputs) inputTypes.push_back(v.getType());
-  inputTypes.push_back(outputBuffer.getType());
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_sparse_dynamic_stitch"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    mapper.map(inputs[i], entry->getArgument(i));
-  }
-  mapper.map(outputBuffer, entry->getArgument(inputs.size()));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
 }
 
 // ── KP sparse segment reduce (一级, 2 输出) ──────────────────────────────────
@@ -2052,75 +2014,18 @@ struct FuseKpSparseDynamicStitchAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_dynamic_stitch"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    SmallVector<Value, 10> callInputs;
-    callInputs.push_back(match.x);
-    for (Value v : match.variables) callInputs.push_back(v);
-
-    auto kernelFunc = createKpSparseDynamicStitchKernelFunc(
-        module, rewriter, kernelName, callInputs, match.outputBuffer,
-        match.kernelOps);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_dynamic_stitch")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"dynamic", getValueName(match.x), match.x.getType()});
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    SmallVector<Value> callInputs = {match.x};
+    SmallVector<StringRef> roles = {"dynamic"};
     for (Value v : match.variables) {
-      argSpecs.push_back({"fixed", getValueName(v), v.getType()});
+      callInputs.push_back(v);
+      roles.push_back("fixed");
     }
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    // The GraphDef rewrite emits the inputs fixed-first, dynamic-last:
-    //   [v0..vN-1, x, output]
-    // while the kernel function signature is [x, v0..vN-1, output].
-    // Map the runtime list onto that signature explicitly.
-    SmallVector<int64_t> kernelArgOrder;
-    const int64_t numVariables =
-        static_cast<int64_t>(match.variables.size());
-    kernelArgOrder.push_back(numVariables);  // x
-    for (int64_t i = 0; i < numVariables; ++i) {
-      kernelArgOrder.push_back(i);  // v0..vN-1
-    }
-    kernelArgOrder.push_back(numVariables + 1);  // output
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), kernelArgOrder)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:1|S:?;?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    SmallVector<Value, 10> callArgs(callInputs);
-    callArgs.push_back(match.outputBuffer);
-    rewriter.create<func::CallOp>(anchor.getLoc(), kernelFunc, callArgs);
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedSparseDynamicStitch",
+        "kp_sparse_dynamic_stitch", callInputs, {anchor.getResult()},
+        match.kernelOps, kAotExecutionMode,
+        static_cast<int64_t>(match.variables.size()), roles);
   }
 };
 

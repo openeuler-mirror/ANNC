@@ -1,240 +1,356 @@
-#include "Kernel/MemRefTypes.h"
-#include "Kernel/KernelStatus.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
+/* Copyright 2025 The Huawei Technologies Co. Authors. All Rights Reserved.
 
-#include <algorithm>
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include <arm_neon.h>
+
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
+#include <vector>
 
-#include "llvm/Support/raw_ostream.h"
+#include "Context/KernelContextUtils.h"
 
 namespace {
 
-// Fused sparse dynamic stitch, ported from the 812 KPFusedSparseDynamicStitch
-// TF kernel (tf_custom_ops/kernels/embedding_fused_sparse_dynamic_stitch.cc).
-//
-//   output[i] = variables[x[i] % N][x[i] / N]   (row-major copy)
-//
-// x [L] int64, variables [N] of [rows_i, stride] float32 (equal stride),
-// output [L, stride].
-template <int N>
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    AnncMemRef2DF32* output,
-    AnncMemRef1DI64* x,
-    const std::array<AnncMemRef2DF32*, N>& variables) {
-    static_assert(N >= 2, "N must be >= 2");
+// Computation follows embedding_fused_sparse_dynamic_stitch_new.cc;
+// only tensor access, allocation, scheduling and errors use Context services.
+// TensorFlow's sharder uses this value as an estimate of the work for one
+// input element. Keep the baseline estimate: a larger value for wide rows
+// creates too many tiny shards because the table lookup is usually limited by
+// random memory latency rather than by the number of copied floats.
+constexpr int64_t kCostPerUnit = 120;
 
-    if (!output || !x) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "null memref argument\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
+inline int64_t ShardCost(int64_t /*stride*/) { return kCostPerUnit; }
+
+inline void RecordInvalidIndex(std::atomic<int64_t>* first_bad_index,
+                               int64_t index) {
+  int64_t expected = -1;
+  first_bad_index->compare_exchange_strong(expected, index,
+                                           std::memory_order_relaxed);
+}
+
+template <int Stride>
+struct RowCopier {
+  static inline void Copy(float* destination, const float* source) {
+    __builtin_memcpy(destination, source, sizeof(float) * Stride);
+  }
+};
+
+template <>
+struct RowCopier<3> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1_f32(destination, vld1_f32(source));
+    destination[2] = source[2];
+  }
+};
+
+template <>
+struct RowCopier<4> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1q_f32(destination, vld1q_f32(source));
+  }
+};
+
+template <>
+struct RowCopier<6> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1q_f32(destination, vld1q_f32(source));
+    vst1_f32(destination + 4, vld1_f32(source + 4));
+  }
+};
+
+template <>
+struct RowCopier<8> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1q_f32(destination, vld1q_f32(source));
+    vst1q_f32(destination + 4, vld1q_f32(source + 4));
+  }
+};
+
+template <>
+struct RowCopier<10> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1q_f32(destination, vld1q_f32(source));
+    vst1q_f32(destination + 4, vld1q_f32(source + 4));
+    vst1_f32(destination + 8, vld1_f32(source + 8));
+  }
+};
+
+template <>
+struct RowCopier<16> {
+  static inline void Copy(float* destination, const float* source) {
+    vst1q_f32(destination, vld1q_f32(source));
+    vst1q_f32(destination + 4, vld1q_f32(source + 4));
+    vst1q_f32(destination + 8, vld1q_f32(source + 8));
+    vst1q_f32(destination + 12, vld1q_f32(source + 12));
+  }
+};
+
+template <int NumPartitions>
+inline int64_t DecodeTable(int64_t global_id, int64_t* row_id) {
+  if constexpr (NumPartitions == 8) {
+    *row_id = global_id >> 3;
+    return global_id & 7;
+  } else {
+    *row_id = global_id / NumPartitions;
+    return global_id - *row_id * NumPartitions;
+  }
+}
+
+template <int NumPartitions, int Stride>
+void CopyFixedStride(const int64_t* indices, int64_t start, int64_t end,
+                     const float* const* variables,
+                     const int64_t* variable_rows, float* output,
+                     std::atomic<int64_t>* first_bad_index) {
+  for (int64_t i = start; i < end; ++i) {
+    const int64_t global_id = indices[i];
+    if (global_id < 0) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
-    for (int i = 0; i < N; ++i) {
-        if (!variables[i]) {
-            llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                         "null variable memref\n";
-            return annc::kernels::KernelStatus::InvalidArgument;
-        }
+
+    int64_t row_id;
+    const int64_t table_id = DecodeTable<NumPartitions>(global_id, &row_id);
+    if (row_id < 0 || row_id >= variable_rows[table_id]) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
 
-    const int64_t L = x->sizes[0];
-    const int64_t out_rows = output->sizes[0];
-    const int64_t out_cols = output->sizes[1];
+    float* destination = output + i * Stride;
+    const float* source = variables[table_id] + row_id * Stride;
+    RowCopier<Stride>::Copy(destination, source);
+  }
+}
 
-    if (L < 0 || out_rows < 0 || out_cols <= 0) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "invalid shape\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (L != out_rows) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "output row count mismatch\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    for (int i = 0; i < N; ++i) {
-        const auto* v = variables[i];
-        if (v->sizes[0] < 0 || v->sizes[1] != out_cols) {
-            llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                         "variable shape mismatch\n";
-            return annc::kernels::KernelStatus::InvalidArgument;
-        }
-    }
-    if (output->offset < 0 || x->offset < 0) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "negative memref offset\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if ((L > 0 && !x->aligned) || (out_rows > 0 && !output->aligned)) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "null memref data\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (x->strides[0] != 1 ||
-        output->strides[0] != out_cols || output->strides[1] != 1) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "non-contiguous memref is unsupported\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    for (int i = 0; i < N; ++i) {
-        const auto* v = variables[i];
-        if (v->sizes[0] > 0 &&
-            (v->strides[0] != out_cols || v->strides[1] != 1 ||
-             !v->aligned)) {
-            llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                         "non-contiguous variable memref\n";
-            return annc::kernels::KernelStatus::InvalidArgument;
-        }
+template <int NumPartitions>
+void CopyFixedPartitionRuntimeStride(const int64_t* indices, int64_t start,
+                                     int64_t end, const float* const* variables,
+                                     const int64_t* variable_rows,
+                                     int64_t stride, float* output,
+                                     std::atomic<int64_t>* first_bad_index) {
+  const size_t copy_size = static_cast<size_t>(stride) * sizeof(float);
+  for (int64_t i = start; i < end; ++i) {
+    const int64_t global_id = indices[i];
+    if (global_id < 0) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
 
-    const int64_t* x_data = ANNC_MEMREF_DATA(*x);
-    float* out = ANNC_MEMREF_DATA(*output);
-    std::array<const float*, N> var_data;
-    std::array<int64_t, N> var_rows;
-    for (int i = 0; i < N; ++i) {
-        var_data[i] = ANNC_MEMREF_DATA(*variables[i]);
-        var_rows[i] = variables[i]->sizes[0];
+    int64_t row_id;
+    const int64_t table_id = DecodeTable<NumPartitions>(global_id, &row_id);
+    if (row_id < 0 || row_id >= variable_rows[table_id]) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
 
-    if (L == 0) {
-        return annc::kernels::KernelStatus::Success;
+    std::memcpy(output + i * stride, variables[table_id] + row_id * stride,
+                copy_size);
+  }
+}
+
+void CopyRuntime(const int64_t* indices, int64_t start, int64_t end,
+                 int num_partitions, const float* const* variables,
+                 const int64_t* variable_rows, int64_t stride, float* output,
+                 std::atomic<int64_t>* first_bad_index) {
+  const size_t copy_size = static_cast<size_t>(stride) * sizeof(float);
+  for (int64_t i = start; i < end; ++i) {
+    const int64_t global_id = indices[i];
+    if (global_id < 0) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
 
-    try {
-        const size_t copy_size =
-            static_cast<size_t>(out_cols) * sizeof(float);
-        std::atomic<bool> failed{false};
-        annc::threadpool::parallel_for(
-            thread_pool, L, [&](int64_t begin, int64_t end) {
-                for (int64_t i = begin; i < end; ++i) {
-                    const int64_t global_id = x_data[i];
-                    const int64_t table_id = global_id % N;
-                    const int64_t row_id = global_id / N;
-                    if (row_id < 0 || row_id >= var_rows[table_id]) {
-                        failed.store(true, std::memory_order_relaxed);
-                        return;
-                    }
-                    std::memcpy(out + i * out_cols,
-                                var_data[table_id] + row_id * out_cols,
-                                copy_size);
-                }
-            });
-        if (failed.load(std::memory_order_relaxed)) {
-            llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                         "row_id out of range\n";
-            return annc::kernels::KernelStatus::InvalidArgument;
-        }
-        return annc::kernels::KernelStatus::Success;
-    } catch (const std::exception& ex) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     << ex.what() << '\n';
-        return annc::kernels::KernelStatus::RuntimeError;
-    } catch (...) {
-        llvm::errs() << "[ANNC Kernel] KPFusedSparseDynamicStitch failed: "
-                     "unknown exception\n";
-        return annc::kernels::KernelStatus::UnknownError;
+    const int64_t row_id = global_id / num_partitions;
+    const int64_t table_id = global_id - row_id * num_partitions;
+    if (row_id < 0 || row_id >= variable_rows[table_id]) {
+      RecordInvalidIndex(first_bad_index, i);
+      continue;
     }
+
+    std::memcpy(output + i * stride, variables[table_id] + row_id * stride,
+                copy_size);
+  }
 }
 
-// Non-template dispatch entry points.  The ANNC_KERNEL macro body is
-// comma-split at the preprocessor level, so neither template
-// argument lists nor brace-initialized aggregates may appear
-// there.  These helpers accept the N variable pointers as
-// separate arguments (all commas inside parens) and select the
-// N specialization.
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n2(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1) {
-  const std::array<AnncMemRef2DF32*, 2> vars{v0, v1};
-  return kp_fused_sparse_dynamic_stitch_impl<2>(tp, output, x, vars);
+template <typename Work>
+void RunSharded(annc::kernels::KernelContext* context, int64_t num_elems,
+                int64_t stride, Work work) {
+  auto workers = context->getThreadPool();
+  annc::kernels::Shard(workers.numThreads(), workers, num_elems,
+                       ShardCost(stride), work);
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n3(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2) {
-  const std::array<AnncMemRef2DF32*, 3> vars{v0, v1, v2};
-  return kp_fused_sparse_dynamic_stitch_impl<3>(tp, output, x, vars);
+template <int NumPartitions, int Stride>
+void RunFixedStride(annc::kernels::KernelContext* context, int64_t num_elems,
+                    const int64_t* indices, const float* const* variables,
+                    const int64_t* variable_rows, float* output,
+                    std::atomic<int64_t>* first_bad_index) {
+  auto work = [&](int64_t start, int64_t end) {
+    CopyFixedStride<NumPartitions, Stride>(
+        indices, start, end, variables, variable_rows, output, first_bad_index);
+  };
+  RunSharded(context, num_elems, Stride, work);
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n4(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3) {
-  const std::array<AnncMemRef2DF32*, 4> vars{v0, v1, v2, v3};
-  return kp_fused_sparse_dynamic_stitch_impl<4>(tp, output, x, vars);
+template <int NumPartitions>
+void RunFixedPartitionRuntimeStride(annc::kernels::KernelContext* context,
+                                    int64_t num_elems, const int64_t* indices,
+                                    const float* const* variables,
+                                    const int64_t* variable_rows,
+                                    int64_t stride, float* output,
+                                    std::atomic<int64_t>* first_bad_index) {
+  auto work = [&](int64_t start, int64_t end) {
+    CopyFixedPartitionRuntimeStride<NumPartitions>(
+        indices, start, end, variables, variable_rows, stride, output,
+        first_bad_index);
+  };
+  RunSharded(context, num_elems, stride, work);
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n5(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4) {
-  const std::array<AnncMemRef2DF32*, 5> vars{v0, v1, v2, v3, v4};
-  return kp_fused_sparse_dynamic_stitch_impl<5>(tp, output, x, vars);
+void RunRuntime(annc::kernels::KernelContext* context, int64_t num_elems,
+                const int64_t* indices, int num_partitions,
+                const float* const* variables, const int64_t* variable_rows,
+                int64_t stride, float* output,
+                std::atomic<int64_t>* first_bad_index) {
+  auto work = [&](int64_t start, int64_t end) {
+    CopyRuntime(indices, start, end, num_partitions, variables, variable_rows,
+                stride, output, first_bad_index);
+  };
+  RunSharded(context, num_elems, stride, work);
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n6(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5) {
-  const std::array<AnncMemRef2DF32*, 6> vars{v0, v1, v2, v3, v4, v5};
-  return kp_fused_sparse_dynamic_stitch_impl<6>(tp, output, x, vars);
+template <int NumPartitions>
+void DispatchStride(annc::kernels::KernelContext* context, int64_t num_elems,
+                    const int64_t* indices, const float* const* variables,
+                    const int64_t* variable_rows, int64_t stride, float* output,
+                    std::atomic<int64_t>* first_bad_index) {
+  switch (stride) {
+    case 3:
+      RunFixedStride<NumPartitions, 3>(context, num_elems, indices, variables,
+                                       variable_rows, output, first_bad_index);
+      return;
+    case 4:
+      RunFixedStride<NumPartitions, 4>(context, num_elems, indices, variables,
+                                       variable_rows, output, first_bad_index);
+      return;
+    case 6:
+      RunFixedStride<NumPartitions, 6>(context, num_elems, indices, variables,
+                                       variable_rows, output, first_bad_index);
+      return;
+    case 8:
+      RunFixedStride<NumPartitions, 8>(context, num_elems, indices, variables,
+                                       variable_rows, output, first_bad_index);
+      return;
+    case 10:
+      RunFixedStride<NumPartitions, 10>(context, num_elems, indices, variables,
+                                        variable_rows, output, first_bad_index);
+      return;
+    case 16:
+      RunFixedStride<NumPartitions, 16>(context, num_elems, indices, variables,
+                                        variable_rows, output, first_bad_index);
+      return;
+    default:
+      RunFixedPartitionRuntimeStride<NumPartitions>(
+          context, num_elems, indices, variables, variable_rows, stride, output,
+          first_bad_index);
+  }
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n7(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6) {
-  const std::array<AnncMemRef2DF32*, 7> vars{v0, v1, v2, v3, v4, v5, v6};
-  return kp_fused_sparse_dynamic_stitch_impl<7>(tp, output, x, vars);
+void Dispatch(annc::kernels::KernelContext* context, int64_t num_elems,
+              const int64_t* indices, int num_partitions,
+              const float* const* variables, const int64_t* variable_rows,
+              int64_t stride, float* output,
+              std::atomic<int64_t>* first_bad_index) {
+  switch (num_partitions) {
+    case 8:
+      DispatchStride<8>(context, num_elems, indices, variables, variable_rows,
+                        stride, output, first_bad_index);
+      return;
+    case 12:
+      DispatchStride<12>(context, num_elems, indices, variables, variable_rows,
+                         stride, output, first_bad_index);
+      return;
+    case 36:
+      DispatchStride<36>(context, num_elems, indices, variables, variable_rows,
+                         stride, output, first_bad_index);
+      return;
+    default:
+      RunRuntime(context, num_elems, indices, num_partitions, variables,
+                 variable_rows, stride, output, first_bad_index);
+  }
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n8(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7) {
-  const std::array<AnncMemRef2DF32*, 8> vars{v0, v1, v2, v3, v4, v5, v6, v7};
-  return kp_fused_sparse_dynamic_stitch_impl<8>(tp, output, x, vars);
+AnncStatusCode kp_fused_sparse_dynamic_stitch_impl(
+    annc::kernels::KernelContext& context) {
+  const auto declaredN = context.getI64Attr(0);
+  if (!declaredN) return context.status();
+  const int64_t n = static_cast<int64_t>(context.numInputs()) - 1;
+  if (n <= 1 || n != *declaredN || n > std::numeric_limits<int>::max())
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "DynamicStitch input count does not match N > 1");
+  const int num_partitions = static_cast<int>(n);
+  const auto* x = context.getInput(0);
+  if (!x) return context.status();
+  if (x->element_type != ANNC_ELEMENT_TYPE_I64)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "DynamicStitch x must be int64");
+  // Tensor::flat<int64>() in the reference accepts every dense input rank.
+  int64_t num_elems = 1;
+  for (uint32_t i = 0; i < x->rank; ++i) num_elems *= x->sizes[i];
+
+  // Match the reference's InlinedVector<..., 36> without a TF dependency.
+  std::array<const float*, 36> inline_variables;
+  std::array<int64_t, 36> inline_rows;
+  std::vector<const float*> heap_variables(num_partitions > 36 ? num_partitions
+                                                               : 0);
+  std::vector<int64_t> heap_rows(num_partitions > 36 ? num_partitions : 0);
+  auto* variables =
+      num_partitions > 36 ? heap_variables.data() : inline_variables.data();
+  auto* variable_rows =
+      num_partitions > 36 ? heap_rows.data() : inline_rows.data();
+  int64_t output_stride = 0;
+  for (int i = 0; i < num_partitions; ++i) {
+    const auto* input = context.getInput(static_cast<uint32_t>(i) + 1);
+    if (!input) return context.status();
+    if (input->rank != 2 || input->element_type != ANNC_ELEMENT_TYPE_F32)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "DynamicStitch variables must be rank-2 float32");
+    if (i == 0)
+      output_stride = input->sizes[1];
+    else if (input->sizes[1] != output_stride)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "DynamicStitch variable widths differ");
+    variables[i] = annc::kernels::contextData<float>(*input);
+    variable_rows[i] = input->sizes[0];
+  }
+  if (output_stride <= 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "DynamicStitch output width must be positive");
+  auto* output = context.allocateOutput<float>(0, {num_elems, output_stride});
+  if (!output) return context.status();
+  std::atomic<int64_t> first_bad_index(-1);
+  Dispatch(&context, num_elems, annc::kernels::contextData<int64_t>(*x),
+           num_partitions, variables, variable_rows, output_stride,
+           annc::kernels::contextData<float>(*output), &first_bad_index);
+  if (context.status() != ANNC_STATUS_OK) return context.status();
+  if (first_bad_index.load(std::memory_order_relaxed) >= 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "DynamicStitch row index out of range");
+  return context.status();
 }
 
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n9(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8) {
-  const std::array<AnncMemRef2DF32*, 9> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8};
-  return kp_fused_sparse_dynamic_stitch_impl<9>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n10(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9) {
-  const std::array<AnncMemRef2DF32*, 10> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9};
-  return kp_fused_sparse_dynamic_stitch_impl<10>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n11(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10) {
-  const std::array<AnncMemRef2DF32*, 11> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10};
-  return kp_fused_sparse_dynamic_stitch_impl<11>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n12(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10, AnncMemRef2DF32* v11) {
-  const std::array<AnncMemRef2DF32*, 12> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11};
-  return kp_fused_sparse_dynamic_stitch_impl<12>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n13(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10, AnncMemRef2DF32* v11, AnncMemRef2DF32* v12) {
-  const std::array<AnncMemRef2DF32*, 13> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12};
-  return kp_fused_sparse_dynamic_stitch_impl<13>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n14(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10, AnncMemRef2DF32* v11, AnncMemRef2DF32* v12, AnncMemRef2DF32* v13) {
-  const std::array<AnncMemRef2DF32*, 14> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13};
-  return kp_fused_sparse_dynamic_stitch_impl<14>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n15(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10, AnncMemRef2DF32* v11, AnncMemRef2DF32* v12, AnncMemRef2DF32* v13, AnncMemRef2DF32* v14) {
-  const std::array<AnncMemRef2DF32*, 15> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14};
-  return kp_fused_sparse_dynamic_stitch_impl<15>(tp, output, x, vars);
-}
-
-annc::kernels::KernelStatus kp_fused_sparse_dynamic_stitch_n16(
-    annc::threadpool::AnncThreadPool* tp, AnncMemRef2DF32* output, AnncMemRef1DI64* x, AnncMemRef2DF32* v0, AnncMemRef2DF32* v1, AnncMemRef2DF32* v2, AnncMemRef2DF32* v3, AnncMemRef2DF32* v4, AnncMemRef2DF32* v5, AnncMemRef2DF32* v6, AnncMemRef2DF32* v7, AnncMemRef2DF32* v8, AnncMemRef2DF32* v9, AnncMemRef2DF32* v10, AnncMemRef2DF32* v11, AnncMemRef2DF32* v12, AnncMemRef2DF32* v13, AnncMemRef2DF32* v14, AnncMemRef2DF32* v15) {
-  const std::array<AnncMemRef2DF32*, 16> vars{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15};
-  return kp_fused_sparse_dynamic_stitch_impl<16>(tp, output, x, vars);
-}
-
-} // namespace
+}  // namespace

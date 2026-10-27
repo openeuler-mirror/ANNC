@@ -5,6 +5,8 @@
 #include <unordered_set>
 
 #include "ConfigFusionSupport.h"
+#include "Dialect/Atir/BuiltinKernelSchema.h"
+#include "Dialect/Atir/CustomOpSchema.h"
 #include "FusionMetadata/FusionMetadata.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -1187,6 +1189,41 @@ func::FuncOp materializePattern(
   }
   if (orderedOps.empty()) return nullptr;
 
+  std::optional<CustomOpSchema> contextSchema;
+  if (rule.abi == "annc_context_v3") {
+    // Stitch's variable arity is transported as N before metadata is exported;
+    // FastCodegen later verifies the cloned graph and its positional boundary.
+    if (!contextSchema && rule.pattern == "kp_sparse_dynamic_stitch") {
+      for (Operation *op : orderedOps) {
+        auto stitch = dyn_cast<ParallelDynamicStitchOp>(op);
+        if (!stitch || outputValues.size() != 1 ||
+            outputValues.front() != stitch.getResult() ||
+            inputValues.size() != stitch.getIndices().size() + 1)
+          continue;
+        contextSchema = getContextKernelSchema(
+            "KPFusedSparseDynamicStitch",
+            {static_cast<int64_t>(stitch.getIndices().size())});
+        break;
+      }
+    }
+    // Other configured outlines declare their canonical tensor slot order in
+    // inputs/outputs. FastCodegen matches the cloned graph against the shared
+    // builtin schema; the context entry pass rejects any reordered or
+    // incomplete boundary before forwarding the context.
+  }
+  if (contextSchema) {
+    SmallVector<mlir::Type> inputTypes, outputTypes;
+    for (Value value : inputValues) inputTypes.push_back(value.getType());
+    for (Value value : outputValues) outputTypes.push_back(value.getType());
+    auto bindings = inferTypeConstraintsFromSchema(
+        contextSchema->toMetadata(module.getContext()), inputTypes,
+        outputTypes);
+    if (!bindings) {
+      llvm::consumeError(bindings.takeError());
+      return nullptr;
+    }
+  }
+
   std::vector<Value> boundaryValues =
       collectBoundaryValues(orderedOps, state, inputValues);
   if (rule.abi == "annc_context_v3" && boundaryValues != inputValues) {
@@ -1302,6 +1339,11 @@ func::FuncOp materializePattern(
     out.rank = getRank(value.getType());
     out.dtype = getTensorDType(value.getType());
     info.outputs.push_back(std::move(out));
+  }
+  if (contextSchema) {
+    for (const auto &arg : contextSchema->args())
+      if (arg.kind == CustomOpSchema::ArgKind::I64Attr)
+        info.contextI64Attrs.push_back(arg.i64Value);
   }
   info.patternAttrs = patternAttrs;
 
