@@ -3,8 +3,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 
-#include "Context/ThreadPool.h"
+#include "Context/KernelContextUtils.h"
 #include "kdnn_config.h"
 #include "service/kdnn_threading.hpp"
 
@@ -15,7 +16,11 @@ public:
     explicit KDNNThreadPoolAdaptor(annc::threadpool::AnncThreadPool* thread_pool)
         : thread_pool_(thread_pool) {}
 
+    explicit KDNNThreadPoolAdaptor(KernelContext& context)
+        : thread_pool_(nullptr), workers_(context.getThreadPool()) {}
+
     int GetNumThreads() const override {
+        if (workers_) return workers_->numThreads();
         if (thread_pool_ == nullptr) {
             return 1;
         }
@@ -25,12 +30,18 @@ public:
     }
 
     bool IsInParallel() const override {
+        if (workers_) return false;
         return thread_pool_ != nullptr && thread_pool_->in_parallel_region();
     }
 
     void ParallelFor(int total,
                      int64_t cost_per_unit,
                      const std::function<void(int, int)>& fn) override {
+        if (workers_) {
+            Shard(workers_->numThreads(), *workers_, total, cost_per_unit,
+                  [&](int64_t first, int64_t last) { fn(first, last); });
+            return;
+        }
         if (thread_pool_ == nullptr || total <= 0) {
             if (total > 0) {
                 fn(0, total);
@@ -53,6 +64,7 @@ public:
 
 private:
     annc::threadpool::AnncThreadPool* thread_pool_;
+    std::optional<KernelThreadPool> workers_;
 };
 
 class ScopedKDNNThreadPoolActivation final {
@@ -66,6 +78,14 @@ public:
         }
 #else
         (void)thread_pool;
+#endif
+    }
+
+    explicit ScopedKDNNThreadPoolActivation(KernelContext& context)
+        : adaptor_(context) {
+#if defined(KDNN_CPU_THREADING_RUNTIME) && (KDNN_CPU_THREADING_RUNTIME == KDNN_RUNTIME_THREADPOOL)
+        KDNN::Threading::ActivateThreadpool(&adaptor_);
+        active_ = true;
 #endif
     }
 

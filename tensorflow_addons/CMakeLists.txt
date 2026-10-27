@@ -7,6 +7,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+if(NOT TARGET ANNCContext)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../context"
+        "${CMAKE_CURRENT_BINARY_DIR}/context")
+endif()
+
 option(ANNC_TENSORFLOW_PRELOAD
     "Build an LD_PRELOAD plugin whose TensorFlow symbols come from its host" ON)
 option(ANNC_WITH_THREADPOOL "Include ThreadPool in annc_fused_op" OFF)
@@ -157,6 +162,8 @@ set(ANNC_OPTIMIZER_SOURCES
 
 set(ANNC_FUSED_OP_SOURCES
     annc_fused_op.cc
+    context/annc_fused_op_context.cc
+    context/ThreadPool.cc
     annc_fused_op_jit.cc
     annc_fused_op_prepack.cc
     annc_fused_op_register.cc
@@ -173,7 +180,7 @@ target_link_libraries(annc_jit_cache PRIVATE dl)
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 target_link_libraries(annc_fused_op PRIVATE ANNCCheckpoint)
-target_link_libraries(annc_fused_op PRIVATE annc_jit_cache)
+target_link_libraries(annc_fused_op PRIVATE annc_jit_cache ANNCContext)
 if(TARGET nlohmann_json::nlohmann_json)
     target_link_libraries(annc_fused_op PRIVATE nlohmann_json::nlohmann_json)
 else()

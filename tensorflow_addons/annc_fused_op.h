@@ -64,6 +64,8 @@ class ANNCFusedOp : public OpKernel {
                                   void* kernel_function, bool profile_enabled,
                                   AnncFusedProfileSample* profile_sample,
                                   const AnncJitBinding* binding = nullptr);
+  Status ExecuteContextV3Kernel(OpKernelContext* context,
+                                void* kernel_function);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;
@@ -81,6 +83,11 @@ class ANNCFusedOp : public OpKernel {
   std::vector<int> dynamic_dims_;
   // One entry per input in constants/fixed/dynamic TensorFlow input order.
   std::vector<int> input_ranks_;
+  // TensorFlow input dtypes in transport order.
+  std::vector<DataType> input_types_;
+  // canonical input slot -> TensorFlow transport input slot.
+  std::vector<int> context_input_order_;
+  std::vector<int64_t> context_i64_attrs_;
   // Comma-separated dimensions per output; "?" denotes a dynamic dimension.
   std::vector<std::string> output_shapes_;
   // output_shapes_ parsed once in the constructor (-1 for dynamic dimensions);
