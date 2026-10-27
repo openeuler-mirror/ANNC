@@ -48,7 +48,7 @@ mlir::Value rank1BiasOperandOf(MatMulOp matmul, AddOp add) {
   return bias;
 }
 
-bool isExecutionV2BuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu) {
+bool isContextBuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu) {
   if (!matmul || !add || !relu) return false;
   if (matmul.getWithBias() || matmul.getDoRelu() ||
       matmul.getRightTranspose() || matmul.getLeftTranspose() ||

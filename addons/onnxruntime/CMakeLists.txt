@@ -28,7 +28,7 @@ add_library(annc_ep SHARED
     annc_ep_site.cc
     annc_ep_graph_export.cc
     annc_ep_compile.cc
-    annc_ep_execution.cc
+    context/annc_ep_execution.cc
     ${ONNX_PROTO_SRCS}
 )
 target_include_directories(annc_ep SYSTEM PRIVATE
@@ -41,8 +41,7 @@ target_include_directories(annc_ep SYSTEM PRIVATE
 target_include_directories(annc_ep PRIVATE
     "${Protobuf_INCLUDE_DIRS}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    # Execution-context ABI and the AnncThreadPool interface the context
-    # carries into the kernels. Header-only use: the plugin never links ANNC.
+    # Host-side thread-pool implementation; kernels use common C services.
     "${CMAKE_SOURCE_DIR}/annc/include"
 )
 
@@ -85,8 +84,8 @@ endif()
 # moves from ANNC's port of Eigen's cost model to ORT's own TryParallelFor,
 # through build-tree archives of the *same* ORT build that hosts the plugin.
 # The EP always uses this path; there is no build option to disable it.
-# Private-ABI coupling; see annc_ep_native_pool.h for the layout pin and the
-# fallback conditions.
+# Private-ABI coupling; see context/annc_ep_native_pool.h for the layout pin
+# and fallback conditions.
 set(ANNC_EP_ORT_COMMON_ARCHIVE
     "${ANNC_EP_ORT_BUILD_TREE}/libonnxruntime_common.a")
 set(ANNC_EP_ORT_CPUINFO_ARCHIVE
@@ -141,3 +140,6 @@ set_target_properties(annc_ep PROPERTIES
 target_link_options(annc_ep PRIVATE
     "-Wl,--allow-shlib-undefined" "-Wl,-z,undefs")
 install(TARGETS annc_ep DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# Framework-neutral kernel context definitions and runtime services.
+target_link_libraries(annc_ep PRIVATE ANNCContext)

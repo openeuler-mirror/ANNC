@@ -38,7 +38,7 @@
 // guard of its own -- including it a second time redefines every struct in it.
 
 #include "annc_ep_compile.h"
-#include "annc_ep_execution.h"
+#include "context/annc_ep_execution.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -107,10 +107,8 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
   };
   // v2: ORT fusion switches default to disabled. Bump the version so caches
   // produced under the old default-on semantics are not reused.
-  // The execution context gained the optional packed-B field in ABI v4.
-  // Old v3 kernels reject the larger context, so invalidate compiled kernel
-  // caches built against the v3 layout and force a rebuild.
-  fingerprint += "\nannc-packed-b-abi-v3-effective-weight-size";
+  // Rebuild artifacts whose context service requirements or layout differs.
+  fingerprint += "\nannc-context-v3-required-pool";
   for (const char* name : config_names) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
@@ -453,6 +451,7 @@ struct AnncNodeComputeInfo : OrtNodeComputeInfo {
   // Context-ABI site contract, copied from the report at Compile time.
   std::string abi;
   std::vector<int64_t> arg_ranks;
+  std::vector<int64_t> context_i64_attrs;
   std::vector<AnncElementType> arg_types;
   std::vector<annc_ep::OutputContract> outputs;
   // Sites whose arguments or outputs the rank rule cannot identify get their
@@ -659,6 +658,8 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
   }
   state->context_call.symbol = state->symbol;
   state->abi = info->abi;
+  state->context_call.abi = info->abi;
+  state->context_call.i64_attrs = info->context_i64_attrs;
   state->context_call.arg_ranks = info->arg_ranks;
   state->context_call.arg_types = info->arg_types;
   state->context_call.outputs = info->outputs;
@@ -702,7 +703,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
     return g_api->KernelContext_GetOutput(kernel_context, 0, dims, 3, &out);
   }
 
-  if (state->abi == "annc_execution_v2") {
+  if ((state->abi == "annc_execution_v2" || state->abi == "annc_context_v3")) {
     return ComputeContextSite(state, kernel_context);
   }
 
@@ -1164,6 +1165,7 @@ bool FillContextContract(const annc_ep::Site& site, const OrtGraph* graph,
     }
     return false;
   };
+  info->context_i64_attrs = site.contextI64Attrs;
   for (const annc_ep::Site::Arg& arg : site.args) {
     AnncElementType type = 0;
     if (!to_element_type(arg.dtype, &type)) return false;
@@ -1468,7 +1470,7 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
         info->kernel_name = site->kernelName;
         info->library = ep->kernel_library;
         info->abi = site->abi;
-        if (site->abi == "annc_execution_v2" &&
+        if ((site->abi == "annc_execution_v2" || site->abi == "annc_context_v3") &&
             !FillContextContract(*site, graphs[i], fused_nodes[i], info)) {
           // A contract that disagrees with the fused subgraph would run the
           // kernel against the wrong buffers; refuse the node loudly instead.
@@ -1689,7 +1691,7 @@ OrtStatus* ORT_API_CALL CreateEpFactories(const char* /*registration_name*/,
 #if defined(ANNC_EP_NATIVE_POOL)
   // The native-pool path's private ABI is only valid for one ORT release;
   // the adapter falls back to the public KernelContext_ParallelFor path in
-  // any other host (annc_ep_native_pool.h).
+  // any other host (context/annc_ep_native_pool.h).
   annc_ep::native::CheckHostVersion(ort_api_base);
   if (g_debug && !annc_ep::native::PoolAvailable()) {
     std::fprintf(stderr,

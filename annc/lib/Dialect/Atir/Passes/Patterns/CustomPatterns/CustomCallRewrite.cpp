@@ -61,7 +61,7 @@ struct MatmulToCustomCallRewrite : public CustomFusionPatternBase<MatMulOp> {
       if (add) {
         ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
         if (ambiguous) return failure();
-        if (relu && isExecutionV2BuiltinCompatible(anchor, add, relu)) {
+        if (relu && isContextBuiltinCompatible(anchor, add, relu)) {
           fusedOps.push_back(add);
           fusedOps.push_back(relu);
           // The multi-output add+relu contract is owned by
@@ -186,7 +186,7 @@ struct MatMulAddReluWithAddOutputRewrite
 
     ReluOp relu = findUniqueUser<ReluOp>(add.getResult(), ambiguous);
     if (ambiguous || !relu) return failure();
-    if (!isExecutionV2BuiltinCompatible(anchor, add, relu)) return failure();
+    if (!isContextBuiltinCompatible(anchor, add, relu)) return failure();
 
     fusedOps.push_back(add);
     fusedOps.push_back(relu);

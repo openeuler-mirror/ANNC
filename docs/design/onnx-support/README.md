@@ -168,8 +168,8 @@ sequenceDiagram
 | --- | --- | --- |
 | `addons/onnxruntime/annc_ep.cpp` | 符号表、参数绑定与执行器、ORT 回调 | ep-design §3.2、§4、§6.3、§6.5 |
 | `addons/onnxruntime/annc_ep_site.cc` | 站点校验（上下文与兼容两套规则） | ep-design §4.3 |
-| `addons/onnxruntime/annc_ep_execution.*` | 执行上下文、三回调与线程池适配器 | ep-design §6.6、§6.7 |
-| `addons/onnxruntime/annc_ep_native_pool.h` | 原生 operator pool 私有布局读取与宿主版本校验 | ep-design §6.6 |
+| `addons/onnxruntime/context/annc_ep_execution.*` | 执行上下文、三回调与线程池适配器 | ep-design §6.6、§6.7 |
+| `addons/onnxruntime/context/annc_ep_native_pool.h` | 原生 operator pool 私有布局读取与宿主版本校验 | ep-design §6.6 |
 | `addons/onnxruntime/annc_ep_compile.*` | 编译驱动：工具定位、缓存身份与发布、子进程与超时 | ep-design §4.2、§6.2、§6.4 |
 | `addons/onnxruntime/annc_ep_graph_export.cc`、`ort_graph_to_proto.h` | 图导出、确定性命名与缓存身份计算 | ep-design §6.1、§6.2 |
 | `frontends/onnx/onnx2atir/`（前端各件） | 加载解析、类型与形状推导、常量解码、语义适配、映射表与构建扩展接口 | onnx-frontend-design §3.2、§4.4、§6 |

@@ -161,7 +161,7 @@ set(ANNC_OPTIMIZER_SOURCES
 )
 
 set(ANNC_FUSED_OP_SOURCES
-    annc_fused_op.cc
+    context/annc_fused_op.cc
     context/annc_fused_op_context.cc
     context/ThreadPool.cc
     annc_fused_op_jit.cc

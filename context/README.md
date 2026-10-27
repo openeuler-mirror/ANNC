@@ -151,7 +151,7 @@ TensorFlow 与 ONNX Runtime 的 builtin 调用共用 `AnncKernelContext`。
 | 适配层 | 实现位置 | 职责 |
 | --- | --- | --- |
 | TensorFlow | `tensorflow_addons/context/` | 绑定 TF tensor，提供输出/临时分配与 TF 线程池服务 |
-| ONNX Runtime | `addons/onnxruntime/annc_ep_execution.*` | 按站点契约绑定 ORT 输入输出，提供分配、调度及原生线程池句柄 |
+| ONNX Runtime | `addons/onnxruntime/context/annc_ep_execution.*` | 按站点契约绑定 ORT 输入输出，提供分配、调度及原生线程池句柄 |
 
 一次同步调用按以下顺序执行：
 
