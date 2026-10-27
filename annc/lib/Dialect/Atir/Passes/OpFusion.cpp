@@ -2501,27 +2501,10 @@ static LogicalResult matchKpEmbeddingPaddingFast(
   return success();
 }
 
-static CustomOpSchema getKpEmbeddingPaddingSchema(StringRef opName,
-                                                  bool fast) {
-  auto schema = CustomOpSchema::get(opName)
-                    .TypeVar("T")
-                    .MemRefArg("origin_shape", 1, "")
-                    .MemRefArg("input_rows", 0, "")
-                    .MemRefArg("pack", 0, "")
-                    .MemRefArg("data", 2, "T")
-                    .MemRefArg("reshape_sizes", 1, "");
-  schema.Result("out_padding_rows", 0, "");
-  if (fast) {
-    schema.Result("out_reshape_rows", 0, "");
-  } else {
-    schema.Result("out_data", 2, "T");
-  }
-  return schema;
-}
-
-static LogicalResult fuseKpEmbeddingPadding(
-    Operation *anchorOp, KpEmbeddingPaddingMatch &match, bool fast,
-    StringRef patternName, PatternRewriter &rewriter) {
+static LogicalResult fuseKpEmbeddingPadding(Operation *anchorOp,
+                                            KpEmbeddingPaddingMatch &match,
+                                            bool fast, StringRef patternName,
+                                            PatternRewriter &rewriter) {
   ModuleOp module = anchorOp->getParentOfType<ModuleOp>();
   if (!module) return failure();
 
@@ -2540,74 +2523,9 @@ static LogicalResult fuseKpEmbeddingPadding(
 
   const char *customOpName =
       fast ? "KPFusedEmbeddingPaddingFast" : "KPFusedEmbeddingPadding";
-  auto schema = getKpEmbeddingPaddingSchema(customOpName, fast);
-  SmallVector<Type> inputTypes;
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> outputTypes;
-  for (Value output : boundaryOutputs) outputTypes.push_back(output.getType());
-  auto inferred = inferTypeConstraintsFromSchema(
-      schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-      TypeRange(outputTypes));
-  if (!inferred) {
-    llvm::consumeError(inferred.takeError());
-    return failure();
-  }
-  annc::kernels::KernelResolveRequest request;
-  request.op_type = customOpName;
-  request.abi = "annc_execution_v2";
-  request.type_constraints = std::move(*inferred);
-  if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-  std::string anchorName = getTfName(anchorOp);
-  std::string kernelName = uniquifySymbolName(
-      module, getStableFusionKernelName(anchorName, patternName));
-  std::string clusterName = uniquifyFusionName(
-      module, sanitizeName(anchorName + "/kp_fused"));
-  auto kernelFunc = createExecutionV2KernelFunc(
-      module, rewriter, kernelName, fusedOps, boundaryInputs, boundaryOutputs);
-  kernelFunc->setAttr("fusion.pattern", rewriter.getStringAttr(patternName));
-  setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-  SmallVector<NamedAttribute> metadata;
-  metadata.push_back(rewriter.getNamedAttr(
-      "fusion.pattern", rewriter.getStringAttr(patternName)));
-  addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-  metadata.push_back(rewriter.getNamedAttr(
-      "kernel_name", rewriter.getStringAttr(kernelName)));
-  metadata.push_back(rewriter.getNamedAttr(
-      "tf.name", rewriter.getStringAttr(clusterName)));
-  SmallVector<FusionArgSpec> args;
-  for (Value input : boundaryInputs)
-    args.push_back({"dynamic", getValueName(input), input.getType()});
-  metadata.push_back(rewriter.getNamedAttr(
-      "args", makeFusionArgArray(rewriter.getContext(), args)));
-  SmallVector<FusionArgSpec> outputs;
-  auto outputName = [](Value value, StringRef fallback) {
-    std::string name = getFusionOutputName(value);
-    return name.empty() ? fallback.str() : name;
-  };
-  outputs.push_back({"output",
-                     outputName(match.subResult, "padding_rows:0"),
-                     match.subResult.getType()});
-  outputs.push_back(
-      {"output", outputName(match.anchorResult, anchorName + ":0"),
-       match.anchorResult.getType()});
-  metadata.push_back(rewriter.getNamedAttr(
-      "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-  metadata.push_back(rewriter.getNamedAttr(
-      "abi", rewriter.getStringAttr("annc_execution_v2")));
-  metadata.push_back(rewriter.getNamedAttr(
-      "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-  metadata.push_back(rewriter.getNamedAttr(
-      "dynamic_dims", makeI64Array(rewriter.getContext(), {1})));
-  metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                           rewriter.getStringAttr("")));
-  metadata.push_back(rewriter.getNamedAttr(
-      "fallback_function", rewriter.getStringAttr("original_subgraph")));
-  kernelFunc->setAttr("fusion.metadata",
-                      DictionaryAttr::get(rewriter.getContext(), metadata));
-  anchorOp->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-  return success();
+  return outlineContextBuiltin(module, rewriter, anchorOp, customOpName,
+                               patternName, boundaryInputs, boundaryOutputs,
+                               fusedOps, kAotExecutionMode);
 }
 
 struct FuseKpEmbeddingPaddingAsFuncCallPattern
@@ -2640,17 +2558,16 @@ struct FuseKpEmbeddingPaddingFastAsFuncCallPattern
   }
 };
 
-
-// ── KP sparse reshape (一级, Execution V2) ──────────────────────────────────
+// ── KP sparse reshape (一级, Context V3) ──────────────────────────────────
 //
 // 匹配链 (与二级 KpEmbeddingSparseReshapeRewrite 一致):
 //   keys ──┬─► Shape ─► StridedSlice(shrink=1) ─► Pack ◄─ pack_const
 //          │                                        │
 //          │  input_shape ◄─ Cast ◄─────────────────┘
 //          │
-//          ├─► StridedSlice(shrink=2, begin_mask=1, end_mask=1) ─► Reshape{-1,1} ─┐
-//          │                                                                     ├─► ConcatV2(axis={-1}) ─► indices
-//          └─► Range(0, limit, 1) ─► Reshape{-1,1} ─► Cast ──────────────────────┘
+//          ├─► StridedSlice(shrink=2, begin_mask=1, end_mask=1) ─►
+//          Reshape{-1,1} ─┐ │ ├─► ConcatV2(axis={-1}) ─► indices └─► Range(0,
+//          limit, 1) ─► Reshape{-1,1} ─► Cast ──────────────────────┘
 //   new_shape ───────────────────────────────────► SparseReshape (anchor)
 //
 // anchor 是 functional op (operand 0 = indices, 无输出 buffer), 故 kernel

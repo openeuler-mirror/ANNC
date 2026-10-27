@@ -1,29 +1,25 @@
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
-// KP-style embedding padding fusion, second level, Execution V2: inside the
+// KP-style embedding padding fusion, second level, Context V3: inside the
 // kernel func (signature !llvm.ptr + 5 inputs, 2 results) the padding chain
 // folds into a single CustomizeOp; results map to execution slots
 // (0 = padding_rows, 1 = out_data / reshape_rows).
-
 // CHECK-LABEL: func.func private @fused_kp_embedding_padding
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<2xi64, name = "origin_shape">, %arg2: !atir.tensor<i32, name = "input_rows">, %arg3: !atir.tensor<i32, name = "pack">, %arg4: !atir.tensor<4x3xf32, name = "data">, %arg5: !atir.tensor<2xi32, name = "reshape_sizes">
+// CHECK-SAME: %arg0: !atir.tensor<2xi64, name = "origin_shape">, %arg1: !atir.tensor<i32, name = "input_rows">, %arg2: !atir.tensor<i32, name = "pack">, %arg3: !atir.tensor<4x3xf32, name = "data">, %arg4: !atir.tensor<2xi32, name = "reshape_sizes">
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedEmbeddingPadding"
-// CHECK-SAME: custom.result_names = ["out_padding_rows", "out_data"]
 // CHECK-NOT: atir.Sub
 // CHECK-NOT: atir.Reshape
 // 注: kernel func 只克隆定义链, anchor 的 ConcatV2 用户 (812 要求) 在一级
 // 主图层面检查, 不出现在 kernel func 里。
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_embedding_padding(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<2xi64, name = "origin_shape">,
       %arg2: !atir.tensor<i32, name = "input_rows">,
       %arg3: !atir.tensor<i32, name = "pack">,
       %arg4: !atir.tensor<4x3xf32, name = "data">,
       %arg5: !atir.tensor<2xi32, name = "reshape_sizes">)
       -> (!atir.tensor<i32, name = "out_padding">, !atir.tensor<?x3xf32, name = "out_data">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<2xi32, name = "cast_out">
     %1 = "atir.Cast"(%0, %arg1) : (!atir.tensor<2xi32, name = "cast_out">, !atir.tensor<2xi64, name = "origin_shape">) -> !atir.tensor<2xi32, name = "cast_out">
     %2 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss_out">
@@ -48,22 +44,18 @@ module attributes {module.state = "atir"} {
 }
 
 // -----
-
 // CHECK-LABEL: func.func private @fused_kp_embedding_padding_fast
-// CHECK-SAME: %arg0: !llvm.ptr,
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedEmbeddingPaddingFast"
-// CHECK-SAME: custom.result_names = ["out_padding_rows", "out_reshape_rows"]
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_embedding_padding_fast(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<2xi64, name = "origin_shape">,
       %arg2: !atir.tensor<i32, name = "input_rows">,
       %arg3: !atir.tensor<i32, name = "pack">,
       %arg4: !atir.tensor<4x3xf32, name = "data">,
       %arg5: !atir.tensor<2xi32, name = "reshape_sizes">)
       -> (!atir.tensor<i32, name = "out_padding">, !atir.tensor<i32, name = "out_reshape_rows">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<2xi32, name = "cast_out">
     %1 = "atir.Cast"(%0, %arg1) : (!atir.tensor<2xi32, name = "cast_out">, !atir.tensor<2xi64, name = "origin_shape">) -> !atir.tensor<2xi32, name = "cast_out">
     %2 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss_out">
@@ -101,14 +93,13 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.Sub
 module attributes {module.state = "atir"} {
   func.func private @bad_ss_begin(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<2xi64, name = "origin_shape">,
       %arg2: !atir.tensor<i32, name = "input_rows">,
       %arg3: !atir.tensor<i32, name = "pack">,
       %arg4: !atir.tensor<4x3xf32, name = "data">,
       %arg5: !atir.tensor<2xi32, name = "reshape_sizes">)
       -> (!atir.tensor<i32, name = "out_padding">, !atir.tensor<?x3xf32, name = "out_data">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<2xi32, name = "cast_out">
     %1 = "atir.Cast"(%0, %arg1) : (!atir.tensor<2xi32, name = "cast_out">, !atir.tensor<2xi64, name = "origin_shape">) -> !atir.tensor<2xi32, name = "cast_out">
     %2 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss_out">

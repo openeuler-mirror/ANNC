@@ -4,7 +4,7 @@
     {
       "name": "kp_embedding_padding_fast",
       "kernel": "fused_kp_embedding_padding_fast",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 200,
       "graph": [
         "origin_cast = Cast(origin_shape)",
@@ -39,7 +39,7 @@
     {
       "name": "kp_embedding_padding",
       "kernel": "fused_kp_embedding_padding",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 190,
       "graph": [
         "origin_cast = Cast(origin_shape)",

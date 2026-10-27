@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -54,14 +55,12 @@ bool checkConstantZeroForChain(Value v) {
   DenseElementsAttr dataAttr = tensorType.getCacheData();
   if (!dataAttr) return false;
   if (dataAttr.getElementType().isF32()) {
-    return dataAttr.isSplat()
-               ? dataAttr.getSplatValue<float>() == 0.0f
-               : (*dataAttr.getValues<float>().begin()) == 0.0f;
+    return dataAttr.isSplat() ? dataAttr.getSplatValue<float>() == 0.0f
+                              : (*dataAttr.getValues<float>().begin()) == 0.0f;
   }
   if (dataAttr.getElementType().isIntOrIndex()) {
-    return dataAttr.isSplat()
-               ? dataAttr.getSplatValue<APInt>().isZero()
-               : (*dataAttr.getValues<APInt>().begin()).isZero();
+    return dataAttr.isSplat() ? dataAttr.getSplatValue<APInt>().isZero()
+                              : (*dataAttr.getValues<APInt>().begin()).isZero();
   }
   return false;
 }
@@ -176,14 +175,13 @@ bool checkPaddingEscape(PaddingChain &chain, Operation *concatUser) {
   // 剥掉的每一层只能喂链上的下一层 (最外层喂 Sub), 逐级不逃逸 —— 与放宽前
   // 的 cast→ss→sub 两级检查等强, 只是层数可变。
   for (size_t i = 0; i < chain.peeled.size(); ++i) {
-    Operation *next =
-        (i == 0) ? chain.sub.getOperation() : chain.peeled[i - 1];
+    Operation *next = (i == 0) ? chain.sub.getOperation() : chain.peeled[i - 1];
     for (Operation *user : chain.peeled[i]->getResult(0).getUsers()) {
       if (user != next) return false;
     }
   }
-  // V2: the sub result is a fused output — it feeds pack internally and the
-  // enclosing func return externally.
+  // context: the sub result is a fused output — it feeds pack internally and
+  // the enclosing func return externally.
   for (Operation *user : chain.sub.getResult().getUsers()) {
     if (user != chain.pack.getOperation() && !isa<func::ReturnOp>(user))
       return false;
@@ -208,19 +206,16 @@ bool checkPaddingDtype(Value originShape, Value data) {
          dType.getElementType().isF32() && dType.getShape().size() == 2;
 }
 
-// V2 kernel func signature check: private func with annc.kernel, argument 0
-// = !llvm.ptr, 5 memref inputs, 2 results.
-LogicalResult checkV2KernelFunc(func::FuncOp func) {
+// context kernel func signature check: private func with annc.kernel, which
+// has 5 tensor inputs and 2 results.
+LogicalResult checkContextKernelFunc(func::FuncOp func) {
   if (!func || !func->hasAttr("annc.kernel")) return failure();
-  if (func.getNumArguments() != 6 ||
-      !isa<LLVM::LLVMPointerType>(func.getArgument(0).getType()))
-    return failure();
+  if (func.getNumArguments() != 5) return failure();
   if (func.getFunctionType().getResults().size() != 2) return failure();
   return success();
 }
 
-bool checkResultContract(Value value,
-                         llvm::ArrayRef<Operation *> fusedUsers) {
+bool checkResultContract(Value value, llvm::ArrayRef<Operation *> fusedUsers) {
   for (Operation *user : value.getUsers()) {
     if (isa<func::ReturnOp>(user)) continue;
     if (!llvm::is_contained(fusedUsers, user)) return false;
@@ -229,8 +224,7 @@ bool checkResultContract(Value value,
 }
 
 // ── Padding (anchor = Reshape) ─────────────────────────────────────────────
-struct KpEmbeddingPaddingRewrite
-    : public CustomFusionPatternBase<ReshapeOp> {
+struct KpEmbeddingPaddingRewrite : public CustomFusionPatternBase<ReshapeOp> {
   KpEmbeddingPaddingRewrite(MLIRContext *context,
                             const CustomOpTypeFilter &customOpFilter,
                             PatternBenefit benefit = 8)
@@ -240,12 +234,12 @@ struct KpEmbeddingPaddingRewrite
       ReshapeOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    if (failed(checkV2KernelFunc(func))) return failure();
-    Value originShapeArg = func.getArgument(1);
-    Value inputRowsArg = func.getArgument(2);
-    Value packArg = func.getArgument(3);
-    Value dataArg = func.getArgument(4);
-    Value reshapeSizesArg = func.getArgument(5);
+    if (failed(checkContextKernelFunc(func))) return failure();
+    Value originShapeArg = func.getArgument(0);
+    Value inputRowsArg = func.getArgument(1);
+    Value packArg = func.getArgument(2);
+    Value dataArg = func.getArgument(3);
+    Value reshapeSizesArg = func.getArgument(4);
     if (!isa<BufferOp>(anchor.getOutput().getDefiningOp())) return failure();
 
     // 注: 812 的 "anchor 有 ConcatV2 用户" 检查在一级 (OpFusion, 主图层面)
@@ -274,20 +268,18 @@ struct KpEmbeddingPaddingRewrite
       return failure();
     }
 
-    SmallVector<Value, 5> boundaryValues = {originShapeArg, dataArg,
-                                            inputRowsArg, reshapeSizesArg,
-                                            packArg};
+    SmallVector<Value, 5> boundaryValues = {
+        originShapeArg, dataArg, inputRowsArg, reshapeSizesArg, packArg};
     SmallPtrSet<Operation *, 32> visited;
-    collectPaddingOps(anchor.getOperation(), boundaryValues, visited,
-                      fusedOps);
+    collectPaddingOps(anchor.getOperation(), boundaryValues, visited, fusedOps);
     if (fusedOps.empty()) return failure();
     if (!llvm::is_contained(fusedOps, chain.concat.getOperation()) ||
         !llvm::is_contained(fusedOps, chain.sub.getOperation()) ||
         !llvm::is_contained(fusedOps, anchor.getOperation()))
       return failure();
 
-    // V2 result contract: sub result (padding_rows) feeds pack internally and
-    // the enclosing return externally; anchor result is the return value.
+    // context result contract: sub result (padding_rows) feeds pack internally
+    // and the enclosing return externally; anchor result is the return value.
     if (!checkResultContract(chain.sub.getResult(),
                              {chain.pack.getOperation()}) ||
         !checkResultContract(anchor.getResult(), {}))
@@ -305,29 +297,18 @@ struct KpEmbeddingPaddingRewrite
   CustomOpSchema getCustomOpSchema(
       ReshapeOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    // MemRef arg order = getOrderedBoundaryInputs = kernel wrapper inputs.
-    // Results map to execution slots: 0 = padding_rows (0D i32),
-    // 1 = out_data (2D f32).
-    return CustomOpSchema::get("KPFusedEmbeddingPadding")
-        .TypeVar("T")
-        .MemRefArg("origin_shape", 1, "")
-        .MemRefArg("input_rows", 0, "")
-        .MemRefArg("pack", 0, "")
-        .MemRefArg("data", 2, "T")
-        .MemRefArg("reshape_sizes", 1, "")
-        .Result("out_padding_rows", 0, "")
-        .Result("out_data", 2, "T");
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
   void getOrderedBoundaryInputs(
       ReshapeOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    inputs.push_back(func.getArgument(1));  // origin_shape
-    inputs.push_back(func.getArgument(2));  // input_rows
-    inputs.push_back(func.getArgument(3));  // pack
-    inputs.push_back(func.getArgument(4));  // data
-    inputs.push_back(func.getArgument(5));  // reshape_sizes
+    inputs.push_back(func.getArgument(0));  // origin_shape
+    inputs.push_back(func.getArgument(1));  // input_rows
+    inputs.push_back(func.getArgument(2));  // pack
+    inputs.push_back(func.getArgument(3));  // data
+    inputs.push_back(func.getArgument(4));  // reshape_sizes
   }
 };
 
@@ -344,12 +325,12 @@ struct KpEmbeddingPaddingFastRewrite
       StridedSliceOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    if (failed(checkV2KernelFunc(func))) return failure();
-    Value originShapeArg = func.getArgument(1);
-    Value inputRowsArg = func.getArgument(2);
-    Value packArg = func.getArgument(3);
-    Value dataArg = func.getArgument(4);
-    Value reshapeSizesArg = func.getArgument(5);
+    if (failed(checkContextKernelFunc(func))) return failure();
+    Value originShapeArg = func.getArgument(0);
+    Value inputRowsArg = func.getArgument(1);
+    Value packArg = func.getArgument(2);
+    Value dataArg = func.getArgument(3);
+    Value reshapeSizesArg = func.getArgument(4);
     if (!isa<BufferOp>(anchor.getOutput().getDefiningOp())) return failure();
 
     if (anchor.getShrinkAxisMask() != 1) return failure();
@@ -375,8 +356,7 @@ struct KpEmbeddingPaddingFastRewrite
     if (!concat || failed(matchPaddingChain(concat, chain))) return failure();
     if (chain.originShape != originShapeArg || chain.data != dataArg ||
         chain.inputRows != inputRowsArg ||
-        reshape.getTargetShape() != reshapeSizesArg ||
-        chain.packVal != packArg)
+        reshape.getTargetShape() != reshapeSizesArg || chain.packVal != packArg)
       return failure();
     if (!isa<BufferOp>(chain.sub.getOutput().getDefiningOp())) {
       return failure();
@@ -390,12 +370,10 @@ struct KpEmbeddingPaddingFastRewrite
       if (user != anchor.getOperation()) return failure();
     }
 
-    SmallVector<Value, 5> boundaryValues = {originShapeArg, dataArg,
-                                            inputRowsArg, reshapeSizesArg,
-                                            packArg};
+    SmallVector<Value, 5> boundaryValues = {
+        originShapeArg, dataArg, inputRowsArg, reshapeSizesArg, packArg};
     SmallPtrSet<Operation *, 32> visited;
-    collectPaddingOps(anchor.getOperation(), boundaryValues, visited,
-                      fusedOps);
+    collectPaddingOps(anchor.getOperation(), boundaryValues, visited, fusedOps);
     if (fusedOps.empty()) return failure();
     if (!llvm::is_contained(fusedOps, chain.concat.getOperation()) ||
         !llvm::is_contained(fusedOps, chain.sub.getOperation()) ||
@@ -403,9 +381,9 @@ struct KpEmbeddingPaddingFastRewrite
         !llvm::is_contained(fusedOps, anchor.getOperation()))
       return failure();
 
-    // V2 result contract: sub result (padding_rows) feeds pack internally and
-    // the enclosing return externally; anchor result (reshape_rows scalar) is
-    // the return value.
+    // context result contract: sub result (padding_rows) feeds pack internally
+    // and the enclosing return externally; anchor result (reshape_rows scalar)
+    // is the return value.
     if (!checkResultContract(chain.sub.getResult(),
                              {chain.pack.getOperation()}) ||
         !checkResultContract(anchor.getResult(), {}))
@@ -423,26 +401,18 @@ struct KpEmbeddingPaddingFastRewrite
   CustomOpSchema getCustomOpSchema(
       StridedSliceOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    return CustomOpSchema::get("KPFusedEmbeddingPaddingFast")
-        .TypeVar("T")
-        .MemRefArg("origin_shape", 1, "")
-        .MemRefArg("input_rows", 0, "")
-        .MemRefArg("pack", 0, "")
-        .MemRefArg("data", 2, "T")
-        .MemRefArg("reshape_sizes", 1, "")
-        .Result("out_padding_rows", 0, "")
-        .Result("out_reshape_rows", 0, "");
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
   void getOrderedBoundaryInputs(
       StridedSliceOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    inputs.push_back(func.getArgument(1));  // origin_shape
-    inputs.push_back(func.getArgument(2));  // input_rows
-    inputs.push_back(func.getArgument(3));  // pack
-    inputs.push_back(func.getArgument(4));  // data
-    inputs.push_back(func.getArgument(5));  // reshape_sizes
+    inputs.push_back(func.getArgument(0));  // origin_shape
+    inputs.push_back(func.getArgument(1));  // input_rows
+    inputs.push_back(func.getArgument(2));  // pack
+    inputs.push_back(func.getArgument(3));  // data
+    inputs.push_back(func.getArgument(4));  // reshape_sizes
   }
 };
 
