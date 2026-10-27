@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "annc_packed_rhs.h"
+
 namespace annc::jit {
 
 struct JitArgumentSignature {
@@ -51,6 +53,10 @@ class JitExecutable final {
   void *kernelFunction() const { return kernel_function_; }
   void *setThreadPoolFunction() const { return set_thread_pool_function_; }
   void *getThreadPoolFunction() const { return get_thread_pool_function_; }
+
+  // Immutable after publication into the process-wide code cache.
+  std::vector<AnncPackedRhsSpec> packed_rhs_specs;
+  AnncPreparePackedRhs prepare_rhs = nullptr;
 
  private:
   std::string work_dir_;

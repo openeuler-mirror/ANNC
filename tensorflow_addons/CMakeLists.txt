@@ -158,20 +158,23 @@ set(ANNC_OPTIMIZER_SOURCES
 set(ANNC_FUSED_OP_SOURCES
     annc_fused_op.cc
     annc_fused_op_jit.cc
+    annc_fused_op_prepack.cc
     annc_fused_op_register.cc
 )
 
 # ── Build targets ────────────────────────────────────────────────────────────
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-add_library(annc_jit_cache STATIC annc_jit_cache.cc)
+add_library(annc_jit_cache STATIC annc_jit_cache.cc annc_packed_rhs.cc)
 target_include_directories(annc_jit_cache PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../annc/include"
 )
 target_link_libraries(annc_jit_cache PUBLIC OpenSSL::Crypto PRIVATE dl)
 
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 if(ANNC_ENABLE_CONSTANT_FOLDING)
+    target_link_libraries(annc_fused_op PRIVATE ANNCCheckpoint)
     target_compile_definitions(annc_fused_op PRIVATE
         ANNC_ENABLE_CONSTANT_FOLDING)
 endif()

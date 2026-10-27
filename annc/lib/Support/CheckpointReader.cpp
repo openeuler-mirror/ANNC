@@ -1,8 +1,10 @@
-#include "CheckpointReader.h"
+#include "Support/CheckpointReader.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include "llvm/Support/raw_ostream.h"
+#include <iostream>
 namespace fs = std::filesystem;
 namespace annc {
 namespace constant_folding {
@@ -117,7 +119,7 @@ std::optional<CheckpointReader> CheckpointReader::open(
     }
   }
   if (index_path.empty()) {
-    llvm::errs() << "[CheckpointReader] variables.index not found under " << dir
+    std::cerr << "[CheckpointReader] variables.index not found under " << dir
                  << "\n";
     return std::nullopt;
   }
@@ -125,7 +127,7 @@ std::optional<CheckpointReader> CheckpointReader::open(
   reader.data_prefix_ =
       (fs::path(index_path).parent_path() / "variables").string();
   if (!reader.parseIndexFile(index_path)) {
-    llvm::errs() << "[CheckpointReader] failed to parse " << index_path
+    std::cerr << "[CheckpointReader] failed to parse " << index_path
                  << "\n";
     return std::nullopt;
   }
@@ -228,12 +230,52 @@ bool CheckpointReader::readTensor(const std::string &var_name,
   file.read(reinterpret_cast<char *>(out_data.data()),
             static_cast<std::streamsize>(entry.size));
   if (file.gcount() != entry.size) {
-    llvm::errs() << "[CheckpointReader] short read for variable " << var_name
+    std::cerr << "[CheckpointReader] short read for variable " << var_name
                  << "\n";
     return false;
   }
   out_dtype = entry.dtype;
   return true;
+}
+
+bool RhsDataLoader::load(const std::string &name, std::vector<uint8_t> &out) {
+  if (name.empty()) return false;
+  if (!checkpointAttempted_) {
+    checkpointAttempted_ = true;
+    const char *directory = std::getenv("ANNC_DEMO_CHECKPOINT_DIR");
+    if (directory && *directory)
+      checkpoint_ = CheckpointReader::open(directory);
+  }
+  if (!checkpoint_) return false;
+  int32_t dtype = 0;
+  std::string key = name;
+  auto tryCandidate = [&] {
+    return checkpoint_->readTensor(key, out, dtype) ||
+           checkpoint_->readTensor(key + "/.ATTRIBUTES/VARIABLE_VALUE", out,
+                                   dtype);
+  };
+  while (!tryCandidate()) {
+    bool stripped = false;
+    for (const std::string suffix : {"/ReadVariableOp", "/read"}) {
+      if (key.size() >= suffix.size() &&
+          key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        key.resize(key.size() - suffix.size());
+        stripped = true;
+        break;
+      }
+    }
+    if (stripped) continue;
+    size_t pos = key.size();
+    while (pos > 0 && key[pos - 1] >= '0' && key[pos - 1] <= '9') --pos;
+    if (pos >= 2 && key[pos - 1] == '_') {
+      key.resize(pos - 1);
+      continue;
+    }
+    const size_t slash = key.rfind('/');
+    if (slash == std::string::npos) return false;
+    key.resize(slash);
+  }
+  return dtype == 1 && !out.empty();
 }
 
 }  // namespace constant_folding

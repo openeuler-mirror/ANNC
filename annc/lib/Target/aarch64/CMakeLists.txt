@@ -3,7 +3,7 @@ file(GLOB _srcs *.cpp)
 set(_gemm_srcs
         Gemm/GemmPlan.cpp
         Gemm/ConstantFolding/GemmPrepackRhs.cpp
-        Gemm/ConstantFolding/CheckpointReader.cpp
+        Gemm/ConstantFolding/JitPrepack.cpp
         Gemm/ResolveGemmPlan.cpp
         Gemm/SelectGemmStrategy.cpp
         Gemm/GemmThreadPlanning.cpp
@@ -54,6 +54,7 @@ add_mlir_library(AArch64Codegen
         AArch64CodeGenPassIncGen
 
         LINK_LIBS PUBLIC
+        ANNCCheckpoint
         MLIRIR
         MLIRPass
         MLIRSupport

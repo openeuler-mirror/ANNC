@@ -21,7 +21,9 @@ def AArch64GemmPrepackRhs
   let constructor = "createAArch64GemmPrepackRhs()";
   let options = [
     Option<"packedCPath", "packed-c", "std::string", "",
-           "Path for the generated packed RHS C source">
+           "Path for the generated packed RHS C source">,
+    Option<"jitInputsPath", "jit-inputs", "std::string", "",
+           "JSON array of immutable JIT argument indices; generate runtime packing entries">
   ];
 }
 

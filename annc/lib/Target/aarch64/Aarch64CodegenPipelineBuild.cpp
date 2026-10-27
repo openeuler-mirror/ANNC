@@ -24,12 +24,17 @@ namespace annc
             llvm::cl::desc("Number of intra-op threads available to the GEMM "
                            "plan (1 = serial execution)"),
             llvm::cl::init(1)};
+        PassOptions::Option<std::string> jitInputsPath{
+            *this, "jit-inputs",
+            llvm::cl::desc("JSON array of immutable JIT argument indices "
+                           "for runtime packing")};
     };
 
     void buildAArch64CodegenPipelineImpl(OpPassManager& passManager,
                                          StringRef configPath,
                                          StringRef packedCPath,
-                                         int64_t intraThreadCount)
+                                         int64_t intraThreadCount,
+                                         StringRef jitInputsPath = {})
     {
         passManager.addPass(createAArch64AtirGemmEpilogueCommit());
         passManager.addPass(atir::createConvertAtirToLinalg());
@@ -46,7 +51,8 @@ namespace annc
         passManager.addPass(createAArch64GemmThreadPlanning());
 #ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (enablePrepack)
-            passManager.addPass(createAArch64GemmPrepackRhs(packedCPath));
+            passManager.addPass(createAArch64GemmPrepackRhs(
+                packedCPath, jitInputsPath));
 #endif
         passManager.addPass(createAArch64FinalizeGemmPlan());
         passManager.addPass(createAArch64GemmThreadTiling());
@@ -76,7 +82,8 @@ namespace annc
                 buildAArch64CodegenPipelineImpl(passManager,
                                                options.configPath,
                                                options.packedCPath,
-                                               options.intraThreadCount);
+                                               options.intraThreadCount,
+                                               options.jitInputsPath);
             });
     }
 } //namespace annc
