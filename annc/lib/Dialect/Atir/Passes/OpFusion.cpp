@@ -1608,117 +1608,31 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    Value executionV2Bias;
-    AddOp executionV2Add = findUniqueMatMulAddUser(matmulOp, executionV2Bias);
-    ReluOp executionV2Relu =
-        executionV2Add ? findUniqueAddReluUser(executionV2Add) : nullptr;
-    if (isContextBuiltinCompatible(matmulOp, executionV2Add,
-                                       executionV2Relu)) {
+    Value builtinBias;
+    AddOp builtinAdd = findUniqueMatMulAddUser(matmulOp, builtinBias);
+    ReluOp builtinRelu =
+        builtinAdd ? findUniqueAddReluUser(builtinAdd) : nullptr;
+    if (isContextBuiltinCompatible(matmulOp, builtinAdd, builtinRelu)) {
       SmallVector<Operation *> fusedOps = {matmulOp.getOperation(),
-                                           executionV2Add.getOperation(),
-                                           executionV2Relu.getOperation()};
+                                           builtinAdd.getOperation(),
+                                           builtinRelu.getOperation()};
       SmallVector<Value> boundaryOutputs = collectEscapingResults(fusedOps);
       bool hasExactTwoOutputContract =
           boundaryOutputs.size() == 2 &&
-          boundaryOutputs[0] == executionV2Add.getResult() &&
-          boundaryOutputs[1] == executionV2Relu.getResult();
+          boundaryOutputs[0] == builtinAdd.getResult() &&
+          boundaryOutputs[1] == builtinRelu.getResult();
       if (hasExactTwoOutputContract) {
         SmallVector<Value> boundaryInputs = collectBuiltinInputs(fusedOps);
         if (boundaryInputs.size() != 3 ||
             boundaryInputs[0] != matmulOp.getLhs() ||
             boundaryInputs[1] != matmulOp.getRhs() ||
-            boundaryInputs[2] != executionV2Bias) {
+            boundaryInputs[2] != builtinBias) {
           return failure();
         }
-        auto schema = CustomOpSchema::get("MatMulAddReluWithAddOutput")
-                          .TypeVar("T")
-                          .MemRefArg("lhs", 2, "T")
-                          .MemRefArg("rhs", 2, "T")
-                          .MemRefArg("bias", 1, "T")
-                          .Result("add", 2, "T")
-                          .Result("relu", 2, "T");
-        SmallVector<Type> inputTypes;
-        for (Value input : boundaryInputs)
-          inputTypes.push_back(input.getType());
-        SmallVector<Type> outputTypes;
-        for (Value output : boundaryOutputs)
-          outputTypes.push_back(output.getType());
-        auto typeConstraints = inferTypeConstraintsFromSchema(
-            schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-            TypeRange(outputTypes));
-        if (!typeConstraints) {
-          llvm::consumeError(typeConstraints.takeError());
-          return failure();
-        }
-        annc::kernels::KernelResolveRequest request;
-        request.op_type = "MatMulAddReluWithAddOutput";
-        request.abi = "annc_execution_v2";
-        request.type_constraints = std::move(*typeConstraints);
-        auto enableKdnnAttr =
-            module->getAttrOfType<BoolAttr>("annc.enable_kdnn");
-        if (!annc::kernels::hasAnyAvailableKernel(
-                request, enableKdnnAttr && enableKdnnAttr.getValue())) {
-          return failure();
-        }
-
-        std::string kernelName = uniquifySymbolName(
-            module,
-            getStableMatMulFusionKernelName(matmulOp, "matmul_add_relu"));
-        std::string clusterName = uniquifyFusionName(
-            module,
-            sanitizeName("annc_fused_" + getValueName(boundaryOutputs.back())));
-        auto kernelFunc =
-            createExecutionV2KernelFunc(module, rewriter, kernelName, fusedOps,
-                                        boundaryInputs, boundaryOutputs);
-        setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
-        std::string templateFingerprint =
-            atir::computeAtirTemplateFingerprint(kernelFunc);
-
-        SmallVector<NamedAttribute> metadata;
-        metadata.push_back(rewriter.getNamedAttr(
-            "fusion.pattern", rewriter.getStringAttr("matmul_add_relu")));
-        addExecutionModeMetadata(metadata, rewriter, kJitExecutionMode);
-        metadata.push_back(rewriter.getNamedAttr(
-            "kernel_name", rewriter.getStringAttr(kernelName)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "template_fingerprint",
-            rewriter.getStringAttr(templateFingerprint)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "tf.name", rewriter.getStringAttr(clusterName)));
-
-        SmallVector<FusionArgSpec> argSpecs;
-        for (Value input : boundaryInputs) {
-          StringRef role = input == matmulOp.getLhs() ? "dynamic" : "fixed";
-          argSpecs.push_back(
-              {role.str(), getValueName(input), input.getType()});
-        }
-        metadata.push_back(rewriter.getNamedAttr(
-            "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-
-        SmallVector<FusionArgSpec> outputSpecs;
-        for (Value output : boundaryOutputs) {
-          outputSpecs.push_back(
-              {"output", getFusionOutputName(output), output.getType()});
-        }
-        metadata.push_back(rewriter.getNamedAttr(
-            "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "abi", rewriter.getStringAttr("annc_execution_v2")));
-        metadata.push_back(rewriter.getNamedAttr(
-            "kernel_arg_order",
-            makeI64Array(rewriter.getContext(), ArrayRef<int64_t>{})));
-        metadata.push_back(rewriter.getNamedAttr(
-            "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-        metadata.push_back(rewriter.getNamedAttr(
-            "symbolic_signature", rewriter.getStringAttr("F:0|S:1;?,?")));
-        metadata.push_back(rewriter.getNamedAttr(
-            "fallback_function", rewriter.getStringAttr("original_subgraph")));
-        kernelFunc->setAttr(
-            "fusion.metadata",
-            DictionaryAttr::get(rewriter.getContext(), metadata));
-
-        matmulOp->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-        return success();
+        return outlineContextBuiltin(
+            module, rewriter, matmulOp, "MatMulAddReluWithAddOutput",
+            "matmul_add_relu", boundaryInputs, boundaryOutputs, fusedOps,
+            kJitExecutionMode, 0, {"dynamic", "fixed", "fixed"});
       }
     }
 
@@ -1738,6 +1652,41 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         return failure();
       }
       epilogue = std::move(*parsed);
+    }
+
+    // Prefer the context kernel for a plain rank-2 MatMul. Keep generated
+    // GEMM as the compatibility path for variants outside the builtin schema
+    // or when the context specialization is unavailable.
+    if (!epilogue && !matmulOp.getWithBias() && !matmulOp.getDoRelu() &&
+        !matmulOp.getRightTranspose() && !matmulOp.getLeftTranspose() &&
+        !matmulOp.getOutputTranspose() && !matmulOp.getMStart() &&
+        !matmulOp.getNStart() && !matmulOp.getKStart() &&
+        !matmulOp.getMSize() && !matmulOp.getNSize() &&
+        !matmulOp.getKSize() && !matmulOp->getAttr("rhs_format")) {
+      auto resultType = dyn_cast<atir::TensorType>(
+          matmulOp.getResult().getType());
+      auto lhsType = dyn_cast<atir::TensorType>(matmulOp.getLhs().getType());
+      auto rhsType = dyn_cast<atir::TensorType>(matmulOp.getRhs().getType());
+      if (resultType && lhsType && rhsType && resultType.hasKnownRank() &&
+          lhsType.hasKnownRank() && rhsType.hasKnownRank() &&
+          getRank(resultType) == 2 && getRank(lhsType) == 2 &&
+          getRank(rhsType) == 2) {
+        bool lhsIsDynamic =
+            hasMatchingBatchDim(matmulOp.getLhs().getType(),
+                                matmulOp.getResult().getType());
+        bool rhsIsDynamic =
+            hasMatchingBatchDim(matmulOp.getRhs().getType(),
+                                matmulOp.getResult().getType());
+        if (lhsIsDynamic == rhsIsDynamic) lhsIsDynamic = true;
+        SmallVector<Operation *> fusedOps = {matmulOp.getOperation()};
+        if (succeeded(outlineContextBuiltin(
+                module, rewriter, matmulOp, "MatMul", "matmul",
+                {matmulOp.getLhs(), matmulOp.getRhs()},
+                {matmulOp.getResult()}, fusedOps, kJitExecutionMode, 0,
+                {lhsIsDynamic ? "dynamic" : "fixed",
+                 lhsIsDynamic ? "fixed" : "dynamic"})))
+          return success();
+      }
     }
 
     Operation *outputOp =

@@ -13,13 +13,14 @@
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAddRelu' | FileCheck %s --check-prefix=RELU-ALLOW
 // FastCodegen: MatmulToCustomCallRewrite pattern，--enable-kdnn 给 module 加 annc.enable_kdnn 标记
 
-// GEMM patterns remain as ATIR by default and can be enabled explicitly.
+// Legacy registrations remain callable until their context migration finishes.
 // CHECK-LABEL: func @main
 // KDNN-LABEL: module @main attributes
 // KDNN-SAME: annc.enable_kdnn = true
 // KDNN: func.func @main
-// KDNN: "atir.MatMul"
-// KDNN-NOT: atir.Customize
+// KDNN: atir.Customize
+// KDNN-SAME: custom.op_name = "MatMul"
+// KDNN-NOT: "atir.MatMul"
 // KDNN: return
 // ENABLED-LABEL: func @main
 module @main attributes {module.state = "atir"} {
@@ -30,9 +31,8 @@ module @main attributes {module.state = "atir"} {
     // CHECK: "atir.MatMul"
     // CHECK-NOT: atir.Customize
     // CHECK: return
-    // ENABLED: atir.Customize
-    // ENABLED-SAME: custom.op_name = "MatMul"
-    // ENABLED-NOT: "atir.MatMul"
+    // ENABLED: "atir.MatMul"
+    // ENABLED-NOT: atir.Customize
     // ENABLED: return
     // DISABLE: "atir.MatMul"
     // DISABLE-NOT: atir.Customize
@@ -55,9 +55,10 @@ module @main attributes {module.state = "atir"} {
 // KDNN-LABEL: module @fused attributes
 // KDNN-SAME: annc.enable_kdnn = true
 // KDNN: func.func @matmul_add
-// KDNN: "atir.MatMul"
-// KDNN: "atir.Add"
-// KDNN-NOT: atir.Customize
+// KDNN: atir.Customize
+// KDNN-SAME: custom.op_name = "MatMulAdd"
+// KDNN-NOT: "atir.MatMul"
+// KDNN-NOT: "atir.Add"
 // KDNN: return
 // ALLOW-LABEL: func @matmul_add
 // ALLOW: atir.Customize
@@ -108,10 +109,11 @@ module @fused attributes {module.state = "atir"} {
 // KDNN-LABEL: module @fused_relu attributes
 // KDNN-SAME: annc.enable_kdnn = true
 // KDNN: func.func @matmul_add_relu
-// KDNN: "atir.MatMul"
-// KDNN: "atir.Add"
-// KDNN: "atir.Relu"
-// KDNN-NOT: atir.Customize
+// KDNN: atir.Customize
+// KDNN-SAME: custom.op_name = "MatMulAddRelu"
+// KDNN-NOT: "atir.MatMul"
+// KDNN-NOT: "atir.Add"
+// KDNN-NOT: "atir.Relu"
 // KDNN: return
 // RELU-ALLOW-LABEL: func @matmul_add_relu
 // RELU-ALLOW: atir.Customize
