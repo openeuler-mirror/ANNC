@@ -420,6 +420,19 @@ static MatMulOp createMatMulBodyOp(PatternRewriter &rewriter, Location loc,
       source->getAttrOfType<StringAttr>("rhs_format"));
 }
 
+// The epilogue kernel is built by cloning operations from the source graph.
+// Their typed attributes and SSA operands are part of the generated kernel,
+// while the source metadata only describes the original TensorFlow graph. A
+// generated kernel must not carry that source identity into its template.
+static void clearClonedEpilogueSourceMetadata(Operation *cloned) {
+  if (!cloned) return;
+  cloned->walk([](Operation *op) {
+    op->removeAttr("metadata");
+    op->removeAttr("tf.name");
+    op->removeAttr("tf_name");
+  });
+}
+
 static SmallVector<Value> collectExecutionV2Inputs(
     ArrayRef<Operation *> fusedOps) {
   SmallPtrSet<Operation *, 8> fusedSet(fusedOps.begin(), fusedOps.end());
@@ -625,7 +638,7 @@ static func::FuncOp createMatMulEpilogueKernelFunc(
                    .getResult());
   };
   mapOutput(matmulOp.getC());
-  rewriter.clone(*matmulOp, mapper);
+  clearClonedEpilogueSourceMetadata(rewriter.clone(*matmulOp, mapper));
 
   unsigned inputIndex = 3;
   for (const EpilogueStep &step : program.steps) {
@@ -636,13 +649,15 @@ static func::FuncOp createMatMulEpilogueKernelFunc(
         mapper.map(input, entry->getArgument(inputIndex));
       ++inputIndex;
     }
-    rewriter.clone(*step.source, mapper);
+    clearClonedEpilogueSourceMetadata(rewriter.clone(*step.source, mapper));
   }
   if (program.terminalViewSource) {
     Value shape = program.terminalViewSource->getOperand(2);
     if (!mapper.contains(shape))
-      rewriter.clone(*shape.getDefiningOp(), mapper);
-    rewriter.clone(*program.terminalViewSource, mapper);
+      clearClonedEpilogueSourceMetadata(
+          rewriter.clone(*shape.getDefiningOp(), mapper));
+    clearClonedEpilogueSourceMetadata(
+        rewriter.clone(*program.terminalViewSource, mapper));
   }
   rewriter.create<func::ReturnOp>(func.getLoc());
 

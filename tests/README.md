@@ -95,6 +95,7 @@ bash tests/FileCheck/run.sh
 | `FileCheck/**/*.mlir` | L1 | pass/IR 行为 |
 | `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
 | `integration/fusion/test_config_fusion_kp_fused_gather.py` | L2 | config fusion 集成 |
+| `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、FTDMM、fusion toggles、context-ABI e2e |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
 | `e2e/tf/e2e_kp_embedding_patterns.py` | L4 | KP embedding pattern 端到端 |
