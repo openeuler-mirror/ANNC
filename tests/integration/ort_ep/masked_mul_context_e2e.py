@@ -112,7 +112,7 @@ def build_product_model(path):
     onnx.save(model, path)
 
 
-def build_model(path, two_muls=True):
+def build_model(path, two_muls=True, flat=False):
     ids = helper.make_tensor_value_info("ids", TensorProto.INT64, [2, 3])
     a = helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])
     b = helper.make_tensor_value_info("b", TensorProto.FLOAT, [2, 3, 4])
@@ -134,9 +134,19 @@ def build_model(path, two_muls=True):
     if two_muls:
         nodes.append(helper.make_node("Mul", ["b", "tiled"], ["out_b"],
                                       name="n_mul_b"))
+    outputs = [out_a] + ([out_b] if two_muls else [])
+    if flat:
+        # model3 reads the pre-unsqueeze mask outside the site.  A Shape node
+        # would be constant-folded away for these static shapes, so use a
+        # dtype Cast (not foldable, and the matcher allows any non-Mul user of
+        # the chain's Cast result): the fused node must expose the flat mask
+        # as an extra output and the Cast checks its values end to end.
+        nodes.append(helper.make_node("Cast", ["mask2"], ["flat_mask"],
+                                      name="n_flat_cast", to=TensorProto.DOUBLE))
+        outputs.append(helper.make_tensor_value_info(
+            "flat_mask", TensorProto.DOUBLE, [2, 3]))
     graph = helper.make_graph(nodes, "masked_mul_chain", [ids, a, b],
-                              [out_a] + ([out_b] if two_muls else []),
-                              initializer=[pad, axes, repeats])
+                              outputs, initializer=[pad, axes, repeats])
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 13)])
     # Match the FTDMM fixture's metadata: ORT 1.26 has no trouble with it.
@@ -206,7 +216,7 @@ def main():
     os.environ.update({k: v for k, v in env.items()
                        if k.startswith("ANNC_") or k == "LIBRARY_PATH"})
 
-    for name in ("shared_chain", "one_mul", "norm", "product"):
+    for name in ("shared_chain", "one_mul", "norm", "product", "flat"):
         case = work / name
         case.mkdir(parents=True, exist_ok=True)
         os.environ["ANNC_EP_CACHE_DIR"] = str(case / "cache")
@@ -219,6 +229,8 @@ def run_case(work, kind):
         build_norm_model(model_path)
     elif kind == "product":
         build_product_model(model_path)
+    elif kind == "flat":
+        build_model(model_path, two_muls=False, flat=True)
     else:
         build_model(model_path, kind == "shared_chain")
     options = ort.SessionOptions()
@@ -230,6 +242,8 @@ def run_case(work, kind):
     output_names = list(OUTPUT_NAMES if kind != "one_mul" else OUTPUT_NAMES[:1])
     if kind in ("norm", "product"):
         output_names.append("out_c")
+    elif kind == "flat":
+        output_names = ["out_a", "flat_mask"]
     reference = ort.InferenceSession(
         str(model_path), options,
         providers=["CPUExecutionProvider"]).run(None, feed)
@@ -272,6 +286,11 @@ def run_case(work, kind):
         assert len(site["member_node_names"]) == 8, site
         assert [o["rank"] for o in site["outputs"]] == [3, 3, 3], site
         assert [a["rank"] for a in site["args"]] == [3, 3, 2], site
+    elif kind == "flat":
+        # chain (5, with Tile) + one Mul, plus the flat mask as extra output.
+        assert len(site["member_node_names"]) == 6, site
+        assert [o["rank"] for o in site["outputs"]] == [3, 2], site
+        assert [a["rank"] for a in site["args"]] == [3, 2], site
     elif kind == "shared_chain":
         # chain (5) + two Muls, both results are the site's outputs.
         assert len(site["member_node_names"]) == 7, site

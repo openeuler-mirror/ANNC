@@ -342,3 +342,142 @@ module attributes {module.state = "atir"} {
     return %mul : !atir.tensor<1x4x8xf32, name = "mul_out">
   }
 }
+
+// -----
+
+// 正例：11 个 data 实参的大站点（model1 的 11 输入 Sum/Div 形态，kernel
+// 侧对应 MaskedMul11）。一条链喂 11 个各自独立的 Mul，argMap 的 11 个
+// nibble 依次指向实参 0..10；这是当前 ABI 支持的最大实参个数。
+// CHECK-LABEL: func.func @main
+// CHECK: func.func private @fused_masked_mul_
+// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: kernel_arg_order = []
+// CHECK: atir.Customize
+// CHECK-SAME: custom.arg_names = ["arg0", "arg1", "arg2", "arg3", "arg4", "arg5", "arg6", "arg7", "arg8", "arg9", "arg10", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
+// CHECK-SAME: custom.attr.argMap = 11649936536080
+// CHECK-SAME: custom.attr.dataArgs = 11
+// CHECK-SAME: custom.attr.fedMuls = 0
+// CHECK-SAME: custom.attr.rawMuls = 11
+// CHECK-SAME: custom.op_name = "MaskedMul11"
+// CHECK-SAME: custom.result_ranks = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
+  func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %d0: !atir.tensor<1x4x8xf32, name = "d0">, %d1: !atir.tensor<1x4x8xf32, name = "d1">, %d2: !atir.tensor<1x4x8xf32, name = "d2">, %d3: !atir.tensor<1x4x8xf32, name = "d3">, %d4: !atir.tensor<1x4x8xf32, name = "d4">, %d5: !atir.tensor<1x4x8xf32, name = "d5">, %d6: !atir.tensor<1x4x8xf32, name = "d6">, %d7: !atir.tensor<1x4x8xf32, name = "d7">, %d8: !atir.tensor<1x4x8xf32, name = "d8">, %d9: !atir.tensor<1x4x8xf32, name = "d9">, %d10: !atir.tensor<1x4x8xf32, name = "d10">) -> (!atir.tensor<1x4x8xf32, name = "m0">, !atir.tensor<1x4x8xf32, name = "m1">, !atir.tensor<1x4x8xf32, name = "m2">, !atir.tensor<1x4x8xf32, name = "m3">, !atir.tensor<1x4x8xf32, name = "m4">, !atir.tensor<1x4x8xf32, name = "m5">, !atir.tensor<1x4x8xf32, name = "m6">, !atir.tensor<1x4x8xf32, name = "m7">, !atir.tensor<1x4x8xf32, name = "m8">, !atir.tensor<1x4x8xf32, name = "m9">, !atir.tensor<1x4x8xf32, name = "m10">) {
+    %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
+    %true = atir.constant "private" @"Not/true" -> <i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>
+    %eq = atir.Compare %ids, %pad {comparisonDirection = "EQ"} : (!atir.tensor<1x4xi64, name = "ids">, !atir.tensor<i64, name = "pad", data = dense<0> : tensor<i64>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">
+    %not = atir.Compare %eq, %true {comparisonDirection = "NE"} : (!atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">, !atir.tensor<i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Not:0">
+    %cast_buf = "atir.buffer"() : () -> !atir.tensor<1x4xf32, name = "Cast:0">
+    %cast = atir.Cast %cast_buf, %not {ANNCMARK}: <1x4xf32, name = "Cast:0">, <1x4xi32, encoding = <"bool">, name = "Not:0"> -> <1x4xf32, name = "Cast:0">
+    %axes = atir.constant "private" @"Unsqueeze/axes" -> <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>>
+    %unsq_buf = "atir.buffer"() : () -> !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">
+    %unsq = atir.ExpandDims %unsq_buf, %cast, %axes : <1x4x1xf32, name = "Unsqueeze:0">, <1x4xf32, name = "Cast:0">, <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>> -> <1x4x1xf32, name = "Unsqueeze:0">
+    %m0_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m0">
+    %m0 = "atir.Mul"(%m0_buf, %d0, %unsq) {metadata = {tf.name = "m0", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m0">, !atir.tensor<1x4x8xf32, name = "d0">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m0">
+    %m1_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m1">
+    %m1 = "atir.Mul"(%m1_buf, %d1, %unsq) {metadata = {tf.name = "m1", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m1">, !atir.tensor<1x4x8xf32, name = "d1">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m1">
+    %m2_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m2">
+    %m2 = "atir.Mul"(%m2_buf, %d2, %unsq) {metadata = {tf.name = "m2", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m2">, !atir.tensor<1x4x8xf32, name = "d2">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m2">
+    %m3_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m3">
+    %m3 = "atir.Mul"(%m3_buf, %d3, %unsq) {metadata = {tf.name = "m3", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m3">, !atir.tensor<1x4x8xf32, name = "d3">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m3">
+    %m4_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m4">
+    %m4 = "atir.Mul"(%m4_buf, %d4, %unsq) {metadata = {tf.name = "m4", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m4">, !atir.tensor<1x4x8xf32, name = "d4">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m4">
+    %m5_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m5">
+    %m5 = "atir.Mul"(%m5_buf, %d5, %unsq) {metadata = {tf.name = "m5", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m5">, !atir.tensor<1x4x8xf32, name = "d5">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m5">
+    %m6_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m6">
+    %m6 = "atir.Mul"(%m6_buf, %d6, %unsq) {metadata = {tf.name = "m6", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m6">, !atir.tensor<1x4x8xf32, name = "d6">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m6">
+    %m7_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m7">
+    %m7 = "atir.Mul"(%m7_buf, %d7, %unsq) {metadata = {tf.name = "m7", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m7">, !atir.tensor<1x4x8xf32, name = "d7">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m7">
+    %m8_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m8">
+    %m8 = "atir.Mul"(%m8_buf, %d8, %unsq) {metadata = {tf.name = "m8", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m8">, !atir.tensor<1x4x8xf32, name = "d8">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m8">
+    %m9_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m9">
+    %m9 = "atir.Mul"(%m9_buf, %d9, %unsq) {metadata = {tf.name = "m9", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m9">, !atir.tensor<1x4x8xf32, name = "d9">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m9">
+    %m10_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m10">
+    %m10 = "atir.Mul"(%m10_buf, %d10, %unsq) {metadata = {tf.name = "m10", tf.op = "Mul"}} : (!atir.tensor<1x4x8xf32, name = "m10">, !atir.tensor<1x4x8xf32, name = "d10">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m10">
+    return %m0, %m1, %m2, %m3, %m4, %m5, %m6, %m7, %m8, %m9, %m10 : !atir.tensor<1x4x8xf32, name = "m0">, !atir.tensor<1x4x8xf32, name = "m1">, !atir.tensor<1x4x8xf32, name = "m2">, !atir.tensor<1x4x8xf32, name = "m3">, !atir.tensor<1x4x8xf32, name = "m4">, !atir.tensor<1x4x8xf32, name = "m5">, !atir.tensor<1x4x8xf32, name = "m6">, !atir.tensor<1x4x8xf32, name = "m7">, !atir.tensor<1x4x8xf32, name = "m8">, !atir.tensor<1x4x8xf32, name = "m9">, !atir.tensor<1x4x8xf32, name = "m10">
+  }
+}
+
+// -----
+
+// 负例：mask 链已被别的 anchor 认领（Cast 上已有 annc.fusion_materialized，
+// 模拟贪心重写中前一个站点留下标记的状态）。一条链只落一个站点——
+// matchMaskedMul 在收集 Mul 之前先查链成员的 materialized 标记，
+// 本 anchor 不得再建第二个站点。
+// CHECK-LABEL: func.func @main
+// CHECK-NOT: fused_masked_mul
+module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
+  func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %data: !atir.tensor<1x4x8xf32, name = "data">) -> !atir.tensor<1x4x8xf32, name = "mul_out"> {
+    %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
+    %true = atir.constant "private" @"Not/true" -> <i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>
+    %eq = atir.Compare %ids, %pad {comparisonDirection = "EQ"} : (!atir.tensor<1x4xi64, name = "ids">, !atir.tensor<i64, name = "pad", data = dense<0> : tensor<i64>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">
+    %not = atir.Compare %eq, %true {comparisonDirection = "NE"} : (!atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">, !atir.tensor<i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Not:0">
+    %cast_buf = "atir.buffer"() : () -> !atir.tensor<1x4xf32, name = "Cast:0">
+    %cast = atir.Cast %cast_buf, %not {annc.fusion_materialized} : <1x4xf32, name = "Cast:0">, <1x4xi32, encoding = <"bool">, name = "Not:0"> -> <1x4xf32, name = "Cast:0">
+    %axes = atir.constant "private" @"Unsqueeze/axes" -> <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>>
+    %unsq_buf = "atir.buffer"() : () -> !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">
+    %unsq = atir.ExpandDims %unsq_buf, %cast, %axes : <1x4x1xf32, name = "Unsqueeze:0">, <1x4xf32, name = "Cast:0">, <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>> -> <1x4x1xf32, name = "Unsqueeze:0">
+    %mul_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "mul_out">
+    %mul = "atir.Mul"(%mul_buf, %data, %unsq) : (!atir.tensor<1x4x8xf32, name = "mul_out">, !atir.tensor<1x4x8xf32, name = "data">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "mul_out">
+    return %mul : !atir.tensor<1x4x8xf32, name = "mul_out">
+  }
+}
+
+// -----
+
+// 生产形态：ONNX 前端对 i64 的 Equal 走整数门禁（ADR-011），降级成
+// atir.opaque；上面的用例用 atir.Compare 表达同一语义。opaque 分支必须
+// 同样成站——真实模型走的就是这条路径（E2E 端到端已验证）。
+// CHECK-LABEL: func.func @main
+// CHECK: func.func private @fused_masked_mul_
+// CHECK-SAME: member_node_names = ["mul_out", "Unsqueeze:0", "Cast:0", "Not:0", "Equal:0"]
+// CHECK: atir.Customize
+// CHECK-SAME: custom.op_name = "MaskedMul1"
+// CHECK-SAME: custom.result_names = ["output0"]
+module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
+  func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %data: !atir.tensor<1x4x8xf32, name = "data">) -> !atir.tensor<1x4x8xf32, name = "mul_out"> {
+    %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
+    %true = atir.constant "private" @"Not/true" -> <i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>
+    %eq = atir.opaque (%ids, %pad) {opType = "Equal", name = "Equal:0"} : (!atir.tensor<1x4xi64, name = "ids">, !atir.tensor<i64, name = "pad", data = dense<0> : tensor<i64>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">
+    %not = atir.Compare %eq, %true {comparisonDirection = "NE"} : (!atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">, !atir.tensor<i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Not:0">
+    %cast_buf = "atir.buffer"() : () -> !atir.tensor<1x4xf32, name = "Cast:0">
+    %cast = atir.Cast %cast_buf, %not : <1x4xf32, name = "Cast:0">, <1x4xi32, encoding = <"bool">, name = "Not:0"> -> <1x4xf32, name = "Cast:0">
+    %axes = atir.constant "private" @"Unsqueeze/axes" -> <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>>
+    %unsq_buf = "atir.buffer"() : () -> !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">
+    %unsq = atir.ExpandDims %unsq_buf, %cast, %axes : <1x4x1xf32, name = "Unsqueeze:0">, <1x4xf32, name = "Cast:0">, <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>> -> <1x4x1xf32, name = "Unsqueeze:0">
+    %mul_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "mul_out">
+    %mul = "atir.Mul"(%mul_buf, %data, %unsq) : (!atir.tensor<1x4x8xf32, name = "mul_out">, !atir.tensor<1x4x8xf32, name = "data">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "mul_out">
+    return %mul : !atir.tensor<1x4x8xf32, name = "mul_out">
+  }
+}
+
+
+// -----
+
+// 两个 Mul 读同一份 data：实参表按源去重，只保留一个 arg，argMap 的两个
+// nibble 都是 0（EP 不接受两个实参指向同一个输入）。站点仍是两个输出。
+// CHECK-LABEL: func.func @main
+// CHECK: func.func private @fused_masked_mul_
+// CHECK: atir.Customize
+// CHECK-SAME: custom.attr.argMap = 0
+// CHECK-SAME: custom.attr.dataArgs = 1
+// CHECK-SAME: custom.attr.rawMuls = 2
+// CHECK-SAME: custom.op_name = "MaskedMul1"
+// CHECK-SAME: custom.result_names = ["output0", "output1"]
+module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
+  func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %data: !atir.tensor<1x4x8xf32, name = "data">) -> (!atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "m_b">) {
+    %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
+    %true = atir.constant "private" @"Not/true" -> <i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>
+    %eq = atir.opaque (%ids, %pad) {opType = "Equal", name = "Equal:0"} : (!atir.tensor<1x4xi64, name = "ids">, !atir.tensor<i64, name = "pad", data = dense<0> : tensor<i64>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">
+    %not = atir.Compare %eq, %true {comparisonDirection = "NE"} : (!atir.tensor<1x4xi32, encoding = <"bool">, name = "Equal:0">, !atir.tensor<i32, encoding = <"bool">, name = "Not/true", data = dense<1> : tensor<i32>>) -> !atir.tensor<1x4xi32, encoding = <"bool">, name = "Not:0">
+    %cast_buf = "atir.buffer"() : () -> !atir.tensor<1x4xf32, name = "Cast:0">
+    %cast = atir.Cast %cast_buf, %not : <1x4xf32, name = "Cast:0">, <1x4xi32, encoding = <"bool">, name = "Not:0"> -> <1x4xf32, name = "Cast:0">
+    %axes = atir.constant "private" @"Unsqueeze/axes" -> <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>>
+    %unsq_buf = "atir.buffer"() : () -> !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">
+    %unsq = atir.ExpandDims %unsq_buf, %cast, %axes : <1x4x1xf32, name = "Unsqueeze:0">, <1x4xf32, name = "Cast:0">, <1xi64, name = "Unsqueeze/axes", data = dense<2> : tensor<1xi64>> -> <1x4x1xf32, name = "Unsqueeze:0">
+    %a_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m_a">
+    %m_a = "atir.Mul"(%a_buf, %data, %unsq) : (!atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "data">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m_a">
+    %b_buf = "atir.buffer"() : () -> !atir.tensor<1x4x8xf32, name = "m_b">
+    %m_b = "atir.Mul"(%b_buf, %data, %unsq) : (!atir.tensor<1x4x8xf32, name = "m_b">, !atir.tensor<1x4x8xf32, name = "data">, !atir.tensor<1x4x1xf32, name = "Unsqueeze:0">) -> !atir.tensor<1x4x8xf32, name = "m_b">
+    return %m_a, %m_b : !atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "m_b">
+  }
+}

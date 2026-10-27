@@ -1,4 +1,6 @@
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -755,6 +757,32 @@ TEST(BatchedMatMulAddContext, Rank4FailsWhenOutputAllocationFails) {
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_NE(outputs.last_error.find("output allocation failed"),
             std::string::npos);
+}
+
+// NaN in the data must reach the output: the kernel does real arithmetic and
+// has no zero/branch shortcut that would drop it.
+TEST(BatchedMatMulAddContext, Rank3PropagatesNaN) {
+  const int64_t dataBatch = 1, d1 = 1, k = 1, n = 1;
+  std::vector<float> data{std::numeric_limits<float>::quiet_NaN()};
+  std::vector<float> weight{1.0f};
+  std::vector<float> bias{0.0f};
+  const int64_t dataDims[] = {dataBatch, d1, k};
+  const int64_t weightDims[] = {dataBatch, k, n};
+  const int64_t biasDims[] = {dataBatch, 1, n};
+  auto dataRef = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
+      data.data(), 3, dataDims);
+  auto weightRef = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
+      weight.data(), 3, weightDims);
+  auto biasRef = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
+      bias.data(), 3, biasDims);
+
+  OutputBuffers outputs;
+  auto context = outputs.context();
+  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
+                                 &biasRef),
+            KernelStatus::Success);
+  ASSERT_EQ(outputs.output().size(), 1u);
+  EXPECT_TRUE(std::isnan(outputs.output()[0]));
 }
 
 TEST(BatchedMatMulAddContext, RejectsNullArguments) {

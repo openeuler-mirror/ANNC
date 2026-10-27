@@ -4759,6 +4759,19 @@ static FailureOr<LayerNormMatch> matchLayerNorm(AddOp out) {
   auto xType = dyn_cast<atir::TensorType>(x.getType());
   if (!xType || xType.getShape().size() != 2) return failure();
   if (!xType.getElementType().isF32()) return failure();
+  // gamma/beta 是逐列 scale/bias，kernel 按 cols 读取；长度必须与 x 末维一致
+  //（动态维留给 kernel 运行时校验）。缺这条守卫时，长度不符的站点会先融合、
+  // 到运行时才被 kernel 拒绝，表现为 session 失败而不是不融合回退。
+  const int64_t lastDim = xType.getShape()[1];
+  auto scaleMatchesLastDim = [&](Value scale) {
+    auto scaleType = dyn_cast<atir::TensorType>(scale.getType());
+    if (!scaleType || scaleType.getShape().empty()) return false;
+    const int64_t dim = scaleType.getShape()[0];
+    return lastDim < 0 || dim < 0 || dim == lastDim;
+  };
+  if (!scaleMatchesLastDim(gamma) || !scaleMatchesLastDim(beta)) {
+    return failure();
+  }
   const int64_t rank = 2;
   if (!isLastAxisMean(meanOp, rank) || !isLastAxisMean(varianceMean, rank)) {
     return failure();
