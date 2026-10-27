@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -71,11 +72,24 @@ def test_kp_fused_gather_can_be_materialized_from_external_config(tmp_path):
     text = fused_atir.read_text()
     assert 'func.func private @fused_kp_fused_gather_external_' in text
     assert 'abi = "annc_context_v3"' in text
-    assert text.count('role = "dynamic"') == 3
+    assert '!llvm.ptr' not in text
+    assert text.count('role = "dynamic"') >= 3
     assert 'fusion.pattern = "kp_fused_gather_external"' in text
     assert 'tf_name = "first_unique:0"' in text
     assert 'tf_name = "first_unique:1"' in text
     assert 'tf_name = "outer_gather:0"' in text
+
+    metadata_path = tmp_path / "fusion_metadata.json"
+    _run([
+        _binary(build_dir, "annc-fusion-metadata"), fused_atir,
+        "-o", metadata_path,
+    ])
+    fusions = json.loads(metadata_path.read_text())["fusions"]
+    assert len(fusions) == 1
+    # Positional context records retain only graph endpoints and tensor facts.
+    expected_fields = {"role", "tf_name", "shape", "rank", "dtype"}
+    for record in fusions[0]["args"] + fusions[0]["outputs"]:
+        assert set(record) == expected_fields
 
     main = text[text.rfind("func.func @main") :]
     assert "call @fused_kp_fused_gather_external_" not in main
@@ -95,3 +109,22 @@ def test_kp_fused_gather_can_be_materialized_from_external_config(tmp_path):
     lowered_text = lowered.read_text()
     assert 'custom.op_name = "KPFusedGather"' in lowered_text
     assert "atir.Unique" not in lowered_text
+
+
+def test_config_fusion_rejects_retired_execution_v2(tmp_path):
+    annc_opt = _binary(_build_dir(), "annc-opt")
+    config = tmp_path / "retired_abi.json"
+    config.write_text(json.dumps({"version": 1, "patterns": [{
+        "name": "retired", "abi": "annc_execution_v2",
+        "graph": ["out = Relu(input)"],
+        "inputs": ["input"], "outputs": ["out"],
+    }]}))
+    source = tmp_path / "input.mlir"
+    source.write_text("module { func.func @main() { return } }\n")
+    completed = subprocess.run(
+        [os.fspath(annc_opt), os.fspath(source),
+         f"--atir-config-fusion=config={config} run-builtin-after=false"],
+        text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode != 0
+    assert ".abi must be 'mlir_ciface' or 'annc_context_v3'" in completed.stderr

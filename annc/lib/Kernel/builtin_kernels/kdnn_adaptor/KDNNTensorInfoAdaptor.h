@@ -6,7 +6,6 @@
 #include <cstdint>
 
 #include "Context/KernelContextUtils.h"
-#include "Kernel/MemRefTypes.h"
 #include "kdnn.hpp"
 
 namespace annc::kernels::kdnn_adaptor {
@@ -59,28 +58,6 @@ inline DenseTensorRef<float*> makeMutableDenseTensorRef(AnncTensorView& memref,
       KDNN::TensorInfo(makeMatrixShape(memref.sizes), KDNN::Element::TypeT::F32,
                        layout, makeMatrixShape(memref.strides)),
       contextData<float>(memref)};
-}
-
-inline DenseTensorRef<const float*> makeDenseTensorRef(const AnncMemRef2DF32& memref,
-                                                       KDNN::Layout layout) {
-    return DenseTensorRef<const float*>{
-        KDNN::TensorInfo(
-            makeShape(memref.sizes),
-            KDNN::Element::TypeT::F32,
-            layout,
-            makeShape(memref.strides)),
-        ANNC_MEMREF_DATA(memref)};
-}
-
-inline DenseTensorRef<float*> makeMutableDenseTensorRef(AnncMemRef2DF32& memref,
-                                                        KDNN::Layout layout) {
-    return DenseTensorRef<float*>{
-        KDNN::TensorInfo(
-            makeShape(memref.sizes),
-            KDNN::Element::TypeT::F32,
-            layout,
-            makeShape(memref.strides)),
-        ANNC_MEMREF_DATA(memref)};
 }
 
 }  // namespace annc::kernels::kdnn_adaptor

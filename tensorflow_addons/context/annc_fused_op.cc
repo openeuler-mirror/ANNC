@@ -20,7 +20,6 @@
 
 #include "Support/GemmConfig.h"
 #include "Context/KernelContext.h"
-#include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
 #include "Context/ThreadPool.h"
 #include "annc_fused_op_jit.h"
@@ -30,10 +29,6 @@
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/threadpool.h"
-
-struct AnncExecutionHandle {
-  void* user;
-};
 
 namespace tensorflow {
 
@@ -55,14 +50,7 @@ struct AnncFusedProfileSample {
   double output_init_us = 0.0;
   double output_memref_us = 0.0;
   double arg_order_us = 0.0;
-  double execution_setup_us = 0.0;
-  double execution_post_us = 0.0;
   double kernel_us = 0.0;
-  double execution_callback_us = 0.0;
-  double tensorflow_output_alloc_us = 0.0;
-  double tensorflow_temp_alloc_us = 0.0;
-  int execution_output_callbacks = 0;
-  int execution_temp_callbacks = 0;
 };
 
 namespace {
@@ -72,33 +60,6 @@ using TimePoint = Clock::time_point;
 
 double ElapsedUs(TimePoint start, TimePoint end = Clock::now()) {
   return std::chrono::duration<double, std::micro>(end - start).count();
-}
-
-struct TensorFlowExecutionState;
-
-struct TensorFlowExecutionState {
-  OpKernelContext* context;
-  const std::vector<DataType>* output_types;
-  const std::vector<int>* output_ranks;
-  Status error;
-  std::vector<Tensor*> outputs;
-  std::vector<std::unique_ptr<Tensor>> temps;
-  bool profile_enabled;
-  AnncFusedProfileSample* profile_sample;
-};
-
-TensorFlowExecutionState* GetExecutionState(AnncExecutionHandle* handle) {
-  return handle ? static_cast<TensorFlowExecutionState*>(handle->user)
-                : nullptr;
-}
-
-AnncStatusCode RecordExecutionError(TensorFlowExecutionState* state,
-                                    AnncStatusCode status,
-                                    const std::string& message) {
-  if (state && state->error.ok()) {
-    state->error = errors::InvalidArgument(message);
-  }
-  return status;
 }
 
 AnncElementType ToAnncElementType(DataType type) {
@@ -111,135 +72,6 @@ AnncElementType ToAnncElementType(DataType type) {
       return ANNC_ELEMENT_TYPE_I64;
     default:
       return static_cast<AnncElementType>(0);
-  }
-}
-
-DataType ToTensorFlowDataType(uint32_t type) {
-  switch (type) {
-    case ANNC_ELEMENT_TYPE_F32:
-      return DT_FLOAT;
-    case ANNC_ELEMENT_TYPE_I32:
-      return DT_INT32;
-    case ANNC_ELEMENT_TYPE_I64:
-      return DT_INT64;
-    default:
-      return DT_INVALID;
-  }
-}
-
-bool FillTensorShape(const AnncTensorDesc* desc, TensorShape* shape) {
-  if (!desc || !shape || desc->rank > 8 || (desc->rank && !desc->dims)) {
-    return false;
-  }
-  shape->Clear();
-  for (uint32_t i = 0; i < desc->rank; ++i) {
-    if (desc->dims[i] < 0) return false;
-    shape->AddDim(desc->dims[i]);
-  }
-  return true;
-}
-
-AnncStatusCode AllocateExecutionOutput(AnncExecutionHandle* handle,
-                                       uint32_t slot, AnncTensorDesc* desc) {
-  auto* state = GetExecutionState(handle);
-  if (!state || !desc || desc->struct_size < sizeof(*desc))
-    return ANNC_STATUS_INVALID_ARGUMENT;
-  const bool profile_enabled = state->profile_enabled && state->profile_sample;
-  auto callback_start = profile_enabled ? Clock::now() : TimePoint{};
-  if (slot >= state->output_types->size() ||
-      slot >= state->output_ranks->size()) {
-    return RecordExecutionError(
-        state, ANNC_STATUS_INVALID_ARGUMENT,
-        "ANNC execution output slot " + std::to_string(slot) +
-            " is out of range");
-  }
-  if (ToAnncElementType((*state->output_types)[slot]) != desc->element_type) {
-    return RecordExecutionError(
-        state, ANNC_STATUS_INVALID_ARGUMENT,
-        "ANNC execution output slot " + std::to_string(slot) +
-            " dtype mismatch");
-  }
-  if ((*state->output_ranks)[slot] != static_cast<int>(desc->rank)) {
-    return RecordExecutionError(
-        state, ANNC_STATUS_INVALID_ARGUMENT,
-        "ANNC execution output slot " + std::to_string(slot) +
-            " rank mismatch");
-  }
-  if (slot < state->outputs.size() && state->outputs[slot] != nullptr) {
-    return RecordExecutionError(
-        state, ANNC_STATUS_INVALID_ARGUMENT,
-        "ANNC execution output slot " + std::to_string(slot) +
-            " was allocated more than once");
-  }
-  TensorShape shape;
-  if (!FillTensorShape(desc, &shape)) {
-    return RecordExecutionError(
-        state, ANNC_STATUS_INVALID_ARGUMENT,
-        "ANNC execution output slot " + std::to_string(slot) +
-            " has invalid dimensions");
-  }
-  Tensor* output = nullptr;
-  auto allocation_start = profile_enabled ? Clock::now() : TimePoint{};
-  Status status = state->context->allocate_output(slot, shape, &output);
-  if (profile_enabled) {
-    state->profile_sample->tensorflow_output_alloc_us +=
-        ElapsedUs(allocation_start);
-  }
-  if (!status.ok()) {
-    state->error = status;
-    return ANNC_STATUS_ALLOCATION_FAILED;
-  }
-  if (state->outputs.size() <= slot) state->outputs.resize(slot + 1, nullptr);
-  state->outputs[slot] = output;
-  desc->data = const_cast<char*>(output->tensor_data().data());
-  if (profile_enabled) {
-    ++state->profile_sample->execution_output_callbacks;
-    state->profile_sample->execution_callback_us +=
-        ElapsedUs(callback_start);
-  }
-  return ANNC_STATUS_OK;
-}
-
-AnncStatusCode AllocateExecutionTemp(AnncExecutionHandle* handle,
-                                     AnncTensorDesc* desc) {
-  auto* state = GetExecutionState(handle);
-  if (!state || !desc || desc->struct_size < sizeof(*desc))
-    return ANNC_STATUS_INVALID_ARGUMENT;
-  const bool profile_enabled = state->profile_enabled && state->profile_sample;
-  auto callback_start = profile_enabled ? Clock::now() : TimePoint{};
-  TensorShape shape;
-  if (!FillTensorShape(desc, &shape)) return ANNC_STATUS_INVALID_ARGUMENT;
-  DataType dtype = ToTensorFlowDataType(desc->element_type);
-  if (dtype == DT_INVALID) return ANNC_STATUS_INVALID_ARGUMENT;
-  auto temp = std::make_unique<Tensor>();
-  auto allocation_start = profile_enabled ? Clock::now() : TimePoint{};
-  Status status = state->context->allocate_temp(dtype, shape, temp.get());
-  if (profile_enabled) {
-    state->profile_sample->tensorflow_temp_alloc_us +=
-        ElapsedUs(allocation_start);
-  }
-  if (!status.ok()) {
-    state->error = status;
-    return ANNC_STATUS_ALLOCATION_FAILED;
-  }
-  desc->data = const_cast<char*>(temp->tensor_data().data());
-  state->temps.push_back(std::move(temp));
-  if (profile_enabled) {
-    ++state->profile_sample->execution_temp_callbacks;
-    state->profile_sample->execution_callback_us +=
-        ElapsedUs(callback_start);
-  }
-  return ANNC_STATUS_OK;
-}
-
-void ReportExecutionError(AnncExecutionHandle* handle, AnncStatusCode status,
-                          const char* message) {
-  auto* state = GetExecutionState(handle);
-  if (!state) return;
-  if (state->error.ok()) {
-    state->error =
-        errors::Internal("ANNC execution error ", static_cast<int>(status),
-                         ": ", message ? message : "");
   }
 }
 
@@ -339,14 +171,7 @@ struct ProfileStats {
   double output_init_us = 0.0;
   double output_memref_us = 0.0;
   double arg_order_us = 0.0;
-  double execution_setup_us = 0.0;
-  double execution_post_us = 0.0;
   double kernel_us = 0.0;
-  double execution_callback_us = 0.0;
-  double tensorflow_output_alloc_us = 0.0;
-  double tensorflow_temp_alloc_us = 0.0;
-  int execution_output_callbacks = 0;
-  int execution_temp_callbacks = 0;
   double total_us = 0.0;
 };
 
@@ -412,29 +237,7 @@ void LogProfileStats(const char* tag, int total,
               << " avg_output_init=" << (s.output_init_us / count) << " us"
               << " avg_output_memref=" << (s.output_memref_us / count) << " us"
               << " avg_arg_order=" << (s.arg_order_us / count) << " us"
-              << " avg_execution_setup=" << (s.execution_setup_us / count)
-              << " us"
-              << " avg_execution_post=" << (s.execution_post_us / count)
-              << " us"
               << " avg_kernel=" << (s.kernel_us / count) << " us"
-              << " avg_execution_callbacks="
-              << (s.execution_callback_us / count) << " us"
-              << " avg_tf_output_alloc="
-              << (s.tensorflow_output_alloc_us / count) << " us"
-              << " avg_tf_temp_alloc="
-              << (s.tensorflow_temp_alloc_us / count) << " us"
-              << " avg_callback_framework="
-              << ((s.execution_callback_us -
-                   s.tensorflow_output_alloc_us -
-                   s.tensorflow_temp_alloc_us) /
-                  count)
-              << " us"
-              << " avg_kernel_excluding_callbacks="
-              << ((s.kernel_us - s.execution_callback_us) / count) << " us"
-              << " avg_output_callbacks="
-              << (static_cast<double>(s.execution_output_callbacks) / count)
-              << " avg_temp_callbacks="
-              << (static_cast<double>(s.execution_temp_callbacks) / count)
               << " avg_total=" << (s.total_us / count) << " us"
               << " avg_overhead=" << ((s.total_us - s.kernel_us) / count)
               << " us";
@@ -983,7 +786,7 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
                               "atir_module_path for JIT"));
   OP_REQUIRES(context,
               abi_ == "mlir_ciface" ||
-                  abi_ == ANNC_CONTEXT_ABI_NAME || abi_ == "annc_execution_v2",
+                  abi_ == ANNC_CONTEXT_ABI_NAME,
               errors::InvalidArgument("Unsupported ANNCFused abi: ", abi_));
   OP_REQUIRES(context, num_outputs_ == static_cast<int>(output_ranks_.size()),
               errors::InvalidArgument("num_outputs must match output_ranks"));
@@ -1333,10 +1136,6 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
     if (profile_enabled) {
       profile_sample.kernel_us = ElapsedUs(t_kernel_start);
     }
-  } else if (abi_ == "annc_execution_v2") {
-    execute_status = ExecuteExecutionV2Kernel(
-        context, kernel_function, profile_enabled, &profile_sample,
-        jit_binding.get());
   } else {
     execute_status =
         ExecuteMlirCifaceKernel(context, kernel_function, profile_enabled,
@@ -1386,118 +1185,12 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   s.output_init_us += profile_sample.output_init_us;
   s.output_memref_us += profile_sample.output_memref_us;
   s.arg_order_us += profile_sample.arg_order_us;
-  s.execution_setup_us += profile_sample.execution_setup_us;
-  s.execution_post_us += profile_sample.execution_post_us;
   s.kernel_us += profile_sample.kernel_us;
-  s.execution_callback_us += profile_sample.execution_callback_us;
-  s.tensorflow_output_alloc_us +=
-      profile_sample.tensorflow_output_alloc_us;
-  s.tensorflow_temp_alloc_us += profile_sample.tensorflow_temp_alloc_us;
-  s.execution_output_callbacks +=
-      profile_sample.execution_output_callbacks;
-  s.execution_temp_callbacks += profile_sample.execution_temp_callbacks;
   s.total_us += total_us;
   total_calls++;
   if (total_calls % AnncFusedProfileInterval() == 0) {
     LogProfileStats("ANNC-FUSED-PROFILE", total_calls, stats);
   }
-}
-
-Status ANNCFusedOp::ExecuteExecutionV2Kernel(
-    OpKernelContext* context, void* kernel_function, bool profile_enabled,
-    AnncFusedProfileSample* profile_sample, const AnncJitBinding* binding) {
-  if (!kernel_function) {
-    return errors::FailedPrecondition(
-        "Execution V2 kernel symbol is not loaded");
-  }
-  const int expected_inputs = num_constants_ + num_fixed_ + num_dynamic_;
-  if (context->num_inputs() != expected_inputs) {
-    return errors::InvalidArgument("ANNCFused expected ", expected_inputs,
-                                   " inputs, got ", context->num_inputs());
-  }
-  if (expected_inputs > 7) {
-    return errors::Unimplemented(
-        "annc_execution_v2 supports up to 7 inputs, got ", expected_inputs);
-  }
-  auto t_execution_setup_start =
-      profile_enabled ? Clock::now() : TimePoint{};
-  TensorFlowExecutionState state{context,
-                                 &output_types_,
-                                 &output_ranks_,
-                                 OkStatus(),
-                                 {},
-                                 {},
-                                 profile_enabled,
-                                 profile_sample};
-  AnncExecutionHandle handle{&state};
-  AnncExecutionContext execution{sizeof(AnncExecutionContext),
-                                 ANNC_EXECUTION_ABI_VERSION,
-                                 &handle,
-                                 &AllocateExecutionOutput,
-                                 &AllocateExecutionTemp,
-                                 &ReportExecutionError};
-  if (output_types_.size() != static_cast<size_t>(num_outputs_)) {
-    return errors::InvalidArgument("annc_execution_v2 requires Toutputs");
-  }
-
-  std::vector<void*> memrefs(expected_inputs, nullptr);
-  std::vector<std::array<RankedMemRefDescriptor<0>, 1>> rank0(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<1>, 1>> rank1(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<2>, 1>> rank2(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<3>, 1>> rank3(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<4>, 1>> rank4(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<5>, 1>> rank5(expected_inputs);
-  std::vector<std::array<RankedMemRefDescriptor<6>, 1>> rank6(expected_inputs);
-  std::vector<std::vector<AnncStringRef>> string_storage(expected_inputs);
-  if (profile_enabled && profile_sample) {
-    profile_sample->execution_setup_us =
-        ElapsedUs(t_execution_setup_start);
-  }
-
-  auto t_input_memref_start = profile_enabled ? Clock::now() : TimePoint{};
-  for (int i = 0; i < expected_inputs; ++i) {
-    const Tensor& tensor = context->input(i);
-    int rank = input_ranks_.empty() ? tensor.dims() : input_ranks_[i];
-    TF_RETURN_IF_ERROR(BuildRankedMemRefArg(
-        tensor, rank, &rank0[i], &rank1[i], &rank2[i], &rank3[i], &rank4[i],
-        &rank5[i], &rank6[i], &memrefs[i], &string_storage[i]));
-    if (binding && !binding->packed.empty() && binding->packed[i]) {
-      rank2[i][0].allocated = binding->packed[i]->data;
-      rank2[i][0].aligned = binding->packed[i]->data;
-    }
-  }
-  if (profile_enabled && profile_sample) {
-    profile_sample->input_memref_us = ElapsedUs(t_input_memref_start);
-  }
-
-  auto t_arg_order_start = profile_enabled ? Clock::now() : TimePoint{};
-  std::vector<void*> args;
-  args.reserve(expected_inputs + 1);
-  args.push_back(&execution);
-  args.insert(args.end(), memrefs.begin(), memrefs.end());
-  if (profile_enabled && profile_sample) {
-    profile_sample->arg_order_us = ElapsedUs(t_arg_order_start);
-  }
-
-  auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
-  Status status = CallMlirCiface(kernel_function, args);
-  if (profile_enabled && profile_sample) {
-    profile_sample->kernel_us = ElapsedUs(t_kernel_start);
-  }
-  auto t_execution_post_start =
-      profile_enabled ? Clock::now() : TimePoint{};
-  if (!state.error.ok()) return state.error;
-  if (!status.ok()) return status;
-  if (state.outputs.size() != static_cast<size_t>(num_outputs_) ||
-      std::any_of(state.outputs.begin(), state.outputs.end(),
-                  [](const Tensor* output) { return output == nullptr; })) {
-    return errors::Internal("annc_execution_v2 did not allocate all outputs");
-  }
-  if (profile_enabled && profile_sample) {
-    profile_sample->execution_post_us =
-        ElapsedUs(t_execution_post_start);
-  }
-  return OkStatus();
 }
 
 Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {

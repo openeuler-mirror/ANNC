@@ -571,55 +571,6 @@ static LogicalResult outlineContextBuiltin(
   return success();
 }
 
-static func::FuncOp createExecutionV2KernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Operation *> fusedOps, ArrayRef<Value> boundaryInputs,
-    ArrayRef<Value> boundaryOutputs) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> resultTypes;
-  for (Value output : boundaryOutputs) resultTypes.push_back(output.getType());
-
-  auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
-  func->setAttr("fusion.pattern", rewriter.getStringAttr("matmul_add_relu"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-  IRMapping mapper;
-  for (auto [index, input] : llvm::enumerate(boundaryInputs)) {
-    mapper.map(input, entry->getArgument(index + 1));
-  }
-  for (Operation *op : fusedOps) {
-    if (!isa<UniqueOp, ConstantOp, BufferOp>(op)) {
-      Value outputBuffer = op->getOperand(0);
-      if (!mapper.contains(outputBuffer)) {
-        Value localBuffer =
-            rewriter.create<BufferOp>(func.getLoc(), outputBuffer.getType());
-        mapper.map(outputBuffer, localBuffer);
-      }
-    }
-    rewriter.clone(*op, mapper);
-  }
-
-  SmallVector<Value> returns;
-  for (Value output : boundaryOutputs) returns.push_back(mapper.lookup(output));
-  rewriter.create<func::ReturnOp>(func.getLoc(), returns);
-  return func;
-}
-
 static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
                                      StringRef kernelName, MatMulOp matmulOp) {
   if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
@@ -1042,48 +993,6 @@ static LogicalResult matchKpEmbeddingActionIdGather(
   if (!isClosedKernelOpSet(match.kernelOps, boundaryValues)) return failure();
 
   return success();
-}
-
-static func::FuncOp createKpEmbeddingActionIdGatherKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type indices1Type, Type paramsType, Type indices2Type, Type packDimType,
-    Type packType, Type outputType, ArrayRef<Operation *> kernelOps,
-    Value indices1, Value params, Value indices2, Value packDim, Value pack,
-    Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {indices1Type, paramsType, indices2Type,
-                                  packDimType, packType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_embedding_action_id_gather"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(indices1, entry->getArgument(0));
-  mapper.map(params, entry->getArgument(1));
-  mapper.map(indices2, entry->getArgument(2));
-  mapper.map(packDim, entry->getArgument(3));
-  mapper.map(pack, entry->getArgument(4));
-  mapper.map(outputBuffer, entry->getArgument(5));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
 }
 
 static bool isConstantFloat(Value v, float expected) {
