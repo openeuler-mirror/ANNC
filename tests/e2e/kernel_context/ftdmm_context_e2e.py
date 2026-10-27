@@ -3,9 +3,9 @@
 
 The fixture model is the 16-node `tensordot_matmul` region extracted from the
 real profile1 OrtGraph export (the same model ftdmm_aot_e2e.py uses). Unlike
-that test, the kernel here is built from the source tree's execution-v2 FTDMM
+that test, the kernel here is built from the source tree's context-v3 FTDMM
 (fused function takes the execution context, allocates its output through the
-callbacks), so the site's report carries abi=annc_execution_v2 and the EP
+callbacks), so the site's report carries abi=annc_context_v3 and the EP
 executes it through the ONNX execution context -- engine, pattern, kernel
 library and EP all from this tree, no external install.
 """
@@ -73,7 +73,7 @@ def run_case(model_path, input_name, x, cache_dir, expected_weight_shape):
 
     entries = [
         p
-        for p in Path(cache_dir).glob("v1/*/*")
+        for p in Path(cache_dir).glob("context-v3/*/*")
         if p.is_dir() and (p / "DONE").is_file()
     ]
     assert len(entries) == 1, entries
@@ -82,7 +82,7 @@ def run_case(model_path, input_name, x, cache_dir, expected_weight_shape):
     assert len(sites) == 1, sites
     site = sites[0]
     assert site["pattern"] == "tensordot_matmul", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert site["kernel_arg_order"] == [], site
     assert len(site["member_node_names"]) == 16, site
     assert site["args"][-1]["shape"] == expected_weight_shape, site

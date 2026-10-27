@@ -180,14 +180,16 @@ def run_case(args, work, rows, cols):
         )
         print(f"[{rows}x{cols}] session {attempt + 1}: numeric match")
 
-    entries = [p for p in cache.glob("v1/*/*") if p.is_dir() and (p / "DONE").is_file()]
+    entries = [
+        p for p in cache.glob("context-v3/*/*") if p.is_dir() and (p / "DONE").is_file()
+    ]
     assert len(entries) == 1, entries
     report = json.loads((entries[0] / "sites.json").read_text())
     sites = report["sites"]
     assert len(sites) == 1, sites
     site = sites[0]
     assert site["pattern"] == "layer_norm", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert site["kernel_arg_order"] == [], site
     # mean/Sub/Mul/var/Add/Sqrt/Reciprocal/Mul/Mul/Mul/Sub/Add.
     assert len(site["member_node_names"]) == 12, site

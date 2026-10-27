@@ -29,9 +29,9 @@ foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report con
     TIMEOUT 60 ENVIRONMENT "${AnncEpTestEnvironment}")
 endforeach()
 
-# annc_execution_v2 sites: the context callbacks, the pool the context
+# annc_context_v3 sites: the context callbacks, the pool the context
 # carries, and the failure paths of both.
-foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot legacy-packed)
+foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot packed-switch)
   add_test(NAME AnncEpContextFixture.${mode}
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/ep_context_fixture.py

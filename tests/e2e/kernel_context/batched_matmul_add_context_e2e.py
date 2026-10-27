@@ -394,7 +394,7 @@ def run_rank4_affine_case(work, affine_shape, folded=True, broadcast_weight=Fals
             options.enable_profiling = False
         reports = [
             json.loads(p.read_text())
-            for p in (work / "cache").glob("v1/*/*/sites.json")
+            for p in (work / "cache").glob("context-v3/*/*/sites.json")
         ]
         assert len(reports) == version + 1, reports
         for report in reports:
@@ -524,13 +524,13 @@ def run_rank4_case(work, broadcast_data, intra_threads=1):
 
     entries = [
         p
-        for p in (work / "cache").glob("v1/*/*")
+        for p in (work / "cache").glob("context-v3/*/*")
         if p.is_dir() and (p / "DONE").is_file()
     ]
     assert len(entries) == 1, entries
     site = json.loads((entries[0] / "sites.json").read_text())["sites"][0]
     assert site["pattern"] == "batched_matmul_add", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert [arg["rank"] for arg in site["args"]] == [4, 4, 4], site
     assert [len(arg["shape"]) for arg in site["args"]] == [4, 4, 4], site
     assert len(site["member_node_names"]) == 2, site
@@ -615,7 +615,7 @@ def run_model(work, model_path, options, feed, affine, version, folded):
 
     entries = [
         p
-        for p in (work / "cache").glob("v1/*/*")
+        for p in (work / "cache").glob("context-v3/*/*")
         if p.is_dir() and (p / "DONE").is_file()
     ]
     assert len(entries) == version + 1, entries
@@ -625,7 +625,7 @@ def run_model(work, model_path, options, feed, affine, version, folded):
     assert len(sites) == 1, sites
     site = sites[0]
     assert site["pattern"] == "batched_matmul_add", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert site["kernel_arg_order"] == [], site
     # MatMul + Add (the names the EP sees are its own export's).
     assert len(site["member_node_names"]) == (4 if folded else 2), site

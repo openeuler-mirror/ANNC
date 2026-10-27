@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the annc_execution_v2 EP path with a hand-written context kernel.
+"""Exercise the annc_context_v3 EP path with a hand-written context kernel.
 
 The fixture stands in for `annc-onnx-pipeline` (like ep_aot_fixture.py does for
 the preallocated-output ABI), so the real graph export, site validation, cache
@@ -9,7 +9,7 @@ stand-in. The kernel drives every piece of the execution context:
   * it allocates its output through allocate_output with dims it reads from the
     runtime descriptors (the leading dims are dynamic in the model, so only the
     kernel can size the buffer),
-  * it allocates a zero-filled temporary through allocate_temp and computes
+  * it allocates a temporary through context, initializes it and computes
     into it before copying to the output,
   * it runs the rows through the thread pool the context carries and records
     the distinct worker threads it observed,
@@ -50,18 +50,7 @@ KERNEL = r"""
 #include <thread>
 #include <vector>
 
-#include "Kernel/ExecutionContext.h"
-#include "Context/ThreadPool.h"
-
-// The EP calls the kernel with one ranked-memref descriptor per site argument.
-struct MemRef3D {
-  float *allocated, *aligned;
-  int64_t offset, sizes[3], strides[3];
-};
-struct MemRef2D {
-  float *allocated, *aligned;
-  int64_t offset, sizes[2], strides[2];
-};
+#include "Context/KernelContextUtils.h"
 
 namespace {
 
@@ -83,15 +72,7 @@ const char *KernelMode() {
 
 }  // namespace
 
-extern "C" int32_t _mlir_ciface_fixture_context_matmul(
-    const AnncExecutionContext *context, void *input_arg, void *weight_arg) {
-  if (context == nullptr) return 1;
-  if (std::getenv("ANNC_EP_FIXTURE_LEGACY_PACKED") != nullptr &&
-      annc::packedBOf(context) != nullptr) {
-    context->report_error(context->handle, ANNC_STATUS_INTERNAL,
-                          "legacy kernel received unverified packed weight");
-    return 1;
-  }
+AnncStatusCode FixtureMatmul(annc::kernels::KernelContext& context) {
   if (std::strcmp(KernelMode(), "same-session") == 0) {
     static std::mutex mutex;
     static std::condition_variable cv;
@@ -99,7 +80,7 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     std::unique_lock<std::mutex> lock(mutex);
     if (++arrived < 2) {
       if (!cv.wait_for(lock, std::chrono::seconds(10), [] { return arrived >= 2; })) {
-        context->report_error(context->handle, ANNC_STATUS_INTERNAL,
+        context.error(ANNC_STATUS_INTERNAL,
                               "same-session calls did not overlap");
         return 7;
       }
@@ -108,8 +89,9 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     }
     AppendMarker("same-session overlap");
   }
-  MemRef3D *x = static_cast<MemRef3D *>(input_arg);
-  MemRef2D *w = static_cast<MemRef2D *>(weight_arg);
+  auto* x = context.getInput(0);
+  auto* w = context.getInput(1);
+  if (!x || !w) return context.status();
   const int64_t d0 = x->sizes[0];
   const int64_t d1 = x->sizes[1];
   const int64_t k = x->sizes[2];
@@ -117,7 +99,7 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
   const int64_t m = d0 * d1;
 
   if (std::strcmp(KernelMode(), "error") == 0) {
-    context->report_error(context->handle, ANNC_STATUS_INTERNAL,
+    context.error(ANNC_STATUS_INTERNAL,
                           "fixture: deliberate kernel error");
     AppendMarker("error deliberate");
     return 7;
@@ -127,27 +109,15 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
   // read the runtime descriptors before it can size the buffer.
   const uint32_t slot =
       std::strcmp(KernelMode(), "bad-slot") == 0 ? 1u : 0u;
-  int64_t out_dims[3] = {d0, d1, n};
-  AnncTensorDesc out_desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
-                          ANNC_ALLOCATION_NONE, out_dims, nullptr};
-  AnncStatusCode status = context->allocate_output(context->handle, slot,
-                                                   &out_desc);
-  if (status != ANNC_STATUS_OK) return 3;
-
-  int64_t scratch_dims[2] = {m, n};
-  AnncTensorDesc temp_desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 2,
-                           ANNC_ALLOCATION_ZERO, scratch_dims, nullptr};
-  status = context->allocate_temp(context->handle, &temp_desc);
-  if (status != ANNC_STATUS_OK) return 4;
-  float *scratch = static_cast<float *>(temp_desc.data);
-
-  auto *pool = reinterpret_cast<annc::threadpool::AnncThreadPool *>(
-      context->thread_pool);
-  if (pool == nullptr) {
-    context->report_error(context->handle, ANNC_STATUS_INTERNAL,
-                          "fixture: context carries no thread pool");
-    return 5;
-  }
+  auto output = context.allocateOutput<float>(slot, {d0, d1, n});
+  if (!output) return context.status();
+  const int64_t temp_dims[] = {m, n};
+  AnncTensorView temp{};
+  if (context.allocateTemp<float, 2>(temp_dims, &temp) != ANNC_STATUS_OK)
+    return context.status();
+  float* scratch = annc::kernels::contextData<float>(temp);
+  if (m && n) std::fill_n(scratch, m * n, 0.0f);
+  auto pool = context.getThreadPool();
 
   std::mutex mutex;
   std::vector<std::thread::id> workers;
@@ -164,16 +134,14 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
   // optionless call takes the public KernelContext_ParallelFor mapping, the
   // cost-bearing one the adapter's cost-model path (what every production
   // kernel's rowOptions() reaches).  The nested-mode recording is per pass so
-  // the driver can pin the in_parallel_region() report of each path
+  // the driver can check that nested requests stay on the outer worker
   // separately, and covers the rows each callback saw so it can pin the
   // partition (every row exactly once) without pinning a block count the
   // framework owns.
-  auto dispatch = [&](const annc::threadpool::ParallelForOptions &options,
+  auto dispatch = [&](int64_t cost,
                       int *calls, int *in_region, int64_t *rows,
                       std::vector<std::thread::id> *ids) {
-    pool->parallel_for(
-        m, options,
-        [&, calls, in_region, rows, ids](int64_t begin, int64_t end) {
+    auto body = [&, calls, in_region, rows, ids](int64_t begin, int64_t end) {
           {
             std::lock_guard<std::mutex> lock(mutex);
             const std::thread::id id = std::this_thread::get_id();
@@ -183,54 +151,50 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
             }
           }
           if (std::strcmp(KernelMode(), "nested") == 0) {
-            // Emulate the gate ANNC's own parallel_for applies (Parallel.cpp):
-            // inside a region it runs the whole range serially. The fixture
-            // does not link the ANNC runtime, so the gate is spelled out here;
-            // what it demonstrates is that in_parallel_region() reports true
-            // while this callback runs. The nested range is deliberately large
-            // so that a missing gate would visibly fan out, and the distinct
-            // threads it ran on are recorded.
-            const bool in_region_now = pool->in_parallel_region();
+            // We are inside the outer callback. A nested service request
+            // must execute inline on this worker; thread identities below
+            // verify this for both public and cost-based dispatch.
+            const auto outer_worker = std::this_thread::get_id();
             {
               std::lock_guard<std::mutex> lock(mutex);
-              if (*in_region < 0) *in_region = in_region_now ? 1 : 0;
+              if (*in_region < 0) *in_region = 1;
               ++*calls;
               *rows += end - begin;
             }
             auto nested_body = [&](int64_t, int64_t) {
               std::lock_guard<std::mutex> lock(mutex);
+              if (std::this_thread::get_id() != outer_worker) *in_region = 0;
               if (std::find(ids->begin(), ids->end(),
                             std::this_thread::get_id()) == ids->end()) {
                 ids->push_back(std::this_thread::get_id());
               }
             };
-            if (in_region_now) {
-              nested_body(0, 4096);
-            } else {
-              pool->parallel_for(4096, annc::threadpool::ParallelForOptions{},
-                                 nested_body);
-            }
+            pool.parallelFor(4096, nested_body);
           }
           for (int64_t row = begin; row < end; ++row) {
             const int64_t i = d1 > 0 ? row / d1 : 0;
             const int64_t j = d1 > 0 ? row % d1 : 0;
-            const float *xr = x->aligned + x->offset + i * x->strides[0] +
+            const float *xr = annc::kernels::contextData<float>(*x) + i * x->strides[0] +
                               j * x->strides[1];
             float *sr = scratch + row * n;
             for (int64_t col = 0; col < n; ++col) {
               float sum = 0.0f;
               for (int64_t t = 0; t < k; ++t) {
                 sum += xr[t * x->strides[2]] *
-                       w->aligned[w->offset + t * w->strides[0] +
+                       annc::kernels::contextData<float>(*w)[ t * w->strides[0] +
                                   col * w->strides[1]];
               }
               sr[col] = sum;
             }
           }
-        });
+        };
+    if (cost)
+      annc::kernels::Shard(pool.numThreads(), pool, m, cost, body);
+    else
+      pool.parallelFor(m, body);
   };
 
-  dispatch(annc::threadpool::ParallelForOptions{}, &nested_calls,
+  dispatch(0, &nested_calls,
            &nested_in_region, &nested_rows, &nested_ids);
   if (std::strcmp(KernelMode(), "nested") == 0) {
     // The second pass carries a cost, so it reaches the adapter's cost-model
@@ -238,13 +202,11 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
     // dispatch path, and a cost of the production kernels' scale (tens of
     // cycles per row) would leave this six-row range below the framework's
     // parallelisation threshold and prove nothing about a region.
-    annc::threadpool::ParallelForOptions cost_options;
-    cost_options.cost_per_unit = 100000;
-    dispatch(cost_options, &cost_calls, &cost_in_region, &cost_rows,
+    dispatch(100000, &cost_calls, &cost_in_region, &cost_rows,
              &cost_ids);
   }
 
-  float *out = static_cast<float *>(out_desc.data);
+  float *out = annc::kernels::contextData<float>(*output);
   if (m > 0 && n > 0) {
     std::memcpy(out, scratch, static_cast<size_t>(m) * n * sizeof(float));
   }
@@ -260,14 +222,19 @@ extern "C" int32_t _mlir_ciface_fixture_context_matmul(
                 cost_in_region, cost_ids.size(),
                 static_cast<long long>(cost_rows));
   AppendMarker(line);
-  return 0;
+  return context.status();
+}
+
+extern "C" AnncStatusCode _mlir_ciface_fixture_context_matmul(
+    AnncKernelContext* context) {
+  return annc::kernels::invokeContextKernel(context, FixtureMatmul);
 }
 """
 
 
 def run_pipeline(args):
     if args.toolchain_info:
-        print("annc-ep-context-fixture-v1")
+        print("annc-ep-context-fixture-v3")
         return
     model = onnx.load(args.model)
     onnx.checker.check_model(model)
@@ -291,7 +258,7 @@ def run_pipeline(args):
     pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
     site = {
         "pattern": pattern, "execution_mode": "aot",
-        "abi": "annc_execution_v2",
+        "abi": "annc_context_v3",
         "kernel_name": kernel_name, "member_node_names": [nodes[0].name],
         "kernel_arg_order": [],
         "args": [
@@ -303,6 +270,9 @@ def run_pipeline(args):
         "outputs": [{"tf_name": nodes[0].output[0], "role": "output",
                      "dtype": "f32", "rank": 3, "shape": [-1, -1, -1]}],
     }
+    if pattern == "masked_mul":
+        # The fixture kernel ignores attrs; exercise their report transport.
+        site["context_i64_attrs"] = [1, 1, 0, 0, 1, 0, 0x3f800000, 0]
     (output / "sites.json").write_text(json.dumps({
         "schema": "annc-ep-site-report/1", "contract_version": "1.0.0",
         "sites": [site],
@@ -336,10 +306,9 @@ def session(model, providers, threads=1):
 
 
 def run_test(args):
-    if args.mode == "legacy-packed":
+    if args.mode == "packed-switch":
         os.environ.update(ANNC_EP_FIXTURE_PATTERN="batched_matmul_add",
-                          ANNC_EP_PACKED_B="1",
-                          ANNC_EP_FIXTURE_LEGACY_PACKED="1")
+                          ANNC_EP_PACKED_B="1")
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ep-context-"))
     work.mkdir(parents=True, exist_ok=True)
     # The optionless dispatch is cut into min(rows, DoP) blocks, so the
@@ -398,7 +367,7 @@ def run_test(args):
                 None, {"x": x})
             raise AssertionError("the out-of-range slot did not fail the run")
         except Exception as error:  # noqa: BLE001
-            assert "output slot 1 is out of range" in str(error), error
+            assert "invalid output request" in str(error), error
         print("Bad output slot: rejected by the context callbacks")
         return
 
@@ -514,7 +483,7 @@ def run_test(args):
                        pool.submit(run_one, other, expected_other)]
             for future in futures:
                 future.result()
-        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        entries = list((work / "cache").glob("context-v3/*/*/DONE"))
         assert len(entries) == 2, entries
         print("Two models compiled and executed concurrently; both numeric")
         return
@@ -536,7 +505,7 @@ def run_test(args):
     assert lines[0].startswith(f"compute dims={batch},3,5 threads=1 "), lines
     assert lines[1].startswith(f"compute dims={batch + 3},3,5 threads=1 "), lines
     assert lines[2].startswith("compute dims=0,3,5 "), lines
-    entries = list((work / "cache").glob("v1/*/*/DONE"))
+    entries = list((work / "cache").glob("context-v3/*/*/DONE"))
     assert len(entries) == 1, entries
     assert (entries[0].parent / "libannc_kernels.so").is_file()
     print("Context kernel: allocation + temp + pool; cold compile, warm cache")
@@ -551,7 +520,7 @@ def main():
     parser.add_argument("--work-dir")
     parser.add_argument("--mode",
                         choices=["normal", "threads", "nested", "concurrent", "same-session",
-                                 "error", "bad-slot", "legacy-packed"],
+                                 "error", "bad-slot", "packed-switch"],
                         default="normal")
     args = parser.parse_args()
     if args.toolchain_info or args.model:

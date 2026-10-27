@@ -306,7 +306,7 @@ def run_case(work, kind):
 
     entries = [
         p
-        for p in (work / "cache").glob("v1/*/*")
+        for p in (work / "cache").glob("context-v3/*/*")
         if p.is_dir() and (p / "DONE").is_file()
     ]
     assert len(entries) == 1, entries
@@ -314,7 +314,7 @@ def run_case(work, kind):
     assert len(sites) == 1, sites
     site = sites[0]
     assert site["pattern"] == "masked_mul", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert site["kernel_arg_order"] == [], site
     if kind == "norm":
         # chain (4, no Tile) + three Muls + the Sum and the Div.

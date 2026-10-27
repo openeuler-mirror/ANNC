@@ -17,8 +17,6 @@
 #include <vector>
 
 #include "Context/KernelContext.h"
-#include "Kernel/ExecutionContext.h"
-#include "Kernel/PackedB.h"
 #include "Context/ThreadPool.h"
 #include "annc_ep_native_pool.h"
 
@@ -103,9 +101,7 @@ class OnnxExecutionContext {
   OnnxExecutionContext& operator=(const OnnxExecutionContext&) = delete;
 
   // The ANNC ABI struct handed to the kernel as its only argument.
-  AnncKernelContext* kernelAbi() { return &context_; }
-  AnncExecutionContext* abi() { return &legacy_; }
-  void SetPackedB(const AnncPackedB* packed) { legacy_.packed_b = packed; }
+  AnncKernelContext* abi() { return &context_; }
 
 
   // Ownership of the returned status (the first error the callbacks recorded)
@@ -137,7 +133,7 @@ class OnnxExecutionContext {
   bool BindView(const AnncTensorDesc& request, void* data,
                 AnncTensorView* result);
 
-  AnncStatusCode AllocateOutputImpl(uint32_t slot, AnncTensorDesc* desc, bool legacy = false);
+  AnncStatusCode AllocateOutputImpl(uint32_t slot, AnncTensorDesc* desc);
   AnncStatusCode AllocateTempImpl(AnncTensorDesc* desc);
   // Stores the first error and reports it to stderr once.
   AnncStatusCode Fail(AnncStatusCode status, const std::string& message);
@@ -166,10 +162,7 @@ class OnnxExecutionContext {
   std::atomic<AnncStatusCode> status_{ANNC_STATUS_OK};
   AnncRuntimeServices services_{};
   AnncKernelContext context_{};
-  AnncExecutionContext legacy_{};
 };
-
-std::int32_t CallContextKernel(void*, const std::vector<void*>&);
 
 // Maps an ORT tensor element type onto the ANNC element type the ABI uses;
 // false when the type has no ANNC counterpart (such a tensor can never fill a
@@ -208,8 +201,6 @@ ArgumentBinding BindArgumentsToInputs(
 // inputs.
 struct ContextCall {
   void* symbol = nullptr;
-  std::string abi = "annc_execution_v2";
-  const AnncPackedB* packed_b = nullptr;
   // Kernel call order: the rank and element type of each site argument (args
   // in the report).
   std::vector<int64_t> arg_ranks;
