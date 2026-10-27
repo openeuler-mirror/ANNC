@@ -2,9 +2,9 @@
 
 ## 构建相关
 
-1. **编译失败**：确认已安装所有依赖（cmake、ninja-build、TensorFlow、`llvm-toolset-20-*`；`--enable-python` 时再加 pybind11/nanobind），见[安装 ANNC](../getting-started/installation.md)。
+1. **编译失败**：确认已安装所有依赖（cmake、ninja-build、TensorFlow、24.03 的 `llvm-toolset-20-*` 或 22.03 的自建 LLVM/MLIR 20/21；`--enable-python` 时再加 pybind11/nanobind），见[安装 ANNC](../getting-started/installation.md)。
 2. **编译内存不足**：减少并行编译任务数，如 `ninja -j4`。
-3. **找不到 LLVM/MLIR**：configure 报 `LLVMConfig.cmake`/`MLIRConfig.cmake` 缺失。安装 `llvm-toolset-20-*`；工具链在自定义前缀时导出 `ANNC_LLVM_BIN=<LLVM 20 bin 目录>`，或传 `-DLLVM_DIR`/`-DMLIR_DIR`。标准 yum 安装且 `llvm-config-20` 在 `PATH` 时无需导出。
+3. **找不到 LLVM/MLIR**：configure 报 `LLVMConfig.cmake`/`MLIRConfig.cmake` 缺失。24.03 安装 `llvm-toolset-20-*`；22.03 仓库只有 LLVM/MLIR 12.0.1，需自建 20/21 后传 `-DLLVM_DIR`/`-DMLIR_DIR`。工具链在自定义前缀时导出 `ANNC_LLVM_BIN=<LLVM bin 目录>`，或传 `-DLLVM_DIR`/`-DMLIR_DIR`。标准 yum 安装且 `llvm-config-20` 在 `PATH` 时无需导出。
 
 ## 运行相关
 

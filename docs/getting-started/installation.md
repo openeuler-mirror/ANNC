@@ -6,10 +6,10 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | openEuler-24.03-LTS-SP4 |
+| 操作系统 | openEuler-24.03-LTS-SP4（系统 `llvm-toolset-20`）；openEuler-22.03-LTS-SP4（需自建 LLVM/MLIR 20/21） |
 | 处理器 | 鲲鹏 920X（AArch64） |
-| LLVM / MLIR | 系统 `llvm-toolset-20`（本机验证 20.1.8，不锁定版本）；CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用预装工具链 |
-| 磁盘空间 | ANNC 构建目录约数 GB；不再下载或编译 LLVM |
+| LLVM / MLIR | LLVM/MLIR 20 或 21（24.03 基线 20.1.8，22.03 自建示例 21.1.3，不锁定小版本）；CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链 |
+| 磁盘空间 | ANNC 构建目录约数 GB；22.03 自建 LLVM/MLIR 另需更多空间 |
 
 ## 前置条件
 
@@ -38,10 +38,17 @@ pip3 install -r requirements.txt
 
 ### 3. 安装系统依赖
 
+基础系统依赖（两种 OS 相同）：
+
 ```shell
 sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel \
   gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
+```
+
+LLVM/MLIR 按 OS 版本二选一。openEuler 24.03 直接安装系统工具链：
+
+```shell
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
   llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
   llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
@@ -49,11 +56,14 @@ sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
   llvm-toolset-20-clang
 ```
 
+openEuler 22.03 没有 `llvm-toolset-20`：everything 仓库只提供 LLVM/MLIR 12.0.1，EPOL 只提供 `llvm15`/`clang15`（不含 MLIR），均不满足 ANNC 所需的 MLIR 20/21，需按步骤 4 自建。
+
 | 依赖 | 用途 |
 | --- | --- |
 | `cmake` / `ninja-build` | 构建系统（`build.sh` 默认使用 Ninja 生成器） |
 | `gcc` / `gcc-c++` | 默认 C/C++ 编译器（`build.sh` 的 `CC`/`CXX` 默认值） |
-| `llvm-toolset-20-*` | LLVM/MLIR 20 工具链：CMake 配置、MLIR 头文件/库、静态归档、`clang`、Python 绑定源码 |
+| `llvm-toolset-20-*` | 仅 openEuler 24.03：LLVM/MLIR 20 工具链，含 CMake 配置、MLIR 头文件/库、静态归档、`clang`、Python 绑定源码 |
+| 自建 LLVM/MLIR | 仅 openEuler 22.03：仓库无可用包，见步骤 4 |
 | `python3-devel` | pybind11 / nanobind 扩展需要的 `Python.h`（仅 `--enable-python`） |
 | `gtest-devel` | C++ 单元测试（CTest） |
 | `unzip` / `rpm`（提供 `rpm2cpio`） / `cpio` | KDNN RELEASE 模式解包 release zip；`build.sh` 默认 `--kdnn-source RELEASE`，在 CMake 之前检查这三个命令 |
@@ -62,7 +72,34 @@ sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
 
 ### 4. LLVM / MLIR 与 nlohmann/json
 
-LLVM/MLIR 由系统 `llvm-toolset-20-*` 提供，CMake 用 `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用预装工具链，不再下载或编译 LLVM。标准安装路径（或 `llvm-config-20` 在 `PATH`）时无需额外环境变量；工具链在自定义前缀时导出 `ANNC_LLVM_BIN=<LLVM 20 bin 目录>`，或传 `-DLLVM_DIR`/`-DMLIR_DIR`。
+ANNC 需要 LLVM/MLIR 20 或 21（不锁定小版本；`annc/include/Support/LLVMCompat.h` 处理 21 的 API 差异），由 CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链。
+
+**openEuler 24.03**：使用系统 `llvm-toolset-20-*`。标准安装路径（或 `llvm-config-20` 在 `PATH`）时无需额外环境变量；自定义前缀时导出 `ANNC_LLVM_BIN=<LLVM bin 目录>`，或传 `-DLLVM_DIR`/`-DMLIR_DIR`。
+
+**openEuler 22.03**：仓库的 LLVM/MLIR 12.0.1 与 ANNC 所需的 MLIR 20/21 跨越多个大版本，不能直接使用，需自建（本机以 llvm-project 21.1.3 验证）。在 llvm-project monorepo 根目录执行（`-S` 指向 `llvm/` 子目录）：
+
+```shell
+cmake -G Ninja -S llvm -B llvm-build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/llvm" \
+  -DLLVM_ENABLE_PROJECTS="clang;mlir" \
+  -DLLVM_TARGETS_TO_BUILD="AArch64" \
+  -DLLVM_ENABLE_ASSERTIONS=OFF
+ninja -C llvm-build install
+```
+
+安装后让 CMake 找到它，两种方式任选：
+
+```shell
+export ANNC_LLVM_BIN="$HOME/llvm/bin"   # build.sh 与 CMake 均可识别
+
+# 或手动 configure 时显式指定（安装目录为 lib64 时把 lib 换成 lib64）
+cmake ... \
+  -DLLVM_DIR="$HOME/llvm/lib/cmake/llvm" \
+  -DMLIR_DIR="$HOME/llvm/lib/cmake/mlir"
+```
+
+若直接复用 LLVM 构建树而不安装，MLIR 的配置目录是 `<llvm-build>/tools/mlir/cmake/modules`，需显式传 `-DMLIR_DIR`。`--enable-python` 还要求自建产物包含共享 MLIR 库与 MLIR Python 绑定（`-DMLIR_ENABLE_BINDINGS_PYTHON=ON`），否则保持 Python 绑定关闭。
 
 nlohmann/json 仍由 CMake `FetchContent` 在 configure 时获取到 `third_party/json/`（header-only）。
 

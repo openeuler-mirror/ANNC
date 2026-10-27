@@ -238,7 +238,7 @@ ANNC_LIBRARY_NAME=./fused_matmul.so ./test_app
 | `-v` / `--verbose` | 打印详细命令 |
 | `--shared` / `-shared` | 生成 `.so`，否则生成可执行文件 |
 
-`annc` 链接阶段调用 `ANNC_LLVM_BIN`（缺省为构建期记录的 LLVM 20 bin 目录）下的 `clang`；该目录缺少 `clang` 时启动即报错，不会回退到 PATH 中的其他 clang。kernel 归档的搜索目录可用 `--kernel-lib-path <dir>` 或 `ANNC_KERNEL_LIB_PATH` 指定。详见[环境变量参考](environment-variables.md)。
+`annc` 链接阶段调用 `ANNC_LLVM_BIN`（缺省为构建期记录的 LLVM/MLIR 20/21 bin 目录）下的 `clang`；该目录缺少 `clang` 时启动即报错，不会回退到 PATH 中的其他 clang。kernel 归档的搜索目录可用 `--kernel-lib-path <dir>` 或 `ANNC_KERNEL_LIB_PATH` 指定。详见[环境变量参考](environment-variables.md)。
 
 ```shell
 ANNC_LLVM_BIN=/path/to/llvm20/bin annc model_lowered.mlir --shared -o kernel.so
