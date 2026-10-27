@@ -31,6 +31,10 @@ bool BuildJitCacheKey(const std::string &templateFingerprint,
                       const std::vector<JitArgumentSignature> &arguments,
                       JitCacheKey *key, std::string *error);
 
+// Short printable summary of a cache key for logging. The key itself is a
+// binary blob and must not be written to logs verbatim.
+std::string CacheKeySummary(const JitCacheKey &key);
+
 class JitExecutable final {
  public:
   JitExecutable(std::string workDir, std::string sharedLibraryPath,
