@@ -2571,16 +2571,15 @@ struct FuseKpEmbeddingPaddingFastAsFuncCallPattern
 //   new_shape ───────────────────────────────────► SparseReshape (anchor)
 //
 // anchor 是 functional op (operand 0 = indices, 无输出 buffer), 故 kernel
-// func 用下方变体 helper (clone 时跳过 SparseReshapeOp 的 dest-style buffer
+// func uses the single i64 entry point (clone 时跳过 SparseReshapeOp 的 dest-style buffer
 // 映射)。输出: out_indices i64[R,rank] (R 值依赖) + out_shape i64[rank]。
-// T = pack_const 元素类型 (i32/i64, 多名字特化); new_shape 固定 i64。
+// pack_const and new_shape are fixed i64 values.
 
 struct KpSparseReshapeMatch {
   Value keys;
   Value begin;
   Value newShape;
   Value packConst;
-  Value rangeLimit;  // 动态 Range.limit 边界 (常量为 null)
   Value outIndicesResult;
   Value outShapeResult;
   SparseReshapeOp anchor;
@@ -2602,18 +2601,10 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   if (!areConstantInts(reshape1.getTargetShape(), {-1, 1})) return failure();
   auto range = reshape1.getInput().getDefiningOp<RangeOp>();
   if (!range) return failure();
-  // 812 只查 delta=1; 移植补查 start=0。limit 允许常量或 0-D i32 动态值
-  // (varlen batch 图: StridedSlice(Shape(x)) 提取); 动态时作为额外边界输入
-  // 传入 kernel func——kernel 不用 limit 值, 内部自行重生成行号列。
+  // The downloaded kernel regenerates the row range from the input row count.
   if (!isConstantInt(range.getStart(), 0)) return failure();
   if (!isConstantInt(range.getDelta(), 1)) return failure();
   bool limitIsConst = range.getLimit().getDefiningOp<ConstantOp>() != nullptr;
-  if (!limitIsConst) {
-    auto lType = dyn_cast<atir::TensorType>(range.getLimit().getType());
-    if (!lType || !lType.getElementType().isInteger(32) ||
-        lType.getShape().size() != 0)
-      return failure();
-  }
   // 分支 B: Reshape(StridedSlice(keys, begin), {-1,1}) — keys 列。
   auto reshape = concat.getValues()[1].getDefiningOp<ReshapeOp>();
   if (!reshape) return failure();
@@ -2648,25 +2639,20 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   auto shape = ss1.getInput().getDefiningOp<ShapeOp>();
   if (!shape) return failure();
 
-  // D-2 放宽 2: 两个分支交叉引用同一个 num_rows。ss1 = Shape(keys)[0] 既喂
-  // input_shape 分支的 Pack, 又当 indices 分支 Range 的 limit (cvr history /
-  // hmv session 族实测)。这是链内交叉引用而非逃逸——两端都在融合区内。
-  // 此时 limit 不作边界输入: 它就是 num_rows, kernel 从 slice_input->sizes[0]
-  // 已能得到, 故走非 DynLimit 特化。
+  // Shape(keys)[0] is also a valid in-chain Range.limit reference. The kernel
+  // derives the same row count from slice_input, so it is not a boundary.
   bool limitFromSs1 = (range.getLimit() == ss1.getResult());
 
   match.keys = shape.getInput();
   match.begin = ss.getBegin();
   match.newShape = anchor.getNewShape();
   match.packConst = pack.getInputs()[1];
-  match.rangeLimit =
-      (limitIsConst || limitFromSs1) ? Value() : range.getLimit();
+  if (!limitIsConst && !limitFromSs1) return failure();
   match.anchor = anchor;
   match.outIndicesResult = anchor.getOutputIndices();
   match.outShapeResult = anchor.getOutputShape();
 
-  // dtype 契约: keys i64 2D; begin i32 1D 2 元素; new_shape 固定 i64; T =
-  // pack_const (i32/i64); 两处 Cast 结果为 i64。
+  // dtype contract: keys, new_shape and pack_const are i64; begin is i32.
   auto kType = dyn_cast<atir::TensorType>(match.keys.getType());
   auto bType = dyn_cast<atir::TensorType>(match.begin.getType());
   auto nType = dyn_cast<atir::TensorType>(match.newShape.getType());
@@ -2680,9 +2666,7 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   if (!nType || !nType.getElementType().isInteger(64) ||
       nType.getShape().size() != 1 || nType.getShape()[0] != 2)
     return failure();
-  if (!pType ||
-      !(pType.getElementType().isInteger(32) ||
-        pType.getElementType().isInteger(64)) ||
+  if (!pType || !pType.getElementType().isInteger(64) ||
       pType.getShape().size() != 0)
     return failure();
   {
@@ -2735,82 +2719,12 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   return success();
 }
 
-// Multi-name scheme: T (pack_const element type) is a kernel specialization;
-// the DynLimit variants take an extra unused 0-D i32 range_limit boundary
-// (dynamic Range.limit in varlen-batch graphs).
-static std::string getKpSparseReshapeOpName(Type packConstType,
-                                            bool hasRangeLimit) {
-  auto tensorType = dyn_cast<atir::TensorType>(packConstType);
-  std::string name = "KPFusedSparseReshape";
-  name +=
-      (tensorType && tensorType.getElementType().isInteger(64)) ? "I64" : "I32";
-  if (hasRangeLimit) name += "DynLimit";
-  return name;
-}
+static constexpr StringLiteral kKpSparseReshapeOpName =
+    "KPFusedSparseReshapeI64";
 
-static CustomOpSchema getKpSparseReshapeSchema(StringRef opName,
-                                               bool hasRangeLimit) {
-  auto schema = CustomOpSchema::get(opName)
-                    .TypeVar("T")
-                    .MemRefArg("slice_input", 2, "")
-                    .MemRefArg("begin", 1, "")
-                    .MemRefArg("pack_const", 0, "T")
-                    .MemRefArg("new_shape", 1, "");
-  if (hasRangeLimit) schema.MemRefArg("range_limit", 0, "");
-  return schema.Result("out_indices", 2, "").Result("out_shape", 1, "");
-}
-
-// Functional-anchor variant of createExecutionV2KernelFunc: SparseReshapeOp
+// SparseReshapeOp has a functional anchor:
 // takes its semantic input as operand 0 (no dest-style output buffer), so the
 // buffer mapping is skipped for it during clone.
-static func::FuncOp createKpSparseReshapeV2KernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Operation *> fusedOps, ArrayRef<Value> boundaryInputs,
-    ArrayRef<Value> boundaryOutputs) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> resultTypes;
-  for (Value output : boundaryOutputs) resultTypes.push_back(output.getType());
-
-  auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-  IRMapping mapper;
-  for (auto [index, input] : llvm::enumerate(boundaryInputs)) {
-    mapper.map(input, entry->getArgument(index + 1));
-  }
-  for (Operation *op : fusedOps) {
-    if (!isa<UniqueOp, ConstantOp, BufferOp, SparseReshapeOp>(op)) {
-      Value outputBuffer = op->getOperand(0);
-      if (!mapper.contains(outputBuffer)) {
-        Value localBuffer =
-            rewriter.create<BufferOp>(func.getLoc(), outputBuffer.getType());
-        mapper.map(outputBuffer, localBuffer);
-      }
-    }
-    rewriter.clone(*op, mapper);
-  }
-
-  SmallVector<Value> returns;
-  for (Value output : boundaryOutputs) returns.push_back(mapper.lookup(output));
-  rewriter.create<func::ReturnOp>(func.getLoc(), returns);
-  return func;
-}
-
 struct FuseKpSparseReshapeAsFuncCallPattern
     : public OpRewritePattern<SparseReshapeOp> {
   using OpRewritePattern<SparseReshapeOp>::OpRewritePattern;
@@ -2823,12 +2737,9 @@ struct FuseKpSparseReshapeAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    // 边界顺序 = kernel wrapper 序 (slice_input, begin, pack_const,
-    // new_shape[, range_limit]), 二级 getOrderedBoundaryInputs 与此一致。
+    // Boundary order follows the single downloaded-kernel entry point.
     SmallVector<Value, 4> boundaryInputs = {match.keys, match.begin,
                                             match.packConst, match.newShape};
-    bool hasRangeLimit = static_cast<bool>(match.rangeLimit);
-    if (hasRangeLimit) boundaryInputs.push_back(match.rangeLimit);
     SmallVector<Value, 2> boundaryOutputs = {match.outIndicesResult,
                                              match.outShapeResult};
     SmallVector<Operation *> fusedOps;
@@ -2840,97 +2751,29 @@ struct FuseKpSparseReshapeAsFuncCallPattern
     if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
       return failure();
 
-    std::string customOpName =
-        getKpSparseReshapeOpName(match.packConst.getType(), hasRangeLimit);
-    auto schema = getKpSparseReshapeSchema(customOpName, hasRangeLimit);
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = customOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_reshape"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createKpSparseReshapeV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_reshape"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_reshape")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output",
-                       outputName(match.outIndicesResult,
-                                  anchorName + "/output_indices"),
-                       match.outIndicesResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.outShapeResult,
-                                  anchorName + "/output_shape"),
-                       match.outShapeResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(module, rewriter, anchor,
+                                 kKpSparseReshapeOpName,
+                                 "kp_sparse_reshape", boundaryInputs,
+                                 boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 
-
-// ── KP sparse select (一级, Execution V2) ────────────────────────────────────
+// ── KP sparse select (一级, Context V3) ────────────────────────────────────
 //
 //   a ─► Reshape{-1,1} ─► Compare(GT, gt) ─► Cast ─┐
-//                                                  ├► Where(equal, (fill, ·)) ─┐
-//   b ─► Reshape{-1,1} ─┬► Compare(EQ, eq1) ─► Where(equal1, (fill0, ·)) ──────┘
-//                       └► Compare(EQ, eq2) ────────────────────────────────────► ConcatV2(axis=1)
-//   c ─► Reshape{-1,1} ─► Compare(EQ, eq3) ─► Where(equal2, (fill2, fill1)) ───►
-//   empty [?,0] (Fill) ─────────────────────────────────────────────────────────►
+//                                                  ├► Where(equal, (fill, ·))
+//                                                  ─┐
+//   b ─► Reshape{-1,1} ─┬► Compare(EQ, eq1) ─► Where(equal1, (fill0, ·))
+//   ──────┘
+//                       └► Compare(EQ, eq2)
+//                       ────────────────────────────────────► ConcatV2(axis=1)
+//   c ─► Reshape{-1,1} ─► Compare(EQ, eq3) ─► Where(equal2, (fill2, fill1))
+//   ───► empty [?,0] (Fill)
+//   ─────────────────────────────────────────────────────────►
 //
 // 输出: x = reshape_4 结果 (i32 [N,1]), y = select_0 结果 (f32 [N,1]),
-//       w = concat 结果 (f32 [N,2] = [y, 1.0])。N 值依赖 → V2。
-// 7 个边界输入 (a/b/c + 4 比较常量) = V2 输入上限 7, 恰好卡线。
+//       w = concat 结果 (f32 [N,2] = [y, 1.0])。N 值依赖 → context。
+// 7 个边界输入：a/b/c 与 4 个比较标量 tensor。
 
 struct KpSparseSelectMatch {
   Value a;
@@ -3058,7 +2901,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
     }
     return true;
   };
-  // 注: reshape_4 结果 (x 输出) 在 V2 ABI 下由 kernel func return 消费,
+  // 注: reshape_4 结果 (x 输出) 在 context ABI 下由 kernel func return 消费,
   // 无需主图用户 (二级 checkSparseSelectEscape 的 checkOnlyOrReturn 已
   // 覆盖该契约), 故一级不再要求 x 逃逸到主图。
   if (!checkOnly(greater.getResult(), {cast.getOperation()})) return failure();
@@ -3118,10 +2961,9 @@ struct FuseKpSparseSelectAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    // 7 边界输入 = V2 上限 (恰好可用)。
-    SmallVector<Value, 7> boundaryInputs = {match.a,  match.b,  match.c,
-                                            match.gt, match.eq1, match.eq2,
-                                            match.eq3};
+    // 7 个边界 tensor 输入。
+    SmallVector<Value, 7> boundaryInputs = {
+        match.a, match.b, match.c, match.gt, match.eq1, match.eq2, match.eq3};
     SmallVector<Value, 3> boundaryOutputs = {match.xResult, match.yResult,
                                              match.wResult};
     SmallVector<Operation *> fusedOps;
@@ -3133,92 +2975,9 @@ struct FuseKpSparseSelectAsFuncCallPattern
     if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
       return failure();
 
-    static const char kOpName[] = "KPFusedSparseSelect";
-    auto schema = CustomOpSchema::get(kOpName)
-                      .TypeVar("T")
-                      .MemRefArg("a", 1, "T")
-                      .MemRefArg("b", 1, "T")
-                      .MemRefArg("c", 1, "T")
-                      .MemRefArg("gt", 0, "T")
-                      .MemRefArg("eq1", 0, "T")
-                      .MemRefArg("eq2", 0, "T")
-                      .MemRefArg("eq3", 0, "T")
-                      .Result("out_x", 2, "")
-                      .Result("out_y", 2, "")
-                      .Result("out_w", 2, "");
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = kOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_select"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_select"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_select")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output",
-                       outputName(match.xResult, anchorName + "/output_x"),
-                       match.xResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.yResult, anchorName + "/output_y"),
-                       match.yResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.wResult, anchorName + "/output_w"),
-                       match.wResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedSparseSelect", "kp_sparse_select",
+        boundaryInputs, boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 

@@ -1,26 +1,21 @@
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
-// KP-style sparse reshape fusion, second level, Execution V2: inside the
-// kernel func (signature !llvm.ptr + 4 inputs, 2 results) the chain folds
-// into a single KPFusedSparseReshape<Idx> CustomizeOp; the two .Result()
+// KP-style sparse reshape fusion, second level, Context V3: inside the
+// kernel func (signature 4 tensor inputs, 2 results) the chain folds
+// into a single KPFusedSparseReshapeI64 CustomizeOp; the two .Result()
 // entries map to execution slots 0 (out_indices) and 1 (out_shape).
 
-// 正例 1: T = int32 (pack_const i32)。
+// 负例 1: i32 pack_const is outside the downloaded kernel contract.
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK: atir.Customize
-// CHECK-SAME: custom.op_name = "KPFusedSparseReshapeI32"
-// CHECK-SAME: custom.result_names = ["out_indices", "out_shape"]
-// CHECK-NOT: atir.SparseReshape
-// CHECK-NOT: atir.ConcatV2
+// CHECK-NOT: atir.Customize
+// CHECK: atir.SparseReshape
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_reshape(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x3xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<i32, name = "pack_const">,
       %arg4: !atir.tensor<2xi64, name = "new_shape">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.Shape %arg1 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
     %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
     %2 = atir.constant "public" @"ss1_begin" -> <1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>
@@ -58,26 +53,19 @@ module attributes {module.state = "atir"} {
 
 // -----
 
-// 正例 1b: T = int32 + 动态 Range.limit (0-D i32 block arg, varlen batch) —
-// DynLimit kernel 变体 (limit 参数 kernel 不用, 只占 ABI 槽位)。
+// 负例 1b: dynamic Range.limit is not an accepted boundary.
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape_dynlimit
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg5: !atir.tensor<i32, name = "limit">
-// CHECK: atir.Customize
-// CHECK-SAME: custom.op_name = "KPFusedSparseReshapeI32DynLimit"
-// CHECK-SAME: custom.result_names = ["out_indices", "out_shape"]
-// CHECK-NOT: atir.SparseReshape
-// CHECK-NOT: atir.ConcatV2
+// CHECK-NOT: atir.Customize
+// CHECK: atir.SparseReshape
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_reshape_dynlimit(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x3xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<i32, name = "pack_const">,
       %arg4: !atir.tensor<2xi64, name = "new_shape">,
       %arg5: !atir.tensor<i32, name = "limit">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.Shape %arg1 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
     %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
     %2 = atir.constant "public" @"ss1_begin" -> <1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>
@@ -114,20 +102,18 @@ module attributes {module.state = "atir"} {
 
 // -----
 
-// 正例 2: T = int64 (pack_const i64) — 第二个 kernel 特化。
+// 正例: pack_const i64.
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape_i64
-// CHECK-SAME: %arg0: !llvm.ptr,
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedSparseReshapeI64"
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_reshape_i64(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x3xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<i64, name = "pack_const">,
       %arg4: !atir.tensor<2xi64, name = "new_shape">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.Shape %arg1 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
     %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
     %2 = atir.constant "public" @"ss1_begin" -> <1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>
@@ -165,25 +151,19 @@ module attributes {module.state = "atir"} {
 
 // -----
 
-// 正例 1c (D-2 放宽 2): Range.limit 是链内交叉引用 ss1 (= Shape(keys)[0]),
-// 不是 block arg。ss1 有两个用户 {Pack, Range}, 两端都在融合区内, 不是逃逸。
-// 签名仍是 5 参 (无 range_limit 槽), 因此选非 DynLimit 变体。
+// 负例: i32 pack_const remains rejected even when Range.limit is Shape(keys)[0],
+// because the kernel contract requires i64 pack_const.
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape_xref
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK: atir.Customize
-// CHECK-SAME: custom.op_name = "KPFusedSparseReshapeI32"
-// CHECK-SAME: custom.result_names = ["out_indices", "out_shape"]
-// CHECK-NOT: atir.SparseReshape
-// CHECK-NOT: atir.ConcatV2
+// CHECK-NOT: atir.Customize
+// CHECK: atir.SparseReshape
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_reshape_xref(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x3xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<i32, name = "pack_const">,
       %arg4: !atir.tensor<2xi64, name = "new_shape">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.Shape %arg1 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
     %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
     %2 = atir.constant "public" @"ss1_begin" -> <1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>
@@ -226,13 +206,12 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.SparseReshape
 module attributes {module.state = "atir"} {
   func.func private @bad_shrink(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x3xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<i32, name = "pack_const">,
       %arg4: !atir.tensor<2xi64, name = "new_shape">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.Shape %arg1 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
     %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
     %2 = atir.constant "public" @"ss1_begin" -> <1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>

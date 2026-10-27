@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,8 +12,8 @@ using namespace atir;
 namespace {
 
 // Shared chain match for the 812 KPFusedSparseSelect subgraph (second level,
-// anchor = ConcatV2), Execution V2: kernel func signature is
-// (!llvm.ptr, a, b, c, gt, eq1, eq2, eq3) -> (x, y, w); the three .Result()
+// anchor = ConcatV2), Context V3: kernel func signature is
+// (a, b, c, gt, eq1, eq2, eq3) -> (x, y, w); the three .Result()
 // entries replace A's output-buffer handling.
 struct SparseSelectChain {
   ConcatV2Op anchor;
@@ -88,8 +89,7 @@ bool checkConstantFloatForChain(Value v, float expected) {
   DenseElementsAttr dataAttr = tensorType.getCacheData();
   if (!dataAttr) return false;
   if (!dataAttr.getElementType().isF32()) return false;
-  if (dataAttr.isSplat())
-    return dataAttr.getSplatValue<float>() == expected;
+  if (dataAttr.isSplat()) return dataAttr.getSplatValue<float>() == expected;
   if (dataAttr.getNumElements() != 1) return false;
   return (*dataAttr.getValues<float>().begin()) == expected;
 }
@@ -135,8 +135,7 @@ LogicalResult matchSparseSelectChain(ConcatV2Op anchor,
   chain.anchor = anchor;
   if (anchor.getValues().size() != 3) return failure();
   if (!checkConstantIntForChain(anchor.getAxis(), 1)) return failure();
-  auto emptyType =
-      dyn_cast<atir::TensorType>(anchor.getValues()[2].getType());
+  auto emptyType = dyn_cast<atir::TensorType>(anchor.getValues()[2].getType());
   if (!emptyType || !emptyType.getElementType().isF32() ||
       emptyType.getShape().size() != 2 || emptyType.getShape()[1] != 0)
     return failure();
@@ -207,13 +206,13 @@ bool checkSparseSelectDtype(SparseSelectChain &chain) {
   }
   auto t0 = dyn_cast<atir::TensorType>(chain.select0.getResult().getType());
   auto tw = dyn_cast<atir::TensorType>(chain.anchor.getResult().getType());
-  return t0 && t0.getElementType().isF32() && t0.getShape().size() == 2 &&
-         tw && tw.getElementType().isF32() && tw.getShape().size() == 2;
+  return t0 && t0.getElementType().isF32() && t0.getShape().size() == 2 && tw &&
+         tw.getElementType().isF32() && tw.getShape().size() == 2;
 }
 
 bool checkSparseSelectEscape(SparseSelectChain &chain) {
-  // V2: fused outputs (reshape4/select0/anchor results) are consumed by the
-  // enclosing func return; all other intermediate results stay internal.
+  // context: fused outputs (reshape4/select0/anchor results) are consumed by
+  // the enclosing func return; all other intermediate results stay internal.
   auto checkOnlyOrReturn = [](Value v, ArrayRef<Operation *> allowed) {
     for (Operation *user : v.getUsers()) {
       if (isa<func::ReturnOp>(user)) continue;
@@ -299,7 +298,7 @@ void collectSparseSelectOps(Operation *op, ArrayRef<Value> boundaryValues,
   ops.push_back(op);
 }
 
-// Second level: rewrite the V2 kernel func (extracted by OpFusion's
+// Second level: rewrite the context kernel func (extracted by OpFusion's
 // FuseKpSparseSelectAsFuncCallPattern) into a single atir.Customize call to
 // the hand-written KPFusedSparseSelect kernel.  The three .Result() entries
 // map to execution slots 0 (x), 1 (y), 2 (w); A's eraseFusedOutputOp hack is
@@ -309,8 +308,7 @@ struct KpEmbeddingSparseSelectRewrite
   KpEmbeddingSparseSelectRewrite(MLIRContext *context,
                                  const CustomOpTypeFilter &customOpFilter,
                                  PatternBenefit benefit = 8)
-      : CustomFusionPatternBase<ConcatV2Op>(context, customOpFilter,
-                                            benefit) {}
+      : CustomFusionPatternBase<ConcatV2Op>(context, customOpFilter, benefit) {}
 
   mlir::LogicalResult matchFusion(
       ConcatV2Op anchor,
@@ -319,18 +317,17 @@ struct KpEmbeddingSparseSelectRewrite
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if (func.getNumArguments() != 8 ||
-        !isa<LLVM::LLVMPointerType>(func.getArgument(0).getType())) {
+    if (func.getNumArguments() != 7) {
       return failure();
     }
     if (func.getFunctionType().getResults().size() != 3) return failure();
-    Value aArg = func.getArgument(1);
-    Value bArg = func.getArgument(2);
-    Value cArg = func.getArgument(3);
-    Value gtArg = func.getArgument(4);
-    Value eq1Arg = func.getArgument(5);
-    Value eq2Arg = func.getArgument(6);
-    Value eq3Arg = func.getArgument(7);
+    Value aArg = func.getArgument(0);
+    Value bArg = func.getArgument(1);
+    Value cArg = func.getArgument(2);
+    Value gtArg = func.getArgument(3);
+    Value eq1Arg = func.getArgument(4);
+    Value eq2Arg = func.getArgument(5);
+    Value eq3Arg = func.getArgument(6);
 
     SparseSelectChain chain;
     if (failed(matchSparseSelectChain(anchor, chain))) {
@@ -348,8 +345,8 @@ struct KpEmbeddingSparseSelectRewrite
       return failure();
     }
 
-    SmallVector<Value, 7> boundaryValues = {aArg, bArg, cArg,
-                                            gtArg, eq1Arg, eq2Arg, eq3Arg};
+    SmallVector<Value, 7> boundaryValues = {aArg,   bArg,   cArg,  gtArg,
+                                            eq1Arg, eq2Arg, eq3Arg};
     SmallPtrSet<Operation *, 32> visited;
     SmallVector<Operation *> collected;
     collectSparseSelectOps(anchor.getOperation(), boundaryValues, visited,
@@ -391,33 +388,20 @@ struct KpEmbeddingSparseSelectRewrite
   CustomOpSchema getCustomOpSchema(
       ConcatV2Op anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    // MemRef arg order = getOrderedBoundaryInputs = kernel wrapper inputs
-    // (a, b, c, gt, eq1, eq2, eq3); T binds a/b/c and the 4 scalars.
-    return CustomOpSchema::get("KPFusedSparseSelect")
-        .TypeVar("T")
-        .MemRefArg("a", 1, "T")
-        .MemRefArg("b", 1, "T")
-        .MemRefArg("c", 1, "T")
-        .MemRefArg("gt", 0, "T")
-        .MemRefArg("eq1", 0, "T")
-        .MemRefArg("eq2", 0, "T")
-        .MemRefArg("eq3", 0, "T")
-        .Result("out_x", 2, "")
-        .Result("out_y", 2, "")
-        .Result("out_w", 2, "");
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
   void getOrderedBoundaryInputs(
       ConcatV2Op anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    inputs.push_back(func.getArgument(1));  // a
-    inputs.push_back(func.getArgument(2));  // b
-    inputs.push_back(func.getArgument(3));  // c
-    inputs.push_back(func.getArgument(4));  // gt
-    inputs.push_back(func.getArgument(5));  // eq1
-    inputs.push_back(func.getArgument(6));  // eq2
-    inputs.push_back(func.getArgument(7));  // eq3
+    inputs.push_back(func.getArgument(0));  // a
+    inputs.push_back(func.getArgument(1));  // b
+    inputs.push_back(func.getArgument(2));  // c
+    inputs.push_back(func.getArgument(3));  // gt
+    inputs.push_back(func.getArgument(4));  // eq1
+    inputs.push_back(func.getArgument(5));  // eq2
+    inputs.push_back(func.getArgument(6));  // eq3
   }
 };
 

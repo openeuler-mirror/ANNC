@@ -92,7 +92,7 @@ std::optional<CustomOpSchema> getContextKernelSchema(
       return schema.Result("out_reshape_rows", 0, "");
     return schema.Result("out_data", 2, "T");
   }
-  for (StringRef suffix : {"I32", "I64", "I32DynLimit", "I64DynLimit"}) {
+  for (StringRef suffix : {"I64"}) {
     if (opName != ("KPFusedSparseReshape" + suffix).str()) continue;
     auto schema = CustomOpSchema::get(opName)
                       .TypeVar("T")
@@ -100,7 +100,6 @@ std::optional<CustomOpSchema> getContextKernelSchema(
                       .MemRefArg("begin", 1, "")
                       .MemRefArg("pack_const", 0, "T")
                       .MemRefArg("new_shape", 1, "");
-    if (suffix.ends_with("DynLimit")) schema.MemRefArg("range_limit", 0, "");
     return schema.Result("out_indices", 2, "").Result("out_shape", 1, "");
   }
   if (opName == "KPFusedSparseSelect") {
