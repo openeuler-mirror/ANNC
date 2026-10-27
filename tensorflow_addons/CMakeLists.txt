@@ -174,6 +174,7 @@ target_link_libraries(annc_jit_cache PUBLIC OpenSSL::Crypto PRIVATE dl)
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 if(ANNC_ENABLE_CONSTANT_FOLDING)
+    target_link_libraries(annc_fused_op PRIVATE ANNCCheckpoint)
     target_compile_definitions(annc_fused_op PRIVATE
         ANNC_ENABLE_CONSTANT_FOLDING)
 endif()

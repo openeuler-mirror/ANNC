@@ -58,6 +58,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_FUSED_PROFILE` | 非空且非 `0` | 关闭 | 开启融合 Op 性能打点（字段含义见[运行时接入](../architecture/runtime-integration.md#运行时性能打点)） |
 | `ANNC_FUSED_PROFILE_INTERVAL` | 正整数 | `100000` | 每隔多少次调用输出一次汇总统计 |
 | `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅识别 `openblas`，且该 MatMul 直通路径未实现（设置后融合 MatMul 报 `Unimplemented`） |
+| `ANNC_DEMO_CHECKPOINT_DIR` | checkpoint 目录 | 空 | 沿用静态 prepack 的权重来源目录；CF 开启时每个 Op 首次初始化读取，核对输入名称、F32 类型和字节数。未设置或未匹配时使用普通 packing；shape 切换不重复读取 |
 | `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存 |
 
 ## ONNX Runtime EP 插件（`libannc_ep.so`）

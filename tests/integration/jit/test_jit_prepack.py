@@ -93,7 +93,7 @@ def toolchain():
     return build, env
 
 
-def _compile(directory, batch, threads, prepack, toolchain):
+def _compile(directory, batch, threads, prepack, toolchain, config=CONFIG):
     build, env = toolchain
     directory.mkdir()
     source = directory / "input.mlir"
@@ -107,7 +107,7 @@ func.func @test(%a: memref<{batch}x73xf32>, %b: memref<73x67xf32>,
   return
 }}
 ''')
-    options = f"config-path={CONFIG} intra-thread-count={threads}"
+    options = f"config-path={config} intra-thread-count={threads}"
     packed_c = directory / "pack.c"
     if prepack:
         manifest = directory / "inputs.json"
@@ -135,12 +135,19 @@ func.func @test(%a: memref<{batch}x73xf32>, %b: memref<73x67xf32>,
 
 @pytest.mark.parametrize("batch", [1, 8, 32, 100])
 @pytest.mark.parametrize("threads", [1, 8])
-def test_shared_kernel_uses_each_weight(tmp_path, toolchain, batch, threads):
+@pytest.mark.parametrize("isa", ["neon", "sve"])
+def test_shared_kernel_uses_each_weight(tmp_path, toolchain, batch, threads, isa):
     """Tail tiles and thread slices must work with two independent weights.
 
     Without a TF thread pool the dispatcher executes tasks serially; these
     cases exercise task coordinates, not parallel scheduler throughput.
     """
+    config = CONFIG
+    if isa == "sve":
+        vl = ct.CDLL(None).prctl(51, 0, 0, 0, 0)  # PR_SVE_GET_VL
+        if vl < 0 or vl & 0xffff != 32:
+            pytest.skip("requires SVE VL=32 bytes for the target ABI")
+        config = CONFIG.with_name("gemm-tuning-test.json")
     rng = np.random.default_rng(421 + batch)
     lhs = rng.normal(0, 0.1, (batch, 73)).astype("float32")
     weights = [
@@ -148,7 +155,7 @@ def test_shared_kernel_uses_each_weight(tmp_path, toolchain, batch, threads):
     ]
     for prepack in (False, True):
         library = _compile(
-            tmp_path / str(prepack), batch, threads, prepack, toolchain,
+            tmp_path / str(prepack), batch, threads, prepack, toolchain, config,
         )
         count = ct.c_int64(0)
         if prepack:
@@ -156,7 +163,7 @@ def test_shared_kernel_uses_each_weight(tmp_path, toolchain, batch, threads):
             getter.argtypes = [ct.POINTER(ct.c_int64)]
             getter.restype = ct.POINTER(PackedRhsSpec)
             specs = getter(ct.byref(count))
-            assert count.value == (0 if batch == 1 else 1)
+            assert count.value == (0 if batch == 1 and isa == "neon" else 1)
         packed_weights = []
         for weight in weights:
             rhs = weight

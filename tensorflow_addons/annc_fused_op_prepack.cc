@@ -1,5 +1,9 @@
 #include "annc_fused_op.h"
+#include "annc_fused_op_jit.h"
 #include "tensorflow/core/lib/core/errors.h"
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+#include "Support/CheckpointReader.h"
+#endif
 
 namespace tensorflow {
 void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
@@ -16,13 +20,30 @@ void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
       }
     }
     jit_weights_.resize(inputs);
-    // Deployment contract: weights are immutable for the node lifetime.
-    // Retain Tensor ownership; do not copy or hash the weight contents.
+#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+    const auto input_names = ReadAnncJitInputNames(
+        atir_module_path_, kernel_name_, template_fingerprint_, num_constants_,
+        num_fixed_, num_dynamic_);
+    annc::constant_folding::RhsDataLoader loader;
+    std::vector<uint8_t> checkpoint;
+    // Match the static prepack admission contract; weights remain immutable
+    // for the node lifetime. Checkpoint bytes are never used as packed data.
     for (int slot = 0; slot < num_constants_ + num_fixed_; ++slot) {
       const Tensor& tensor = context->input(slot);
-      if (tensor.dtype() == DT_FLOAT && tensor.dims() == 2)
+      if (tensor.dtype() != DT_FLOAT || tensor.dims() != 2 ||
+          input_names.size() != static_cast<size_t>(inputs))
+        continue;
+      std::string name = input_names[slot];
+      const auto colon = name.rfind(':');
+      if (colon != std::string::npos) {
+        if (name.substr(colon) != ":0") continue;
+        name.resize(colon);
+      }
+      if (loader.load(name, checkpoint) &&
+          checkpoint.size() == tensor.TotalBytes())
         jit_weights_[slot] = tensor;
     }
+#endif
     for (size_t argument = 0; argument < jit_argument_order_.size();
          ++argument) {
       int slot = jit_argument_order_[argument];

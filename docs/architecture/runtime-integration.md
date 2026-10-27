@@ -28,7 +28,11 @@ Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipel
 
 GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和与名字无关的 `template_fingerprint`，运行时根据实际输入和输出 shape 选择并特化当前 fusion func，再同步执行 `annc-asm` 和 `annc`。非 GEMM fusion 节点写入 AOT 共享库路径。进程内缓存按 `OpFusion` 生成的 `template_fingerprint`（对规范化后的 kernel func 计算，不含 module 级属性）和实际参数 shape 复用 `.so`；常量折叠构建的身份另含私有 packing ABI 版本、执行 ABI 和不可变参数槽，不包含权重内容。工具链、GEMM 配置和线程预算固定于进程上下文，`kernel_name` 不进入 key。相同 key 的并发 miss 只编译一次，不同 key 可并行编译。Ready entry 使用有界 LRU，默认保留 64 个（`ANNC_JIT_CACHE_MAX_ENTRIES`）；编译失败不缓存，后续请求可重试。
 
-启用 `ANNC_ENABLE_CONSTANT_FOLDING` 构建后，JIT 固定采用代码与权重缓存分离：共享库只含计算代码、packing 布局和准备入口，各 `ANNCFusedOp` 从首次输入保留权重 Tensor，并独立持有 packed buffer。无运行时模式选择、权重哈希或快照文件。候选 RHS 必须在 OpKernel 生命周期内不可变；换模型创建新实例。fixed 形状角色不证明内容不可变，本实现不检测原地更新；可变权重应使用关闭常量折叠的构建。跨 batch 复用要求输入槽、K/N/KC/NC/ISA/panel 等完整布局一致，切块改变则重新准备对应布局。连续同 shape 直接复用已有 executable/binding，不查权重缓存、不检查初始化 once_flag；shape 切换才查节点绑定，新布局才分配和打包。编译期开关关闭时保持普通 runtime-packed/direct 路径。后端通过 `jit-inputs`（不可变 kernel 参数索引的 JSON 数组，例如 `[1]`）与 `packed-c` 生成准备代码，沿用 `annc --packed-rhs-c` 链接入口。详见[分离缓存实现契约](../design/jit-constant-folding/cache-separation.md)。
+启用 `ANNC_ENABLE_CONSTANT_FOLDING` 构建后，JIT 固定采用代码与权重缓存分离：共享库只含计算代码、packing 布局和准备入口，各 `ANNCFusedOp` 从首次输入保留权重 Tensor，并独立持有 packed buffer。无运行时模式选择、权重哈希或快照文件。候选 RHS 必须在 OpKernel 生命周期内不可变；换模型创建新实例。fixed 形状角色不证明内容不可变；每个节点首次初始化复用旧静态 prepack 的 checkpoint 名称、F32 类型和字节数检查，未通过的输入使用普通 runtime-packed/direct。准入在全局代码缓存查找前完成，连续或交替 shape 命中均不重复读取 checkpoint。checkpoint 不证明运行期不可变，已准入权重仍不支持原地更新。跨 batch 复用要求输入槽、K/N/KC/NC/ISA/panel 等完整布局一致，切块改变则重新准备对应布局。连续同 shape 直接复用已有 executable/binding，不查权重缓存、不检查初始化 once_flag；shape 切换才查节点绑定，新布局才分配和打包。编译期开关关闭时保持普通 runtime-packed/direct 路径。后端通过 `jit-inputs`（不可变 kernel 参数索引的 JSON 数组，例如 `[1]`）与 `packed-c` 生成准备代码，沿用 `annc --packed-rhs-c` 链接入口。详见[分离缓存实现契约](../design/jit-constant-folding/cache-separation.md)。
+
+原始输入名通过既有 annc-fusion-metadata 从 ATIR 提取，不新增 GraphDef 属性；
+工具或元数据不可用时使用普通 packing。新 Op 首次命中共享代码也需初始化，
+元数据提取和 checkpoint 读取不进入后续缓存命中路径。
 
 ### 图重写与形状推导
 

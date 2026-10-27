@@ -21,6 +21,12 @@ struct AnncJitCompileRequest {
   std::vector<int64_t> immutable_arguments;
 };
 
+// Original names in constants/fixed/dynamic input order, read once per Op.
+std::vector<std::string> ReadAnncJitInputNames(
+    const std::string& atir_module_path, const std::string& kernel_name,
+    const std::string& template_fingerprint, int num_constants, int num_fixed,
+    int num_dynamic);
+
 Status CompileAnncJitKernel(
     const AnncJitCompileRequest& request,
     std::shared_ptr<annc::jit::JitExecutable>* executable);

@@ -3,6 +3,10 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -89,6 +93,26 @@ TEST(PackedRhsCacheTest, RejectsInvalidLayoutWithoutPublishing) {
   spec.elements = 15;
   EXPECT_EQ(cache.GetOrPack(spec, a, PrepareTestRhs, 0, &error), nullptr);
   EXPECT_FALSE(error.empty());
+  EXPECT_EQ(cache.size(), 0);
+}
+
+TEST(PackedRhsCacheTest, RejectsMismatchedSveVectorLengthBeforePacking) {
+  auto spec = TestSpec();
+  spec.isa = 1;
+  spec.panel = 32;
+#if defined(__aarch64__) && defined(__linux__)
+  const int vl = prctl(PR_SVE_GET_VL, 0, 0, 0, 0);
+  if (vl >= 0 && (vl & PR_SVE_VL_LEN_MASK) == spec.panel) spec.panel = 16;
+#endif
+  spec.elements = spec.k * spec.panel;
+  ASSERT_TRUE(annc::jit::ValidatePackedRhsSpec(spec));
+  annc::jit::PackedRhsCache cache;
+  float source[16] = {};
+  std::string error;
+  packCalls = 0;
+  EXPECT_EQ(cache.GetOrPack(spec, source, PrepareTestRhs, 0, &error), nullptr);
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(packCalls, 0);
   EXPECT_EQ(cache.size(), 0);
 }
 

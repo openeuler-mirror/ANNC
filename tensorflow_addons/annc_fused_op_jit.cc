@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <vector>
 
 #include "tensorflow/core/lib/core/errors.h"
@@ -148,6 +149,62 @@ static void CleanupAnncJitWorkDir(const std::string& work_dir) {
     LOG(WARNING) << "[ANNC-JIT] failed to remove work directory " << work_dir
                  << ": " << ec.message();
   }
+}
+
+std::vector<std::string> ReadAnncJitInputNames(
+    const std::string& atir_module_path, const std::string& kernel_name,
+    const std::string& template_fingerprint, int num_constants, int num_fixed,
+    int num_dynamic) {
+  const char* checkpoint = std::getenv("ANNC_DEMO_CHECKPOINT_DIR");
+  if (!checkpoint || !*checkpoint || num_constants + num_fixed == 0) return {};
+  std::string work_dir;
+  Status status = CreateJitWorkDir(&work_dir);
+  if (!status.ok()) {
+    LOG(WARNING) << "[ANNC-JIT] prepack admission unavailable: " << status;
+    return {};
+  }
+  const std::string metadata_path =
+      (fs::path(work_dir) / "fusion_metadata.json").string();
+  status = RunJitTool({AnncToolPath("annc-fusion-metadata"), atir_module_path,
+                       "-o", metadata_path},
+                      "annc-fusion-metadata");
+  std::vector<std::string> names;
+  if (status.ok()) {
+    try {
+      std::ifstream input(metadata_path);
+      nlohmann::json metadata;
+      input >> metadata;
+      const nlohmann::json* selected = nullptr;
+      for (const auto& fusion : metadata.at("fusions")) {
+        if (fusion.at("kernel_name") != kernel_name) continue;
+        if (selected) throw std::runtime_error("duplicate kernel metadata");
+        selected = &fusion;
+      }
+      if (!selected ||
+          selected->at("template_fingerprint") != template_fingerprint)
+        throw std::runtime_error("kernel metadata identity mismatch");
+      const char* roles[] = {"constant", "fixed", "dynamic"};
+      const int counts[] = {num_constants, num_fixed, num_dynamic};
+      for (int role = 0; role < 3; ++role) {
+        const size_t start = names.size();
+        for (const auto& arg : selected->at("args")) {
+          if (arg.at("role") == roles[role])
+            names.push_back(arg.at("tf_name").get<std::string>());
+        }
+        if (names.size() - start != static_cast<size_t>(counts[role]))
+          throw std::runtime_error("kernel metadata input count mismatch");
+      }
+    } catch (const std::exception& error) {
+      status =
+          errors::InvalidArgument("Invalid JIT input metadata: ", error.what());
+    }
+  }
+  CleanupAnncJitWorkDir(work_dir);
+  if (!status.ok()) {
+    LOG(WARNING) << "[ANNC-JIT] prepack admission unavailable: " << status;
+    return {};
+  }
+  return names;
 }
 
 Status CompileAnncJitKernel(

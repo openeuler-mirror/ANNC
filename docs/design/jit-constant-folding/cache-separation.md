@@ -15,8 +15,15 @@ ANNC_ENABLE_CONSTANT_FOLDING 开启即使用分离缓存，关闭则使用已有
 runtime-packed/direct。JIT 代码不内嵌权重，无权重快照/哈希或运行时模式路由。
 
 候选 RHS 必须在节点生命周期内不可变，模型更新创建新实例。fixed 仅表示
-形状，不证明内容不可变；保留 Tensor 也不检测原地更新。可变权重使用关闭
-常量折叠的构建，本次不新增版本协议。
+形状，不证明内容不可变。首次初始化复用静态 prepack 的 checkpoint 名称匹配、
+F32 类型及数据字节数检查；仅通过检查的输入进入 immutable 参数集合。
+原始名称由既有 annc-fusion-metadata 从 atir_module_path 提取，按 kernel_name
+和 template_fingerprint 选择当前融合，并恢复 constants/fixed/dynamic 输入顺序；
+不新增 GraphDef 属性。元数据不可读取或不匹配时保守使用普通 packing。
+checkpoint 使用既有 ANNC_DEMO_CHECKPOINT_DIR，不匹配或不可读取的输入
+走普通 runtime-packed/direct。checkpoint 只用于准入，打包仍读取当前节点
+首次输入 Tensor；不证明运行期不可变，也不检测原地更新。在线更新已准入
+权重仍不支持，本次不新增版本协议。
 
 AOT/手工 pass 保留 checkpoint/global 路径。默认内置 GEMM fusion 标记为
 JIT，AOT 分支按执行模式裁剪；不扩展 AOT、ONNX EP 或 execution_v2 JIT 特化。
@@ -33,6 +40,10 @@ NEON 使用 packed-b-v1、panel=4；SVE 使用 packed-b-v2，panel 反映 VL。
 完整 pc-jc 布局相同才跨 batch 复用；切块不同分别准备。节点所有权隔离
 不同权重，不引入全局权重哈希表或跨节点数据去重。
 
+SVE 生成布局时与既有 packer sizing helper 核对 VL、块容量及偏移；节点
+准备 packed buffer 前再检查当前线程 VL，不匹配则报错且不发布缓存。
+执行线程须保持与目标一致的 VL，不支持运行期间切换；热路径不重复检查。
+
 ## 热路径与生命周期
 
 1. last-shape 命中同时取得 executable 与节点 binding，无初始化检查或模式路由。
@@ -41,8 +52,12 @@ NEON 使用 packed-b-v1、panel=4；SVE 使用 packed-b-v2，panel 反映 VL。
 4. 构建输入 descriptor 时替换对应 RHS 的 allocated/aligned 指针，保持
    逻辑 shape、原始 Tensor、kernel 参数数目及微内核/线程池 ABI 不变。
 
-初始化仅在首次 shape miss 执行一次，保留 Tensor 引用并记录 immutable
-参数，不复制或哈希权重。冷路径节点 mutex 保证并发首次准备只做一次。
+每个节点首次初始化在全局代码缓存查找之前执行，即使其他节点已编译同模板
+也独立完成准入。元数据提取子进程和 checkpoint 读取只发生在这一次初始化，
+临时字节随初始化释放；未配置 checkpoint 时不启动提取工具。保留通过准入的
+Tensor 引用并记录 immutable 参数，不复制或哈希运行期权重，后续任意 shape
+均不重读元数据或 checkpoint。
+冷路径节点 mutex 保证并发首次准备只做一次。
 调用期间强引用代码与 packed 数据；绑定弱引用 executable，过期绑定在
 后续 miss 清理。代码淘汰重编可复用原布局数据。packed 数据保留到节点
 卸载，内存随遇到的布局种类增长。引用计数、分支、指针写入仍有成本，

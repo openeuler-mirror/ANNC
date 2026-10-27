@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "../GemmPlan.h"
-#include "CheckpointReader.h"
 #include "JitPrepack.h"
+#include "Support/CheckpointReader.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -65,83 +65,6 @@ std::vector<float> packGemmLayout(
   }
   return packed;
 }
-
-// TF2 SavedModel checkpoints key variables as "<trackable>/.ATTRIBUTES/
-// VARIABLE_VALUE", while TF1 Saver checkpoints use the bare variable name.
-constexpr llvm::StringLiteral kTfVariableKeySuffix =
-    "/.ATTRIBUTES/VARIABLE_VALUE";
-
-// Resource-variable read nodes end with "/ReadVariableOp" (TF2) or "/read"
-// (TF1 ref variables).
-std::string stripReadOpSuffix(const std::string &key) {
-  for (llvm::StringRef suffix : {"/ReadVariableOp", "/read"}) {
-    if (llvm::StringRef(key).ends_with(suffix))
-      return key.substr(0, key.size() - suffix.size());
-  }
-  return key;
-}
-
-// TF renames ops that collide with an existing name by appending "_N"; a read
-// node "w_1/ReadVariableOp" therefore maps back to variable "w".
-std::string stripUniquifier(const std::string &key) {
-  const llvm::StringRef s(key);
-  size_t pos = s.size();
-  while (pos > 0 && s[pos - 1] >= '0' && s[pos - 1] <= '9') --pos;
-  if (pos < 2 || s[pos - 1] != '_') return key;
-  return key.substr(0, pos - 1);
-}
-
-class RhsDataLoader {
- public:
-  bool load(StringAttr name, std::vector<char> &out) {
-    if (!name || name.getValue().empty()) return false;
-    if (!ensureCheckpoint()) return false;
-    std::vector<uint8_t> bytes;
-    int32_t dtype = 0;
-    // Try candidate keys in order: the node name (+TF2 suffix), then with a
-    // read-op suffix, a "_N" uniquifier, or the last path component stripped.
-    std::string key = name.getValue().str();
-    auto tryRead = [&](const std::string &candidate) {
-      return checkpoint_->readTensor(candidate, bytes, dtype);
-    };
-    auto tryCandidate = [&](const std::string &candidate) {
-      return tryRead(candidate) ||
-             tryRead(candidate + kTfVariableKeySuffix.str());
-    };
-    while (true) {
-      if (tryCandidate(key)) break;
-      std::string next = stripReadOpSuffix(key);
-      if (next != key) {
-        key = next;
-        continue;
-      }
-      next = stripUniquifier(key);
-      if (next != key) {
-        key = next;
-        continue;
-      }
-      const size_t slash = key.rfind('/');
-      if (slash == std::string::npos) return false;
-      key.resize(slash);
-    }
-    if (dtype != 1) return false;
-    out.assign(bytes.begin(), bytes.end());
-    return !out.empty();
-  }
-
- private:
-  bool ensureCheckpoint() {
-    if (checkpointAttempted_) return checkpoint_.has_value();
-    checkpointAttempted_ = true;
-    const char *directory = std::getenv("ANNC_DEMO_CHECKPOINT_DIR");
-    if (!directory || !*directory) return false;
-    checkpoint_ = constant_folding::CheckpointReader::open(directory);
-    return checkpoint_.has_value();
-  }
-
-  std::optional<constant_folding::CheckpointReader> checkpoint_;
-  bool checkpointAttempted_ = false;
-};
 
 llvm::Error writePackedDataFile(llvm::StringRef path,
                                 llvm::ArrayRef<std::pair<llvm::StringRef,
@@ -204,7 +127,7 @@ struct AArch64GemmPrepackRhsPass
       return;
     }
 
-    RhsDataLoader rhsLoader;
+    constant_folding::RhsDataLoader rhsLoader;
     struct PendingPack {
       std::string dataSymbol;
       std::vector<float> data;
@@ -244,11 +167,10 @@ struct AArch64GemmPrepackRhsPass
           continue;
         }
 
-        std::vector<char> rawData;
-        if (!rhsLoader.load(
-                gemm->getAttrOfType<StringAttr>(
-                    aarch64::gemm::kRhsNameAttrName),
-                rawData)) {
+        std::vector<uint8_t> rawData;
+        auto rhsName =
+            gemm->getAttrOfType<StringAttr>(aarch64::gemm::kRhsNameAttrName);
+        if (!rhsName || !rhsLoader.load(rhsName.getValue().str(), rawData)) {
           gemm->emitOpError("cannot load prepacked RHS checkpoint data");
           packingFailed = true;
           continue;

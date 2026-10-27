@@ -36,6 +36,16 @@ private:
   std::string dataFilePath(int32_t shard_id) const;
 };
 
+// Shared by static prepack and per-op JIT weight admission.
+class RhsDataLoader {
+ public:
+  bool load(const std::string &name, std::vector<uint8_t> &out);
+
+ private:
+  std::optional<CheckpointReader> checkpoint_;
+  bool checkpointAttempted_ = false;
+};
+
 } // namespace constant_folding
 } // namespace annc
 
