@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "Context/StringRef.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,11 +26,6 @@ typedef struct {
     int64_t  sizes[1];
     int64_t  strides[1];
 } AnncMemRef1DF32;
-
-typedef struct {
-    const char* data;
-    int64_t     size;
-} AnncStringRef;
 
 typedef struct {
     AnncStringRef* allocated;

@@ -1,10 +1,10 @@
-#ifndef ANNC_SUPPORT_THREADPOOL_ROW_PARALLEL_H
-#define ANNC_SUPPORT_THREADPOOL_ROW_PARALLEL_H
+#ifndef ANNC_CONTEXT_ROW_PARALLEL_H
+#define ANNC_CONTEXT_ROW_PARALLEL_H
 
 #include <algorithm>
 #include <cstdint>
 
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 
 namespace annc {
 namespace threadpool {
@@ -24,7 +24,7 @@ namespace threadpool {
 //     framework would have made.
 //   grain_size -- minimum rows per block, for hosts whose pool takes a fixed
 //     block size instead of a cost model: the in-tree pool
-//     (Support/ThreadPool/Parallel.cpp reads only grain_size) and the TF
+//     (context/lib/Parallel.cpp reads only grain_size) and the TF
 //     adapter's kFixedBlockSize path.
 //
 // cost::* computes the first of these from the shape of the kernel's inner
@@ -137,4 +137,4 @@ inline ParallelForOptions rowOptions(std::int64_t cost_per_unit,
 }  // namespace threadpool
 }  // namespace annc
 
-#endif  // ANNC_SUPPORT_THREADPOOL_ROW_PARALLEL_H
+#endif  // ANNC_CONTEXT_ROW_PARALLEL_H

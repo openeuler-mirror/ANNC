@@ -80,6 +80,7 @@ function(annc_add_kernel_gtest target)
     target_link_libraries(${target}
         PRIVATE
         GTest::gtest_main
+        ANNCContext
         Threads::Threads
         ${CMAKE_DL_LIBS}
     )

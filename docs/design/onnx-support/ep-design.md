@@ -620,4 +620,4 @@ stateDiagram-v2
 | `tests/integration/ort_ep/`                  | ctest 宿主夹具与端到端用例（AOT、上下文、FTDMM）                                     |
 | `addons/onnxruntime/CMakeLists.txt`          | 可选插件构建（默认关闭，要求外部 ORT SDK 头文件目录）                              |
 | `addons/onnxruntime/README.md`               | 使用说明与接入示例。其中少量表述与代码不符，见 §10 与各节注记                            |
-| `annc/lib/Support/ThreadPool/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/annc_fused_op.cc` |
+| `context/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/annc_fused_op.cc` |

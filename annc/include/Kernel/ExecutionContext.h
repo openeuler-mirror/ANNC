@@ -4,10 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "Context/KernelContext.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+// Compatibility ABI for the ONNX kernels imported from dev.
+// This layout is distinct from AnncKernelContext; never cast between them.
 // Version history:
 //   v2: handle + allocate_output/allocate_temp/report_error, no thread pool.
 //   v3: appends `thread_pool` so the host can carry the pool in the context
@@ -22,35 +26,11 @@ enum { ANNC_EXECUTION_ABI_VERSION = 4 };
 enum { ANNC_EXECUTION_V2_ABI_VERSION = 2 };
 enum { ANNC_EXECUTION_V3_ABI_VERSION = 3 };
 
-typedef uint32_t AnncStatusCode;
-#define ANNC_STATUS_OK ((AnncStatusCode)0u)
-#define ANNC_STATUS_INVALID_ARGUMENT ((AnncStatusCode)1u)
-#define ANNC_STATUS_ALLOCATION_FAILED ((AnncStatusCode)2u)
-#define ANNC_STATUS_INTERNAL ((AnncStatusCode)3u)
-
-typedef uint32_t AnncElementType;
-#define ANNC_ELEMENT_TYPE_F32 ((AnncElementType)1u)
-#define ANNC_ELEMENT_TYPE_I32 ((AnncElementType)2u)
-#define ANNC_ELEMENT_TYPE_I64 ((AnncElementType)3u)
-
-typedef uint32_t AnncAllocationFlags;
-#define ANNC_ALLOCATION_NONE ((AnncAllocationFlags)0u)
-#define ANNC_ALLOCATION_ZERO ((AnncAllocationFlags)1u)
-
-typedef struct {
-  uint32_t struct_size;
-  AnncElementType element_type;
-  uint32_t rank;
-  AnncAllocationFlags flags;
-  const int64_t* dims;
-  void* data;
-} AnncTensorDesc;
-
 typedef struct AnncExecutionHandle AnncExecutionHandle;
 
 // Opaque handle for the host thread pool carried by the context (ABI v3).
 // The kernel side casts it to annc::threadpool::AnncThreadPool
-// (Support/ThreadPool/ThreadPool.h). The host guarantees the object stays
+// (Context/ThreadPool.h). The host guarantees the object stays
 // alive for the duration of every call that receives the context.
 typedef struct AnncThreadPoolHandle AnncThreadPoolHandle;
 
@@ -61,8 +41,8 @@ typedef struct AnncPackedB AnncPackedB;
 
 typedef AnncStatusCode (*AnncAllocateOutputCallback)(
     AnncExecutionHandle* handle, uint32_t slot, AnncTensorDesc* desc);
-typedef AnncStatusCode (*AnncAllocateTempCallback)(
-    AnncExecutionHandle* handle, AnncTensorDesc* desc);
+typedef AnncStatusCode (*AnncAllocateTempCallback)(AnncExecutionHandle* handle,
+                                                   AnncTensorDesc* desc);
 typedef void (*AnncReportErrorCallback)(AnncExecutionHandle* handle,
                                         AnncStatusCode status,
                                         const char* message);

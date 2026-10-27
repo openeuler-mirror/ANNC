@@ -178,7 +178,7 @@ sequenceDiagram
 | `annc/lib/Dialect/Atir/Passes/`（融合相关） | 融合 Pass 体系、区域模型、模式目录与产物形态 | fusion-design §3、§4、§5 |
 | `annc/lib/FusionMetadata/`、`annc/include/FusionMetadata/` | 元数据契约与序列化 | fusion-design §6 |
 | `annc/lib/Conversion/`、`annc/lib/Target/aarch64/` | 实现落点、调用约定与目标后端 | fusion-design §7.1、§7.3、§7.4 |
-| `annc/lib/Kernel/`、`annc/lib/Support/ThreadPool/` | kernel 注册与选择、并行运行时 | fusion-design §7.2、附录 A；ep-design §6.6 |
+| `annc/lib/Kernel/`、`context/` | kernel 注册与选择、并行运行时 | fusion-design §7.2、附录 A；ep-design §6.6 |
 | `annc/tools/annc*` | 编译驱动、汇编与验证工具 | fusion-design §7.5、§9 |
 
 ## 5 交付物与关键契约

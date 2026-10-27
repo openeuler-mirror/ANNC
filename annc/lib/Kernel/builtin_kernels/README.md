@@ -29,7 +29,7 @@ void impl(::annc::threadpool::AnncThreadPool* thread_pool,
 最小例子：
 
 ```cpp
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 #include "Kernel/MemRefTypes.h"
 
 namespace {
@@ -80,7 +80,7 @@ ANNC_KERNEL(
 如果 kernel 需要并行，优先用：
 
 ```cpp
-#include "Support/ThreadPool/Parallel.h"
+#include "Context/Parallel.h"
 
 annc::threadpool::parallel_for(thread_pool, total, fn);
 annc::threadpool::parallel_for(thread_pool, total, options, fn);

@@ -1,7 +1,7 @@
 #include "Kernel/MemRefTypes.h"
 #include "Kernel/KernelStatus.h"
-#include "Support/ThreadPool/Parallel.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/Parallel.h"
+#include "Context/ThreadPool.h"
 #include "fingerprint64.h"
 
 #include <algorithm>

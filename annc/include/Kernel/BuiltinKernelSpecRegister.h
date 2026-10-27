@@ -12,6 +12,9 @@ using ::annc::kernels::Name;
 
 #define ANNC_KERNEL_SPEC(spec_token, builder_expr, args_decl, body) \
     ANNC_REGISTER_AUTO_KERNEL_SPEC(spec_token, builder_expr)
+#define ANNC_CONTEXT_KERNEL_SPEC(spec_token, builder_expr, body) \
+    ANNC_REGISTER_AUTO_KERNEL_SPEC(spec_token, builder_expr)
 #include ANNC_BUILTIN_KERNEL_SPECS_FILE
+#undef ANNC_CONTEXT_KERNEL_SPEC
 #undef ANNC_KERNEL_SPEC
 #undef ANNC_BUILTIN_KERNEL_SPECS_FILE

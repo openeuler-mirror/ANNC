@@ -1,7 +1,7 @@
 #include <exception>
 
 #include "Kernel/KernelStatus.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 #include "kdnn.hpp"
 #include "kdnn_adaptor/KDNNTensorInfoAdaptor.h"
 #include "kdnn_adaptor/KDNNThreadPoolAdaptor.h"

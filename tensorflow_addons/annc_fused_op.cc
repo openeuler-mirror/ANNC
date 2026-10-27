@@ -20,7 +20,7 @@
 
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
-#include "Support/ThreadPool/ThreadPool.h"
+#include "Context/ThreadPool.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"

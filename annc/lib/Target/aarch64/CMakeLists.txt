@@ -30,7 +30,7 @@ set(_gemm_srcs
 add_library(ANNCGemmSupport STATIC
         Gemm/Support/GemmDispatch.cpp
 )
-target_link_libraries(ANNCGemmSupport PUBLIC ANNCThreadPool)
+target_link_libraries(ANNCGemmSupport PUBLIC ANNCThreadPool ANNCContext)
 target_include_directories(ANNCGemmSupport
         PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/annc/include>
