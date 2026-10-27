@@ -74,6 +74,10 @@ bash tests/FileCheck/run.sh
   `onnxruntime`。若构建用的解释器没有这两个包，configure 时用
   `-DANNC_TEST_PYTHON=/path/to/venv/bin/python3` 指定测试解释器（该变量只影响
   CTest 的 Python 用例，不会改变 Python 绑定的构建解释器）。
+  EP 在运行期现场编译 kernel 时要读进程环境里的 `ANNC_EP_ORT_BUILD_TREE`；
+  configure 时设置了同名缓存变量的话，`tests/integration/ort_ep/CMakeLists.txt`
+  会把它写进这些测试的 `ENVIRONMENT`，因此 `ctest` 前不必再手工导出（换 ORT
+  构建树后需重新 configure）。
 - `unit/annc/annc_jit_cache_test` 只在 `ANNC_ENABLE_TENSORFLOW_ADDON=ON` 时注册；
   ONNX 前端 GTest 只在 `ANNC_ENABLE_ONNX=ON` 时注册。
 - `e2e/tf/` 的脚本需要外部 predictor、SavedModel、TSV、brpc client 等，
