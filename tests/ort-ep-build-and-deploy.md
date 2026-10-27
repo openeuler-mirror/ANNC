@@ -220,12 +220,21 @@ ANNC 安装前缀保持默认相对布局时大多数变量可省略。常用变
 | `ANNC_EP_PIPELINE` | `annc-onnx-pipeline` 绝对路径 | 与 EP 同目录 → `../bin` → `PATH` |
 | `ANNC_KERNEL_LIB_PATH` | ANNC 归档目录 | `<ANNC_PREFIX>/lib64`（GNUInstallDirs；aarch64） |
 | `ANNC_LLVM_BIN` | LLVM  bin 目录；其父目录的 `lib64`/`lib` 提供 LLVM 静态归档 | 构建期写入的工具目录 |
-| `ANNC_EP_ORT_BUILD_TREE` | ORT 构建树 `Release/`；用于定位四个 MLAS 归档 | 构建期值/未设置 |
+| `ANNC_EP_ORT_BUILD_TREE` | ORT 构建树 `Release/`；构建期用于链接 EP，运行期用于定位四个 MLAS 归档 | 构建期不自动继承到运行进程；运行期必须显式导出 |
 | `ANNC_EP_CACHE_DIR` | EP 编译缓存目录 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` |
 | `ANNC_EP_DEBUG=1` | 打印站点申报、编译与缓存诊断 | 关闭 |
 
+运行 EP 的进程在首次 session 编译（或缓存未命中）前必须导出：
+
+```shell
+export ANNC_EP_ORT_BUILD_TREE=<ORT_BUILD>
+```
+
 要点：
 
+- `ANNC_EP_ORT_BUILD_TREE` 同时是运行期变量：EP 现场编译 kernel 时由 `annc` 驱动直接读取，
+  用于定位 `libonnxruntime_mlas.a`、`libkleidiai.a`、`libonnxruntime_common.a`、`libcpuinfo.a`；
+  未导出会导致首次 session 编译失败。构建期 `-DANNC_EP_ORT_BUILD_TREE` 不会自动写入运行进程环境。
 - 四个 `ANNC_EP_FUSION_*` 默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0`
   关闭。
 - 修改融合开关后需要新建 session，并会进入 EP 缓存签名。
@@ -270,7 +279,7 @@ sess = ort.InferenceSession(
 
 - 打开：设置 `ANNC_EP_FUSION_TENSORDOT_MATMUL=1`（默认关闭）。
 - 对应 pattern：`tensordot_matmul`；融合算子：`FusedTensordotMatmul`。
-- 本机 model4 含该 pattern 站点。
+- 本机 model1/model4 含该 pattern 站点（model1 27 个、model4 15 个）。
 
 测试命令与四模型 A/B 同参；`numactl -C 48-63` 按目标机 cpuset 调整（本机实测
 用 48-63）：
@@ -324,8 +333,8 @@ grep -E 'GetCapability|site\(s\)' tdt_on.log tdt_off.log
 `dropped=0`；关闭时对应站点为 0。若 `claimed` 小于 `sites` 或 `dropped>0`，
 在日志里搜 `dropping site` 查看被丢弃的站点及原因。
 
-model4 只开 `tensordot_matmul` 时预期 `sites=15 claimed=15 dropped=0`；`=0` 时
-预期 `sites=0 claimed=0`。
+model1 只开 `tensordot_matmul` 时预期 `sites=27 claimed=27 dropped=0`；model4 只开时
+预期 `sites=15 claimed=15 dropped=0`；`=0` 时均为 `sites=0 claimed=0`。
 
 导入阶段出现以下 warning 是正常的：
 
@@ -339,15 +348,16 @@ warning: unsupported op 'Slice' at node '...' lowered to atir.opaque
 | 模型 | 特性 | 开启时 `sites/claimed` | 关闭时 |
 |---|---|---|---|
 | model1 | `masked_mul` | 21/21 | 0/0 |
+| model1 | `tensordot_matmul` | 27/27 | 0/0 |
 | model2 | `masked_mul` | 33/33 | 0/0 |
 | model3 | `masked_mul` | 3/3 | 0/0 |
 | model3 | `batched_matmul_add` | 50/50 | 0/0 |
 | model4 | `layer_norm` | 27/27 | 0/0 |
 | model4 | `tensordot_matmul` | 15/15 | 0/0 |
 
-四个开关全开时，`GetCapability` 应为 model1 21/21、model2 33/33、model3 53/53
-（`batched_matmul_add` 50 + `masked_mul` 3）、model4 42/42（`layer_norm` 27 +
-`tensordot_matmul` 15）。
+四个开关全开时，`GetCapability` 应为 model1 48/48（`masked_mul` 21 +
+`tensordot_matmul` 27）、model2 33/33、model3 53/53（`batched_matmul_add` 50 +
+`masked_mul` 3）、model4 42/42（`layer_norm` 27 + `tensordot_matmul` 15）。
 
 ### 3.4 layer_norm 特性
 
@@ -440,7 +450,7 @@ ANNC_EP_DEBUG=1 numactl -C 48-63 <PYTHON> /tmp/onnx_benchmark_all_annc.py \
 
 证明：对比 `actual_qps`、`avg_latency_us`、`p99_latency_us`，并按 3.3 的方法
 `grep -E 'GetCapability|site\(s\)'` 确认站点：四个开关全开时 model1/2/3/4 分别为
-21/33/53/42，claimed 相同、dropped=0；默认全关时目标 pattern 为 0/0。
+48/33/53/42，claimed 相同、dropped=0；默认全关时目标 pattern 为 0/0。
 
 ## 4. 常见报错
 
