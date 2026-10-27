@@ -8,7 +8,7 @@
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 ```
 
-LLVM/MLIR 使用系统 `llvm-toolset-20`（CMake `find_package`，不锁定版本），不再下载或编译 LLVM；nlohmann/json 由 CMake 在 configure 时 `FetchContent` 获取到 `third_party/json/`。
+LLVM/MLIR 使用外部工具链（CMake `find_package`，不锁定版本），不再下载或编译 LLVM；nlohmann/json 由 CMake 在 configure 时 `FetchContent` 获取到 `third_party/json/`。openEuler 24.03 用系统 `llvm-toolset-20`；openEuler 22.03 仓库只有 LLVM/MLIR 12.0.1，需自建 LLVM/MLIR 20/21 并通过 `ANNC_LLVM_BIN` 或 `-DLLVM_DIR`/`-DMLIR_DIR` 指定，见[安装 ANNC](../getting-started/installation.md#4-llvm--mlir-与-nlohmannjson)。
 
 RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不启用 KDNN 后端，需同时打开 adaptor）：
 
@@ -40,6 +40,8 @@ export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
 # 或：export LLVM_DIR=<.../lib64/cmake/llvm>
 #     export MLIR_DIR=<.../lib64/cmake/mlir>
 ```
+
+自建的安装树同样适用。若直接使用 LLVM 构建树而不安装，MLIR 的配置位于 `<llvm-build>/tools/mlir/cmake/modules`，需显式传 `-DMLIR_DIR`（该布局不在 `ANNC_LLVM_BIN` 的前缀推断范围内）。
 
 然后配置并构建。默认启用 TensorFlow addon，必须显式指定 `ANNC_TENSORFLOW_CXX11_ABI`：
 

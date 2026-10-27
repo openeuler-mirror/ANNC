@@ -21,7 +21,7 @@ ANNC 面向 CPU 推理场景，重点解决搜索/推荐/广告（搜推广）�
 
 | 维度              | 现状                                                                                               |
 | --------------- | ------------------------------------------------------------------------------------------------ |
-| 平台              | openEuler-24.03-LTS-SP4 + 鲲鹏 920X（AArch64）；其他平台组合未声明支持                                           |
+| 平台              | openEuler-24.03-LTS-SP4（系统 `llvm-toolset-20`）/ openEuler-22.03-LTS-SP4（自建 LLVM/MLIR 20/21）+ 鲲鹏 920X（AArch64）；其他平台组合未声明支持 |
 | 框架              | TensorFlow（GraphDef / SavedModel）；ONNX Runtime 1.26.0                                            |
 | 加速范围            | 命中 ANNC fusion pattern 的子图；未命中区域原样保留，继续由原框架 / CPU EP 执行                                          |
 | TensorFlow 接入   | 会话启用 Grappler 插件 `ANNCOptimizer` 并加载 `ANNCFused` Op（均由本仓库构建）；模型与业务代码无需改动                         |
@@ -42,13 +42,14 @@ cd ANNC
 pip3 install -r requirements.txt
 sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
+#    openEuler 24.03 使用系统 llvm-toolset-20；22.03 无该 toolset，需自建 LLVM/MLIR 20/21（见「安装 ANNC」步骤 4）
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
   llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
   llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
   llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
   llvm-toolset-20-clang
 
-# 3. 一键构建（LLVM/MLIR 使用系统 llvm-toolset-20；nlohmann/json 由 CMake FetchContent 获取）
+# 3. 一键构建（LLVM/MLIR 使用系统 llvm-toolset-20 或 22.03 自建工具链；nlohmann/json 由 CMake FetchContent 获取）
 #    安装到无写权限前缀时请改用有权限的目录，或确保当前用户可写
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 

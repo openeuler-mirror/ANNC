@@ -140,6 +140,9 @@ set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON)
 #     llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
 #     llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
 #     llvm-toolset-20-clang
+# openEuler 22.03 没有该 toolset（仓库仅提供 LLVM/MLIR 12.0.1），需自建 LLVM/MLIR
+# 20/21 并传 -DLLVM_DIR/-DMLIR_DIR 或设置 ANNC_LLVM_BIN；详见
+# docs/getting-started/installation.md。
 #
 # 查找提示优先级：显式 -DLLVM_DIR/-DMLIR_DIR（find_package 自身行为）高于
 # ANNC_LLVM_BIN 环境变量，最后回退 llvm-config --cmakedir。
@@ -199,6 +202,8 @@ if(NOT LLVM_FOUND)
     "llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel "
     "llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir "
     "llvm-toolset-20-clang\n"
+    "on openEuler 22.03 no such toolset exists; build LLVM/MLIR 20/21 from "
+    "source (see docs/getting-started/installation.md)\n"
     "or pass -DLLVM_DIR=<directory containing LLVMConfig.cmake>, "
     "-DLLVM_ROOT=<install prefix> or set ANNC_LLVM_BIN. "
     "(LLVM_DIR='${LLVM_DIR}', LLVM_ROOT='${LLVM_ROOT}')")
@@ -211,7 +216,9 @@ if(NOT MLIR_FOUND)
   message(FATAL_ERROR
     "MLIR not found (no MLIRConfig.cmake). Install the matching MLIR "
     "development package (e.g. llvm-toolset-20-llvm-mlir-devel and "
-    "llvm-toolset-20-python3-mlir for the Python binding sources), or pass "
+    "llvm-toolset-20-python3-mlir for the Python binding sources), "
+    "or build LLVM/MLIR 20/21 from source on openEuler 22.03 (see "
+    "docs/getting-started/installation.md), or pass "
     "-DMLIR_DIR=<directory containing MLIRConfig.cmake>, "
     "-DMLIR_ROOT=<install prefix> or set ANNC_LLVM_BIN. "
     "(MLIR_DIR='${MLIR_DIR}', MLIR_ROOT='${MLIR_ROOT}')")
@@ -226,12 +233,15 @@ find_package(MLIR REQUIRED CONFIG HINTS ${_annc_mlir_hints})
 # 实现，与 libMLIR.so 组合使用已验证（发行版自带的 mlir Python 包即如此构建）。
 # 因此：C API 目标统一指向 libMLIRPythonCAPI.so，其余 MLIR 静态目标指向
 # libMLIR.so；执行引擎、运行时与测试目标不在 libMLIR.so 中，保持原样。
-get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION)
-foreach(_cfg _RELWITHDEBINFO _RELEASE _DEBUG _MINSIZEREL)
-  if(NOT _annc_mlir_shared)
-    get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION${_cfg})
-  endif()
-endforeach()
+set(_annc_mlir_shared "")
+if(TARGET MLIR)
+  get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION)
+  foreach(_cfg _RELWITHDEBINFO _RELEASE _DEBUG _MINSIZEREL)
+    if(NOT _annc_mlir_shared)
+      get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION${_cfg})
+    endif()
+  endforeach()
+endif()
 if(NOT _annc_mlir_shared)
   if(ANNC_ENABLE_PYTHON)
     message(FATAL_ERROR

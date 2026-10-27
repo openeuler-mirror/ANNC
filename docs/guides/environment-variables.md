@@ -12,7 +12,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_LLVM_BIN` | LLVM 20 的 bin 目录 | 构建期由 `LLVM_TOOLS_BINARY_DIR` 写入 | 解析 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`/`FileCheck`；未设置时使用构建期默认值，工具缺失则明确报错。工具链 lib 目录（含 `libLLVMSupport.a`/`libLLVMDemangle.a`）由其父目录推导 |
+| `ANNC_LLVM_BIN` | LLVM/MLIR 20/21 的 bin 目录 | 构建期由 `LLVM_TOOLS_BINARY_DIR` 写入 | 解析 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`/`FileCheck`；未设置时使用构建期默认值，工具缺失则明确报错。工具链 lib 目录（含 `libLLVMSupport.a`/`libLLVMDemangle.a`）由其父目录推导 |
 | `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_FULL_LIBDIR}`（aarch64 为 `<prefix>/lib64`） | 覆盖内置 kernel、线程池归档的搜索目录；LLVM 静态归档不在其中，由 `ANNC_LLVM_BIN` 的父目录解析 |
 | `ANNC_EP_ORT_BUILD_TREE` | 目录路径 | 构建期值/未设置 | 宿主 ORT 构建树的 `Release/` 目录；按 `<tree>/` 与 `<tree>/_deps/*-build/` 的布局定位四个 MLAS 归档 `libonnxruntime_mlas.a`、`libkleidiai.a`、`libonnxruntime_common.a`、`libcpuinfo.a`；缺任一归档即拒绝链接 |
 | `ANNC_GEMM_ASM_SOURCE_DIR` | 目录路径 | 构建期 `-DANNC_GEMM_ASM_SOURCE_DIR` | GEMM-ASM checkout 根目录（须含 `Sve/`、`Neon/`）；`annc` 在存在 `model_generated_kernels/*.S` 时用它汇编微内核，未配置且未编译期指定则报错退出 |
