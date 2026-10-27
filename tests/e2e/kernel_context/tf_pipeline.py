@@ -42,6 +42,7 @@ def run_pipeline(spec, make_graph, case, tmp_path):
     ).resolve()
     _require(addon.is_file(), f"TensorFlow addon is not built: {addon}")
     env = os.environ.copy()
+    env.update(spec.get("env", {}))
     if spec["abi"] == "mlir_ciface":
         config = env.get("ANNC_GEMM_CONFIG")
         _require(
@@ -136,8 +137,11 @@ def run_pipeline(spec, make_graph, case, tmp_path):
         gemm = "--annc-aarch64-gemm-pipeline"
         if config:
             gemm += f"=config-path={config}"
+        fast_codegen = "--atir-fast-codegen"
+        if spec.get("fast_codegen"):
+            fast_codegen += f'={spec["fast_codegen"]}'
         _run(
-            [tools["annc-asm"], aot, "--atir-fast-codegen", gemm, "-o", lowered],
+            [tools["annc-asm"], aot, fast_codegen, gemm, "-o", lowered],
             env,
             tmp_path / "asm.log",
         )

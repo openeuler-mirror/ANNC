@@ -11,7 +11,6 @@
 
 #include "Context/KernelContextUtils.h"
 #include "Kernel/KernelRegistry.h"
-#include "Kernel/MemRefTypes.h"
 
 #if ANNC_TEST_ENABLE_KDNN
 #include "annc/lib/Kernel/builtin_kernels/kdnn_adaptor/KDNNTensorInfoAdaptor.h"
@@ -33,44 +32,6 @@ Fn loadKernelApi(const char* symbol) {
   }
   return reinterpret_cast<Fn>(address);
 }
-
-AnncMemRef2DF32 makeMemRef2D(float* data, int64_t dim0, int64_t dim1) {
-    AnncMemRef2DF32 memref{};
-    memref.allocated = data;
-    memref.aligned = data;
-    memref.offset = 0;
-    memref.sizes[0] = dim0;
-    memref.sizes[1] = dim1;
-    memref.strides[0] = dim1;
-    memref.strides[1] = 1;
-    return memref;
-}
-
-std::array<float, 4> runLegacyMatMulKernel(const std::string& backend) {
-    float lhsData[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-    float rhsData[6] = {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
-    float outputData[9] = {0.0f};
-
-    AnncMemRef2DF32 lhs = makeMemRef2D(lhsData, 2, 3);
-    AnncMemRef2DF32 rhs = makeMemRef2D(rhsData, 3, 2);
-    AnncMemRef2DF32 output = makeMemRef2D(outputData, 2, 2);
-
-    auto symbolOpt = KernelRegistry::instance().lookupKernelSymbol(
-        KernelQuery{"MatMul", backend, {{"T", "float"}}});
-    if (!symbolOpt.has_value()) {
-        throw std::runtime_error("MatMul kernel was not registered for backend: " + backend);
-    }
-
-    auto kernel = loadKernelApi<std::int32_t (*)(
-        AnncMemRef2DF32*, AnncMemRef2DF32*, AnncMemRef2DF32*)>(
-            symbolOpt->c_str());
-    if (kernel(&output, &lhs, &rhs) != 0) {
-        throw std::runtime_error("MatMul kernel returned failure status");
-    }
-
-    return {outputData[0], outputData[1], outputData[2], outputData[3]};
-}
-
 
 AnncTensorView makeView(float* data, const int64_t* dims,
                         const int64_t* strides) {
@@ -111,7 +72,6 @@ struct TestServices {
 };
 
 std::array<float, 4> runMatMulKernel(const std::string& backend) {
-  if (backend == "kdnn") return runLegacyMatMulKernel(backend);
   float lhsData[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   float rhsData[6] = {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
   float outputData[9] = {0.0f};
@@ -208,7 +168,7 @@ TEST(BuiltinSharedSpecTest, Aarch64MatMulWrapperRuns) {
 #if ANNC_TEST_ENABLE_KDNN
 TEST(BuiltinSharedSpecTest, RegistryExposesMatMulKdnn) {
   auto symbolOpt = KernelRegistry::instance().lookupKernelSymbol(
-      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}});
+      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}, "annc_context_v3"});
 
   EXPECT_TRUE(symbolOpt.has_value());
 }
@@ -242,14 +202,14 @@ TEST(BuiltinSharedSpecTest, MatMulHasBothBackends) {
   EXPECT_TRUE(KernelRegistry::instance().hasKernel(
       KernelQuery{"MatMul", "aarch64", {{"T", "float"}}, "annc_context_v3"}));
   EXPECT_TRUE(KernelRegistry::instance().hasKernel(
-      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}}));
+      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}, "annc_context_v3"}));
 }
 
 TEST(BuiltinSharedSpecTest, MatMulSymbolsDifferBetweenBackends) {
   auto aarch64Sym = KernelRegistry::instance().lookupKernelSymbol(
       KernelQuery{"MatMul", "aarch64", {{"T", "float"}}, "annc_context_v3"});
   auto kdnnSym = KernelRegistry::instance().lookupKernelSymbol(
-      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}});
+      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}, "annc_context_v3"});
 
   ASSERT_TRUE(aarch64Sym.has_value());
   ASSERT_TRUE(kdnnSym.has_value());

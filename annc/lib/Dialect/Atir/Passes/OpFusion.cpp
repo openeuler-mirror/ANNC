@@ -1475,117 +1475,28 @@ struct FuseKdnnMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                                    : StringRef("MatMul");
     if (!customOpFilter.isEnabled(formOpType)) return failure();
 
-    // Site-level availability probe (kdnn registers f32 kernels only); opt
-    // runs before asm so the annc.enable_kdnn module attribute is not set.
-    CustomOpSchema schema = CustomOpSchema::get(formOpType)
-                                .TypeVar("T")
-                                .MemRefArg("lhs", 2, "T")
-                                .MemRefArg("rhs", 2, "T");
-    if (addOp) schema.MemRefArg("bias", 1, "T");
-    schema.Result(reluOp  ? StringRef("relu")
-                  : addOp ? StringRef("add")
-                          : StringRef("output"),
-                  2, "T");
-    SmallVector<Type> schemaInputTypes = {matmulOp.getLhs().getType(),
-                                          matmulOp.getRhs().getType()};
-    if (addOp) schemaInputTypes.push_back(bias.getType());
-    auto typeConstraints = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
-        TypeRange{terminal->getResult(0).getType()});
-    if (!typeConstraints) {
-      llvm::consumeError(typeConstraints.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = formOpType;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*typeConstraints);
-    if (!annc::kernels::hasAnyAvailableKernel(request, /*enableKdnn=*/true))
-      return failure();
-
     StringRef pattern = reluOp  ? StringRef("matmul_add_relu")
                         : addOp ? StringRef("matmul_add")
                                 : StringRef("matmul");
-    std::string matmulName = getTfName(matmulOp);
-    std::string outputName =
-        addOp ? getFusionOutputName(terminal->getResult(0)) : matmulName;
-    if (outputName.empty()) outputName = getTfName(terminal);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableMatMulFusionKernelName(matmulOp, pattern));
-    std::string clusterName =
-        uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
-
-    // Fixed (weight-like) vs dynamic (batch-carrying) args follow the JIT
-    // matmul sites. The v2 host passes inputs positionally after the
-    // execution pointer and resolves dynamic output dims from the input at
-    // index num_fixed, so the kernel signature and the metadata args share
-    // the fixed-first order.
     Type outputType = terminal->getResult(0).getType();
     bool lhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
     bool rhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getRhs().getType(), outputType);
-    if (lhsIsDynamic == rhsIsDynamic) {
-      lhsIsDynamic = true;
-      rhsIsDynamic = false;
+    if (lhsIsDynamic == rhsIsDynamic) lhsIsDynamic = true;
+    // Context slots follow the schema. Transport fixed/dynamic ordering is
+    // handled separately by the framework adapter.
+    SmallVector<Value> inputs = {matmulOp.getLhs(), matmulOp.getRhs()};
+    SmallVector<StringRef> roles = {lhsIsDynamic ? "dynamic" : "fixed",
+                                   lhsIsDynamic ? "fixed" : "dynamic"};
+    if (addOp) {
+      inputs.push_back(bias);
+      roles.push_back("fixed");
     }
-    Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
-    Value dynamicInput = lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
-    SmallVector<Value> boundaryInputs = {fixedInput};
-    if (addOp) boundaryInputs.push_back(bias);
-    boundaryInputs.push_back(dynamicInput);
-    SmallVector<Value> boundaryOutputs = {terminal->getResult(0)};
-
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs, boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern", rewriter.getStringAttr(pattern));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back(
-        {"fixed", getValueName(fixedInput), fixedInput.getType()});
-    if (addOp)
-      argSpecs.push_back({"fixed", getValueName(bias), bias.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(dynamicInput), dynamicInput.getType()});
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr("fusion.pattern",
-                                             rewriter.getStringAttr(pattern)));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(
-        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back({"output", outputName, outputType});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(
-        rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "member_node_names",
-        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    // The v2 ABI needs an execution context that only exists at the host
-    // boundary, so the main-graph region stays as the fallback and is only
-    // marked to keep other patterns from building a site on it.
-    for (Operation *op : fusedOps) {
-      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    }
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, matmulOp, formOpType, pattern, inputs,
+        {terminal->getResult(0)}, fusedOps, kAotExecutionMode,
+        /*numBuckets=*/0, roles, /*enableKdnn=*/true);
   }
 
  private:
