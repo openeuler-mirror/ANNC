@@ -7,6 +7,7 @@
 #include "ConfigFusionSupport.h"
 #include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/CustomOpSchema.h"
+#include "Dialect/Atir/Passes/Patterns/CustomPatterns/KPFusedGatherMatch.h"
 #include "FusionMetadata/FusionMetadata.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -1191,6 +1192,29 @@ func::FuncOp materializePattern(
 
   std::optional<CustomOpSchema> contextSchema;
   if (rule.abi == "annc_context_v3") {
+    // Bind semantic slots from the matcher, independently of DSL alias names
+    // and declaration order. The exact boundary must be forwarded to the
+    // builtin unchanged after outlining.
+    for (Operation *op : orderedOps) {
+      auto gather = dyn_cast<GatherOp>(op);
+      if (!gather) continue;
+      auto match = matchKPFusedGather(gather);
+      if (failed(match)) continue;
+      SmallVector<Value> canonicalInputs = {match->data, match->keys,
+                                            match->begin};
+      if (!std::is_permutation(inputValues.begin(), inputValues.end(),
+                               canonicalInputs.begin(),
+                               canonicalInputs.end()) ||
+          !std::is_permutation(outputValues.begin(), outputValues.end(),
+                               match->boundaryOutputs.begin(),
+                               match->boundaryOutputs.end()))
+        continue;
+      contextSchema = getContextKernelSchema("KPFusedGather");
+      inputValues.assign(canonicalInputs.begin(), canonicalInputs.end());
+      outputValues.assign(match->boundaryOutputs.begin(),
+                          match->boundaryOutputs.end());
+      break;
+    }
     // Stitch's variable arity is transported as N before metadata is exported;
     // FastCodegen later verifies the cloned graph and its positional boundary.
     if (!contextSchema && rule.pattern == "kp_sparse_dynamic_stitch") {

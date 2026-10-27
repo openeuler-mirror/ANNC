@@ -620,45 +620,6 @@ static func::FuncOp createExecutionV2KernelFunc(
   return func;
 }
 
-static func::FuncOp createDnnEmbeddingHashBucketKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type dynamicInputType, Type weightType, Type outputType, int64_t numBuckets,
-    ArrayRef<Operation *> kernelOps, Value dynamicInput, Value embeddingWeight,
-    Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {dynamicInputType, weightType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("dnn_embedding_hash_bucket"));
-  func->setAttr("fusion.num_buckets", rewriter.getI64IntegerAttr(numBuckets));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(dynamicInput, entry->getArgument(0));
-  mapper.map(embeddingWeight, entry->getArgument(1));
-  mapper.map(outputBuffer, entry->getArgument(2));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
-}
-
 static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
                                      StringRef kernelName, MatMulOp matmulOp) {
   if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
@@ -1482,70 +1443,20 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
     ModuleOp module = expandDims->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string kernelBase =
-        getStableFusionKernelName(match.prefix, "dnn_embedding_hash_bucket");
-    std::string kernelName = uniquifySymbolName(module, kernelBase);
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(match.prefix + "/rec_embed_kp_dnn_bucket"));
-
-    auto kernelFunc = createDnnEmbeddingHashBucketKernelFunc(
-        module, rewriter, kernelName, match.dynamicInput.getType(),
-        match.embeddingWeight.getType(), match.outputBuffer.getType(),
-        match.hashBucket.getNumBuckets(), match.kernelOps, match.dynamicInput,
-        match.embeddingWeight, match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("dnn_embedding_hash_bucket")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"fixed", getValueName(match.embeddingWeight),
-                        match.embeddingWeight.getType()});
-    argSpecs.push_back({"dynamic", getValueName(match.dynamicInput),
-                        match.dynamicInput.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back({"output", getTfName(match.finalReshape),
-                           match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(
-        rewriter.getNamedAttr("abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {1, 0, 2})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:0|S:1;?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(match.finalReshape);
-    rewriter.create<func::CallOp>(
-        match.finalReshape.getLoc(), kernelFunc,
-        ValueRange{match.dynamicInput, match.embeddingWeight,
-                   match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(match.finalReshape.getResult(),
-                                match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.candidateOps, outputBufferDef);
-    return success();
+    if (expandDims->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, expandDims, "KPFusedDnnEmbeddingWithHashBucket",
+        "dnn_embedding_hash_bucket",
+        {match.dynamicInput, match.embeddingWeight},
+        {match.finalReshape.getResult()}, match.kernelOps, kAotExecutionMode,
+        match.hashBucket.getNumBuckets(), {"dynamic", "fixed"});
   }
 };
 
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-// Outlines a GEMM chain as an AOT kdnn site on the annc_execution_v2 ABI
+// Outlines a GEMM chain as an AOT kdnn site on the annc_context_v3 ABI
 // (one calling convention for the TF and ONNX hosts; the kernel takes its
-// thread pool from the execution context). Only active at ANNC_GEMM=1.
+// thread pool from the kernel context). Only active at ANNC_GEMM=1.
 // Epilogue (2), Prepack (3), and All (99) use the native GEMM path; All
 // combines epilogue fusion and prepacking without enabling this AOT pattern.
 // Greedy prefix truncation from
