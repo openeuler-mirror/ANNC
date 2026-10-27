@@ -106,7 +106,7 @@ set_tests_properties(AnncEpFusionToggles PROPERTIES
 if(TARGET annc-onnx-pipeline)
   add_test(NAME AnncEpFtdmmContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/ftdmm_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/ftdmm_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -137,7 +137,7 @@ if(TARGET annc-onnx-pipeline)
   # batched_matmul_add: all three arguments are rank-3 f32 (name binding).
   add_test(NAME AnncEpBatchedMatMulAddContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/batched_matmul_add_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/batched_matmul_add_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -148,7 +148,7 @@ if(TARGET annc-onnx-pipeline)
     add_test(NAME AnncEpBatchedMatMulAddPackedContextE2e
       COMMAND ${CMAKE_COMMAND} -E env ANNC_EP_PACKED_B=1 ANNC_EP_DEBUG=1
         ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/batched_matmul_add_context_e2e.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/batched_matmul_add_context_e2e.py
         --packed-b-regression
         --ep-library $<TARGET_FILE:annc_ep>
         --pipeline $<TARGET_FILE:annc-onnx-pipeline>

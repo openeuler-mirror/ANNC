@@ -23,7 +23,11 @@ from onnx import numpy_helper
 import onnxruntime as ort
 import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
 
-MODEL = Path(__file__).parent / "fixtures" / "ftdmm_aot_e2e.onnx"
+MODEL = (
+    Path(__file__).resolve().parents[2]
+    / "integration/ort_ep/fixtures"
+    / "ftdmm_aot_e2e.onnx"
+)
 INPUT = "t558_0"
 
 
@@ -36,11 +40,11 @@ def make_wide_model(path, n=16):
     for index, initializer in enumerate(graph.initializer):
         if initializer.name == "w_136":
             values = (np.arange(8 * n, dtype=np.float32).reshape(8, n) - 64) / 37
-            graph.initializer[index].CopyFrom(
-                numpy_helper.from_array(values, "w_136"))
+            graph.initializer[index].CopyFrom(numpy_helper.from_array(values, "w_136"))
         elif initializer.name == "w_154":
             graph.initializer[index].CopyFrom(
-                numpy_helper.from_array(np.array([n], dtype=np.int32), "w_154"))
+                numpy_helper.from_array(np.array([n], dtype=np.int32), "w_154")
+            )
     graph.output[0].type.tensor_type.shape.dim[2].dim_value = n
     onnx.checker.check_model(model)
     onnx.save(model, path)
@@ -52,20 +56,26 @@ def run_case(model_path, input_name, x, cache_dir, expected_weight_shape):
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
     reference = ort.InferenceSession(
-        str(model_path), options,
-        providers=["CPUExecutionProvider"]).run(None, {input_name: x})[0]
+        str(model_path), options, providers=["CPUExecutionProvider"]
+    ).run(None, {input_name: x})[0]
 
     for attempt in range(2):
         session = ort.InferenceSession(
-            str(model_path), options,
-            providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+            str(model_path),
+            options,
+            providers=["AnncExecutionProvider", "CPUExecutionProvider"],
+        )
         actual = session.run(None, {input_name: x})[0]
-        np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7,
-                                   equal_nan=True)
+        np.testing.assert_allclose(
+            actual, reference, rtol=1e-3, atol=1e-7, equal_nan=True
+        )
         print(f"{Path(model_path).stem} session {attempt + 1}: numeric match")
 
-    entries = [p for p in Path(cache_dir).glob("v1/*/*")
-               if p.is_dir() and (p / "DONE").is_file()]
+    entries = [
+        p
+        for p in Path(cache_dir).glob("v1/*/*")
+        if p.is_dir() and (p / "DONE").is_file()
+    ]
     assert len(entries) == 1, entries
     report = json.loads((entries[0] / "sites.json").read_text())
     sites = report["sites"]
@@ -98,42 +108,58 @@ def merge_kernel_libs(work, lib_dirs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-library", required=True)
-    parser.add_argument("--pipeline", required=True,
-                        help="annc-onnx-pipeline built from this tree")
-    parser.add_argument("--kernel-lib-dir", required=True,
-                        help="directory holding libANNCBuiltinKernels.a")
-    parser.add_argument("--llvm-lib-dir",
-                        help="directory holding the LLVM support archives")
-    parser.add_argument("--extra-lib-dir", action="append", default=[],
-                        help="further archive directories the driver links "
-                             "against (ANNCGemmSupport, GEMM microkernels)")
+    parser.add_argument(
+        "--pipeline", required=True, help="annc-onnx-pipeline built from this tree"
+    )
+    parser.add_argument(
+        "--kernel-lib-dir",
+        required=True,
+        help="directory holding libANNCBuiltinKernels.a",
+    )
+    parser.add_argument(
+        "--llvm-lib-dir", help="directory holding the LLVM support archives"
+    )
+    parser.add_argument(
+        "--extra-lib-dir",
+        action="append",
+        default=[],
+        help="further archive directories the driver links "
+        "against (ANNCGemmSupport, GEMM microkernels)",
+    )
     parser.add_argument("--work-dir")
     args = parser.parse_args()
 
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ftdmm-context-"))
     (work / "cache").mkdir(parents=True, exist_ok=True)
     merged = merge_kernel_libs(
-        work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir])
-    for required in ("libANNCBuiltinKernels.a", "libLLVMSupport.a",
-                     "libANNCGemmSupport.a"):
+        work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir]
+    )
+    for required in (
+        "libANNCBuiltinKernels.a",
+        "libLLVMSupport.a",
+        "libANNCGemmSupport.a",
+    ):
         assert (merged / required).exists(), (
             f"{required} missing from {merged}; build annc-onnx-pipeline, "
-            "and ANNCGemmSupport")
+            "and ANNCGemmSupport"
+        )
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
-    rtpy.register_execution_provider_library("AnncExecutionProvider",
-                                             args.ep_library)
-    env = dict(os.environ,
-               ANNC_EP_PIPELINE=args.pipeline,
-               ANNC_EP_CACHE_DIR=str(work / "cache"),
-               ANNC_EP_FUSION_TENSORDOT_MATMUL="1",
-               ANNC_KERNEL_LIB_PATH=str(merged))
+    rtpy.register_execution_provider_library("AnncExecutionProvider", args.ep_library)
+    env = dict(
+        os.environ,
+        ANNC_EP_PIPELINE=args.pipeline,
+        ANNC_EP_CACHE_DIR=str(work / "cache"),
+        ANNC_EP_FUSION_TENSORDOT_MATMUL="1",
+        ANNC_KERNEL_LIB_PATH=str(merged),
+    )
     gcc_runtime = Path("/usr/lib/gcc/aarch64-openEuler-linux/12")
     if gcc_runtime.is_dir() and not env.get("LIBRARY_PATH"):
         env["LIBRARY_PATH"] = str(gcc_runtime)
-    os.environ.update({k: v for k, v in env.items()
-                       if k.startswith("ANNC_") or k == "LIBRARY_PATH"})
+    os.environ.update(
+        {k: v for k, v in env.items() if k.startswith("ANNC_") or k == "LIBRARY_PATH"}
+    )
 
     x = np.arange(16, dtype=np.float32).reshape(1, 2, 8) / 7
     run_case(MODEL, INPUT, x, work / "cache", [8, 1])
@@ -149,9 +175,11 @@ def main():
     actual = run_case(wide_model, INPUT, x_wide, wide_work / "cache", [8, 16])
     assert actual.shape == (1, 3, 16), actual.shape
 
-    print("real pipeline produced context-ABI FTDMM sites for [8,1] and "
-          "[8,16] weights; both kernels executed through the ONNX execution "
-          "context (cold compile + warm cache)")
+    print(
+        "real pipeline produced context-ABI FTDMM sites for [8,1] and "
+        "[8,16] weights; both kernels executed through the ONNX execution "
+        "context (cold compile + warm cache)"
+    )
 
 
 if __name__ == "__main__":

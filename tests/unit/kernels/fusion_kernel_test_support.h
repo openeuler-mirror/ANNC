@@ -14,7 +14,6 @@
 #include <gtest/gtest.h>
 
 #include "Context/KernelContextUtils.h"
-#include "Kernel/ExecutionContext.h"
 #include "Kernel/ExecutionContextUtils.h"
 #include "Kernel/MemRefTypes.h"
 
@@ -80,27 +79,7 @@ class OutputBuffers {
 
   static int32_t NumThreads(void*) { return 1; }
 
-  AnncExecutionContext context() {
-    AnncExecutionContext c{};
-    c.struct_size = sizeof(c);
-    c.abi_version = ANNC_EXECUTION_ABI_VERSION;
-    c.handle = reinterpret_cast<AnncExecutionHandle*>(this);
-    c.allocate_output = [](AnncExecutionHandle* handle, uint32_t slot, AnncTensorDesc* desc) {
-      AnncTensorView view{};
-      auto code = Allocate(handle, slot, desc, &view);
-      if (code == ANNC_STATUS_OK) desc->data = view.aligned;
-      return code;
-    };
-    c.allocate_temp = [](AnncExecutionHandle*, AnncTensorDesc*) { return ANNC_STATUS_INVALID_ARGUMENT; };
-    c.report_error = [](AnncExecutionHandle* handle, AnncStatusCode code, const char* msg) {
-      auto* self = reinterpret_cast<OutputBuffers*>(handle);
-      self->last_error_status = code;
-      self->last_error = msg ? msg : "";
-    };
-    return c;
-  }
-
-  AnncKernelContext kernelContext() {
+  AnncKernelContext context() {
     services = {};
     services.struct_size = sizeof(services);
     services.abi_version = ANNC_CONTEXT_ABI_VERSION;

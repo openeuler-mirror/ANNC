@@ -84,7 +84,7 @@ TEST(LayerNormContext, ScalarPathMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
@@ -117,7 +117,7 @@ TEST(LayerNormContext, NeonPathMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   ExpectOutput(outputs.output(),
@@ -143,7 +143,7 @@ TEST(LayerNormContext, SingleColumnMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   ExpectOutput(outputs.output(),
@@ -169,7 +169,7 @@ TEST(LayerNormContext, ZeroRowsAllocatesAnEmptyOutput) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
@@ -198,7 +198,7 @@ TEST(LayerNormContext, RejectsMismatchedGamma) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
@@ -223,7 +223,7 @@ TEST(LayerNormContext, RejectsMismatchedBeta) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
@@ -247,7 +247,7 @@ TEST(LayerNormContext, RejectsZeroColumns) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
@@ -272,7 +272,7 @@ TEST(LayerNormContext, RejectsNonContiguousInput) {
   input.strides[1] = 2;
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
@@ -304,7 +304,7 @@ TEST(LayerNormContext, PropagatesNaN) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(), static_cast<size_t>(cols));
@@ -329,7 +329,7 @@ TEST(LayerNormContext, RejectsNonContiguousGammaAndBeta) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   gammaRef.strides[0] = 2;
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
@@ -361,7 +361,7 @@ TEST(LayerNormContext, RejectsNegativeRows) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
@@ -389,7 +389,7 @@ TEST(LayerNormContext, NeonPathPropagatesNaN) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
@@ -418,7 +418,7 @@ TEST(LayerNormContext, FailsWhenOutputAllocationFails) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   outputs.FailNextAllocation();
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_ALLOCATION_FAILED);
@@ -445,7 +445,7 @@ TEST(LayerNormContext, RejectsNullArguments) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.kernelContext();
+  auto context = outputs.context();
   EXPECT_EQ(Invoke(layerNormImpl, nullptr, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(Invoke(layerNormImpl, &context, {View(nullptr), View(&gammaRef), View(&betaRef), View(&epsRef)}),
