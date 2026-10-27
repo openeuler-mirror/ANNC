@@ -1246,46 +1246,6 @@ static LogicalResult matchKpTargetBehaviorInteraction(
   return success();
 }
 
-static func::FuncOp createKpTargetBehaviorInteractionKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type batchInputType, Type weightType, Type biasType, Type tileInputType,
-    Type outputType, ArrayRef<Operation *> kernelOps, Value batchInput,
-    Value weight, Value bias, Value tileInput, Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {batchInputType, weightType, biasType,
-                                  tileInputType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_target_behavior_interaction"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(batchInput, entry->getArgument(0));
-  mapper.map(weight, entry->getArgument(1));
-  mapper.map(bias, entry->getArgument(2));
-  mapper.map(tileInput, entry->getArgument(3));
-  mapper.map(outputBuffer, entry->getArgument(4));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
-}
-
 // ── KP sparse dynamic stitch (一级) ─────────────────────────────────────────
 //
 // anchor = ParallelDynamicStitch (N 个 indices + N 个 data):
@@ -1954,70 +1914,13 @@ struct FuseKpTargetBehaviorInteractionAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_target_behavior_interaction"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    auto kernelFunc = createKpTargetBehaviorInteractionKernelFunc(
-        module, rewriter, kernelName, match.batchInput.getType(),
-        match.weight.getType(), match.bias.getType(),
-        match.tileInput.getType(), match.outputBuffer.getType(),
-        match.kernelOps, match.batchInput, match.weight, match.bias,
-        match.tileInput, match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern",
-        rewriter.getStringAttr("kp_target_behavior_interaction")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"dynamic", getValueName(match.batchInput),
-                        match.batchInput.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.weight), match.weight.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.bias), match.bias.getType()});
-    argSpecs.push_back({"dynamic", getValueName(match.tileInput),
-                        match.tileInput.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order",
-        makeI64Array(rewriter.getContext(), {0, 1, 2, 3, 4})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:2|S:2;?,?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    rewriter.create<func::CallOp>(
-        anchor.getLoc(), kernelFunc,
-        ValueRange{match.batchInput, match.weight, match.bias,
-                   match.tileInput, match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedTargetBehaviorInteraction",
+        "kp_target_behavior_interaction",
+        {match.batchInput, match.weight, match.bias, match.tileInput},
+        {anchor.getResult()}, match.kernelOps, kAotExecutionMode, 0,
+        {"dynamic", "fixed", "fixed", "dynamic"});
   }
 };
 
@@ -2200,19 +2103,6 @@ static std::string getKpSparseSegmentReduceOpName(int64_t combiner,
   return name;
 }
 
-static CustomOpSchema getKpSparseSegmentReduceSchema(StringRef opName) {
-  return CustomOpSchema::get(opName)
-      .TypeVar("T")
-      .TypeVar("Tidx")
-      .MemRefArg("keys", 2, "")
-      .MemRefArg("begin", 1, "")
-      .MemRefArg("data", 2, "T")
-      .MemRefArg("indices", 1, "Tidx")
-      .MemRefArg("begin_1", 1, "")
-      .Result("output", 2, "T")
-      .Result("slice_output", 0, "");
-}
-
 struct FuseKpSparseSegmentReduceAsFuncCallPattern
     : public OpRewritePattern<StridedSliceOp> {
   using OpRewritePattern<StridedSliceOp>::OpRewritePattern;
@@ -2239,81 +2129,13 @@ struct FuseKpSparseSegmentReduceAsFuncCallPattern
 
     std::string customOpName =
         getKpSparseSegmentReduceOpName(match.combiner, match.indices.getType());
-    auto schema = getKpSparseSegmentReduceSchema(customOpName);
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = customOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_sparse_segment_reduce"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_segment_reduce"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_segment_reduce")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output", outputName(match.ssResult, "ss_mean:0"),
-                       match.ssResult.getType()});
-    outputs.push_back({"output", outputName(match.sliceResult, "slice_out:0"),
-                       match.sliceResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(module, rewriter, anchor, customOpName,
+                                 "kp_sparse_segment_reduce", boundaryInputs,
+                                 boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 
-
-// ── KP embedding padding (一级, Execution V2) ────────────────────────────────
+// ── KP embedding padding (一级, Context V3) ────────────────────────────────
 //
 // 公共链: Cast(origin_shape) ─► StridedSlice ─► Sub ─► Pack ─► Fill ─►
 //         ConcatV2(data, fill) ─► Reshape
@@ -2321,7 +2143,7 @@ struct FuseKpSparseSegmentReduceAsFuncCallPattern
 //             (padding_rows) + anchor 结果 (padded data 2D f32)
 // PaddingFast: anchor = StridedSlice(shrink=1) ← Shape ← Reshape, 2 输出:
 //             sub 标量 (padding_rows) + anchor 标量 (reshape_rows)
-// reshape_rows 值依赖 (origin_shape[0] - input_rows) —— V2 原生解决。
+// reshape_rows 值依赖 (origin_shape[0] - input_rows) —— context 原生解决。
 // 移植补查 (812 未查): Fill value=0、ConcatV2 axis=0、ss begin/end/strides。
 
 struct KpEmbeddingPaddingMatch {

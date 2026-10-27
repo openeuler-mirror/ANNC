@@ -148,7 +148,7 @@
       "name": "kp_sparse_segment_mean",
       "pattern": "kp_sparse_segment_reduce",
       "kernel": "fused_kp_sparse_segment_reduce",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 150,
       "graph": [
         "segment_ids = StridedSlice(keys, begin)",
@@ -174,7 +174,7 @@
       "name": "kp_sparse_segment_sum",
       "pattern": "kp_sparse_segment_reduce",
       "kernel": "fused_kp_sparse_segment_reduce",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 150,
       "graph": [
         "segment_ids = StridedSlice(keys, begin)",
@@ -226,8 +226,7 @@
     {
       "name": "kp_target_behavior_interaction",
       "kernel": "fused_kp_target_behavior_interaction",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 130,
       "graph": [
         "batch_matmul = BatchMatMul(batch_input, weight)",

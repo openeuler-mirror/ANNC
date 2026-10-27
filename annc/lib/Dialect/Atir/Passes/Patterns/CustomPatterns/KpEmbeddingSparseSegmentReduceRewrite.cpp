@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,12 +12,12 @@ using namespace atir;
 namespace {
 
 // Fusion pattern for the KP-style sparse segment reduce (second level,
-// Execution V2).  The first level (OpFusion's
+// Context V3).  The first level (OpFusion's
 // FuseKpSparseSegmentReduceAsFuncCallPattern) extracts the subgraph into a
 // private kernel func with signature
-//   (!llvm.ptr, keys, begin, data, indices, begin_1)
+//   (keys, begin, data, indices, begin_1)
 //       -> (output f32[batch,E], slice_output i32)
-// and fusion.metadata abi = "annc_execution_v2".  This pattern rewrites the
+// and fusion.metadata abi = "annc_context_v3".  This pattern rewrites the
 // func body into a single atir.CustomizeOp calling the hand-written
 // KPFusedSparseSegmentReduce<Idx><Sum|Mean> kernel; the two schema .Result()
 // entries map to execution slots 0/1 allocated inside the kernel.
@@ -42,25 +43,24 @@ struct KpEmbeddingSparseSegmentReduceRewrite
   mlir::LogicalResult matchFusion(
       StridedSliceOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
-    // Only rewrite inside the V2 kernel func extracted by the first-level
+    // Only rewrite inside the context kernel func extracted by the first-level
     // pattern: private func with annc.kernel, argument 0 = !llvm.ptr,
     // 5 memref inputs, 2 results.
     auto func = anchor->template getParentOfType<func::FuncOp>();
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if (func.getNumArguments() != 6 ||
-        !isa<LLVM::LLVMPointerType>(func.getArgument(0).getType())) {
+    if (func.getNumArguments() != 5) {
       return failure();
     }
     if (func.getFunctionType().getResults().size() != 2) {
       return failure();
     }
-    Value keysArg = func.getArgument(1);
-    Value beginArg = func.getArgument(2);
-    Value dataArg = func.getArgument(3);
-    Value indicesArg = func.getArgument(4);
-    Value begin1Arg = func.getArgument(5);
+    Value keysArg = func.getArgument(0);
+    Value beginArg = func.getArgument(1);
+    Value dataArg = func.getArgument(2);
+    Value indicesArg = func.getArgument(3);
+    Value begin1Arg = func.getArgument(4);
 
     // anchor: shrink=1, begin constant 1-D with 1 element.
     if (anchor.getShrinkAxisMask() != 1) {
@@ -152,13 +152,14 @@ struct KpEmbeddingSparseSegmentReduceRewrite
     if (!kType || !kType.getElementType().isInteger(64) ||
         kType.getShape().size() != 2)
       return failure();
-    if (!iType || !(iType.getElementType().isInteger(32) ||
-                    iType.getElementType().isInteger(64)) ||
+    if (!iType ||
+        !(iType.getElementType().isInteger(32) ||
+          iType.getElementType().isInteger(64)) ||
         iType.getShape().size() != 1)
       return failure();
 
     // Escape contract: intermediates may not escape; the two fused outputs
-    // are consumed only by the enclosing func return (V2 result contract).
+    // are consumed only by the enclosing func return (context result contract).
     // keysSs result may feed ssOp directly or through a Cast wrapper.
     for (Operation *user : keysSs.getResult().getUsers()) {
       if (user == ssOp) continue;
@@ -190,7 +191,7 @@ struct KpEmbeddingSparseSegmentReduceRewrite
       return failure();
     }
 
-    // V2 result contract: fused outputs may be used by fused ops and the
+    // context result contract: fused outputs may be used by fused ops and the
     // enclosing func return only; external non-return users are illegal.
     Value ssResult = ssOp->getResult(0);
     Value sliceResult = anchor.getResult();
@@ -216,7 +217,7 @@ struct KpEmbeddingSparseSegmentReduceRewrite
     auto shape = anchor.getInput().getDefiningOp<ShapeOp>();
     bool isMean =
         shape && shape.getInput().getDefiningOp<SparseSegmentMeanOp>();
-    auto iType = dyn_cast<atir::TensorType>(func.getArgument(4).getType());
+    auto iType = dyn_cast<atir::TensorType>(func.getArgument(3).getType());
     std::string name = "KPFusedSparseSegmentReduce";
     name += (iType && iType.getElementType().isInteger(64)) ? "I64" : "I32";
     name += isMean ? "Mean" : "Sum";
@@ -226,44 +227,18 @@ struct KpEmbeddingSparseSegmentReduceRewrite
   CustomOpSchema getCustomOpSchema(
       StridedSliceOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    auto func = anchor->template getParentOfType<func::FuncOp>();
-    Value keysArg = func.getArgument(1);
-    Value beginArg = func.getArgument(2);
-    Value dataArg = func.getArgument(3);
-    Value indicesArg = func.getArgument(4);
-    Value begin1Arg = func.getArgument(5);
-    auto getRank = [](Type type) -> int64_t {
-      if (auto tensorType = dyn_cast<atir::TensorType>(type))
-        return static_cast<int64_t>(tensorType.getShape().size());
-      return 0;
-    };
-    // MemRef arg order matches getOrderedBoundaryInputs and the kernel
-    // wrapper: keys, begin, data, indices, begin_1.  Tidx binds the indices
-    // element type and matches the kernel's TypeConstraint.  Results map to
-    // execution slots 0 (output) and 1 (slice_output).
-    CustomOpSchema schema =
-        CustomOpSchema::get(getCustomOpName(anchor, fusedOps))
-            .TypeVar("T")
-            .TypeVar("Tidx");
-    schema.MemRefArg("keys", getRank(keysArg.getType()), "");
-    schema.MemRefArg("begin", getRank(beginArg.getType()), "");
-    schema.MemRefArg("data", getRank(dataArg.getType()), "T");
-    schema.MemRefArg("indices", getRank(indicesArg.getType()), "Tidx");
-    schema.MemRefArg("begin_1", getRank(begin1Arg.getType()), "");
-    schema.Result("output", 2, "T");
-    schema.Result("slice_output", 0, "");
-    return schema;
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
   void getOrderedBoundaryInputs(
       StridedSliceOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    inputs.push_back(func.getArgument(1));  // keys
-    inputs.push_back(func.getArgument(2));  // begin
-    inputs.push_back(func.getArgument(3));  // data
-    inputs.push_back(func.getArgument(4));  // indices
-    inputs.push_back(func.getArgument(5));  // begin_1
+    inputs.push_back(func.getArgument(0));  // keys
+    inputs.push_back(func.getArgument(1));  // begin
+    inputs.push_back(func.getArgument(2));  // data
+    inputs.push_back(func.getArgument(3));  // indices
+    inputs.push_back(func.getArgument(4));  // begin_1
   }
 
  private:

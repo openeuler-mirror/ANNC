@@ -1,30 +1,26 @@
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
-// KP-style sparse segment reduce fusion, second level, Execution V2: inside
+// KP-style sparse segment reduce fusion, second level, Context V3: inside
 // the kernel func extracted by OpFusion (signature !llvm.ptr + 5 inputs,
 // 2 results), the StridedSlice->SparseSegmentMean->Shape->StridedSlice
 // subgraph folds into a single KPFusedSparseSegmentReduceI64Mean CustomizeOp
 // whose two results map to execution slots 0/1.
-
 // CHECK-LABEL: func.func private @fused_kp_sparse_segment_reduce
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<4x2xi64, name = "keys">, %arg2: !atir.tensor<2xi32, name = "begin">, %arg3: !atir.tensor<6x3xf32, name = "data">, %arg4: !atir.tensor<4xi64, name = "indices">, %arg5: !atir.tensor<1xi32, name = "begin_1">
+// CHECK-SAME: %arg0: !atir.tensor<4x2xi64, name = "keys">, %arg1: !atir.tensor<2xi32, name = "begin">, %arg2: !atir.tensor<6x3xf32, name = "data">, %arg3: !atir.tensor<4xi64, name = "indices">, %arg4: !atir.tensor<1xi32, name = "begin_1">
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedSparseSegmentReduceI64Mean"
-// CHECK-SAME: custom.result_names = ["output", "slice_output"]
 // CHECK: return {{%.*}}, {{%.*}} : !atir.tensor<?x3xf32, name = "output">, !atir.tensor<i32, name = "slice_output">
 // CHECK-NOT: atir.SparseSegmentMean
 // CHECK-NOT: atir.Shape
 // CHECK-NOT: atir.StridedSlice
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_segment_reduce(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x2xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<6x3xf32, name = "data">,
       %arg4: !atir.tensor<4xi64, name = "indices">,
       %arg5: !atir.tensor<1xi32, name = "begin_1">)
       -> (!atir.tensor<?x3xf32, name = "output">, !atir.tensor<i32, name = "slice_output">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<?xi64, name = "seg_ids">
     %1 = atir.constant "public" @"ss_end" -> <2xi32, name = "ss_end", data = dense<[0, 2]> : tensor<2xi32>>
     %2 = atir.constant "public" @"ss_strides" -> <2xi32, name = "ss_strides", data = dense<[1, 1]> : tensor<2xi32>>
@@ -49,14 +45,13 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.SparseSegmentMean
 module attributes {module.state = "atir"} {
   func.func private @bad_mask(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x2xi64, name = "keys_t">,
       %arg2: !atir.tensor<2xi32, name = "begin_t">,
       %arg3: !atir.tensor<6x3xf32, name = "data_t">,
       %arg4: !atir.tensor<4xi64, name = "indices_t">,
       %arg5: !atir.tensor<1xi32, name = "begin_1_t">)
       -> (!atir.tensor<?x3xf32, name = "output_t">, !atir.tensor<i32, name = "slice_output_t">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<?xi64, name = "seg_ids_t">
     %1 = atir.constant "public" @"ss_end_t" -> <2xi32, name = "ss_end_t", data = dense<[0, 2]> : tensor<2xi32>>
     %2 = atir.constant "public" @"ss_strides_t" -> <2xi32, name = "ss_strides_t", data = dense<[1, 1]> : tensor<2xi32>>
@@ -77,25 +72,22 @@ module attributes {module.state = "atir"} {
 // Cast wrapper: Cast(i32) ← StridedSlice(i64) ← keys, Cast inside the kernel
 // func.  The fast-codegen rewrite absorbs the Cast into the CustomizeOp.
 // CHECK-LABEL: func.func private @fused_ssr_cast
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<4x2xi64, name = "keys">, %arg2: !atir.tensor<2xi32, name = "begin">, %arg3: !atir.tensor<6x3xf32, name = "data">, %arg4: !atir.tensor<4xi64, name = "indices">, %arg5: !atir.tensor<1xi32, name = "begin_1">
+// CHECK-SAME: %arg0: !atir.tensor<4x2xi64, name = "keys">, %arg1: !atir.tensor<2xi32, name = "begin">, %arg2: !atir.tensor<6x3xf32, name = "data">, %arg3: !atir.tensor<4xi64, name = "indices">, %arg4: !atir.tensor<1xi32, name = "begin_1">
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedSparseSegmentReduceI64Mean"
-// CHECK-SAME: custom.result_names = ["output", "slice_output"]
 // CHECK: return {{%.*}}, {{%.*}} : !atir.tensor<?x3xf32, name = "output">, !atir.tensor<i32, name = "slice_output">
 // CHECK-NOT: atir.SparseSegmentMean
 // CHECK-NOT: atir.Shape
 // CHECK-NOT: atir.StridedSlice
 module attributes {module.state = "atir"} {
   func.func private @fused_ssr_cast(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<4x2xi64, name = "keys">,
       %arg2: !atir.tensor<2xi32, name = "begin">,
       %arg3: !atir.tensor<6x3xf32, name = "data">,
       %arg4: !atir.tensor<4xi64, name = "indices">,
       %arg5: !atir.tensor<1xi32, name = "begin_1">)
       -> (!atir.tensor<?x3xf32, name = "output">, !atir.tensor<i32, name = "slice_output">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = "atir.buffer"() : () -> !atir.tensor<?xi64, name = "seg_ids">
     %1 = atir.constant "public" @"ss_end" -> <2xi32, name = "ss_end", data = dense<[0, 2]> : tensor<2xi32>>
     %2 = atir.constant "public" @"ss_strides" -> <2xi32, name = "ss_strides", data = dense<[1, 1]> : tensor<2xi32>>

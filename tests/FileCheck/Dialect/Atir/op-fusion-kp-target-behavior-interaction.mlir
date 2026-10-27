@@ -2,7 +2,7 @@
 // Config fusion first level for target-behavior interaction: the
 // BatchMatMul->Add->Abs->Add->Mul(0.5) + Tile + Sub + Mul subgraph in main
 // is extracted into a private kernel func with annc.kernel +
-// fusion.metadata while preserving the legacy output-buffer ABI.
+// fusion.metadata while preserving the canonical context input/result ABI.
 
 // CONFIG: func.func private @fused_kp_target_behavior_interaction_
 // CONFIG-SAME: annc.kernel
