@@ -238,8 +238,7 @@
     {
       "name": "kp_embedding_action_id_gather",
       "kernel": "fused_kp_embedding_action_id_gather",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 140,
       "graph": [
         "inner = Gather(params, indices1, axis=0)",
@@ -250,7 +249,7 @@
         "padding = Fill(padding_shape, value=0.0)",
         "output = ConcatV2(reshaped, padding, axis=-1)"
       ],
-      "inputs": ["indices1", "params", "indices2", "pack_dim", "pack"],
+      "inputs": ["params", "indices1", "indices2", "pack_dim", "pack"],
       "outputs": ["output"],
       "where": [
         "inner.batch_dims == 0",

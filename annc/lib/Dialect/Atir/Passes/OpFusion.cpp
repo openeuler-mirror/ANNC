@@ -2219,83 +2219,26 @@ struct FuseKpEmbeddingActionIdGatherAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_embedding_action_id_gather"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    auto kernelFunc = createKpEmbeddingActionIdGatherKernelFunc(
-        module, rewriter, kernelName, match.indices1.getType(),
-        match.params.getType(), match.indices2.getType(),
-        match.packDim.getType(), match.pack.getType(),
-        match.outputBuffer.getType(), match.kernelOps, match.indices1,
-        match.params, match.indices2, match.packDim, match.pack,
-        match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern",
-        rewriter.getStringAttr("kp_embedding_action_id_gather")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.indices1), match.indices1.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.params), match.params.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.indices2), match.indices2.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.packDim), match.packDim.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.pack), match.pack.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order",
-        makeI64Array(rewriter.getContext(), {0, 1, 2, 3, 4, 5})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:1|S:4;?,?,?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    rewriter.create<func::CallOp>(
-        anchor.getLoc(), kernelFunc,
-        ValueRange{match.indices1, match.params, match.indices2,
-                   match.packDim, match.pack, match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, anchor,
+        "KPFusedEmbeddingActionIdGatherR" +
+            std::to_string(getRank(match.indices1.getType())) + "x" +
+            std::to_string(getRank(match.indices2.getType())),
+        "kp_embedding_action_id_gather",
+        {match.params, match.indices1, match.indices2, match.packDim,
+         match.pack},
+        {anchor.getResult()}, match.kernelOps, kAotExecutionMode, 0,
+        {"fixed", "dynamic", "dynamic", "dynamic", "dynamic"});
   }
 };
 
-
-// ── KP sparse segment reduce (一级, Execution V2) ────────────────────────────
+// ── KP sparse segment reduce (一级, Context V3) ────────────────────────────
 //
 // anchor = StridedSlice(shrink=1) ← Shape ← SparseSegmentMean|Sum(
 //     segment_ids = StridedSlice(shrink=2, keys))
 // 2 输出: output f32[batch,E] (batch = max(seg_id)+1 值依赖) + slice_output
-// i32 标量。V2 ABI 原生解决值依赖形状; combiner 与 Tidx 走多名字特化。
+// i32 标量。context ABI 原生解决值依赖形状; combiner 与 Tidx 走多名字特化。
 
 struct KpSparseSegmentReduceMatch {
   Value data;
