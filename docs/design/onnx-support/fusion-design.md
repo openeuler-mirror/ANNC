@@ -387,7 +387,7 @@ flowchart TB
   Q3 -->|否| NONE[不可执行：只停留在 IR，或仅供解释器验证]
 ```
 
-当前通用逐算子 kernel 主要覆盖矩阵家族，Add/Relu 等另有通用 lowering（`ConvertAtirToLinalg`）与 Customize 调用 lowering；其余具名 kernel 多为融合产物级。该 pass 有两条入口：命令行 `--convert-atir-to-linalg`，以及 AArch64 目标流水线 `--annc-aarch64-gemm-pipeline` 的第二道 pass；ONNX 与 TF 的 AOT 链路走的都是后者，融合 kernel 的调用生成（符号解析与状态码调用）也在该 pass 内完成。ONNX 链路只对裁剪后的 AOT 融合函数运行该流水线，未融合算子在裁剪时随主图移除，不会到达该 pass。转置、索引、归约、Softmax 等普通算子的前端负责将语义映射到 ATIR，逐算子 AOT 执行还依赖相应 lowering 与 kernel。ONNX 整图导入提供匹配所需的上下文、来源与边界元数据；ANNC 只编译接管融合区域，未融合节点不进入产物，继续由 ORT CPU 执行（见 §11）。
+当前通用逐算子 kernel 主要覆盖矩阵家族，Add/Relu 等另有通用 lowering（`ConvertAtirToLinalg`）与 Customize 调用 lowering；其余具名 kernel 多为融合产物级。通用 lowering 可通过命令行 `--convert-atir-to-linalg` 或 AArch64 目标流水线 `--annc-aarch64-gemm-pipeline` 执行。ONNX 与 TF 的 AOT 链路使用后者，其中独立的 `--lower-context-kernel-entries` pass 在 ATIR→Linalg 之前完成 v3 融合 kernel 的边界校验、符号解析及状态码调用生成。手工组合 pass 时也必须显式安排这一入口改写步骤。ONNX 链路只对裁剪后的 AOT 融合函数运行该流水线，未融合算子在裁剪时随主图移除，不会到达该 pass。转置、索引、归约、Softmax 等普通算子的前端负责将语义映射到 ATIR，逐算子 AOT 执行还依赖相应 lowering 与 kernel。ONNX 整图导入提供匹配所需的上下文、来源与边界元数据；ANNC 只编译接管融合区域，未融合节点不进入产物，继续由 ORT CPU 执行（见 §11）。
 
 覆盖率低仍可能有收益，例如占节点数约 1% 的区域也可能消除热点上的调度与形状计算。性能评价以实测为准，同时记录整图导入/匹配、首次编译、缓存复用、跨 EP 交接与稳态推理的成本，以及接管区域的时间占比。节点覆盖率描述接管规模，实测耗时用于衡量加速效果；低覆盖场景也须计入首次会话成本。
 

@@ -44,6 +44,9 @@ enum { ANNC_CONTEXT_ABI_VERSION = 3, ANNC_CONTEXT_MAX_RANK = 8 };
 
 // Borrowed metadata and data. Offset and strides are measured in elements.
 // Rank-zero views have no sizes/strides; empty bound views may have null data.
+// LLVM mirror: annc/lib/Conversion/Common/ContextInputOverrides.cpp (viewType).
+// Changes to field types/order or packing/alignment require updating the
+// mirror and its field indices.
 typedef struct {
   void* allocated;
   void* aligned;
@@ -121,7 +124,9 @@ typedef struct {
   ((uint32_t)(offsetof(AnncRuntimeServices, native_thread_pool) + \
               sizeof(((AnncRuntimeServices*)0)->native_thread_pool)))
 
-
+// LLVM mirror: annc/lib/Conversion/Common/ContextInputOverrides.cpp (contextType).
+// Changes to field types/order or packing/alignment require updating the
+// mirror and its field indices.
 typedef struct {
   uint32_t struct_size;
   uint32_t abi_version;

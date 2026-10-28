@@ -37,6 +37,7 @@ namespace annc
                                          StringRef jitInputsPath = {})
     {
         passManager.addPass(createAArch64AtirGemmEpilogueCommit());
+        passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
         passManager.addPass(createAArch64ResolveGemmPlan());

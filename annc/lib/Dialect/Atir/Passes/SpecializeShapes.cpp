@@ -116,6 +116,12 @@ class AtirSpecializeShapesPass
       signalPassFailure();
       return;
     }
+    auto fusionMetadata =
+        function->getAttrOfType<DictionaryAttr>("fusion.metadata");
+    auto abi = fusionMetadata
+                   ? dyn_cast_or_null<StringAttr>(fusionMetadata.get("abi"))
+                   : StringAttr{};
+    const bool isContext = abi && abi.getValue() == "annc_context_v3";
     if (runtimeShapes->size() != function.getNumArguments()) {
       function.emitError() << "runtime shape spec has " << runtimeShapes->size()
                            << " arguments, expected "
@@ -151,7 +157,7 @@ class AtirSpecializeShapesPass
       }
       for (auto [declared, actual] :
            llvm::zip_equal(tensorType.getShape(), runtimeShape.shape)) {
-        if (actual <= 0 ||
+        if (actual < 0 || (!isContext && actual == 0) ||
             (!ShapedType::isDynamic(declared) && declared != actual)) {
           function.emitError() << "argument " << runtimeShape.index
                                << " has incompatible runtime shape";
@@ -169,16 +175,44 @@ class AtirSpecializeShapesPass
 
     function.walk([](ShapeInferIntfc interface) { interface.inferShape(); });
     specializeDestinationBuffers(function);
+    // Result-based context templates have no output-buffer argument. Shape
+    // inference specializes SSA results; keep the function return signature in
+    // sync before FastCodegen consumes that ordered boundary.
+    if (isContext) {
+      auto boundaryReturn =
+          dyn_cast<func::ReturnOp>(function.front().getTerminator());
+      if (!boundaryReturn) {
+        function.emitError("context shape specialization requires a return");
+        signalPassFailure();
+        return;
+      }
+      function.setType(FunctionType::get(
+          function.getContext(), inputTypes, boundaryReturn.getOperandTypes()));
+    }
 
     bool dynamicTypeFound = false;
-    function.walk([&](Operation *operation) {
-      if (llvm::any_of(operation->getOperandTypes(), hasDynamicShape) ||
-          llvm::any_of(operation->getResultTypes(), hasDynamicShape)) {
-        operation->emitError(
-            "runtime specialization left a dynamic ATIR tensor");
+    if (isContext) {
+      // Context entry arguments must be static after specialization. Builtins
+      // such as Unique may still produce data-dependent intermediate and output
+      // shapes. Checking all operation operands would reject their valid
+      // consumers, including return operations.
+      for (auto [index, type] : llvm::enumerate(function.getArgumentTypes())) {
+        if (!hasDynamicShape(type)) continue;
+        function.emitError() << "runtime specialization left a dynamic context "
+                                "input at argument "
+                             << index << ": " << type;
         dynamicTypeFound = true;
       }
-    });
+    } else {
+      function.walk([&](Operation *operation) {
+        if (llvm::any_of(operation->getOperandTypes(), hasDynamicShape) ||
+            llvm::any_of(operation->getResultTypes(), hasDynamicShape)) {
+          operation->emitError(
+              "runtime specialization left a dynamic ATIR tensor");
+          dynamicTypeFound = true;
+        }
+      });
+    }
     if (dynamicTypeFound) signalPassFailure();
   }
 };

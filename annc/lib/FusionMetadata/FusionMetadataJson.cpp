@@ -47,6 +47,8 @@ nlohmann::json fusionInfoToJson(const FusionInfo &info) {
   json["abi"] = info.abi.empty() ? "mlir_ciface" : info.abi;
   json["dynamic_dims"] = info.dynamicDims;
   json["kernel_arg_order"] = info.kernelArgOrder;
+  if (!info.contextI64Attrs.empty())
+    json["context_i64_attrs"] = info.contextI64Attrs;
   json["symbolic_signature"] = info.symbolicSignature;
   json["fallback_function"] = info.fallbackFunction;
   return json;
@@ -107,6 +109,7 @@ llvm::Expected<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
         json.value("member_node_names", std::vector<std::string>{});
     info.dynamicDims = jsonValue<int64_t>(json, "dynamic_dims");
     info.kernelArgOrder = jsonValue<int64_t>(json, "kernel_arg_order");
+    info.contextI64Attrs = jsonValue<int64_t>(json, "context_i64_attrs");
     info.symbolicSignature = json.value("symbolic_signature", "");
     info.fallbackFunction = json.value("fallback_function", "");
   } catch (const std::exception &e) {
@@ -142,9 +145,8 @@ llvm::Error writeFusionMetadataJson(const std::vector<FusionInfo> &infos,
                                     const std::string &path) {
   std::ofstream out(path);
   if (!out.is_open()) {
-    return llvm::createStringError(std::errc::io_error,
-                                   "cannot open output file '%s'",
-                                   path.c_str());
+    return llvm::createStringError(
+        std::errc::io_error, "cannot open output file '%s'", path.c_str());
   }
   out << fusionInfosToJson(infos).dump(2) << "\n";
   return llvm::Error::success();
@@ -154,9 +156,8 @@ llvm::Expected<std::vector<FusionInfo>> readFusionMetadataJson(
     const std::string &path) {
   std::ifstream in(path);
   if (!in.is_open()) {
-    return llvm::createStringError(std::errc::io_error,
-                                   "cannot open metadata JSON '%s'",
-                                   path.c_str());
+    return llvm::createStringError(
+        std::errc::io_error, "cannot open metadata JSON '%s'", path.c_str());
   }
   nlohmann::json json;
   try {

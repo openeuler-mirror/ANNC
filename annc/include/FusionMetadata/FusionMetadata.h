@@ -55,7 +55,7 @@ struct FusionInfo {
   std::string executionMode = "aot";
 
   // Exported kernel symbol. The runtime resolves _mlir_ciface_<kernelName>
-  // from the generated shared library for either supported ABI.
+  // from the generated shared library for each supported ABI.
   std::string kernelName;
 
   // Canonical semantic identity of the fused function. This intentionally
@@ -82,8 +82,8 @@ struct FusionInfo {
   // Pattern-specific, non-generic values such as embedding num_buckets.
   std::map<std::string, std::string> patternAttrs;
 
-  // Runtime calling convention: legacy "mlir_ciface" or context-based
-  // "annc_execution_v2".
+  // Runtime calling convention: legacy "mlir_ciface", the single-pointer
+  // "annc_context_v3", or "annc_execution_v2" for ONNX compatibility kernels.
   std::string abi = "mlir_ciface";
 
   // Output-axis indices whose sizes are resolved from the dynamic input at
@@ -93,6 +93,9 @@ struct FusionInfo {
   // Permutation applied before the C-interface call. Indices address the
   // concatenated memref list [args..., outputs...].
   std::vector<int64_t> kernelArgOrder;
+
+  // Scalar attributes in the shared context schema order (not tensor inputs).
+  std::vector<int64_t> contextI64Attrs;
 
   // Reserved symbolic-shape description. It is currently persisted and copied
   // to ANNCFused for compatibility but is not parsed or consumed by runtime.

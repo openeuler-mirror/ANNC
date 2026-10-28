@@ -163,8 +163,7 @@ bool hasConsumers(const tensorflow::GraphDef &graph,
 
 ANNCFusedNodeBuilder::ANNCFusedNodeBuilder(
     const tensorflow::GraphDef &original, std::string sharedLibPath,
-    std::string atirModulePath,
-    const FusionOutputMap &fusionByOutput)
+    std::string atirModulePath, const FusionOutputMap &fusionByOutput)
     : original(original),
       sharedLibPath(std::move(sharedLibPath)),
       atirModulePath(std::move(atirModulePath)),
@@ -339,8 +338,22 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   fused->set_name(fusion.name);
   fused->set_op("ANNCFused");
   fused->set_device(chooseFusionDevice(original, args, outputs));
-  for (const FusionArg &arg : args) {
-    fused->add_input(rewriteDataInput(arg.tfName));
+
+  // FusionArg order is canonical schema order. Context v3 transports inputs in
+  // the TensorFlow op's constants/fixed/dynamic groups and records the inverse
+  // mapping explicitly; legacy ABIs preserve their historical order.
+  std::vector<size_t> transportIndices;
+  transportIndices.reserve(args.size());
+  if (fusion.abi == "annc_context_v3") {
+    for (llvm::StringRef role : {"constant", "fixed", "dynamic"}) {
+      for (size_t i = 0; i < args.size(); ++i)
+        if (args[i].role == role) transportIndices.push_back(i);
+    }
+  } else {
+    for (size_t i = 0; i < args.size(); ++i) transportIndices.push_back(i);
+  }
+  for (size_t index : transportIndices) {
+    fused->add_input(rewriteDataInput(args[index].tfName));
   }
 
   auto *attrs = fused->mutable_attr();
@@ -360,21 +373,23 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
 
   llvm::SmallVector<tensorflow::DataType> inputTypes;
   inputTypes.reserve(args.size());
-  for (const FusionArg &arg : args) {
+  for (size_t index : transportIndices) {
+    const FusionArg &arg = args[index];
     inputTypes.push_back(fusionInputDType(original, arg.tfName));
   }
 
   llvm::SmallVector<tensorflow::DataType> constantTypes;
   llvm::SmallVector<tensorflow::DataType> fixedTypes;
   llvm::SmallVector<tensorflow::DataType> dynamicTypes;
-  for (size_t i = 0; i < args.size() && i < inputTypes.size(); ++i) {
-    tensorflow::DataType type = fusionDType(args[i].dtype);
+  for (size_t i = 0; i < transportIndices.size(); ++i) {
+    const FusionArg &arg = args[transportIndices[i]];
+    tensorflow::DataType type = fusionDType(arg.dtype);
     if (type == tensorflow::DT_INVALID) type = inputTypes[i];
-    if (args[i].role == "constant") {
+    if (arg.role == "constant") {
       constantTypes.push_back(type);
-    } else if (args[i].role == "fixed") {
+    } else if (arg.role == "fixed") {
       fixedTypes.push_back(type);
-    } else if (args[i].role == "dynamic") {
+    } else if (arg.role == "dynamic") {
       dynamicTypes.push_back(type);
     }
   }
@@ -396,8 +411,19 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
     rankList->add_i(rankOf(output, rank));
   }
   auto *inputRanks = (*attrs)["input_ranks"].mutable_list();
-  for (const FusionArg &arg : args) {
-    inputRanks->add_i(rankOf(arg));
+  for (size_t index : transportIndices) {
+    inputRanks->add_i(rankOf(args[index]));
+  }
+  if (fusion.abi == "annc_context_v3") {
+    auto *contextAttrs = (*attrs)["context_i64_attrs"].mutable_list();
+    for (int64_t value : fusion.contextI64Attrs) contextAttrs->add_i(value);
+    auto *inputOrder = (*attrs)["context_input_order"].mutable_list();
+    for (size_t canonical = 0; canonical < args.size(); ++canonical) {
+      auto it = std::find(transportIndices.begin(), transportIndices.end(),
+                          canonical);
+      inputOrder->add_i(
+          static_cast<int64_t>(std::distance(transportIndices.begin(), it)));
+    }
   }
   auto *outputShapes = (*attrs)["output_shapes"].mutable_list();
   for (const FusionArg &output : outputs) {

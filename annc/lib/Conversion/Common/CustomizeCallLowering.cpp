@@ -2,7 +2,6 @@
 
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Kernel/KernelPriorityResolver.h"
-#include "iostream"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -91,14 +90,29 @@ std::optional<SmallVector<SchemaResult>> readSchemaResults(
   return results;
 }
 
-std::optional<int64_t> readI64AttrArg(DictionaryAttr metadata, StringRef name) {
-  std::string attrName = "custom.attr.";
-  attrName += name.str();
-  auto attr = dyn_cast_or_null<IntegerAttr>(metadata.get(attrName));
-  if (!attr) {
+std::optional<int64_t> readI64AttrAt(DictionaryAttr metadata, size_t index) {
+  auto values = getArrayAttr(metadata, "custom.attr_values");
+  // Legacy producers are removed together with the builtin ABI migration.
+  if (!values) {
+    auto kinds = getArrayAttr(metadata, "custom.arg_kinds");
+    auto names = getArrayAttr(metadata, "custom.arg_names");
+    if (!kinds || !names || kinds->size() != names->size()) return std::nullopt;
+    size_t attributeIndex = 0;
+    for (size_t i = 0; i < kinds->size(); ++i) {
+      auto kind = dyn_cast<StringAttr>((*kinds)[i]);
+      if (!kind || kind.getValue() != "i64_attr") continue;
+      if (attributeIndex++ != index) continue;
+      auto name = dyn_cast<StringAttr>((*names)[i]);
+      if (!name) return std::nullopt;
+      auto attr = dyn_cast_or_null<IntegerAttr>(
+          metadata.get("custom.attr." + name.str()));
+      return attr ? std::optional<int64_t>(attr.getInt()) : std::nullopt;
+    }
     return std::nullopt;
   }
-  return attr.getInt();
+  if (index >= values->size()) return std::nullopt;
+  auto value = dyn_cast<IntegerAttr>((*values)[index]);
+  return value ? std::optional<int64_t>(value.getInt()) : std::nullopt;
 }
 
 std::optional<std::pair<ArrayRef<int64_t>, Type>> getShapeAndElementType(
@@ -208,6 +222,9 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
     op.emitError() << "unsupported fusion ABI '" << abi << "'";
     return;
   }
+
+  // Explicit legacy IR may still request execution-v2. Current TF and ONNX
+  // builtins use the context entry pass and never enter this branch.
   const bool isExecutionV2 = abi == "annc_execution_v2";
 
   auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
@@ -236,9 +253,10 @@ void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
 
   auto operands = adaptor.getOperands();
   size_t operandIndex = 0;
+  size_t attributeIndex = 0;
   for (const SchemaArg &schemaArg : *schemaArgs) {
     if (schemaArg.kind == "i64_attr") {
-      auto value = readI64AttrArg(metadata, schemaArg.name);
+      auto value = readI64AttrAt(metadata, attributeIndex++);
       if (!value) {
         op.emitError() << "CustomizeOp '" << op.getOpType()
                        << "' is missing i64 metadata argument '"

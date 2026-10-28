@@ -72,6 +72,7 @@ add_mlir_library(AArch64Codegen
         MLIRSCFDialect
         AtirDialect
         AtirPasses
+        ContextConversion
 )
 
 if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE AND ANNC_ENABLE_CONSTANT_FOLDING)

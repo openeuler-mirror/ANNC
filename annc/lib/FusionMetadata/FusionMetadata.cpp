@@ -308,6 +308,7 @@ FusionInfo fusionInfoFromMetadataEntries(
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayValue("dynamic_dims");
   info.kernelArgOrder = intArrayValue("kernel_arg_order");
+  info.contextI64Attrs = intArrayValue("context_i64_attrs");
   info.symbolicSignature = stringValue("symbolic_signature");
   info.fallbackFunction = stringValue("fallback_function");
 
@@ -368,15 +369,28 @@ llvm::Error validateFusionInfo(const FusionInfo &info) {
   }
   if (info.args.empty()) return missingFieldError("args");
   if (info.outputs.empty()) return missingFieldError("outputs");
-  if (info.abi != "mlir_ciface" && info.abi != "annc_execution_v2") {
+  if (info.abi != "mlir_ciface" && info.abi != "annc_context_v3" &&
+      info.abi != "annc_execution_v2") {
     return llvm::createStringError(std::errc::invalid_argument,
                                    "unsupported fusion ABI: %s",
                                    info.abi.c_str());
   }
-  if (info.abi == "annc_execution_v2" && !info.kernelArgOrder.empty()) {
-    return llvm::createStringError(
-        std::errc::invalid_argument,
-        "annc_execution_v2 must not persist output argument order");
+  if ((info.abi == "annc_context_v3" || info.abi == "annc_execution_v2") &&
+      !info.kernelArgOrder.empty()) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "%s must not persist output argument order",
+                                   info.abi.c_str());
+  }
+  if (info.abi == "annc_context_v3") {
+    for (const auto *tensors : {&info.args, &info.outputs}) {
+      for (const FusionArg &arg : *tensors) {
+        if (arg.rank > 8 || (arg.dtype != "f32" && arg.dtype != "i32" &&
+                             arg.dtype != "i64" && arg.dtype != "string"))
+          return llvm::createStringError(
+              std::errc::invalid_argument,
+              "context tensor has unsupported rank or dtype");
+      }
+    }
   }
 
   static const std::unordered_set<std::string> inputRoles = {
@@ -462,6 +476,7 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayAttr(metadata, "dynamic_dims");
   info.kernelArgOrder = intArrayAttr(metadata, "kernel_arg_order");
+  info.contextI64Attrs = intArrayAttr(metadata, "context_i64_attrs");
   info.symbolicSignature = stringAttr(metadata, "symbolic_signature");
   info.fallbackFunction = stringAttr(metadata, "fallback_function");
   populatePatternAttrs(info, func);
