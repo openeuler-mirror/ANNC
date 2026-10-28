@@ -1131,8 +1131,14 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         profile_sample.jit_cache_key_us = ElapsedUs(t_jit_cache_key_start);
       }
 
-      const std::string key_summary =
-          annc::jit::CacheKeySummary(cache_key);
+      // 摘要只用于日志，按需生成：默认未开启 profile 的缓存命中路径不付计算成本。
+      std::string key_summary;
+      auto summarize_key = [&key_summary, &cache_key]() -> const std::string& {
+        if (key_summary.empty()) {
+          key_summary = annc::jit::CacheKeySummary(cache_key);
+        }
+        return key_summary;
+      };
       annc::jit::JitCompilationCache& cache = GlobalJitCompilationCache();
       annc::jit::JitCacheLookup lookup = cache.GetOrCompile(cache_key, [&] {
         auto compile_start = Clock::now();
@@ -1146,14 +1152,14 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
             CompileJitKernel(arguments, intra_thread_count);
         if (compiled.ok()) {
           if (profile_enabled) {
-            LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << key_summary
+            LOG(INFO) << "[ANNC-JIT-CACHE] compiled key=" << summarize_key()
                       << " kernel=" << kernel_name_
                       << " compile_ms="
                       << (ElapsedUs(compile_start) / 1000.0);
           }
         } else {
-          LOG(ERROR) << "[ANNC-JIT-CACHE] compile_failed key=" << key_summary
-                     << " kernel=" << kernel_name_
+          LOG(ERROR) << "[ANNC-JIT-CACHE] compile_failed key="
+                     << summarize_key() << " kernel=" << kernel_name_
                      << " compile_ms=" << (ElapsedUs(compile_start) / 1000.0)
                      << " error=" << compiled.error;
         }
@@ -1179,7 +1185,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         if (lookup.event != annc::jit::CacheEvent::kHit) {
           annc::jit::JitCacheStats stats_after = cache.stats();
           LOG(INFO) << "[ANNC-JIT-CACHE] " << CacheEventName(lookup.event)
-                    << " key=" << key_summary << " kernel=" << kernel_name_
+                    << " key=" << summarize_key() << " kernel=" << kernel_name_
                     << " entries=" << stats_after.entries;
           for (const std::string& evicted_key : lookup.evictedKeys) {
             LOG(INFO) << "[ANNC-JIT-CACHE] evicted key="

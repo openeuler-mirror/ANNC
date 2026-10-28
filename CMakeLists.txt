@@ -387,7 +387,7 @@ if(ANNC_ENABLE_PYTHON)
 endif()
 # TensorFlow configuration is owned by the addon subdirectory alone, so it is
 # entered only when the addon is enabled: with the addon off no TensorFlow
-# headers or OpenSSL are looked up.
+# headers are looked up.
 if(ANNC_ENABLE_TENSORFLOW_ADDON)
   add_subdirectory(tensorflow_addons)
 endif()

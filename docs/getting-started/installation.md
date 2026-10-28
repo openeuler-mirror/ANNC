@@ -39,7 +39,7 @@ pip3 install -r requirements.txt
 ### 3. 安装系统依赖
 
 ```shell
-sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel \
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel \
   gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
@@ -57,7 +57,6 @@ sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
 | `python3-devel` | pybind11 / nanobind 扩展需要的 `Python.h`（仅 `--enable-python`） |
 | `gtest-devel` | C++ 单元测试（CTest） |
 | `unzip` / `rpm`（提供 `rpm2cpio`） / `cpio` | KDNN RELEASE 模式解包 release zip；`build.sh` 默认 `--kdnn-source RELEASE`，在 CMake 之前检查这三个命令 |
-| `openssl-devel` | JIT cache key 哈希（OpenSSL Crypto）；仅 `ANNC_ENABLE_TENSORFLOW_ADDON=ON` 时需要 |
 | `protobuf-devel` / `protobuf-compiler` | 启用 TF 或 ONNX 前端时必需；`protoc` 用于校验与重新生成 proto 源码。ONNX 侧缺失即报错；TF 侧会先尝试自动下载 fallback protoc |
 
 ### 4. LLVM / MLIR 与 nlohmann/json

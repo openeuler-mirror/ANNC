@@ -63,6 +63,25 @@ TF pipeline 自动 AOT 预打包及 packed KDNN 候选遵循同一开关；已�
 4. 构建输入 descriptor 时替换对应 RHS 的 allocated/aligned 指针，保持
    逻辑 shape、原始 Tensor、kernel 参数数目及微内核/线程池 ABI 不变。
 
+### 普通代码缓存命中与 last-shape 快速路径
+
+`ANNC_ENABLE_JIT_SHAPE_FASTPATH` 默认开启。每次 JIT 调用先构造 runtime 参数
+shape，再检查当前 Op 上一次使用的 shape；检查在 `jit_fastpath_mu_` 下进行，
+并逐参数比较维度。连续调用且 shape 相同则直接复用 executable 和 binding，
+跳过全局缓存 key 构造及查找。
+
+该快速路径只记住每个 Op 的一个 shape。shape 交替或随机 batch 通常无法命中时，
+每次调用仍会先付出这次 mutex 与 shape 比较，再构造全局缓存 key 并查进程级
+JIT 缓存。因此“全局缓存命中”不代表“last-shape 快速路径命中”；非连续重复
+shape 仍可复用全局编译结果，但会经过这段额外检查。将
+`ANNC_ENABLE_JIT_SHAPE_FASTPATH=0` 可跳过 per-Op 检查，直接走全局缓存路径；
+该变量在首次读取时固定，需在进程启动前设置。
+
+`ANNCFusedOp` 对缓存 key 摘要按需计算：普通 cache hit 不为日志执行摘要哈希；
+缓存 key 序列化按完整 shape 维度预留容量，避免因预留不足而扩容。这些是缓存
+查找路径的局部工作量变化；尚无随机 batch 负载下的基准数据，不能据此量化
+端到端性能变化。
+
 每个节点首次初始化在全局代码缓存查找之前执行，即使其他节点已编译同模板
 也独立完成准入。元数据提取子进程和 checkpoint 读取只发生在这一次初始化，
 临时字节随初始化释放；未配置 checkpoint 时不启动提取工具。保留通过准入的

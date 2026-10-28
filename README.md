@@ -40,7 +40,7 @@ cd ANNC
 
 # 2. 安装依赖（详见「安装 ANNC」）
 pip3 install -r requirements.txt
-sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
   llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \

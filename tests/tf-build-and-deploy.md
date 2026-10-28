@@ -57,7 +57,7 @@ git log -1 --oneline
 
   ```shell
   yum install cmake ninja-build protobuf-devel protobuf-compiler \
-              gcc gcc-c++ openssl-devel python3-devel numactl unzip rpm cpio \
+              gcc gcc-c++ python3-devel numactl unzip rpm cpio \
               llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
               llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
               llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
