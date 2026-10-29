@@ -4036,16 +4036,10 @@ static FailureOr<LayerNormMatch> matchLayerNorm(AddOp out) {
   return match;
 }
 
-// Execution v2 的 kernel 函数：(execution, input, gamma, beta, eps) -> output，
+// Context v3 lowering 前的 kernel 函数：(input, gamma, beta, eps) -> output，
 // 体内一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
 static atir::CustomOpSchema getLayerNormSchema() {
-  return atir::CustomOpSchema::get("LayerNorm")
-      .TypeVar("T")
-      .MemRefArg("input", 2, "T")
-      .MemRefArg("gamma", 1, "T")
-      .MemRefArg("beta", 1, "T")
-      .MemRefArg("eps", 0, "T")
-      .Result("output", 2, "T");
+  return *atir::getContextKernelSchema("LayerNorm");
 }
 
 static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
@@ -4060,7 +4054,7 @@ static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext()), match.input.getType(),
+      match.input.getType(),
       match.gamma.getType(), match.beta.getType(), match.eps.getType()};
   auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
   auto func =
@@ -4074,8 +4068,8 @@ static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToStart(entry);
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange{match.output.getType()},
-      ValueRange{entry->getArgument(1), entry->getArgument(2),
-                 entry->getArgument(3), entry->getArgument(4)},
+      ValueRange{entry->getArgument(0), entry->getArgument(1),
+                 entry->getArgument(2), entry->getArgument(3)},
       rewriter.getStringAttr("LayerNorm"),
       getLayerNormSchema().toMetadata(rewriter.getContext()));
   rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
@@ -4111,7 +4105,7 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = "LayerNorm";
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -4153,7 +4147,7 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
     // 输出由 kernel 经执行上下文分配，不在调用参数里。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));

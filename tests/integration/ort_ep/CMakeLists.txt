@@ -127,7 +127,7 @@ if(TARGET annc-onnx-pipeline)
   # layer_norm: rank-1 gamma/beta force name binding, eps is rank-0.
   add_test(NAME AnncEpLayerNormContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/layer_norm_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>

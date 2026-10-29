@@ -10,7 +10,8 @@
 
 namespace {
 
-using annc::kernels::KernelStatus;
+using annc::test::Invoke;
+using annc::test::View;
 using annc::test::ExpectNear;
 using annc::test::OutputBuffers;
 
@@ -83,10 +84,9 @@ TEST(LayerNormContext, ScalarPathMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   ExpectOutput(outputs.output(),
                ReferenceLayerNorm(x, rows, cols, gamma, beta, epsilon),
@@ -117,10 +117,9 @@ TEST(LayerNormContext, NeonPathMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   ExpectOutput(outputs.output(),
                ReferenceLayerNorm(x, rows, cols, gamma, beta, epsilon),
                1e-5f);
@@ -144,10 +143,9 @@ TEST(LayerNormContext, SingleColumnMatchesReference) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   ExpectOutput(outputs.output(),
                ReferenceLayerNorm(x, rows, cols, gamma, beta, epsilon),
                1e-6f);
@@ -171,10 +169,9 @@ TEST(LayerNormContext, ZeroRowsAllocatesAnEmptyOutput) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 2u);
@@ -201,10 +198,9 @@ TEST(LayerNormContext, RejectsMismatchedGamma) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -227,10 +223,9 @@ TEST(LayerNormContext, RejectsMismatchedBeta) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -252,10 +247,9 @@ TEST(LayerNormContext, RejectsZeroColumns) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -278,18 +272,16 @@ TEST(LayerNormContext, RejectsNonContiguousInput) {
   input.strides[1] = 2;
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   input = annc::kernels::execution::makeMemRef<AnncMemRef2DF32>(
       x.data(), 2, inputDims);
   input.strides[0] = cols + 1;
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -312,10 +304,9 @@ TEST(LayerNormContext, PropagatesNaN) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(), static_cast<size_t>(cols));
   for (float value : outputs.output()) EXPECT_TRUE(std::isnan(value));
 }
@@ -338,19 +329,17 @@ TEST(LayerNormContext, RejectsNonContiguousGammaAndBeta) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
+  auto context = outputs.kernelContext();
   gammaRef.strides[0] = 2;
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   gammaRef = annc::kernels::execution::makeMemRef<AnncMemRef1DF32>(
       gamma.data(), 1, vectorDims);
   betaRef.strides[0] = 2;
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -372,10 +361,9 @@ TEST(LayerNormContext, RejectsNegativeRows) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -401,10 +389,9 @@ TEST(LayerNormContext, NeonPathPropagatesNaN) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  ASSERT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::Success);
+  auto context = outputs.kernelContext();
+  ASSERT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 2u);
@@ -431,11 +418,10 @@ TEST(LayerNormContext, FailsWhenOutputAllocationFails) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
+  auto context = outputs.kernelContext();
   outputs.FailNextAllocation();
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::RuntimeError);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_NE(outputs.last_error.find("output allocation failed"),
             std::string::npos);
@@ -459,22 +445,17 @@ TEST(LayerNormContext, RejectsNullArguments) {
   auto epsRef = MakeScalar(const_cast<float*>(&epsilon));
 
   OutputBuffers outputs;
-  auto context = outputs.context();
-  EXPECT_EQ(layerNormImpl(nullptr, nullptr, &input, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(layerNormImpl(nullptr, &context, nullptr, &gammaRef, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, nullptr, &betaRef,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, nullptr,
-                          &epsRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(layerNormImpl(nullptr, &context, &input, &gammaRef, &betaRef,
-                          nullptr),
-            KernelStatus::InvalidArgument);
+  auto context = outputs.kernelContext();
+  EXPECT_EQ(Invoke(layerNormImpl, nullptr, {View(&input), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(nullptr), View(&gammaRef), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(nullptr), View(&betaRef), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(nullptr), View(&epsRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(layerNormImpl, &context, {View(&input), View(&gammaRef), View(&betaRef), View(nullptr)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
