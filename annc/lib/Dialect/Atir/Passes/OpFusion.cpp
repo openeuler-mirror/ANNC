@@ -3576,7 +3576,8 @@ static FailureOr<MaskedMulMatch> matchMaskedMul(MulOp anchor) {
     site.fed = true;
     fedSites.push_back(site);
   }
-  if (rawSites.empty()) return failure();
+  // argMap carries one four-bit index per raw output in a single i64.
+  if (rawSites.empty() || rawSites.size() > 16) return failure();
 
   // 实参表：每个不同的 data 源一个（前 rawCount 个），随后是 Sum 的其它输入。
   for (const MaskedMulSite &site : rawSites) {
@@ -3615,33 +3616,21 @@ static std::string getMaskedMulOpName(const MaskedMulMatch &match) {
 
 // 实参顺序 (data..., extras..., ids)；padding / argMap / divisorBits 是属性，
 // 输出在 kernel 侧经上下文按槽位分配，故不在调用参数里。
-static atir::CustomOpSchema getMaskedMulSchema(const MaskedMulMatch &match) {
-  auto schema =
-      atir::CustomOpSchema::get(getMaskedMulOpName(match))
-          .TypeVar("T")
-          .TypeVar("TMask");
-  for (size_t i = 0; i < match.args.size(); ++i) {
-    schema.MemRefArg("arg" + std::to_string(i), 3, "T");
-  }
-  schema.MemRefArg("ids", 2, "TMask");
-  for (size_t i = 0; i < match.sites.size(); ++i) {
-    schema.Result("output" + std::to_string(i), 3, "T");
-  }
-  if (match.flatMask) schema.Result("flat", 2, "T");
-  schema.I64AttrArg("dataArgs", match.rawCount);
-  schema.I64AttrArg("rawMuls", static_cast<int64_t>(match.sites.size()) - match.fedCount);
-  schema.I64AttrArg("fedMuls", match.fedCount);
-  schema.I64AttrArg("argMap", match.argMap);
-  schema.I64AttrArg("sumMask", match.sumMask);
-  schema.I64AttrArg("interiorKind", match.interiorKind);
-  schema.I64AttrArg("divisorBits", f32Bits(match.divisor));
-  schema.I64AttrArg("padding", match.padding);
-  return schema;
+static SmallVector<int64_t> getMaskedMulAttributes(const MaskedMulMatch &match) {
+  return {match.rawCount,
+          static_cast<int64_t>(match.sites.size()) - match.fedCount,
+          match.fedCount, match.argMap, match.sumMask, match.interiorKind,
+          f32Bits(match.divisor), match.padding};
 }
 
-// Execution v2 的 kernel 函数：(execution, data..., extras..., ids) ->
+static atir::CustomOpSchema getMaskedMulSchema(const MaskedMulMatch &match) {
+  return *atir::getContextKernelSchema(getMaskedMulOpName(match),
+                                          getMaskedMulAttributes(match));
+}
+
+// Context v3 lowering 前的 kernel 函数：(data..., extras..., ids) ->
 // (output...[, flat])，体内只有一次 atir.CustomizeOp；CustomizeCallLowering 把
-// 首参（!llvm.ptr）透传给手写 kernel（annc/lib/Kernel/builtin_kernels/
+// 入口改写为单 context 参数调用手写 kernel（annc/lib/Kernel/builtin_kernels/
 // masked_mul_*），输出由 kernel 经上下文按槽位分配后作为 CustomizeOp 的结果
 // 返回（槽位顺序 = sites 顺序，最后是 flat）。
 static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
@@ -3655,8 +3644,7 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
 
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
+  SmallVector<Type> inputTypes;
   for (Value arg : match.args) inputTypes.push_back(arg.getType());
   inputTypes.push_back(match.ids.getType());
   SmallVector<Type> resultTypes;
@@ -3677,9 +3665,9 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToStart(entry);
   SmallVector<Value> operands;
   for (size_t i = 0; i < match.args.size(); ++i) {
-    operands.push_back(entry->getArgument(i + 1));
+    operands.push_back(entry->getArgument(i));
   }
-  operands.push_back(entry->getArgument(match.args.size() + 1));
+  operands.push_back(entry->getArgument(match.args.size()));
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange(resultTypes), ValueRange(operands),
       rewriter.getStringAttr(getMaskedMulOpName(match)),
@@ -3702,7 +3690,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     if (!module) return failure();
     // 站点本轮只服务 ONNX 导入（同 FTDMM）：ONNX 前端在模块上留
     // annc.contract_version，据此把 pattern 限定在 ONNX 模块，TF 侧融合行为
-    // 不变（kernel 本身在 TF 宿主下也能跑，池走 TLS 回退）。
+    // 不变（kernel 可复用其他宿主的 context，无并行服务时串行执行）。
     if (!module->hasAttr("annc.contract_version")) return failure();
 
     SmallVector<Operation *, 8> fusedOps;
@@ -3732,6 +3720,9 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     }
 
     // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    if (!atir::getContextKernelSchema(getMaskedMulOpName(*match),
+                                          getMaskedMulAttributes(*match)))
+      return failure();
     auto schema = getMaskedMulSchema(*match);
     SmallVector<Type> schemaInputTypes;
     for (Value arg : match->args) schemaInputTypes.push_back(arg.getType());
@@ -3752,7 +3743,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = getMaskedMulOpName(*match);
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -3794,7 +3785,10 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "context_i64_attrs", makeI64Array(rewriter.getContext(),
+                                          getMaskedMulAttributes(*match))));
     // 输出由 kernel 经执行上下文分配，不在调用参数里，故 kernel_arg_order 为空。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
@@ -3810,7 +3804,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     kernelFunc->setAttr("fusion.metadata",
                         DictionaryAttr::get(rewriter.getContext(), metadata));
 
-    // execution v2 的主图区域保留原样（AOT 裁剪丢弃主图），只做标记。
+    // context v3 的主图区域保留原样（AOT 裁剪丢弃主图），只做标记。
     for (Operation *op : fusedOps) {
       op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
     }

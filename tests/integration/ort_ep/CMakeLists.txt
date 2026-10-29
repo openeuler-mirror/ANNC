@@ -117,7 +117,7 @@ if(TARGET annc-onnx-pipeline)
   # outputs need the report->fused-node permutation.
   add_test(NAME AnncEpMaskedMulContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/masked_mul_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/masked_mul_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
