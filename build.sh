@@ -41,6 +41,7 @@ ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
 ANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI:-1}"
+ANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD:-17}"
 
 # Internal flags used to detect whether the user explicitly passed certain
 # options on the command line.  These are not user-tunable defaults.
@@ -218,6 +219,8 @@ while [[ $# -gt 0 ]]; do
       echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
       echo "    ANNC_TENSORFLOW_LIBRARIES=<list>      TensorFlow libraries for linked mode"
       echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: 1)"
+      echo "    ANNC_TENSORFLOW_CXX_STANDARD=<value> TensorFlow C++ standard (default: 17)"
+      echo "    ANNC_TENSORFLOW_PYTHON_EXECUTABLE=<path>  Target TensorFlow Python (default: PYTHON)"
       echo "  ORT EP / kernel env vars:"
       echo "    ANNC_EP_ORT_BUILD_TREE=<path>         ORT build tree Release/ (required when ORT EP is enabled:"
       echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
@@ -323,6 +326,17 @@ if [ -z "${PYTHON_COMMAND}" ]; then
 fi
 PYTHON_COMMAND_DIR=$(cd "$(dirname "${PYTHON_COMMAND}")" && pwd -P)
 PYTHON="${PYTHON_COMMAND_DIR}/$(basename "${PYTHON_COMMAND}")"
+ANNC_TENSORFLOW_PYTHON_EXECUTABLE="${ANNC_TENSORFLOW_PYTHON_EXECUTABLE:-${PYTHON}}"
+
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  TF_PYTHON_COMMAND=$(command -v "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" 2>/dev/null || true)
+  if [ -z "${TF_PYTHON_COMMAND}" ]; then
+    echo "ERROR: TensorFlow Python '${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}' was not found." >&2
+    exit 1
+  fi
+  TF_PYTHON_COMMAND_DIR=$(cd "$(dirname "${TF_PYTHON_COMMAND}")" && pwd -P)
+  ANNC_TENSORFLOW_PYTHON_EXECUTABLE="${TF_PYTHON_COMMAND_DIR}/$(basename "${TF_PYTHON_COMMAND}")"
+fi
 
 if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" && "${KDNN_SOURCE}" != "RELEASE" ]]; then
   echo "ERROR: --kdnn-source must be LOCAL, REMOTE, or RELEASE, got '${KDNN_SOURCE}'" >&2
@@ -584,12 +598,13 @@ fi
 # libraries from, so the check is needed exactly while the addon is built; the
 # frontend tools only consume the vendored protobuf schema.
 if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
-  if ! python_module_available "tensorflow"; then
-    echo "ERROR: TensorFlow cannot be imported by ${PYTHON}." >&2
-    echo "       The TensorFlow addons require TensorFlow at configure time. Install compatible deps with:" >&2
-    echo "         ${PYTHON} -m pip install -r requirements.txt" >&2
+  if ! "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" -c "import tensorflow"; then
+    echo "ERROR: TensorFlow cannot be imported by ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}." >&2
+    echo "       For TensorFlow 2.20, install compatible deps with:" >&2
+    echo "         ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE} -m pip install -r requirements.txt" >&2
     echo "       If the error mentions NumPy 2.x, downgrade with:" >&2
-    echo "         ${PYTHON} -m pip install 'numpy<2'" >&2
+    echo "         ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE} -m pip install 'numpy<2'" >&2
+    echo "       For TensorFlow 1.15, prepare the matching TensorFlow package and its runtime dependencies in this Python environment." >&2
     DEP_ERRORS=$((DEP_ERRORS + 1))
   fi
 fi
@@ -780,6 +795,7 @@ check_cache_consistency() {
     "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
     "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
     "ANNC_TENSORFLOW_CXX11_ABI:${ANNC_TENSORFLOW_CXX11_ABI}"
+    "ANNC_TENSORFLOW_CXX_STANDARD:${ANNC_TENSORFLOW_CXX_STANDARD}"
   )
 
   for entry in "${cache_checks[@]}"; do
@@ -949,6 +965,11 @@ else
   check_source_glob_changes
 fi
 
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ] &&
+   [ "$(get_cache_value ANNC_TENSORFLOW_PYTHON_EXECUTABLE)" != "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" ]; then
+  SKIP_CMAKE="NO"
+fi
+
 if [ "${SKIP_CMAKE}" == "YES" ]; then
   echo "Skipping CMake configuration (reusing existing CMakeCache.txt)"
   echo "Use --clean to force a full reconfigure."
@@ -988,6 +1009,8 @@ else
   echo "  TensorFlow Include Dir: ${ANNC_TENSORFLOW_INCLUDE_DIR:-<auto>}"
   echo "  TensorFlow Libraries: ${ANNC_TENSORFLOW_LIBRARIES:-<none>}"
   echo "  TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI}"
+  echo "  TensorFlow CXX Standard: ${ANNC_TENSORFLOW_CXX_STANDARD}"
+  echo "  TensorFlow Python: ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}"
 
   cmake .. \
     -G Ninja \
@@ -1010,6 +1033,8 @@ else
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \
     -DANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI}" \
+    -DANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD}" \
+    -DANNC_TENSORFLOW_PYTHON_EXECUTABLE="${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" \
     -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
     -DANNC_KDNN_DIR="${KDNN_DIR}" \
     -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \

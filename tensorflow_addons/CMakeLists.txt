@@ -4,6 +4,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
+if(ANNC_TENSORFLOW_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD ${ANNC_TENSORFLOW_CXX_STANDARD})
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -165,6 +168,8 @@ set(ANNC_FUSED_OP_SOURCES
 # ── Build targets ────────────────────────────────────────────────────────────
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(annc_jit_cache STATIC annc_jit_cache.cc annc_packed_rhs.cc)
+target_compile_definitions(annc_jit_cache PRIVATE
+    "_GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI}")
 target_include_directories(annc_jit_cache PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/../annc/include"
