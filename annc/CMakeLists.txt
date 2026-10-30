@@ -26,9 +26,6 @@ if(ANNC_ENABLE_KDNN_ADAPTOR)
     add_definitions(-DANNC_KDNN_OPENMP_LINK_FLAGS="${ANNC_KDNN_OPENMP_LINK_FLAGS}")
 endif()
 
-if(ANNC_ENABLE_CONSTANT_FOLDING)
-    add_definitions(-DANNC_ENABLE_CONSTANT_FOLDING)
-endif()
 
 # ── Sub-directories ──────────────────────────────────────────────────
 add_subdirectory(include)

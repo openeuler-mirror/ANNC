@@ -17,15 +17,12 @@
 
 using namespace mlir;
 
-// The prepack path is only reachable when constant folding is enabled
-// (SelectGemmStrategy is created with enablePrepack, and the pipeline adds this
-// pass under the same switch). Keep it out of builds that do not enable
-// constant folding, including ORT-only builds, which do not need the optional
-// GEMM microkernel archive.
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
 namespace annc {
 namespace {
 
+#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+// Keep strong references when available so the static archive is extracted.
+// Builds without it retain the pass and diagnose static prepack requests.
 extern "C" {
 void annc_aarch64_sve_packb_f32(const float *rhs, float *packed, int32_t kSize,
                                 int32_t nSize, int32_t ldb);
@@ -66,10 +63,9 @@ std::vector<float> packGemmLayout(
   return packed;
 }
 
-llvm::Error writePackedDataFile(llvm::StringRef path,
-                                llvm::ArrayRef<std::pair<llvm::StringRef,
-                                                         llvm::ArrayRef<float>>>
-                                    entries) {
+llvm::Error writePackedDataFile(
+    llvm::StringRef path,
+    llvm::ArrayRef<std::pair<llvm::StringRef, llvm::ArrayRef<float>>> entries) {
   std::error_code error;
   llvm::raw_fd_ostream output(path, error);
   if (error)
@@ -103,10 +99,11 @@ DictionaryAttr buildPrepackedContract(
   contract.append("nc", builder.getI64IntegerAttr(tuning.cacheTile.nc));
   contract.append("kc", builder.getI64IntegerAttr(tuning.cacheTile.kc));
   contract.append("data_symbol", builder.getStringAttr(dataSymbol));
-  contract.append("data_elements",
-                  builder.getI64IntegerAttr(static_cast<int64_t>(dataElements)));
+  contract.append("data_elements", builder.getI64IntegerAttr(
+                                       static_cast<int64_t>(dataElements)));
   return contract.getDictionary(builder.getContext());
 }
+#endif
 
 struct AArch64GemmPrepackRhsPass
     : public AArch64GemmPrepackRhsBase<AArch64GemmPrepackRhsPass> {
@@ -127,6 +124,13 @@ struct AArch64GemmPrepackRhsPass
       return;
     }
 
+#if !ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+    module.emitError(
+        "static RHS prepacking requires the AArch64 GEMM "
+        "microkernel archive; configure "
+        "ANNC_AARCH64_GEMM_KERNEL_LIBRARY and rebuild");
+    signalPassFailure();
+#else
     constant_folding::RhsDataLoader rhsLoader;
     struct PendingPack {
       std::string dataSymbol;
@@ -184,7 +188,8 @@ struct AArch64GemmPrepackRhsPass
             candidate->strategy.target, candidate->strategy.isa,
             candidate->strategy.dataType, candidate->strategy.cacheTile,
             candidate->strategy.kernelTile};
-        std::vector<float> packed = packGemmLayout(rhsData.data(), k, n, tuning);
+        std::vector<float> packed =
+            packGemmLayout(rhsData.data(), k, n, tuning);
         if (packed.empty()) continue;
 
         std::string dataSymbol = "packed_" + func.getName().str();
@@ -221,8 +226,9 @@ struct AArch64GemmPrepackRhsPass
         packedC = environment;
     }
     if (packedC.empty()) {
-      module.emitError("aarch64-gemm-prepack-rhs packed RHS data but "
-                       "--packed-c and ANNC_DEMO_PACKED_C are not set");
+      module.emitError(
+          "aarch64-gemm-prepack-rhs packed RHS data but "
+          "--packed-c and ANNC_DEMO_PACKED_C are not set");
       signalPassFailure();
       return;
     }
@@ -238,6 +244,7 @@ struct AArch64GemmPrepackRhsPass
     for (const PendingPack &entry : pendingPacks)
       entry.target->setDiscardableAttr(aarch64::gemm::kPrepackedRhsAttrName,
                                        entry.contract);
+#endif
   }
 };
 
@@ -254,33 +261,3 @@ std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
 }
 
 }  // namespace annc
-#else
-namespace annc {
-namespace {
-
-// Keep the pass registered for Passes.td/CAPI consumers, but fail loudly
-// instead of compiling in references to the optional microkernel archive.
-struct AArch64GemmPrepackRhsDisabled
-    : public AArch64GemmPrepackRhsBase<AArch64GemmPrepackRhsDisabled> {
-  AArch64GemmPrepackRhsDisabled() = default;
-  explicit AArch64GemmPrepackRhsDisabled(llvm::StringRef) {}
-
-  void runOnOperation() override {
-    getOperation().emitError(
-        "aarch64-gemm-prepack-rhs requires ANNC_ENABLE_CONSTANT_FOLDING");
-    signalPassFailure();
-  }
-};
-
-}  // namespace
-
-std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs() {
-  return std::make_unique<AArch64GemmPrepackRhsDisabled>();
-}
-
-std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(llvm::StringRef) {
-  return std::make_unique<AArch64GemmPrepackRhsDisabled>();
-}
-
-}  // namespace annc
-#endif

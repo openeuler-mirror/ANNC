@@ -40,7 +40,7 @@ cd ANNC
 
 # 2. 安装依赖（详见「安装 ANNC」）
 pip3 install -r requirements.txt
-sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
 #    openEuler 24.03 使用系统 llvm-toolset-20；22.03 无该 toolset，需自建 LLVM/MLIR 20/21（见「安装 ANNC」步骤 4）
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \

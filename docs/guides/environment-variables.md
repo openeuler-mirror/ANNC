@@ -24,7 +24,9 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_GEMM` | `0` / `1` / `2` | `0` | MatMul 融合级别：未设置或 `0` 关闭融合，`1` 融合 plain MatMul（KDNN adaptor 构建下为 AOT KDNN 站点），`2` 追加 epilogue 尾融合（需要 `ANNC_GEMM_ASM_SOURCE_DIR`）。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
+| `ANNC_GEMM` | `0` / `1` / `2` / `3` / `99` | `0` | GEMM 模式：`0`/未设置关闭自动 GEMM fusion，`1`=Basic（plain MatMul，KDNN adaptor 构建下为 AOT KDNN 站点），`2`=Epilogue（追加 epilogue 尾融合，需要 `ANNC_GEMM_ASM_SOURCE_DIR`），`3`=Prepack（plain MatMul + 预打包缓存），`99`=All（Epilogue + 预打包缓存）。这是模式编号而非累进等级，`99` 固定保留给 All，未来模式使用未分配的较小编号。预打包与 epilogue 独立；预打包 pass 始终注册，无需额外优化编译开关；依赖归档的路径要求构建时提供 AArch64 微内核库，模式 `1`/`2` 关闭预打包、`3`/`99` 开启，可变权重使用 `1`/`2`。首尾空白允许，空值视为 `0`；非法值向 stderr 提示合法编号并回退 `0`，`ANNC_LOG_LEVEL=info` 可查看解析后的模式。启动前设置，首次读取后固定，修改后需重启；Op 构造时保存结果，只在首次 JIT / 上一次 shape 缓存未命中时使用。该变量同时控制 TF pipeline 自动 AOT 预打包及 packed KDNN 候选，已生成的 AOT 库不会因变量变化而重写。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
+
+`All` 表示同时启用 epilogue 尾融合和 RHS 预打包，不表示合并所有后端的融合策略。KDNN AOT GEMM outlining 仅在模式 `1` 下启用；模式 `2`、`3`、`99` 使用 native GEMM 路径。因此，模式 `3` 的 plain MatMul 不包含模式 `1` 专有的 KDNN AOT 分支。
 
 ## `annc-asm` / FastCodegen
 

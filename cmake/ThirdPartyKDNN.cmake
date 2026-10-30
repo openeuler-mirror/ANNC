@@ -45,6 +45,9 @@ set(ANNC_KDNN_TARGET_PLATFORM "${_annc_default_kdnn_target_platform}"
     CACHE STRING "TARGET_PLATFORM passed to the KDNN CMake build")
 unset(_annc_default_kdnn_target_platform)
 
+# Internal dependency capability, never a user-selectable optimization option.
+set(ANNC_KDNN_HAS_PACKED_B FALSE)
+
 if(NOT ANNC_ENABLE_KDNN_ADAPTOR)
     return()
 endif()
@@ -58,7 +61,36 @@ string(REPLACE ";" " " _annc_kdnn_openmp_link_flags "${_annc_kdnn_openmp_link_fl
 set(ANNC_KDNN_OPENMP_LINK_FLAGS "${_annc_kdnn_openmp_link_flags}"
     CACHE STRING "OpenMP link flags required by KDNN" FORCE)
 
+# Imported libraries must provide both declarations and linkable overloads.
+# Recheck on configure so switching KDNN installations cannot reuse stale data.
+function(annc_detect_kdnn_packed_b)
+  include(CheckCXXSourceCompiles)
+  include(CMakePushCheckState)
+  cmake_push_check_state(RESET)
+  set(CMAKE_REQUIRED_LIBRARIES KDNN::kdnn)
+  unset(_annc_kdnn_packed_b_available CACHE)
+  check_cxx_source_compiles([=[
+    #include <kdnn.hpp>
+    int main(int argc, char **argv) {
+      const auto *gemm = reinterpret_cast<const KDNN::Gemm *>(argv);
+      KDNN::PostOpsDataPtrs postOps;
+      gemm->RunWithPackedB(argv, argv, argv);
+      gemm->RunWithPackedB(argv, argv, argv, argv);
+      gemm->RunWithPackedB(argv, argv, argv, argv, postOps);
+      return argc;
+    }
+  ]=] _annc_kdnn_packed_b_available)
+  cmake_pop_check_state()
+  set(ANNC_KDNN_HAS_PACKED_B "${_annc_kdnn_packed_b_available}" PARENT_SCOPE)
+  if(_annc_kdnn_packed_b_available)
+    message(STATUS "KDNN packed-B adapters available")
+  else()
+    message(STATUS "KDNN packed-B API unavailable; using ordinary KDNN adapters")
+  endif()
+endfunction()
+
 if(TARGET KDNN::kdnn)
+    annc_detect_kdnn_packed_b()
     return()
 endif()
 
@@ -83,23 +115,6 @@ function(annc_import_kdnn kdnn_root)
             "${kdnn_root}. Expected include/kdnn.hpp, include/kdnn_config.h, "
             "and lib/libkdnn.* or src/libkdnn.*.")
     endif()
-    if(ANNC_ENABLE_CONSTANT_FOLDING)
-        set(_kdnn_gemm_header "${_kdnn_include_dir}/operations/kdnn_gemm.hpp")
-        if(NOT EXISTS "${_kdnn_gemm_header}")
-            message(FATAL_ERROR
-                "ANNC_ENABLE_CONSTANT_FOLDING is ON, but ${_kdnn_gemm_header} "
-                "was not found.")
-        endif()
-        file(STRINGS "${_kdnn_gemm_header}" _kdnn_packed_b_api
-             REGEX "RunWithPackedB")
-        if(NOT _kdnn_packed_b_api)
-            message(FATAL_ERROR
-                "ANNC_ENABLE_CONSTANT_FOLDING is ON, but local KDNN at "
-                "${kdnn_root} does not provide KDNN::Gemm::RunWithPackedB. "
-                "Use a patched local KDNN or set ANNC_KDNN_SOURCE=REMOTE "
-                "so ANNC can apply patches/kdnn_rhs_packed.")
-        endif()
-    endif()
 
     get_filename_component(_kdnn_lib_dir "${_kdnn_library}" DIRECTORY)
     set(KDNN_INCLUDE_DIR "${_kdnn_include_dir}" CACHE PATH "KDNN include directory" FORCE)
@@ -115,12 +130,6 @@ function(annc_import_kdnn kdnn_root)
 endfunction()
 
 if(ANNC_KDNN_SOURCE STREQUAL "RELEASE")
-    if(ANNC_ENABLE_CONSTANT_FOLDING)
-        message(FATAL_ERROR
-            "ANNC_ENABLE_CONSTANT_FOLDING is not supported with "
-            "ANNC_KDNN_SOURCE=RELEASE in this version.")
-    endif()
-
     if(NOT ANNC_KDNN_LIB_VARIANT MATCHES "^(sve-threadpool|sve-omp|sve2-threadpool|sve2-omp)$")
         message(FATAL_ERROR
             "Invalid ANNC_KDNN_LIB_VARIANT='${ANNC_KDNN_LIB_VARIANT}'. "
@@ -211,12 +220,14 @@ if(ANNC_KDNN_SOURCE STREQUAL "RELEASE")
     endif()
 
     annc_import_kdnn("${_kdnn_release_root}")
+    annc_detect_kdnn_packed_b()
     message(STATUS "Using release KDNN from ${_kdnn_release_root}")
     return()
 endif()
 
 if(ANNC_KDNN_SOURCE STREQUAL "LOCAL")
     annc_import_kdnn("${ANNC_KDNN_DIR}")
+    annc_detect_kdnn_packed_b()
     message(STATUS "Using local KDNN from ${ANNC_KDNN_DIR}")
     return()
 endif()
@@ -266,16 +277,16 @@ set(KDNN_LIBRARY "${ANNC_KDNN_INSTALL_DIR}/lib/libkdnn.so"
 set(KDNN_LIB_DIR "${ANNC_KDNN_INSTALL_DIR}/lib"
     CACHE PATH "KDNN library directory" FORCE)
 
-set(_annc_kdnn_patch_command "")
-if(ANNC_ENABLE_CONSTANT_FOLDING)
-    set(ANNC_KDNN_PATCH_FILE
-        "${CMAKE_SOURCE_DIR}/patches/kdnn_rhs_packed/0001-kdnn-run-with-packed-b.patch")
-    set(_annc_kdnn_patch_command
-        ${CMAKE_COMMAND}
-            -DANNC_PATCH_FILE=${ANNC_KDNN_PATCH_FILE}
-            -DANNC_PATCH_WORKDIR=${ANNC_THIRD_PARTY_KDNN_DIR}
-            -P ${CMAKE_SOURCE_DIR}/cmake/ApplyPatchIfNeeded.cmake)
-endif()
+# The managed source build applies the packed-B patch before compilation.
+# Unlike imported binaries, its library does not exist yet to link-probe.
+set(ANNC_KDNN_HAS_PACKED_B TRUE)
+set(ANNC_KDNN_PATCH_FILE
+    "${CMAKE_SOURCE_DIR}/patches/kdnn_rhs_packed/0001-kdnn-run-with-packed-b.patch")
+set(_annc_kdnn_patch_command
+    ${CMAKE_COMMAND}
+        -DANNC_PATCH_FILE=${ANNC_KDNN_PATCH_FILE}
+        -DANNC_PATCH_WORKDIR=${ANNC_THIRD_PARTY_KDNN_DIR}
+        -P ${CMAKE_SOURCE_DIR}/cmake/ApplyPatchIfNeeded.cmake)
 
 ExternalProject_Add(annc_third_party_kdnn
     SOURCE_DIR "${ANNC_KDNN_SOURCE_DIR}"

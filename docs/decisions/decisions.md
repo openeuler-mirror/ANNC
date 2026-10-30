@@ -203,7 +203,7 @@
 | **状态** | accepted / implemented，2026-10-25 |
 | **源码基线** | c0eee3dacd434d7bd0cf2bf9c1307dbf51fb611c |
 | **上下文** | 旧 prepack 将权重嵌入代码，但模板/shape key 不区分权重，导致同形状不同权重串用。修复应保持代码可共享，并避免每次请求扫描权重。 |
-| **决策** | 常量折叠构建固定采用共享无权重代码与只读 PackSpec/准备入口；各节点按输入槽与完整布局持有 packed 数据。不采用将权重摘要加入代码 key 的内嵌方案；关闭编译期开关仍使用普通 packed/direct。 |
+| **决策** | 常量折叠采用共享无权重代码与只读 PackSpec/准备入口；各节点按输入槽与完整布局持有 packed 数据。不采用将权重摘要加入代码 key 的内嵌方案。原生预打包能力始终构建，运行时统一由 ANNC_GEMM 枚举选择：0=Off、1=Basic、2=Epilogue、3=Prepack、99=All。预打包与 epilogue 独立，99 固定保留；不提供额外编译开关，KDNN packed-B 适配器按依赖能力构建注册，关闭使用普通 packed/direct。Op 构造时固定，连续同 shape 不增加开关检查。 |
 | **契约** | 候选 RHS 在 OpKernel 生命周期内不可变，换模型创建新实例。fixed/TensorBuffer 地址不证明内容不变。私有 ABI 与替换槽进入代码身份；继承固定工具链/配置/线程预算限制。 |
 | **实现取舍** | 复用代码 single-flight/LRU、现有 descriptor 和 packed-c 链接入口。仅单消费者、连续二维 F32 RHS 可替换。不合格用普通 packed。节点短 vector 保存完整布局，冷路径 mutex 串行准备，连续同 shape 直接使用已绑定代码与数据，无权重哈希或额外全局缓存查找。 |
 | **生命周期** | 节点绑定弱引用 executable，调用期间强引用代码与数据。packed 数据保留到节点卸载，代码淘汰重编可复用相同布局；不跨节点去重，也不新增全局权重 LRU。 |

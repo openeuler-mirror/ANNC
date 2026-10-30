@@ -12,7 +12,6 @@ option(ANNC_ENABLE_PYTHON "Build the ANNC Python bindings" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
-option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
 option(ANNC_ENABLE_COVERAGE "Enable gcov source coverage instrumentation" OFF)
 option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG); third-party build type unchanged" OFF)
 
@@ -398,7 +397,7 @@ if(ANNC_ENABLE_PYTHON)
 endif()
 # TensorFlow configuration is owned by the addon subdirectory alone, so it is
 # entered only when the addon is enabled: with the addon off no TensorFlow
-# headers or OpenSSL are looked up.
+# headers are looked up.
 if(ANNC_ENABLE_TENSORFLOW_ADDON)
   add_subdirectory(tensorflow_addons)
 endif()

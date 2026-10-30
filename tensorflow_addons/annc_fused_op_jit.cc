@@ -227,16 +227,16 @@ Status CompileAnncJitKernel(
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
   const std::string packed_rhs_c = (work / "kernel_packed_rhs.c").string();
   const std::string so_path = (work / "kernel.so").string();
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
   const std::string input_spec = (work / "immutable_inputs.json").string();
-  std::ofstream manifest(input_spec);
-  manifest << nlohmann::json(request.immutable_arguments).dump();
-  manifest.close();
-  if (!manifest) {
-    CleanupAnncJitWorkDir(work_dir);
-    return errors::Internal("Cannot write JIT immutable input manifest");
+  if (request.enable_constant_folding) {
+    std::ofstream manifest(input_spec);
+    manifest << nlohmann::json(request.immutable_arguments).dump();
+    manifest.close();
+    if (!manifest) {
+      CleanupAnncJitWorkDir(work_dir);
+      return errors::Internal("Cannot write JIT immutable input manifest");
+    }
   }
-#endif
   Status status = WriteRuntimeShapeSpec(shape_spec, request.kernel_name,
                                         request.argument_shapes);
   if (!status.ok()) {
@@ -255,10 +255,10 @@ Status CompileAnncJitKernel(
   const std::string fast_codegen_arg = "--atir-fast-codegen";
 #endif
   std::string gemm_pipeline_options;
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  gemm_pipeline_options =
-      "packed-c=" + packed_rhs_c + " jit-inputs=" + input_spec;
-#endif
+  if (request.enable_constant_folding) {
+    gemm_pipeline_options =
+        "packed-c=" + packed_rhs_c + " jit-inputs=" + input_spec;
+  }
   if (request.intra_thread_count > 0) {
     if (!gemm_pipeline_options.empty()) gemm_pipeline_options += " ";
     gemm_pipeline_options +=
@@ -288,10 +288,10 @@ Status CompileAnncJitKernel(
 
   std::vector<std::string> link_args = {
       AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path};
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  link_args.push_back("--packed-rhs-c");
-  link_args.push_back(packed_rhs_c);
-#endif
+  if (request.enable_constant_folding) {
+    link_args.push_back("--packed-rhs-c");
+    link_args.push_back(packed_rhs_c);
+  }
   status = RunJitTool(link_args, "annc");
   if (!status.ok()) {
     CleanupAnncJitWorkDir(work_dir);
@@ -338,8 +338,7 @@ Status CompileAnncJitKernel(
   *executable = std::make_shared<annc::jit::JitExecutable>(
       work_dir, so_path, handle, kernel_function, set_thread_pool,
       get_thread_pool, EnvFlagEnabled("ANNC_KEEP_TEMPS"));
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  {
+  if (request.enable_constant_folding) {
     auto getter = reinterpret_cast<AnncGetPackedRhsSpecs>(
         dlsym(handle, "annc_jit_packed_rhs_v1"));
     auto prepare = reinterpret_cast<AnncPreparePackedRhs>(
@@ -360,7 +359,6 @@ Status CompileAnncJitKernel(
     (*executable)->packed_rhs_specs.assign(specs, specs + count);
     (*executable)->prepare_rhs = prepare;
   }
-#endif
   return OkStatus();
 }
 

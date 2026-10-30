@@ -3,7 +3,6 @@
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -12,13 +11,11 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
 
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
 // Weak reference to the host-side SVE packed-B sizing helper; resolved when
 // the microkernel archive is linked in.
 extern "C" int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k,
                                                           int64_t n)
     __attribute__((weak));
-#endif
 
 namespace annc {
 namespace {
@@ -38,13 +35,11 @@ func::FuncOp getOrCreateLeafDeclaration(ModuleOp module, StringRef name,
 using WorkspaceMap = llvm::DenseMap<Operation *, Value>;
 
 int64_t packedBElements(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n) {
-  if (isa != aarch64::gemm::GemmIsa::kSve) return k * ((n + 3) / 4) * 4;
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  return annc_aarch64_sve_packed_b_elements_f32(k, n);
-#else
-  llvm::report_fatal_error(
-      "prepacked SVE RHS requires ANNC_ENABLE_CONSTANT_FOLDING");
-#endif
+  // SVE prepacked layout sizing is defined by the microkernel archive. The
+  // pass validates this optional weak symbol before entering this helper.
+  return isa == aarch64::gemm::GemmIsa::kSve
+             ? annc_aarch64_sve_packed_b_elements_f32(k, n)
+             : k * ((n + 3) / 4) * 4;
 }
 
 // Elements covered by the first `count` column blocks of one KC row.
@@ -345,6 +340,11 @@ FailureOr<std::pair<Value, Value>> absoluteBlockBase(Operation *op,
 FailureOr<PackedBBlock> materializePrepackedBBlock(
     ModuleOp module, Operation *op, const aarch64::gemm::GemmPlan &plan,
     OpBuilder &builder, Value rhsBlock, Value jr) {
+  if (plan.isa == aarch64::gemm::GemmIsa::kSve &&
+      !annc_aarch64_sve_packed_b_elements_f32) {
+    return op->emitOpError(
+        "SVE prepacked RHS requires the AArch64 GEMM microkernel archive");
+  }
   auto rhsSubview = rhsBlock.getDefiningOp<memref::SubViewOp>();
   if (!rhsSubview || rhsSubview.getMixedOffsets().size() != 2)
     return op->emitOpError(

@@ -2,6 +2,13 @@ find_package(GTest REQUIRED)
 find_package(Threads REQUIRED)
 include(GoogleTest)
 
+add_executable(gemm_config_test gemm_config_test.cpp)
+target_include_directories(gemm_config_test PRIVATE
+  "${PROJECT_SOURCE_DIR}/annc/include"
+)
+target_link_libraries(gemm_config_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(gemm_config_test TEST_PREFIX "GemmConfig.")
+
 add_executable(op_coverage_test
     op_coverage_test.cpp
 )
@@ -69,18 +76,3 @@ target_link_libraries(ciface_dispatch_test PRIVATE
 gtest_discover_tests(ciface_dispatch_test
     TEST_PREFIX "CifaceDispatch."
 )
-
-add_executable(gemm_fusion_level_test
-    gemm_fusion_level_test.cpp
-)
-target_include_directories(gemm_fusion_level_test PRIVATE
-    "${PROJECT_SOURCE_DIR}/annc/include"
-    "${PROJECT_BINARY_DIR}/annc/include"
-)
-target_link_libraries(gemm_fusion_level_test PRIVATE
-    GTest::gtest_main
-    Threads::Threads
-    AtirDialect
-    MLIRDialect
-)
-gtest_discover_tests(gemm_fusion_level_test)

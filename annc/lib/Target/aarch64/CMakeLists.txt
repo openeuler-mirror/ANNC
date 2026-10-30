@@ -75,6 +75,12 @@ add_mlir_library(AArch64Codegen
         ContextConversion
 )
 
-if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE AND ANNC_ENABLE_CONSTANT_FOLDING)
+# This is a dependency capability, not a user-selectable optimization mode.
+# Apply it to the source so it also reaches MLIR's obj.AArch64Codegen target.
+set_property(SOURCE Gemm/ConstantFolding/GemmPrepackRhs.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS
+  ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=$<BOOL:${ANNC_AARCH64_GEMM_KERNELS_AVAILABLE}>)
+
+if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
   target_link_libraries(AArch64Codegen PUBLIC ANNC::AArch64GemmMicrokernels)
 endif()

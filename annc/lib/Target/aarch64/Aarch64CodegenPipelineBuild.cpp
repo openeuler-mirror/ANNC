@@ -41,20 +41,14 @@ namespace annc
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
         passManager.addPass(createAArch64ResolveGemmPlan());
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
         const bool enablePrepack = !packedCPath.empty();
-#else
-        const bool enablePrepack = false;
-#endif
         passManager.addPass(createAArch64SelectGemmStrategy(configPath,
                                                            enablePrepack,
                                                            intraThreadCount));
         passManager.addPass(createAArch64GemmThreadPlanning());
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (enablePrepack)
             passManager.addPass(createAArch64GemmPrepackRhs(
                 packedCPath, jitInputsPath));
-#endif
         passManager.addPass(createAArch64FinalizeGemmPlan());
         passManager.addPass(createAArch64GemmThreadTiling());
         passManager.addPass(createAArch64GemmCacheBlocking());
