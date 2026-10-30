@@ -43,14 +43,13 @@ export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
 
 自建的安装树同样适用。若直接使用 LLVM 构建树而不安装，MLIR 的配置位于 `<llvm-build>/tools/mlir/cmake/modules`，需显式传 `-DMLIR_DIR`（该布局不在 `ANNC_LLVM_BIN` 的前缀推断范围内）。
 
-然后配置并构建。默认启用 TensorFlow addon，必须显式指定 `ANNC_TENSORFLOW_CXX11_ABI`：
+然后配置并构建。默认启用 TensorFlow addon，ABI 和 C++ 标准自动检测：
 
 ```shell
 mkdir -p build && cd build
 cmake -G Ninja .. \
   -DCMAKE_INSTALL_PREFIX="$HOME/ANNC" \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DANNC_TENSORFLOW_CXX11_ABI=1
+  -DCMAKE_BUILD_TYPE=Debug
 ninja && ninja install
 ```
 

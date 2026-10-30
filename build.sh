@@ -40,8 +40,8 @@ ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:-}"
 ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
-ANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI:-1}"
-ANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD:-17}"
+ANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI:-}"
+ANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD:-}"
 
 # Internal flags used to detect whether the user explicitly passed certain
 # options on the command line.  These are not user-tunable defaults.
@@ -218,8 +218,8 @@ while [[ $# -gt 0 ]]; do
       echo "    ANNC_TENSORFLOW_PRELOAD=ON|OFF        TF addon preload mode (default: ON)"
       echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
       echo "    ANNC_TENSORFLOW_LIBRARIES=<list>      TensorFlow libraries for linked mode"
-      echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: 1)"
-      echo "    ANNC_TENSORFLOW_CXX_STANDARD=<value> TensorFlow C++ standard (default: 17)"
+      echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: auto-detect)"
+      echo "    ANNC_TENSORFLOW_CXX_STANDARD=<value> TensorFlow C++ standard (default: auto-detect)"
       echo "    ANNC_TENSORFLOW_PYTHON_EXECUTABLE=<path>  Target TensorFlow Python (default: PYTHON)"
       echo "  ORT EP / kernel env vars:"
       echo "    ANNC_EP_ORT_BUILD_TREE=<path>         ORT build tree Release/ (required when ORT EP is enabled:"
@@ -404,7 +404,8 @@ if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
     exit 1
   fi
 
-  if [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
+  if [ -n "${ANNC_TENSORFLOW_CXX11_ABI}" ] &&
+     [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
     echo "ERROR: ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1, got '${ANNC_TENSORFLOW_CXX11_ABI}'" >&2
     exit 1
   fi
@@ -1008,8 +1009,8 @@ else
   echo "  TensorFlow Preload: ${ANNC_TENSORFLOW_PRELOAD}"
   echo "  TensorFlow Include Dir: ${ANNC_TENSORFLOW_INCLUDE_DIR:-<auto>}"
   echo "  TensorFlow Libraries: ${ANNC_TENSORFLOW_LIBRARIES:-<none>}"
-  echo "  TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI}"
-  echo "  TensorFlow CXX Standard: ${ANNC_TENSORFLOW_CXX_STANDARD}"
+  echo "  TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI:-<auto>}"
+  echo "  TensorFlow CXX Standard: ${ANNC_TENSORFLOW_CXX_STANDARD:-<auto>}"
   echo "  TensorFlow Python: ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}"
 
   cmake .. \
