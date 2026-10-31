@@ -24,9 +24,6 @@ int main(int argc, char **argv) {
   // std::ifstream f(argv[1]);
   // nlohmann::json jgraph = nlohmann::json::parse(f);
   // f.close();
-  
-  // auto builder = std::make_shared<annc::ANNCBuilder>(&context);
-  // auto root = builder->buildModule("demo", jgraph);
 
   // mlir::OpPrintingFlags flags;
   // flags.elideLargeElementsAttrs(0);

@@ -33,43 +33,6 @@ LogicalResult transformConcatV2(const NodeInfo& node, ArrayRef<Type> outs,
   return success();
 }
 
-// atir.Pack: axis attr of the TF op is currently fixed to 0 (kept for
-// compatibility; a transformer exists so the axis can be lifted later).
-LogicalResult transformPack(const NodeInfo& node, ArrayRef<Type> outs,
-                            ArrayRef<Value> ins, OpContext& ctx) {
-  auto& b = ctx.builder();
-  if (ins.empty()) return ctx.emitError(node, "requires at least one input");
-  Location loc = ctx.loc(node.name);
-  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
-  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
-  auto op = b.create<atir::PackOp>(loc, outs[0], outputBuffer.getResult(), ins,
-                                   b.getI64IntegerAttr(0));
-  ctx.bindResult(node.outputs[0].name, op.getResult());
-  return success();
-}
-
-// atir.Gather: params, indices, axis. Legacy Gather (V1) takes only
-// (params, indices) and fixes axis at 0; GatherV2 carries the axis as a third
-// input tensor. The input count tells the two apart.
-LogicalResult transformGather(const NodeInfo& node, ArrayRef<Type> outs,
-                              ArrayRef<Value> ins, OpContext& ctx) {
-  auto& b = ctx.builder();
-  if (ins.size() < 2)
-    return ctx.emitError(node, "requires params and indices inputs");
-  Location loc = ctx.loc(node.name);
-  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
-  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
-  int32_t batchDims = static_cast<int32_t>(getI64AttrOr(node, "batch_dims", 0));
-  Value axis = (ins.size() >= 3)
-                   ? ins[2]
-                   : buildPrivateIntConst(ctx, node.name + "/axis", {0}, false);
-  auto op =
-      b.create<atir::GatherOp>(loc, outs[0], outputBuffer.getResult(), ins[0],
-                               ins[1], axis, b.getI32IntegerAttr(batchDims));
-  ctx.bindResult(node.outputs[0].name, op.getResult());
-  return success();
-}
-
 // atir.StridedSlice: the five mask bitfields map 1:1 to TF attributes.
 LogicalResult transformStridedSlice(const NodeInfo& node, ArrayRef<Type> outs,
                                     ArrayRef<Value> ins, OpContext& ctx) {

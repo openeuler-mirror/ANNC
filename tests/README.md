@@ -91,7 +91,7 @@ bash tests/FileCheck/run.sh
 
 | 测试资产 | 层 | 说明 |
 |---|---|---|
-| `unit/annc/op_coverage_test.cpp` | L0 | ATIR op 构建覆盖 |
+| `unit/tensorflow/frontend/op_coverage_test.cpp` | L0 | TF 算子表构建与控制流回边覆盖 |
 | `unit/annc/jit_template_fingerprint_test.cpp` | L0 | JIT 模板指纹 |
 | `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
 | `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |

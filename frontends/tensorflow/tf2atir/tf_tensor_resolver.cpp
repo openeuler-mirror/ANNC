@@ -5,9 +5,9 @@
 #include <string>
 #include <unordered_set>
 
-#include "Builder/MLIROpBuilder.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
+#include "tf_mlir_builder.h"
 
 namespace annc::tf2atir {
 namespace {
@@ -301,7 +301,7 @@ bool TfTensorResolver::resolve(const TfGraph& graph, ResolvedTfGraph& result,
                                  node.op == "RefIdentity" ||
                                  node.op == "StopGradient";
     const bool mirrorNode = isControlFlowOp(node.op) || shapeBridgeNode ||
-                            !annc::MLIRBuilder::isSupportedOp(node.op);
+                            !TfMLIRBuilder::isSupportedOp(node.op);
     if (!hasAnnotatedShapes && !mirrorNode) return false;
 
     const std::vector<TensorRef> referencedOutputs = node.outputs;

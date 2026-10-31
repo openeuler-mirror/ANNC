@@ -1,5 +1,5 @@
-// Op-coverage smoke test: every op declared in OpSpecTable.inc must build a
-// verifiable ATIR module. A synthetic graph is generated per spec with typed
+// Op-coverage smoke test: every op declared in tf_op_spec_table.inc must build
+// a verifiable ATIR module. A synthetic graph is generated per spec with typed
 // inputs/outputs chosen so that the op's verifier accepts it. This is the
 // safety net for "adding a row must just work" — it does not prove numerical
 // semantics (covered by the e2e models), but it proves the construction path
@@ -7,13 +7,15 @@
 
 #include <memory>
 
-#include "Builder/MLIROpBuilder.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "gtest/gtest.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
+#include "tf_mlir_builder.h"
+#include "tf_transformers.h"
 
 using namespace mlir;
 using namespace annc;
@@ -89,7 +91,9 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
         {{"int32", {1, 1}}, {"int32", {1}}, {"float32", {1}}, {"float32", {}}},
         {{"float32", {2}}});
   if (op == "SparseTensorDenseMatMul")
-    return set({{"int64", {1, 2}}, {"float32", {1}}, {"int64", {2}},
+    return set({{"int64", {1, 2}},
+                {"float32", {1}},
+                {"int64", {2}},
                 {"float32", {2, 2}}},
                {{"float32", {1, 2}}});
   if (op == "SparseReshape")
@@ -107,8 +111,7 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
     return set({{"float32", {4}}, {"int32", {2}}}, {{"float32", {2}}});
   if (op == "StringToHashBucketFast")
     return set({{"float32", {2}}}, {{"int64", {2}}});
-  if (op == "StringToNumber")
-    return set({{"string", {2}}}, {{"int64", {2}}});
+  if (op == "StringToNumber") return set({{"string", {2}}}, {{"int64", {2}}});
   if (op == "StaticRegexReplace")
     return set({{"string", {2}}}, {{"string", {2}}});
   if (op == "StringSplit")
@@ -116,8 +119,7 @@ void synthTemplates(const OpSpec& spec, const std::string& op,
                {{"int64", {1, 2}}, {"string", {1}}, {"int64", {1}}});
   if (op == "Unique")
     return set({{"float32", {2}}}, {{"float32", {2}}, {"int32", {2}}});
-  if (op == "Rank")
-    return set({{"float32", {2}}}, {{"int32", {}}});
+  if (op == "Rank") return set({{"float32", {2}}}, {{"int32", {}}});
   // Switch routes data to false/true branches; both outputs equal the input.
   if (op == "Switch")
     return set({{"float32", {2}}, {"bool", {}}},
@@ -178,7 +180,7 @@ struct CoverageTest : public ::testing::Test {
 
   bool build(const std::vector<NodeInfo>& nodes) {
     module = ModuleOp::create(UnknownLoc::get(context.get()));
-    MLIRBuilder builder(module);
+    tf2atir::TfMLIRBuilder builder(module);
     return builder.buildFromNodes(nodes);
   }
 
@@ -227,16 +229,15 @@ std::vector<NodeInfo> makeGraph(const OpSpec& spec, const std::string& tfOp) {
     size_t elemCount = 1;
     for (int64_t d : so.shape) elemCount *= static_cast<size_t>(d);
     size_t elemSize = 4;
-    if (so.dtype == "float64" || so.dtype == "int64" ||
-        so.dtype == "uint64" || so.dtype == "complex64")
+    if (so.dtype == "float64" || so.dtype == "int64" || so.dtype == "uint64" ||
+        so.dtype == "complex64")
       elemSize = 8;
     else if (so.dtype == "complex128")
       elemSize = 16;
     else if (so.dtype == "float16" || so.dtype == "bfloat16" ||
              so.dtype == "int16" || so.dtype == "uint16")
       elemSize = 2;
-    else if (so.dtype == "int8" || so.dtype == "uint8" ||
-             so.dtype == "bool")
+    else if (so.dtype == "int8" || so.dtype == "uint8" || so.dtype == "bool")
       elemSize = 1;
     op.raw_data.assign(elemCount * elemSize, 0);
   }
@@ -246,7 +247,7 @@ std::vector<NodeInfo> makeGraph(const OpSpec& spec, const std::string& tfOp) {
 
 TEST_F(CoverageTest, EveryDeclaredOpBuilds) {
   unsigned checked = 0;
-  for (const auto& spec : MLIRBuilder::getAllOpSpecs()) {
+  for (const auto& spec : tf2atir::TfMLIRBuilder::getAllOpSpecs()) {
     // Build one graph per concrete TF op name: aliases and version variants
     // (Gather/GatherV2, Pad/PadV2, Add/AddV2, ...) must all be exercised,
     // otherwise a variant can be registered but never constructed.
@@ -267,7 +268,7 @@ TEST_F(CoverageTest, EveryDeclaredOpBuilds) {
 // Transformer-driven rows get dedicated semantic tests in builder_test.cpp.
 TEST_F(CoverageTest, EveryTableDrivenOpEmitsItsAtirOp) {
   unsigned checked = 0;
-  for (const auto& spec : MLIRBuilder::getAllOpSpecs()) {
+  for (const auto& spec : tf2atir::TfMLIRBuilder::getAllOpSpecs()) {
     if (spec.transformer != nullptr) continue;  // covered by dedicated tests
     for (const auto& tfOpRef : spec.tfOps) {
       const std::string tfOp = tfOpRef.str();
@@ -292,6 +293,91 @@ TEST_F(CoverageTest, EveryTableDrivenOpEmitsItsAtirOp) {
     }
   }
   EXPECT_GE(checked, 40u);
+}
+
+TEST_F(CoverageTest, KeepsTfSumAndGatherRules) {
+  const OpSpec* sum = nullptr;
+  const OpSpec* gather = nullptr;
+  for (const auto& spec : tf2atir::TfMLIRBuilder::getAllOpSpecs()) {
+    for (auto name : spec.tfOps) {
+      if (name == "Sum") sum = &spec;
+      if (name == "Gather") gather = &spec;
+    }
+  }
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(sum->atirOp, "atir.Sum");
+  ASSERT_NE(gather, nullptr);
+  EXPECT_EQ(gather->atirOp, "atir.Gather");
+  EXPECT_EQ(gather->transformer, tf2atir::transformGather);
+  EXPECT_EQ(gather->minInputs, 2u);
+  EXPECT_EQ(gather->maxInputs, 3u);
+}
+
+TEST_F(CoverageTest, PreservesAttributeWarningsAndMetadata) {
+  const OpSpec* matmul = nullptr;
+  for (const auto& spec : tf2atir::TfMLIRBuilder::getAllOpSpecs()) {
+    for (auto name : spec.tfOps)
+      if (name == "MatMul") matmul = &spec;
+  }
+  ASSERT_NE(matmul, nullptr);
+  auto nodes = makeGraph(*matmul, "MatMul");
+  nodes.back().attrs["transpose_a"] = false;
+  nodes.back().attrs["review_unknown"] = int64_t{7};
+
+  std::vector<std::string> warnings;
+  ScopedDiagnosticHandler handler(context.get(), [&](Diagnostic& diagnostic) {
+    if (diagnostic.getSeverity() != DiagnosticSeverity::Warning)
+      return failure();
+    warnings.push_back(diagnostic.str());
+    return success();
+  });
+  ASSERT_TRUE(build(nodes));
+  EXPECT_EQ(warnings, (std::vector<std::string>{
+                          "TF attribute 'review_unknown' of node 'MatMul_node' "
+                          "is not mapped to an "
+                          "ATIR attribute (kept in metadata only)"}));
+
+  Operation* matmulOp = nullptr;
+  module.walk([&](atir::MatMulOp op) { matmulOp = op.getOperation(); });
+  ASSERT_NE(matmulOp, nullptr);
+  OpBuilder attrs(context.get());
+  auto expected = attrs.getDictionaryAttr({
+      attrs.getNamedAttr("tf.name", attrs.getStringAttr("MatMul_node")),
+      attrs.getNamedAttr("tf.op", attrs.getStringAttr("MatMul")),
+      attrs.getNamedAttr("transpose_a", attrs.getStringAttr("false")),
+      attrs.getNamedAttr("review_unknown", attrs.getStringAttr("7")),
+  });
+  EXPECT_EQ(matmulOp->getAttrOfType<DictionaryAttr>("metadata"), expected);
+}
+
+TEST_F(CoverageTest, PreservesControlFlowBackedgeBeforeResolvingInputs) {
+  NodeInfo merge;
+  merge.name = "merge";
+  merge.op_type = "Merge";
+  merge.inputs = {"input", "next"};
+  merge.outputs = {{"merge", "float32", {2}}, {"merge:1", "int32", {}}};
+  merge.tf_attrs = {{"tf.input.0", "input:0"}, {"tf.input.1", "next:0"}};
+
+  NodeInfo next;
+  next.name = "next";
+  next.op_type = "NextIteration";
+  next.inputs = {"merge"};
+  next.outputs = {{"next", "float32", {2}}};
+
+  ASSERT_TRUE(build({makeInput("input", {"float32", {2}}), merge, next}));
+  Operation* mergeOp = nullptr;
+  Operation* nextOp = nullptr;
+  module.walk([&](Operation* op) {
+    if (op->getName().getStringRef() == "atir.merge") mergeOp = op;
+    if (op->getName().getStringRef() == "atir.next_iteration") nextOp = op;
+  });
+  ASSERT_NE(mergeOp, nullptr);
+  ASSERT_NE(nextOp, nullptr);
+  EXPECT_EQ(mergeOp->getNumOperands(), 1u);
+  EXPECT_EQ(nextOp->getOperand(0), mergeOp->getResult(0));
+  auto metadata = mergeOp->getAttrOfType<DictionaryAttr>("metadata");
+  ASSERT_TRUE(metadata);
+  EXPECT_EQ(cast<StringAttr>(metadata.get("tf.input.1")).getValue(), "next:0");
 }
 
 }  // namespace
