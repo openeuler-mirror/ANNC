@@ -13,7 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
-#include <random>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -55,10 +56,29 @@ std::string GetEnvStr(const char* name, const std::string& default_val = "") {
   return val ? std::string(val) : default_val;
 }
 
+template <typename T>
+T ParseInteger(const std::string& value, const char* name, T default_val,
+               T minimum = std::numeric_limits<T>::min()) {
+  try {
+    size_t end = 0;
+    const auto parsed = std::stoll(value, &end);
+    if (end == value.size() && parsed >= minimum &&
+        parsed <= std::numeric_limits<T>::max()) {
+      return static_cast<T>(parsed);
+    }
+  } catch (const std::invalid_argument&) {
+    // Conversion errors share the warning and fallback below.
+  } catch (const std::out_of_range&) {
+  }
+  LOG(WARNING) << "Invalid " << name << ": " << value << "; keeping "
+               << default_val;
+  return default_val;
+}
+
 int GetEnvInt(const char* name, int default_val = 0) {
   const char* val = getenv(name);
   if (!val) return default_val;
-  return std::stoi(val);
+  return ParseInteger(val, name, default_val);
 }
 
 std::string SanitizePathComponent(const std::string& value) {
@@ -121,7 +141,7 @@ Status ANNCOptimizer::Init(
     annc_verbose_ = true;
   }
 
-  int env_timeout = GetEnvInt(kEnvTimeout);
+  int env_timeout = GetEnvInt(kEnvTimeout, timeout_seconds_);
   if (env_timeout > 0) {
     timeout_seconds_ = env_timeout;
   }
@@ -152,7 +172,7 @@ Status ANNCOptimizer::Init(
       } else if (name == "temp_dir") {
         temp_dir_ = value;
       } else if (name == "timeout_seconds") {
-        timeout_seconds_ = std::stoi(value);
+        timeout_seconds_ = ParseInteger(value, name.c_str(), timeout_seconds_, 1);
       } else if (name == "keep_temp_files") {
         keep_temp_files_ = (value == "true" || value == "1");
       } else if (name == "annc_verbose" || name == "verbose") {
@@ -160,7 +180,7 @@ Status ANNCOptimizer::Init(
       } else if (name == "enabled") {
         enabled_ = (value == "true" || value == "1");
       } else if (name == "batch_size") {
-        batch_size_ = std::stoll(value);
+        batch_size_ = ParseInteger(value, name.c_str(), batch_size_);
       } else if (name == "backend") {
         backend_ = value;
       }
@@ -256,6 +276,12 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
     }
   };
 
+  if (input_graphdef_file.empty() || output_graphdef_file.empty()) {
+    cleanup_temps();
+    *output = grappler_item.graph;
+    return OkStatus();
+  }
+
   Status write_status = WriteGraphDefToFile(input_graph, &input_graphdef_file);
   if (!write_status.ok()) {
     LOG(WARNING) << "Failed to write input GraphDef: "
@@ -313,7 +339,7 @@ Status ANNCOptimizer::WriteGraphDefToFile(const GraphDef& graph_def,
     return errors::Internal("Failed to serialize GraphDef");
   }
 
-  int fd = open(filepath->c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  int fd = open(filepath->c_str(), O_WRONLY | O_TRUNC | O_NOFOLLOW);
   if (fd < 0) {
     return errors::Internal(absl::StrCat("Failed to open file for writing: ",
                             *filepath, ": ", strerror(errno)));
@@ -484,14 +510,21 @@ Status ANNCOptimizer::WaitForProcess(pid_t pid, const std::string& process_name)
 }
 
 std::string ANNCOptimizer::GenerateTempFilename(const std::string& prefix) {
-  static std::mt19937 rng(std::random_device{}());
-  std::uniform_int_distribution<uint64_t> dist;
-  uint64_t rand_val = dist(rng);
-  auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-  return absl::StrCat(temp_dir_, "/", prefix, now, "_", rand_val, ".pb");
+  std::string pattern = absl::StrCat(temp_dir_, "/", prefix, "XXXXXX.pb");
+  std::vector<char> path(pattern.begin(), pattern.end());
+  path.push_back('\0');
+  // Atomically reserve the path before passing it to the writer.
+  int fd = mkstemps(path.data(), 3);
+  if (fd < 0) {
+    LOG(WARNING) << "Failed to create temporary file: " << strerror(errno);
+    return "";
+  }
+  close(fd);
+  return std::string(path.data());
 }
 
 void ANNCOptimizer::CleanupTempFile(const std::string& filepath) {
+  if (filepath.empty()) return;
   if (unlink(filepath.c_str()) != 0 && errno != ENOENT) {
     LOG(WARNING) << "Failed to delete temp file: " << filepath
                  << ", error: " << strerror(errno);

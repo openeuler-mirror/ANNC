@@ -1,14 +1,17 @@
 #include "jit_compiler.h"
 
 #include <dlfcn.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <vector>
@@ -109,6 +112,22 @@ std::string RunJitTool(const std::vector<std::string>& args,
     return ErrorMessage("Missing executable for ", tool_name);
   }
 
+  int timeout_seconds = 300;
+  const char* configured_timeout = std::getenv("ANNC_TIMEOUT");
+  if (configured_timeout) {
+    errno = 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(configured_timeout, &end, 10);
+    if (errno == 0 && end != configured_timeout && *end == '\0' && parsed > 0 &&
+        parsed <= std::numeric_limits<int>::max()) {
+      timeout_seconds = static_cast<int>(parsed);
+    } else {
+      LogJitMessage(log, log_context, 1,
+                    ErrorMessage("Invalid ANNC_TIMEOUT: ", configured_timeout,
+                                 "; using ", timeout_seconds));
+    }
+  }
+
   if (AnncVerboseEnabled()) {
     LogJitMessage(log, log_context, 0,
                   ErrorMessage("[ANNC-JIT-TRACE] ", tool_name,
@@ -135,9 +154,21 @@ std::string RunJitTool(const std::vector<std::string>& args,
 
   int status = 0;
   pid_t waited;
-  do {
-    waited = waitpid(pid, &status, 0);
-  } while (waited < 0 && errno == EINTR);
+  const auto start = std::chrono::steady_clock::now();
+  for (;;) {
+    waited = waitpid(pid, &status, WNOHANG);
+    if (waited > 0 || (waited < 0 && errno != EINTR)) break;
+
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    if (elapsed >= std::chrono::seconds(timeout_seconds)) {
+      kill(pid, SIGKILL);
+      do {
+        waited = waitpid(pid, &status, 0);
+      } while (waited < 0 && errno == EINTR);
+      return ErrorMessage(tool_name, " timed out after ", timeout_seconds, "s");
+    }
+    usleep(100000);
+  }
   if (waited < 0) {
     return ErrorMessage("Failed to wait for ", tool_name, ": ",
                         std::strerror(errno));
