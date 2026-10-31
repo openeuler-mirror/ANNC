@@ -1,8 +1,8 @@
 """Exercise built compiler tools with and without the optional GEMM archive.
 
-Run against both configurations using ANNC_BUILD_DIR. The missing-archive
+Run against both configurations using ANNC_BUILD_DIR. The missing-package
 configuration must build annc-asm/annc-opt with
--DANNC_AARCH64_GEMM_KERNEL_LIBRARY=/nonexistent/libannc_gemm_microkernels.a.
+-DANNC_GEMM_PACKAGE_DIR=/nonexistent/annc-gemm-kernels.
 """
 
 import ctypes
@@ -31,9 +31,9 @@ def compiler():
     for name in ("annc-asm", "annc-opt"):
         if not (build / "bin" / name).is_file():
             pytest.skip(f"{name} is not built")
-    archive = cache.get("ANNC_AARCH64_GEMM_KERNEL_LIBRARY", "")
+    package = cache.get("ANNC_GEMM_PACKAGE_DIR", "")
     available = platform.machine().lower() in ("aarch64", "arm64") and bool(
-        archive and Path(archive).is_file()
+        package and (Path(package) / "cmake/AnncGemmKernelsConfig.cmake").is_file()
     )
     return build, available
 
@@ -83,7 +83,7 @@ def test_static_prepack_reports_missing_archive(compiler, tmp_path):
     else:
         assert result.returncode != 0
         assert "static RHS prepacking requires the AArch64 GEMM" in result.stderr
-        assert "ANNC_AARCH64_GEMM_KERNEL_LIBRARY" in result.stderr
+        assert "ANNC_GEMM_PACKAGE_DIR" in result.stderr
 
 
 @pytest.mark.parametrize("isa", ["neon", "sve"])
