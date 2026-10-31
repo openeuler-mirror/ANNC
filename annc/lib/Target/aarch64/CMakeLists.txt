@@ -26,9 +26,14 @@ set(_gemm_srcs
 # reuse it without linking MLIR passes or machine-specific generation code.
 add_library(ANNCGemmCodegenAdapter STATIC Gemm/GemmCodegenAdapter.cpp)
 target_compile_features(ANNCGemmCodegenAdapter PUBLIC cxx_std_17)
+target_compile_definitions(ANNCGemmCodegenAdapter PRIVATE
+  ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
 target_include_directories(ANNCGemmCodegenAdapter PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/annc/include>
   $<INSTALL_INTERFACE:include>)
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
+  target_link_libraries(ANNCGemmCodegenAdapter PRIVATE ANNC::GemmCodegen)
+endif()
 install(TARGETS ANNCGemmCodegenAdapter EXPORT MLIRTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
@@ -86,8 +91,8 @@ add_mlir_library(AArch64Codegen
 # Apply it to the source so it also reaches MLIR's obj.AArch64Codegen target.
 set_property(SOURCE Gemm/ConstantFolding/GemmPrepackRhs.cpp APPEND PROPERTY
   COMPILE_DEFINITIONS
-  ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=$<BOOL:${ANNC_AARCH64_GEMM_KERNELS_AVAILABLE}>)
+  ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
 
-if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
   target_link_libraries(AArch64Codegen PUBLIC ANNC::AArch64GemmMicrokernels)
 endif()

@@ -44,10 +44,6 @@ if(ANNC_ENABLE_ONNXRUNTIME_EP)
   set(ANNC_KERNEL_MLAS ON CACHE BOOL
       "Let builtin kernels call MLAS GEMM entries with the host's native pool (automatically ON when ANNC_ENABLE_ONNXRUNTIME_EP=ON)" FORCE)
 endif()
-# The annc driver assembles generated AOT/JIT GEMM kernels against the GEMM-ASM
-# headers in <checkout>/Sve and <checkout>/Neon.  Baked in here as the default;
-# the runtime ANNC_GEMM_ASM_SOURCE_DIR environment variable overrides it.
-set(ANNC_GEMM_ASM_SOURCE_DIR "" CACHE PATH "GEMM-ASM checkout holding Sve/ and Neon/ assembly headers, used by the annc driver when ANNC_GEMM_ASM_SOURCE_DIR is not set at runtime")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
@@ -225,12 +221,15 @@ find_package(MLIR REQUIRED CONFIG HINTS ${_annc_mlir_hints})
 # 实现，与 libMLIR.so 组合使用已验证（发行版自带的 mlir Python 包即如此构建）。
 # 因此：C API 目标统一指向 libMLIRPythonCAPI.so，其余 MLIR 静态目标指向
 # libMLIR.so；执行引擎、运行时与测试目标不在 libMLIR.so 中，保持原样。
-get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION)
-foreach(_cfg _RELWITHDEBINFO _RELEASE _DEBUG _MINSIZEREL)
-  if(NOT _annc_mlir_shared)
-    get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION${_cfg})
-  endif()
-endforeach()
+set(_annc_mlir_shared "")
+if(TARGET MLIR)
+  get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION)
+  foreach(_cfg _RELWITHDEBINFO _RELEASE _DEBUG _MINSIZEREL)
+    if(NOT _annc_mlir_shared)
+      get_target_property(_annc_mlir_shared MLIR IMPORTED_LOCATION${_cfg})
+    endif()
+  endforeach()
+endif()
 if(NOT _annc_mlir_shared)
   if(ANNC_ENABLE_PYTHON)
     message(FATAL_ERROR

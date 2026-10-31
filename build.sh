@@ -35,7 +35,6 @@ ANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR:-}"
 ANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE:-}"
 ANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS:-OFF}"
 ANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR:-}"
-ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:-}"
 ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
 ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
 ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
@@ -216,8 +215,7 @@ while [[ $# -gt 0 ]]; do
       echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
       echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF; automatically ON for ORT EP)"
       echo "    ANNC_MLAS_INCLUDE_DIR=<path>          ORT onnxruntime/core/mlas/inc (required when MLAS=ON)"
-      echo "    ANNC_GEMM_ASM_SOURCE_DIR=<path>       GEMM-ASM checkout baked into the annc driver as the"
-      echo "                                          default JIT assembly source; runtime env overrides it"
+      echo "  GEMM epilogue uses the complete binary package in third_party/annc-gemm-kernels."
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -731,7 +729,7 @@ get_cache_value() {
 # cache would ignore user-requested changes (e.g. --kdnn-source RELEASE on a
 # tree previously configured with LOCAL).  A changed non-empty value forces an
 # explicit --clean reconfigure.  A new/empty cache entry (for example the
-# ANNC_EP_ORT_BUILD_TREE / ANNC_GEMM_ASM_SOURCE_DIR keys added after an older
+# ANNC_EP_ORT_BUILD_TREE key added after an older
 # cache was written) triggers an in-place reconfigure instead: the third-party
 # build artifacts are kept, but the requested -D values are applied.
 check_cache_consistency() {
@@ -758,7 +756,6 @@ check_cache_consistency() {
     "ANNC_EP_ORT_BUILD_TREE:${ANNC_EP_ORT_BUILD_TREE}"
     "ANNC_KERNEL_MLAS:${ANNC_KERNEL_MLAS}"
     "ANNC_MLAS_INCLUDE_DIR:${ANNC_MLAS_INCLUDE_DIR}"
-    "ANNC_GEMM_ASM_SOURCE_DIR:${ANNC_GEMM_ASM_SOURCE_DIR}"
     "ANNC_TENSORFLOW_PRELOAD:${ANNC_TENSORFLOW_PRELOAD}"
     "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
     "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
@@ -956,7 +953,6 @@ else
   if [ "${ANNC_KERNEL_MLAS}" == "ON" ]; then
     echo "  MLAS Include Dir: ${ANNC_MLAS_INCLUDE_DIR}"
   fi
-  echo "  GEMM-ASM Source Dir: ${ANNC_GEMM_ASM_SOURCE_DIR:-<runtime env only>}"
   echo "  Coverage: ${ENABLE_COVERAGE}"
   echo "  Python Bindings: ${ENABLE_PYTHON}"
   echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
@@ -986,7 +982,6 @@ else
     -DANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE}" \
     -DANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS}" \
     -DANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR}" \
-    -DANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR}" \
     -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
     -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
     -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \

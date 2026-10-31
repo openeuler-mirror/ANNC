@@ -20,7 +20,7 @@ using namespace mlir;
 namespace annc {
 namespace {
 
-#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+#if ANNC_GEMM_PACKAGE_AVAILABLE
 // Keep strong references when available so the static archive is extracted.
 // Builds without it retain the pass and diagnose static prepack requests.
 extern "C" {
@@ -124,11 +124,11 @@ struct AArch64GemmPrepackRhsPass
       return;
     }
 
-#if !ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+#if !ANNC_GEMM_PACKAGE_AVAILABLE
     module.emitError(
         "static RHS prepacking requires the AArch64 GEMM "
         "microkernel archive; configure "
-        "ANNC_AARCH64_GEMM_KERNEL_LIBRARY and rebuild");
+        "ANNC_GEMM_PACKAGE_DIR and rebuild");
     signalPassFailure();
 #else
     constant_folding::RhsDataLoader rhsLoader;
