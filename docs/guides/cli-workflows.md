@@ -244,7 +244,7 @@ ANNC_LIBRARY_NAME=./fused_matmul.so ./test_app
 ANNC_LLVM_BIN=/path/to/llvm20/bin annc model_lowered.mlir --shared -o kernel.so
 ```
 
-链接前还会自动调用 `annc-model-kernel-export`，把 lowered MLIR 中标记的 AArch64 微内核导出为 `.S` 并汇编进产物。
+链接前还会自动调用 `annc-gemm-epilogue-kernel-compile`，把 lowered MLIR 中标记的 AArch64 epilogue GEMM kernel 请求编译为 `.o` 并链接进产物。生成子目录须为本次编译新建；`annc` 会使用独立临时目录并在编译结束时清理。
 
 ## `annc-verify`
 

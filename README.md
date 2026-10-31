@@ -113,7 +113,7 @@ annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点�
 | `annc-fusion-metadata`     | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式）                                                          |
 | `annc-asm`                 | ATIR → lowered MLIR（linalg/affine/scf）                                                      |
 | `annc`                     | 编译驱动：lowered MLIR → `.so` / 可执行文件                                                           |
-| `annc-model-kernel-export` | 导出 lowered MLIR 中生成的 AArch64 微内核（`.S` + `manifest.json`），由 `annc` 在链接前自动调用                 |
+| `annc-gemm-epilogue-kernel-compile` | 将 lowered MLIR 中的 epilogue GEMM kernel 请求编译为 `.o`，由 `annc` 在链接前自动调用 |
 | `annc-verify`              | Kernel 正确性验证                                                                                |
 | `annc-converter`           | 基于融合元数据重写 TF GraphDef（把融合子图替换为 `ANNCFused` 节点）                                              |
 

@@ -48,6 +48,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-015 | ONNX 共享编译器与 ORT 插件接入的整体方案 | proposed | [decisions.md#adr-015](decisions.md#adr-015) |
 | ADR-016 | TF1.15 独立插件与共用 TF 前端 | proposed | [decisions.md#adr-016](decisions.md#adr-016) |
 | ADR-017 | TensorFlow JIT GEMM 代码与权重缓存分离及统一模式开关 | accepted / implemented | [decisions.md#adr-017](decisions.md#adr-017) |
+| ADR-018 | GEMM epilogue codegen 通过 GEMM-ASM 二进制接口交付 | accepted | [decisions.md#adr-018](decisions.md#adr-018) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 
