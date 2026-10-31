@@ -53,7 +53,6 @@ mlir::FailureOr<EpilogueProgram> parseEpilogueCandidatePlan(
     mlir::DictionaryAttr candidate);
 mlir::LogicalResult bindEpilogueProgramToSource(MatMulOp matmul,
                                                 EpilogueProgram &program);
-std::string staticSymbolSuffix(const EpilogueProgram &program, bool accumulate);
 mlir::DictionaryAttr buildEpilogueCandidateAttr(mlir::Builder &builder,
                                                 const EpilogueProgram &program);
 

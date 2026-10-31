@@ -125,6 +125,13 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
   if (isFused && !generated)
     return call.emitOpError("fused leaf has no generated metadata");
 
+  if (generated) {
+    auto generatedSymbol = generated.getAs<StringAttr>("symbol");
+    if (!generatedSymbol || generatedSymbol.getValue() != symbol.getValue())
+      return call.emitOpError(
+          "selected symbol disagrees with generated metadata");
+  }
+
   SmallVector<Value> arguments = {*lhs, *rhs, *out};
   const unsigned indexEnd = call.getNumOperands() - (isFused ? 1 : 0);
   for (unsigned index = 6; index < indexEnd; ++index)

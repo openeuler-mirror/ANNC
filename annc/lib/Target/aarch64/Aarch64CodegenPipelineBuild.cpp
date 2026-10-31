@@ -52,7 +52,6 @@ namespace annc
         passManager.addPass(createAArch64GemmThreadTiling());
         passManager.addPass(createAArch64GemmCacheBlocking());
         passManager.addPass(createAArch64GemmKernelTiling());
-        passManager.addPass(createAArch64GemmEpilogueLowering());
         passManager.addPass(createAArch64GemmLeafMaterialization());
         passManager.addPass(createAArch64GemmEpilogueLowering());
         passManager.addPass(createConvertLinalgToLoopsPass());
