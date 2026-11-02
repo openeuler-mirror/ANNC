@@ -11,6 +11,13 @@ set(ANNC_STABLEHLO_BUILD_DIR
     "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/stablehlo" CACHE PATH
     "StableHLO build tree paired with ONNX-MLIR")
 
+add_executable(annc-onnx2stablehlo annc-onnx2stablehlo.cpp)
+target_include_directories(annc-onnx2stablehlo PRIVATE ${LLVM_INCLUDE_DIRS})
+llvm_map_components_to_libnames(_driver_llvm Support)
+target_link_libraries(annc-onnx2stablehlo PRIVATE ${_driver_llvm})
+target_compile_definitions(annc-onnx2stablehlo PRIVATE
+  ANNC_LLVM_VERSION="${LLVM_PACKAGE_VERSION}")
+
 add_executable(annc-onnx-framework-opt
   annc-onnx-framework-opt.cpp
   ../passes/preprocessing/onnx_slice_preprocess.cpp
@@ -44,4 +51,4 @@ target_link_libraries(annc-onnx-framework-opt PRIVATE
   OMHasOnnxSubgraphOpInterface OMSpecializedKernelOpInterface
   OMMlirDialects OMMlirUtilities OMSmallFPConversion OMDiagnostic
   -Wl,--end-group ${MLIR_LIBS} ${llvm_libs})
-install(TARGETS annc-onnx-framework-opt DESTINATION bin)
+install(TARGETS annc-onnx2stablehlo annc-onnx-framework-opt DESTINATION bin)
