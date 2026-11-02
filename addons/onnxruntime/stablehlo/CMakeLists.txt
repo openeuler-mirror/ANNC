@@ -24,5 +24,5 @@ set(ANNC_STABLEHLO_LIB_DIR
 add_subdirectory(pipeline)
 
 add_custom_target(annc_onnx_stablehlo_addon
-  DEPENDS annc-onnx-framework-opt
+  DEPENDS annc-onnx2stablehlo annc-onnx-framework-opt
   COMMENT "Building the ONNX-to-StableHLO producer pipeline")

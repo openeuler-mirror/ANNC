@@ -89,6 +89,7 @@ ninja && ninja install
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并编译预生成的 ONNX proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
+| `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 ONNX-MLIR 驱动的 ONNX→StableHLO 生成流水线（`addons/onnxruntime/stablehlo/`）；依赖 `third-party/onnx-mlir` submodule 与配套构建树，不连接 EP 执行路径 |
 | `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
