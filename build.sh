@@ -3,6 +3,8 @@
 # Default configuration
 BUILD_TYPE="Release"
 INSTALL_PREFIX="${PWD}/install"
+ANNC_GEMM_PACKAGE_DIR="${PWD}/third_party/annc-gemm-kernels"
+REQUIRE_GEMM_PACKAGE="OFF"
 ENABLE_KDNN_ADAPTOR="OFF"
 ENABLE_COVERAGE="OFF"
 ANNC_DEBUG="OFF"
@@ -55,6 +57,18 @@ while [[ $# -gt 0 ]]; do
     --install-prefix)
       INSTALL_PREFIX="$2"
       shift 2
+      ;;
+    --gemm-package-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --gemm-package-dir requires a path" >&2
+        exit 1
+      fi
+      ANNC_GEMM_PACKAGE_DIR="$2"
+      shift 2
+      ;;
+    --require-gemm-package)
+      REQUIRE_GEMM_PACKAGE="ON"
+      shift
       ;;
     --enable-kdnn-adaptor)
       ENABLE_KDNN_ADAPTOR="ON"
@@ -173,6 +187,8 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --build-type [Debug|Release|RelWithDebInfo]  Set build type (default: Release)"
       echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
+      echo "  --gemm-package-dir <path>     Complete GEMM-ASM package root (default: ./third_party/annc-gemm-kernels)"
+      echo "  --require-gemm-package       Fail CMake configuration if the complete package is unavailable"
       echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
       echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
       echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: RELEASE)"
@@ -215,7 +231,7 @@ while [[ $# -gt 0 ]]; do
       echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
       echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF; automatically ON for ORT EP)"
       echo "    ANNC_MLAS_INCLUDE_DIR=<path>          ORT onnxruntime/core/mlas/inc (required when MLAS=ON)"
-      echo "  GEMM epilogue uses the complete binary package in third_party/annc-gemm-kernels."
+      echo "  GEMM epilogue uses a complete binary package; override its root with --gemm-package-dir."
       echo "  -h, --help                    Show this help message"
       exit 0
       ;;
@@ -225,6 +241,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${ANNC_GEMM_PACKAGE_DIR}" != /* ]]; then
+  ANNC_GEMM_PACKAGE_DIR="${PWD}/${ANNC_GEMM_PACKAGE_DIR}"
+fi
 
 # Resolve the mutually exclusive framework selection.  The legacy default
 # (no selection flag) keeps the historical combination and still honors the
@@ -741,6 +761,8 @@ check_cache_consistency() {
   local -a cache_checks=(
     "CMAKE_BUILD_TYPE:${BUILD_TYPE}"
     "CMAKE_INSTALL_PREFIX:${INSTALL_PREFIX}"
+    "ANNC_GEMM_PACKAGE_DIR:${ANNC_GEMM_PACKAGE_DIR}"
+    "ANNC_REQUIRE_GEMM_PACKAGE:${REQUIRE_GEMM_PACKAGE}"
     "CMAKE_C_COMPILER:$(command -v ${C_COMPILER})"
     "CMAKE_CXX_COMPILER:$(command -v ${CXX_COMPILER})"
     "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
@@ -936,6 +958,8 @@ else
   echo "Running CMake with the following configuration:"
   echo "  Build Type: ${BUILD_TYPE}"
   echo "  Install Prefix: ${INSTALL_PREFIX}"
+  echo "  GEMM Package Dir: ${ANNC_GEMM_PACKAGE_DIR}"
+  echo "  Require GEMM Package: ${REQUIRE_GEMM_PACKAGE}"
   echo "  C Compiler: ${C_COMPILER}"
   echo "  C++ Compiler: ${CXX_COMPILER}"
   echo "  Python: ${PYTHON}"
@@ -970,6 +994,8 @@ else
   cmake .. \
     -G Ninja \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
+    -DANNC_GEMM_PACKAGE_DIR="${ANNC_GEMM_PACKAGE_DIR}" \
+    -DANNC_REQUIRE_GEMM_PACKAGE="${REQUIRE_GEMM_PACKAGE}" \
     -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
     -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
     -DANNC_DEBUG="${ANNC_DEBUG}" \
