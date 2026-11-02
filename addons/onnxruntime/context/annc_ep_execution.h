@@ -111,6 +111,10 @@ class OnnxExecutionContext {
   // True when the kernel allocated every declared output slot.
   bool AllOutputsAllocated() const;
 
+  // True when every slot preserves the view returned by its allocation.
+  // Called after the synchronous kernel and all its callbacks have finished.
+  bool AllOutputsBound() const;
+
  private:
   static AnncStatusCode AllocateOutput(void* opaque, uint32_t slot,
                                        const AnncTensorDesc* request,
@@ -158,6 +162,8 @@ class OnnxExecutionContext {
   };
   std::deque<ShapeStorage> shapes_;
   std::vector<AnncTensorView> output_views_;
+  // Independent copies: the kernel can overwrite the public output slots.
+  std::vector<AnncTensorView> allocated_output_views_;
   std::recursive_mutex mutex_;
   std::atomic<AnncStatusCode> status_{ANNC_STATUS_OK};
   AnncRuntimeServices services_{};

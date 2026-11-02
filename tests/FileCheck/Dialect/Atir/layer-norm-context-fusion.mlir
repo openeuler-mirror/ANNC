@@ -1,30 +1,27 @@
-// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --implicit-check-not=dynamic_dims
 // RUN: env ANNC_EP_FUSION_LAYER_NORM=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
 // DISABLED: atir.ReduceMean
 // DISABLED-NOT: custom.op_name = "LayerNorm
 // DISABLED-NOT: func.func private @fused_layer_norm_
-// FusedLayerNorm 站点（execution v2 形态）：RM-LN 链的 11 个中间算子加末端
-// Add 全部融成一个站点，kernel 函数首参为执行上下文、fusion.metadata 的 abi 为
-// annc_execution_v2、kernel_arg_order 为空（输出由 kernel 经上下文按槽位 0
+// FusedLayerNorm 站点（context v3 形态）：RM-LN 链的 11 个中间算子加末端
+// Add 全部融成一个站点，kernel 函数在 lowering 后只接收上下文、fusion.metadata 的 abi 为
+// annc_context_v3、kernel_arg_order 为空（输出由 kernel 经上下文按槽位 0
 // 分配）；主图区域只标记 annc.fusion_materialized。
 //
 // CHECK-LABEL: func.func @main
 // CHECK: atir.ReduceMean
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_layer_norm_
-// CHECK-SAME: !llvm.ptr
 // CHECK-SAME: annc.execution_mode = "aot"
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: args = [{dtype = "f32", rank = 2 : i64, role = "dynamic", shape = [2, 4], tf_name = "x"}, {dtype = "f32", rank = 1 : i64, role = "fixed", shape = [4], tf_name = "gamma"}, {dtype = "f32", rank = 1 : i64, role = "fixed", shape = [4], tf_name = "beta"}, {dtype = "f32", rank = 0 : i64, role = "fixed", shape = [], tf_name = "eps"}]
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: member_node_names = ["n_out", "n_xg", "n_bias", "n_mg", "n_g", "n_recip", "n_sqrt", "n_add1", "n_var", "n_sq", "n_sub1", "n_mean"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 2 : i64, role = "output", shape = [2, 4], tf_name = "y:0"}]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["input", "gamma", "beta", "eps"]
 // CHECK-SAME: custom.arg_ranks = [2, 1, 1, 0]
 // CHECK-SAME: custom.op_name = "LayerNorm"
-// CHECK-SAME: custom.result_names = ["output"]
 // CHECK-SAME: custom.result_ranks = [2]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<2x4xf32, name = "x">) -> !atir.tensor<2x4xf32, name = "y"> {
@@ -150,7 +147,7 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.ReduceMean
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_layer_norm_
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: args = [{dtype = "f32", rank = 2 : i64, role = "dynamic", shape = [3, 8], tf_name = "x"}
 // CHECK: atir.Customize
 // CHECK-SAME: custom.arg_names = ["input", "gamma", "beta", "eps"]

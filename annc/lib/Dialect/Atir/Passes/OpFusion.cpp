@@ -551,8 +551,8 @@ static LogicalResult outlineContextBuiltin(
       "context_i64_attrs", makeI64Array(rewriter.getContext(), attributes)));
   metadata.push_back(rewriter.getNamedAttr(
       "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-  metadata.push_back(rewriter.getNamedAttr(
-      "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+  // V3 kernels supply actual output shapes through allocation callbacks.
+  // Do not attach the legacy dynamic-input-to-output axis mapping.
   metadata.push_back(
       rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
   metadata.push_back(rewriter.getNamedAttr(
@@ -2958,8 +2958,6 @@ struct FuseTensordotMatMulAsFuncCallPattern
         "abi", rewriter.getStringAttr("annc_context_v3")));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -3697,8 +3695,6 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     // 输出由 kernel 经执行上下文分配，不在调用参数里，故 kernel_arg_order 为空。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -4056,8 +4052,6 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
     // 输出由 kernel 经执行上下文分配，不在调用参数里。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -4614,8 +4608,6 @@ struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
     // 输出由 kernel 经执行上下文分配，不在调用参数里。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(

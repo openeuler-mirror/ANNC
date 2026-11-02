@@ -462,6 +462,7 @@ OnnxExecutionContext::OnnxExecutionContext(
       allocated_(outputs.size(), false),
       pool_(api, kernel_context) {
   output_views_.resize(outputs.size());
+  allocated_output_views_.resize(outputs.size());
   services_ = {sizeof(AnncRuntimeServices),
                ANNC_CONTEXT_ABI_VERSION,
                this,
@@ -529,6 +530,22 @@ bool OnnxExecutionContext::AllOutputsAllocated() const {
                      [](bool allocated) { return allocated; });
 }
 
+bool OnnxExecutionContext::AllOutputsBound() const {
+  for (size_t i = 0; i < output_views_.size(); ++i) {
+    const auto& view = output_views_[i];
+    const auto& allocated = allocated_output_views_[i];
+    if (!allocated_[i] || !(view.flags & ANNC_TENSOR_BOUND) ||
+        (view.flags & ANNC_TENSOR_READ_ONLY) ||
+        view.allocated != allocated.allocated ||
+        view.aligned != allocated.aligned || view.offset != allocated.offset ||
+        view.element_type != allocated.element_type ||
+        view.rank != allocated.rank || view.sizes != allocated.sizes ||
+        view.strides != allocated.strides || view.layout != allocated.layout)
+      return false;
+  }
+  return true;
+}
+
 bool OnnxExecutionContext::BindView(const AnncTensorDesc& request, void* data,
                                     AnncTensorView* result) {
   shapes_.emplace_back();
@@ -564,6 +581,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutput(
     if (code != ANNC_STATUS_OK) return code;
     if (!state.BindView(desc, desc.data, result))
       return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "output stride overflow");
+    state.allocated_output_views_[slot] = *result;
     if (bytes && (desc.flags & ANNC_ALLOCATION_ZERO))
       std::memset(desc.data, 0, bytes);
     return ANNC_STATUS_OK;
@@ -945,6 +963,11 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   if (!context.AllOutputsAllocated()) {
     return api->CreateStatus(
         ORT_FAIL, "ANNC EP: kernel did not allocate every declared output");
+  }
+  if (!context.AllOutputsBound()) {
+    return api->CreateStatus(ORT_FAIL,
+                             "ANNC EP: kernel did not bind every output to its "
+                             "ONNX Runtime allocation");
   }
   return nullptr;
 }

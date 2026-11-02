@@ -80,6 +80,15 @@ typedef struct {
   uint64_t count;
 } AnncAttributeView;
 
+// request and its dims are borrowed only until this synchronous callback
+// returns. On success, result borrows host-owned storage and metadata valid
+// throughout the kernel call. Before returning ANNC_STATUS_OK, the kernel must
+// bind this returned view to context->outputs[slot]; passing that slot as
+// result satisfies the requirement directly. Preserve its data/metadata
+// pointers, offset, type, rank and layout, with BOUND set and READ_ONLY clear.
+// The kernel may write tensor elements, but must not modify the host-owned
+// sizes/strides. Already-bound outputs may instead be reused without invoking
+// this callback.
 typedef AnncStatusCode (*AnncContextAllocateOutput)(
     void* opaque, uint32_t slot, const AnncTensorDesc* request,
     AnncTensorView* result);
