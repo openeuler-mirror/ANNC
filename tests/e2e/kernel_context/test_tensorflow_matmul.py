@@ -7,7 +7,9 @@ from tf_pipeline import run_pipeline
 
 
 CASES = {
-    "matmul_v3": kernel_spec("matmul", "MatMul", mode="jit"),
+    "matmul_v3": kernel_spec(
+        "matmul", "MatMul", mode="jit", env={"ANNC_GEMM": "2"}
+    ),
 }
 
 

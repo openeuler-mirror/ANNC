@@ -15,8 +15,8 @@ func.func @main(
   // CHECK: annc.execution_mode = "jit"
   // CHECK: fusion.metadata
   // CHECK-SAME: abi = "annc_context_v3"
+  // CHECK-SAME: template_fingerprint =
   // CHECK: custom.op_name = "MatMul"
-  // CHECK: template_fingerprint =
   return %0 : !atir.tensor<64x64xf32>
 }
 

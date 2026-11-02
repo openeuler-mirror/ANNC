@@ -8,7 +8,10 @@ from tf_pipeline import run_pipeline
 
 CASES = {
     "matmul_add_relu_v3": kernel_spec(
-        "matmul_add_relu", "MatMulAddReluWithAddOutput", mode="jit"
+        "matmul_add_relu",
+        "MatMulAddReluWithAddOutput",
+        mode="jit",
+        env={"ANNC_GEMM": "2"},
     ),
 }
 
