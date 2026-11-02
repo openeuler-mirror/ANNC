@@ -49,7 +49,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_WORK_DIR` | 目录路径 | 临时目录 | Grappler pipeline 与运行时 JIT 的编译产物工作目录（参数名：`work_dir` / `annc_work_dir`） |
 | `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`）。当前只被透传为 `annc-tf-pipeline --backend`，而该工具不解析此参数（静默忽略）；实际生效处只有 `ANNCFused` 运行时的 `openblas` 判断，且该 MatMul 直通路径未实现，设置后融合 MatMul 会报 `Unimplemented` |
 | `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
-| `ANNC_TIMEOUT` | 正整数（秒） | `300` | pipeline 调用超时时间（参数名：`timeout_seconds`） |
+| `ANNC_TIMEOUT` | 正整数（秒） | `300` | 图改写工具 `annc-tf-pipeline` 的调用超时（参数名：`timeout_seconds`）；JIT 编译工具 `annc-asm`、`annc` 也使用此环境变量，每次调用单独计时 |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
 
@@ -96,7 +96,8 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 | `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
 | `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
 | `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | `1`（仅 `build.sh`） | TensorFlow C++11 ABI；直接使用 CMake 时该 cache 默认为空，需显式指定 `0` 或 `1` |
+| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 自动检测 | TensorFlow 插件的 C++11 ABI，可显式指定 |
+| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 自动检测 | TensorFlow 插件的 C++ 标准，可显式指定 |
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |

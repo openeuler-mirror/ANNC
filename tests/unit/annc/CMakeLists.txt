@@ -41,10 +41,8 @@ gtest_discover_tests(jit_template_fingerprint_test
     TEST_PREFIX "JitTemplateFingerprint."
 )
 
-# The JIT cache lives in the TensorFlow addon, so its test is registered only
-# while that addon is built (ANNC_ENABLE_TENSORFLOW_ADDON gates
-# tensorflow_addons/, which defines the annc_jit_cache target).
-if(ANNC_ENABLE_TENSORFLOW_ADDON)
+# Register this test only for the original TensorFlow addon's cache target.
+if(TARGET annc_jit_cache)
     add_executable(annc_jit_cache_test
         annc_jit_cache_test.cpp
     )

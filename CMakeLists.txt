@@ -399,7 +399,7 @@ endif()
 # entered only when the addon is enabled: with the addon off no TensorFlow
 # headers are looked up.
 if(ANNC_ENABLE_TENSORFLOW_ADDON)
-  add_subdirectory(tensorflow_addons)
+  add_subdirectory(addons/tensorflow)
 endif()
 # Framework frontends, registered after the ANNC libraries they link against.
 # frontends/CMakeLists.txt applies the per-framework switches.
