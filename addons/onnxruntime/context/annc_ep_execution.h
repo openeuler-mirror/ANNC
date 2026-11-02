@@ -218,6 +218,9 @@ struct ContextCall {
   std::vector<int64_t> arg_indices;
   std::vector<OutputContract> outputs;
   std::vector<int64_t> i64_attrs;
+  // Runtime fusion metadata: process-local resources borrowed from this
+  // node's compute state. Never written back to the serialized Site report.
+  std::vector<AnncResourceView> resources;
   // ORT output index each declared output slot maps to; empty = identity.
   std::vector<uint32_t> output_slots;
 };

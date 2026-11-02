@@ -1060,6 +1060,9 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   context.kernelAbi()->num_inputs = static_cast<uint32_t>(inputs.size());
   context.kernelAbi()->attrs = attrs.data();
   context.kernelAbi()->num_attrs = static_cast<uint32_t>(attrs.size());
+  context.kernelAbi()->resources = request.resources.data();
+  context.kernelAbi()->num_resources =
+      static_cast<uint32_t>(request.resources.size());
 
   for (size_t i = 0; i < request.arg_indices.size(); ++i) {
     if (request.arg_indices[i] < 0 ||
