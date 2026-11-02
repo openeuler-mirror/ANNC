@@ -27,6 +27,7 @@ using namespace onnx_mlir;
 
 void registerOnnxStringToFrameworkCustomCallPass();
 void registerAnncFrameworkDialect(DialectRegistry &registry);
+void registerFrameworkVerifyPass();
 void registerFrameworkShapePass();
 void registerFrameworkCustomCallToStablehloPass();
 
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
   registerOnnxSlicePreprocessPass();
   registerOnnxDynamicTilePreprocessPass();
   registerOnnxStringToFrameworkCustomCallPass();
+  registerFrameworkVerifyPass();
   registerFrameworkShapePass();
   registerFrameworkCustomCallToStablehloPass();
   registerTransformsPasses();

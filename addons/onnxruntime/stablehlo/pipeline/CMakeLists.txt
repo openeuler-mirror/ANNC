@@ -16,9 +16,10 @@ add_executable(annc-onnx-framework-opt
   ../passes/preprocessing/onnx_slice_preprocess.cpp
   ../passes/preprocessing/onnx_dynamic_tile_preprocess.cpp
   ../passes/preprocessing/onnx_string_to_framework_custom_call.cpp
+  ../passes/postprocessing/onnx_external_to_stablehlo.cpp
   ../passes/postprocessing/framework_custom_call_to_stablehlo.cpp
   ../passes/postprocessing/framework_shape_legalize.cpp
-  )
+  ../passes/postprocessing/verify_framework_stablehlo.cpp)
 target_include_directories(annc-onnx-framework-opt PRIVATE
   "${ANNC_ONNX_MLIR_SOURCE_DIR}"
   "${ANNC_ONNX_MLIR_SOURCE_DIR}/include"
