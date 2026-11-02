@@ -66,7 +66,6 @@ ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
 # ANNC_LLVM_BIN 不设置时读取 build/annc_llvm_bin.txt（configure 写入）
 PATH="$PWD/build/bin:$ANNC_LLVM_BIN:$PATH" \
 LIBRARY_PATH="$PWD/install/lib64:$PWD/build/lib" \
-ANNC_GEMM_ASM_SOURCE_DIR=/path/to/GEMM-ASM \
 bash tests/FileCheck/run.sh
 ```
 
@@ -79,6 +78,10 @@ bash tests/FileCheck/run.sh
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。
 - `integration/cmake/` 需要 `cmake`、`g++` 与 `ar`，缺任一时 skip。
+- GEMM epilogue 正例需要构建时发现兼容的完整二进制包；
+  `integration/fusion/test_gemm_epilogue_kernel_compile.py` 覆盖请求编译、旧对象隔离
+  与真实生成链接，`integration/cmake/test_gemm_codegen_package.py` 覆盖包发现
+  和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若构建用的解释器没有这两个包，configure 时用
@@ -110,8 +113,10 @@ bash tests/FileCheck/run.sh
 | `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
 | `integration/cmake/test_kdnn_build.py` | L2 | `cmake/ThirdPartyKDNN.cmake` import 能力探测 |
 | `integration/cmake/test_gemm_microkernel_availability.py` | L2 | 微内核归档有/无两种构建下的工具启动、普通 lowering 与预打包能力诊断（用 `ANNC_BUILD_DIR` 选择构建） |
+| `integration/cmake/test_gemm_codegen_package.py` | L2 | GEMM codegen 包发现、manifest 校验与基础归档一致性 |
 | `integration/fusion/test_config_fusion_kp_fused_gather.py` | L2 | config fusion 集成 |
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
+| `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、FTDMM、fusion toggles、context-ABI e2e |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
@@ -127,29 +132,6 @@ bash tests/FileCheck/run.sh
 表中未逐一列出的辅助文件（GTest 的 `auto_kernel_*`、stub，FileCheck 的
 `Inputs/` JSON，套件内的 README 等）随所属套件目录归类；`git ls-files tests/`
 中的每个受跟踪文件都落在上表某个目录或通配模式内。
-
-## 已知基线
-
-2026-10-26（ANNC `2c0aabe`，openEuler 22.03 + 自建 LLVM/MLIR 21.1.3，`build/` 选项
-ONNX=ON、ONNXRUNTIME_EP=OFF、TENSORFLOW_ADDON=ON、KDNN=OFF、PYTHON=OFF）实测：
-
-- `ctest -N`：205 项（204 项执行 + 1 项 `Disabled`：
-  `MaskedMulContext.Model1FanInMicrobenchmark`）。`ONNXRUNTIME_EP=ON`、`PYTHON=ON`
-  的配置为 214 项，差额即这两项开关注册的用例。
-- 全量 `ctest`：203/204 通过，1 项失败：`LayerNormContext.SingleColumnMatchesReference`
-  实际 `-0.49999618530273438`、期望 `-0.5`，差 3.8e-06 超过 `tolerance*scale = 1e-06`，
-  属浮点末位误差，未修改断言。
-- `python3 -m pytest tests/`：25 passed + 1 skipped（ONNX 未安装，
-  `tests/integration/onnx2atir/test_onnx_frontend.py` 整体 skip）。
-- `bash tests/FileCheck/run.sh`：49 PASS / 7 FAIL。其中 6 项为迁移前既有基线：
-  `Conversion/atir-to-linalg.mlir`、`Dialect/Atir/config-fusion-constant-operand.mlir`、
-  `Dialect/Atir/config-fusion-multi-output.mlir`、`Dialect/Atir/fast-codegen.mlir`、
-  `Dialect/Atir/gemm-epilogue-fusion.mlir`、`Dialect/Atir/kp-fused-gather.mlir`；
-  第 7 项 `Target/aarch64/annc-aarch64-gemm-pipeline.mlir` 需要
-  `ANNC_GEMM_ASM_SOURCE_DIR` 与 `LIBRARY_PATH`，且仓库内 tuning JSON 版本与代码
-  要求（`version = 3`）不一致，本机不满足前置条件。
-
-既有失败不要在顺手改动中修改断言或跳过用例。
 
 融合相关用例（`op-fusion.mlir`、`identity-canonicalize-op-fusion.mlir`、
 `annc-aarch64-gemm-pipeline.mlir`）显式设置 `ANNC_GEMM=2`：dev 的

@@ -1,4 +1,5 @@
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
+#include "GemmMicrokernelSelection.h"
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
@@ -154,42 +155,72 @@ bool hasEpilogue(Operation *op) {
   return true;
 }
 
-Value materializeEpilogueArgs(func::FuncOp function, Operation *op,
-                              OpBuilder &builder) {
-  auto generic = llvm::dyn_cast<linalg::GenericOp>(op);
-  if (!generic || generic.getInputs().size() < 2) return Value();
-  auto program = atir::parseEpilogueCandidatePlan(
-      op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr));
-  if (failed(program)) return Value();
-  unsigned inputCount = 0;
-  for (const atir::EpilogueStep &step : program->steps)
-    if (atir::isBinaryEpilogueOpcode(step.opcode)) ++inputCount;
-  if (inputCount > aarch64::gemm::kEpilogueArgsPointerSlots ||
-      generic.getInputs().size() < 2 + inputCount) {
-    op->emitOpError("exceeds the EpilogueArgs external pointer capacity");
-    return Value();
-  }
+FailureOr<AffineMap> buildCarrierMap(OpBuilder &builder, MemRefType outputType,
+                                     MemRefType inputType, AffineExpr m,
+                                     AffineExpr n) {
+  auto map = [&](ArrayRef<AffineExpr> results) {
+    return AffineMap::get(2, 0, results, builder.getContext());
+  };
+  auto zero = builder.getAffineConstantExpr(0);
+  if (inputType.getRank() == 0) return map({});
+  if (inputType.getRank() == 1)
+    return inputType.getDimSize(0) == 1 ? map({zero}) : map({n});
+  if (inputType.getRank() != 2) return failure();
+  if (inputType.getShape() == outputType.getShape()) return map({m, n});
+  if (inputType.getDimSize(0) == 1 && inputType.getDimSize(1) == 1)
+    return map({zero, zero});
+  if (inputType.getDimSize(1) == 1) return map({m, zero});
+  if (inputType.getDimSize(0) == 1) return map({zero, n});
+  return failure();
+}
 
-  Location loc = op->getLoc();
-  OpBuilder allocBuilder(function.getContext());
-  allocBuilder.setInsertionPointToStart(&function.front());
-  auto args = allocBuilder.create<memref::AllocaOp>(
-      loc, MemRefType::get({aarch64::gemm::kEpilogueArgsPointerSlots},
-                           allocBuilder.getIndexType()));
-  auto inputs = generic.getInputs();
-  for (unsigned slot = 0; slot < inputCount; ++slot) {
-    FailureOr<aarch64::gemm::MemRefBaseAndOffset> base =
-        aarch64::gemm::getMemRefBaseAndOffset(builder, loc, inputs[slot + 2]);
-    if (failed(base)) return Value();
-    Value ptr =
-        builder.create<memref::ExtractAlignedPointerAsIndexOp>(loc, base->base);
-    Value bytes = builder.create<arith::ConstantIndexOp>(loc, sizeof(float));
-    Value byteOffset = builder.create<arith::MulIOp>(loc, base->offset, bytes);
-    ptr = builder.create<arith::AddIOp>(loc, ptr, byteOffset);
-    Value index = builder.create<arith::ConstantIndexOp>(loc, slot);
-    builder.create<memref::StoreOp>(loc, ptr, args, ValueRange{index});
+FailureOr<linalg::GenericOp> materializeEpilogueCarrier(
+    Operation *op, OpBuilder &builder, Value output,
+    const atir::EpilogueProgram &program) {
+  auto outputType = llvm::dyn_cast<MemRefType>(output.getType());
+  auto generic = llvm::dyn_cast<linalg::GenericOp>(op);
+  if (!outputType || !generic || outputType.getRank() != 2)
+    return op->emitOpError("requires a rank-2 output for the epilogue carrier");
+
+  SmallVector<Value> inputs{output};
+  SmallVector<AffineMap> maps;
+  auto m = builder.getAffineDimExpr(0);
+  auto n = builder.getAffineDimExpr(1);
+  maps.push_back(AffineMap::get(2, 0, {m, n}, builder.getContext()));
+  unsigned binaryInput = 0;
+  for (const atir::EpilogueStep &step : program.steps) {
+    if (!atir::isBinaryEpilogueOpcode(step.opcode)) continue;
+    if (2 + binaryInput >= generic.getInputs().size())
+      return op->emitOpError("epilogue steps do not match GEMM inputs");
+    Value input = generic.getInputs()[2 + binaryInput++];
+    auto inputType = llvm::dyn_cast<MemRefType>(input.getType());
+    if (!inputType) return op->emitOpError("epilogue input must be a memref");
+    FailureOr<AffineMap> map =
+        buildCarrierMap(builder, outputType, inputType, m, n);
+    if (failed(map))
+      return op->emitOpError("epilogue input has an invalid broadcast shape");
+    inputs.push_back(input);
+    maps.push_back(*map);
   }
-  return args;
+  if (generic.getInputs().size() != 2 + binaryInput)
+    return op->emitOpError("epilogue inputs do not match the candidate plan");
+  maps.push_back(AffineMap::get(2, 0, {m, n}, builder.getContext()));
+
+  auto carrier = builder.create<linalg::GenericOp>(
+      op->getLoc(), TypeRange{}, inputs, ValueRange{output}, maps,
+      SmallVector<utils::IteratorType>{utils::IteratorType::parallel,
+                                       utils::IteratorType::parallel},
+      [](OpBuilder &nested, Location loc, ValueRange args) {
+        // The carrier preserves operands and maps until epilogue lowering.
+        nested.create<linalg::YieldOp>(loc, args.front());
+      });
+  carrier->setAttr(aarch64::gemm::kEpilogueCarrierAttrName,
+                   UnitAttr::get(builder.getContext()));
+  carrier->setAttr(atir::kGemmEpilogueAttr,
+                   atir::buildEpilogueCandidateAttr(builder, program));
+  for (StringRef name : {StringRef("withBias"), StringRef("do_relu")})
+    if (Attribute attr = op->getAttr(name)) carrier->setAttr(name, attr);
+  return carrier;
 }
 
 bool isStaticZero(OpFoldResult value) {
@@ -596,14 +627,7 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   Value outBase =
       aarch64::gemm::castToUnrankedF32MemRef(builder, loc, out->base);
 
-  const bool fused = hasEpilogue(op);
-  Value epilogueArgs;
-  if (fused) {
-    epilogueArgs = materializeEpilogueArgs(
-        op->getParentOfType<func::FuncOp>(), op, builder);
-    if (!epilogueArgs)
-      return op->emitOpError("cannot materialize fused epilogue arguments");
-  }
+  const bool hasCarrier = hasEpilogue(op);
 
   Value lda = builder.create<arith::ConstantIndexOp>(loc, plan->lda);
   Value ldb = builder.create<arith::ConstantIndexOp>(loc, plan->ldb);
@@ -630,16 +654,11 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   auto index = builder.getIndexType();
   StringRef leafName =
       usesLdbAbi
-          ? (fused ? aarch64::gemm::kFusedRowMajorMicrokernelLeafName
-                   : aarch64::gemm::kMicrokernelRmLeafName)
-          : (fused ? aarch64::gemm::kFusedMicrokernelLeafName
-                   : aarch64::gemm::kMicrokernelLeafName);
+          ? aarch64::gemm::kMicrokernelRmLeafName
+          : aarch64::gemm::kMicrokernelLeafName;
   SmallVector<Type> leafTypes = {unranked, unranked, unranked};
   for (int64_t i = 0, count = usesLdbAbi ? 8 : 7; i < count; ++i)
     leafTypes.push_back(index);
-  if (fused)
-    leafTypes.push_back(MemRefType::get(
-        {aarch64::gemm::kEpilogueArgsPointerSlots}, builder.getIndexType()));
   getOrCreateLeafDeclaration(module, leafName,
                              builder.getFunctionType(leafTypes, {}));
 
@@ -663,17 +682,37 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   leafOperands.push_back(ldc);
   leafOperands.push_back(kSize);
   leafOperands.push_back(familyArgument);
-  if (fused) leafOperands.push_back(epilogueArgs);
   auto kernelCall = builder.create<func::CallOp>(loc, leafName, TypeRange{},
                                                  leafOperands);
   copyScheduleAttrs(op, kernelCall, builder);
+  // The epilogue remains on the carrier until the selected leaf has been
+  // inspected.  A pure GEMM call must not look fused to later lowering.
+  kernelCall->removeAttr(atir::kGemmEpilogueAttr);
+  if (hasCarrier)
+    kernelCall->setAttr(aarch64::gemm::kEpilogueInsertionPointAttrName,
+                        UnitAttr::get(builder.getContext()));
   kernelCall->setDiscardableAttr(aarch64::gemm::kMicrokernelMAttrName,
                                  builder.getI64IntegerAttr(*staticM));
   kernelCall->setDiscardableAttr(aarch64::gemm::kMicrokernelNAttrName,
                                  builder.getI64IntegerAttr(*staticN));
   kernelCall->setDiscardableAttr(aarch64::gemm::kMicrokernelKAttrName,
                                  builder.getI64IntegerAttr(*staticK));
+  FailureOr<aarch64::gemm::FinalMicrokernelSelection> selection =
+      aarch64::gemm::selectFinalMicrokernel(kernelCall);
+  if (failed(selection) ||
+      failed(aarch64::gemm::attachFinalMicrokernelSelection(kernelCall,
+                                                            *selection)))
+    return failure();
 
+  if (hasCarrier) {
+    auto program = atir::parseEpilogueCandidatePlan(
+        op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr));
+    if (failed(program))
+      return op->emitOpError("has an invalid fixed epilogue plan");
+    builder.setInsertionPointAfter(kernelCall);
+    if (failed(materializeEpilogueCarrier(op, builder, output, *program)))
+      return failure();
+  }
   op->erase();
   return success();
 }

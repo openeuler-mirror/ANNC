@@ -12,6 +12,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ANNCOPT="${ANNCOPT:-$REPO_ROOT/build/bin/annc-opt}"
 ANNASM="${ANNASM:-$REPO_ROOT/build/bin/annc-asm}"
 ANNCFUSIONMETADATA="${ANNCFUSIONMETADATA:-$REPO_ROOT/build/bin/annc-fusion-metadata}"
+ANNCEPILOGUEKERNELCOMPILE="${ANNCEPILOGUEKERNELCOMPILE:-${ANNCGEMMKERNELCOMPILE:-$REPO_ROOT/build/bin/annc-gemm-epilogue-kernel-compile}}"
+ANNCDRIVER="${ANNCDRIVER:-$REPO_ROOT/build/bin/annc}"
 
 # LLVM 20 tools: ANNC_LLVM_BIN (if exported) wins; otherwise use the toolchain
 # directory recorded by CMake at configure time. Never fall back to a bare
@@ -63,6 +65,8 @@ for f in $FILES; do
         run="${run//annc-opt/$ANNCOPT}"
         run="${run//annc-asm/$ANNASM}"
         run="${run//annc-fusion-metadata/$ANNCFUSIONMETADATA}"
+        run="${run//annc-gemm-epilogue-kernel-compile/$ANNCEPILOGUEKERNELCOMPILE}"
+        run="${run// annc / $ANNCDRIVER }"
         run="${run//mlir-opt/$MLIROPT}"
         run="${run// | FileCheck / | $FILTER | FileCheck }"
         run="${run//FileCheck/$FILECHECK}"

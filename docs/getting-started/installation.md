@@ -106,6 +106,26 @@ nlohmann/json 仍由 CMake `FetchContent` 在 configure 时获取到 `third_part
 
 > `build.sh --enable-python` 会在缺失时自动安装 `pybind11` / `nanobind`（默认不构建 Python 绑定）；传入 `--no-install-deps` 可关闭自动安装。TensorFlow 需自行安装。
 
+### 5. GEMM 二进制依赖包
+
+使用 GEMM epilogue 时，将可信渠道交付的完整 GEMM-ASM 包放入
+`third_party/annc-gemm-kernels/`：基础 `libannc_gemm_microkernels.a`、
+`libannc_gemm_codegen.so` 及版本链接、`include/`、`cmake/`、
+`manifest.json` 和许可证一同保留。ANNC 默认就地发现并校验整包，
+无需 GEMM-ASM 私有源码，也无需预装系统 SDK。不要分别替换两个库。
+缺少完整包时仍能构建普通工具，但 GEMM microkernel、prepack 和 epilogue
+请求会在执行时报告缺少 GEMM-ASM 包。若要在构建期提前发现该问题，适合
+CI、发布构建等场景，可传 `-DANNC_REQUIRE_GEMM_PACKAGE=ON`，让 CMake
+configure 阶段在缺少兼容完整包时直接失败；自定义包目录使用
+`-DANNC_GEMM_PACKAGE_DIR=/path/to/package`。
+
+ANNC 安装会将整包复制到 `<prefix>/<libdir>/annc-gemm-kernels/`，
+编译工具通过相对 RPATH 加载 codegen；基础归档同时保持原有
+`<prefix>/<libdir>/libannc_gemm_microkernels.a` 链接位置。模型执行
+只使用已生成和链接的机器码，不加载 codegen 库。原
+`ANNC_GEMM_ASM_SOURCE_DIR` 已不再使用。版本、元数据与失败边界见
+[GEMM codegen 集成契约](../design/gemm-epilogue-codegen.md)。
+
 ## 验证
 
 ```shell

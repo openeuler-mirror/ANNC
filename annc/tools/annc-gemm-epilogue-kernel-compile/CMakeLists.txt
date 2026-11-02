@@ -11,12 +11,13 @@ set(LIBS
   MLIRMemRefDialect
   MLIRSCFDialect
 )
-add_llvm_executable(annc-model-kernel-export
-  annc-model-kernel-export.cpp
+add_llvm_executable(annc-gemm-epilogue-kernel-compile
+  annc-gemm-epilogue-kernel-compile.cpp
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(annc-model-kernel-export PRIVATE
+target_link_libraries(annc-gemm-epilogue-kernel-compile PRIVATE
+  ANNCGemmCodegenAdapter
   MLIRIR
   MLIRParser
   MLIRArithDialect
@@ -26,5 +27,5 @@ target_link_libraries(annc-model-kernel-export PRIVATE
   MLIRSCFDialect
   LLVMSupport
 )
-llvm_update_compile_flags(annc-model-kernel-export)
-install(TARGETS annc-model-kernel-export DESTINATION bin)
+llvm_update_compile_flags(annc-gemm-epilogue-kernel-compile)
+install(TARGETS annc-gemm-epilogue-kernel-compile DESTINATION bin)

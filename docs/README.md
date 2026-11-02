@@ -23,7 +23,7 @@
 | [architecture/](architecture/README.md) | 总体架构与概念解释 | 已就位 |
 | [design/](design/README.md) | 特性与模块详细设计（HLD/LLD） | 已就位 |
 | [decisions/](decisions/README.md) | 架构决策记录（ADR） | 已就位 |
-| [rfcs/](rfcs/README.md) | 待决设计提案 | 规划中 |
+| [rfcs/](rfcs/README.md) | 待评审的设计提案 | 当前无进行中的提案 |
 | [contributing/](contributing/README.md) | 开发环境、测试、规范与流程 | 规划中 |
 | [assets/](assets/README.md) | 图片与图表源文件 | 已就位 |
 

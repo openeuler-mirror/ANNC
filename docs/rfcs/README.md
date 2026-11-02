@@ -8,4 +8,4 @@
 - 流程：提案 → 评审 → 结论。落地后沉淀为 [../design/](../design/README.md) 文档，并登记一条 ADR。
 - 索引：本目录 `README.md` 维护索引表。
 
-当前无进行中的 RFC。
+当前没有进行中的 RFC。已接受并落地的设计归档在 [../design/](../design/README.md)，决策见 [../decisions/](../decisions/README.md)。

@@ -25,6 +25,10 @@ inline constexpr llvm::StringLiteral kAsmSymbolAttrName =
     "annc.aarch64.asm_symbol";
 inline constexpr llvm::StringLiteral kGeneratedMicrokernelAttrName =
     "annc.aarch64.generated_microkernel";
+inline constexpr llvm::StringLiteral kEpilogueCarrierAttrName =
+    "annc.aarch64.epilogue_carrier";
+inline constexpr llvm::StringLiteral kEpilogueInsertionPointAttrName =
+    "annc.aarch64.epilogue_insertion_point";
 inline constexpr llvm::StringLiteral kKcRoleAttrName = "annc.aarch64.kc_role";
 inline constexpr llvm::StringLiteral kMicrokernelMAttrName =
     "annc.aarch64.microkernel_m";

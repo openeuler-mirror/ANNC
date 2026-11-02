@@ -44,10 +44,6 @@ if(ANNC_ENABLE_ONNXRUNTIME_EP)
   set(ANNC_KERNEL_MLAS ON CACHE BOOL
       "Let builtin kernels call MLAS GEMM entries with the host's native pool (automatically ON when ANNC_ENABLE_ONNXRUNTIME_EP=ON)" FORCE)
 endif()
-# The annc driver assembles generated AOT/JIT GEMM kernels against the GEMM-ASM
-# headers in <checkout>/Sve and <checkout>/Neon.  Baked in here as the default;
-# the runtime ANNC_GEMM_ASM_SOURCE_DIR environment variable overrides it.
-set(ANNC_GEMM_ASM_SOURCE_DIR "" CACHE PATH "GEMM-ASM checkout holding Sve/ and Neon/ assembly headers, used by the annc driver when ANNC_GEMM_ASM_SOURCE_DIR is not set at runtime")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR

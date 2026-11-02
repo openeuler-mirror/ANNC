@@ -209,3 +209,20 @@
 | **生命周期** | 节点绑定弱引用 executable，调用期间强引用代码与数据。packed 数据保留到节点卸载，代码淘汰重编可复用相同布局；不跨节点去重，也不新增全局权重 LRU。 |
 | **兼容与边界** | TF 公共 attrs/输入签名不变；保留 AOT/手工 checkpoint/global。不扩展可变权重、ONNX EP、execution_v2 JIT 特化或 fallback。节点数据内存随布局种类增长，不声称严格零成本。 |
 | **详细资料** | [实现契约与回归](../design/jit-constant-folding/cache-separation.md)。 |
+
+<a id="adr-018"></a>
+
+## ADR-018：GEMM epilogue codegen 通过 GEMM-ASM 二进制接口交付
+
+| 项目 | 内容 |
+| --- | --- |
+| **状态** | accepted，2026-10-29 |
+| **责任角色** | ANNC AArch64 GEMM / GEMM-ASM 维护者 |
+| **上下文** | 汇编最初拆至私有 GEMM-ASM，普通内核通过归档交付；当前 epilogue 路径又由开源 ANNC 绑定寄存器、emit、拼接宏，并依赖私有源码 include 才能汇编，破坏二进制依赖边界。 |
+| **决策** | ANNC 完成调度、分块与选核，提交 single/final KC 块已选 microkernel 的公开标识/必要描述及有序融合链；GEMM-ASM 生成该内核的融合版本，接管寄存器、输入加载、emit、内核组合和 object 生成，以私有二进制 codegen 库与基础 microkernel 归档交付。ANNC 保留语义分析、参数构造及 suffix，不向库传递整个 GEMM plan 或 tuning 配置。 |
+| **关键契约** | 沿用既有选核、GEMM 调用 ABI、8-slot 布局与前缀处理；超容量候选当前在后端拒绝，优化阶段提前限制或切分另行处理；已接受前缀不得静默缩短。lowering 确定入口与 object 身份，导出按相同 build ID 生成且每个 object 只链接一次。仅 single/final KC 执行 store 前融合；旧 emitter 算法与 suffix 各自保留，迁移前后同一路径做数值对照；模型执行不依赖 codegen DSO。 |
+| **私有边界** | 模板、寄存器规则与生成实现只在 GEMM-ASM 私有仓库维护，不进入 ANNC；交付 DSO 不携带原始模板全文或压缩/编码源码资源，采用编译后的生成逻辑或经验证的非源码二进制表示。库内部可生成并汇编文本，不承诺机器代码不可逆向。 |
+| **交付单位** | GEMM-ASM 以一份版本化二进制依赖包交付，直接放入 ANNC 的 `third_party/annc-gemm-kernels/` 并由构建系统就地导入。包内 codegen 共享库、基础静态归档、公开头文件和 CMake 配置作为整体升级；无需额外系统 SDK 安装或分别匹配组件版本。ANNC 安装时携带所需依赖。 |
+| **后果** | 公开仓库维护公开接口适配与契约测试；私有生成实现留在 GEMM-ASM。融合范围、普通 GEMM ABI 与既有算法均保持不变。 |
+| **备选方案** | 只移 emit 仍依赖源码；返回完整汇编仍暴露汇编交换产物；枚举变体限制按需组合；独立后处理改变内存访问。CLI 可另作工具，首版优先库以支持 lowering 内查询。 |
+| **详细设计** | [GEMM epilogue codegen 集成契约](../design/gemm-epilogue-codegen.md) |

@@ -6,6 +6,7 @@
 
 | 文档集 | 位置 |
 | --- | --- |
+| GEMM epilogue 二进制 codegen | [gemm-epilogue-codegen.md](gemm-epilogue-codegen.md) |
 | JIT 常量折叠特性设计 | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
 | JIT 代码与预打包权重分离 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |

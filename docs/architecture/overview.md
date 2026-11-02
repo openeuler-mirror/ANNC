@@ -1,11 +1,11 @@
 # ANNC 架构设计文档
 
 > **文档编号**：ANNC-ARCH-001\
-> **文档版本**：v3.7\
-> **发布日期**：2026-10-20\
+> **文档版本**：v3.8\
+> **发布日期**：2026-10-29\
 > **目标受众**：架构评审、产品经理、开发工程师、测试工程师、运维工程师\
 > **文档密级**：公开\
-> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算；v3.5 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline；v3.6 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物；v3.7 同步 upstream !248/!260：KDNN adaptor 构建下 `ANNC_GEMM=1` 新增 AOT `matmul` 分支，ONNX EP 可申报站点随构建配置变化；GEMM 常量折叠要求 TensorFlow 与 AArch64 GEMM 微内核归档。
+> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算；v3.5 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline；v3.6 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物；v3.7 同步 upstream !248/!260：KDNN adaptor 构建下 `ANNC_GEMM=1` 新增 AOT `matmul` 分支，ONNX EP 可申报站点随构建配置变化；GEMM 常量折叠要求 TensorFlow 与 AArch64 GEMM 微内核归档；v3.8 将 GEMM epilogue 生成迁入私有二进制 codegen 包，公开后端通过版本化请求与临时 object 接入。
 
 ***
 
@@ -456,6 +456,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - `annc-tf-pipeline` 负责 AOT 编译和 GraphDef 重写；运行时 JIT 通过 `atir-select-kernel`、`atir-specialize-shapes` 处理单个融合函数。
 - GEMM lowering 采用 ATIR→Linalg 和 `annc-aarch64-gemm-pipeline`，由 AArch64 后端依次完成计划选择、线程划分、缓存/微内核分块和 ABI lowering。
 - Linalg GEMM planner 对 NEON F32 区分普通 GEMM、`N=1` 的矩阵-向量和 `M=1` 的向量-矩阵运算；两种退化形态使用独立内核符号，向量-矩阵路径直接读取 row-major B。通用 GEMM 在 `M*N*K <= 4500` 时同样直接读取 row-major B，跳过运行时 `pack_b`；更大的形状继续使用已打包 RHS。路径在策略选择阶段一次决定，后续 lowering 只消费该决策。ANNC 依赖外部内核库提供对应实现，并消费其静态归档。
+- GEMM epilogue 通过 `third_party/annc-gemm-kernels/` 的版本化二进制包生成。ANNC 提交所选 single/final KC microkernel 与融合链；私有 codegen 库负责能力查询、emit 和 object 生成，公开后端保留参数构造与 suffix。编译工具在本次编译的临时目录生成 object，driver 直接链接 `.o`，不再读取私有汇编源码。编译工具随安装携带 codegen 共享库，模型执行不依赖它。详见[集成契约](../design/gemm-epilogue-codegen.md)。
 - GEMM 优化统一由 ANNC_GEMM 模式控制：0/未设置关闭自动 GEMM fusion，1=Basic，2=Epilogue，3=Prepack，99=All。预打包与 epilogue 独立，99 固定保留。原生预打包 pass 始终注册，由运行时模式选择；主机静态打包及 SVE 布局校验要求构建时提供可选的 AArch64 微内核归档，缺库时普通编译工具仍可构建，实际请求上述能力时明确报错；KDNN packed-B 适配器按依赖接口能力自动构建注册，不限制原生预打包。非法模式提示并回退 0。配置首次读取后固定，Op 构造时保存预打包标志，只在 JIT last-shape miss 使用，连续同 shape 热路径不新增检查。TF pipeline 自动 AOT 预打包及 packed KDNN 候选遵循该策略；显式手工 pass 和已生成 AOT 库不受改写。非空 packed-c 启用预打包候选选择；策略/线程规划确定 KC/NC/ISA 后，aarch64-gemm-prepack-rhs 在 Finalize 前建立布局契约。关闭时保持 runtime packed/direct。
 - JIT 在每个节点首次初始化、查询共享代码缓存前，复用 annc-fusion-metadata 提取 ATIR 中已有原始名称，按既有 checkpoint 名称匹配、F32 类型和字节数检查筛选可缓存输入；未通过的输入保持 runtime-packed/direct，后续 shape 切换不重复检查。使用 jit-inputs 传入获准的不可变参数索引，编译器仅生成布局元数据和调用现有 packb 的准备入口；不读取或链接模型权重。ANNCFusedOp 节点局部按输入槽与完整 layout 缓存 packed 数据，以原 RHS descriptor 传参。代码沿用进程级 single-flight/LRU，同形状不同权重共享代码但不共享数据。连续同 shape 直接复用 executable/binding，切换 shape 才查节点绑定，新 layout 才准备。
 - AOT/手工 pass 未提供 jit-inputs 时保留原 checkpoint/global 路径。默认内置 MatMul/GEMM fusion 标记为 JIT，AOT 分支按执行模式裁剪；不能据此断言当前这些 GEMM 在 AOT 中实际折叠。本次不扩展 AOT 或 ONNX EP。

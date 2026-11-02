@@ -18,26 +18,22 @@
 // RUN: env ANNC_GEMM=2 ANNC_ENABLE_EPILOGUE_MATVEC=0 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefix=NEON-MATVEC-OFF
 // RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/production.mlir --check-prefix=COMMIT
 // RUN: rm -rf %t.aot && env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' -o %t.mlir
-// RUN: env ANNC_GEMM=2 annc-model-kernel-export %t.mlir --output-dir %t.aot
-// RUN: find %t.aot/model_generated_kernels -name '*.S' -print | count 7
-// RUN: FileCheck %t.dir/production.mlir --check-prefix=AOT-MANIFEST < %t.aot/model_generated_kernels/manifest.json
-// RUN: env ANNC_GEMM=2 ANNC_GEMM_ASM_SOURCE_DIR=/nonexistent LIBRARY_PATH="${LIBRARY_PATH:?}" annc -v %t.mlir --shared -o %t.invalid.so > %t.error 2>&1; test $? -ne 0
-// RUN: FileCheck %t.dir/production.mlir --check-prefix=AOT-ERROR < %t.error
-// RUN: env ANNC_GEMM=2 ANNC_GEMM_ASM_SOURCE_DIR="${ANNC_GEMM_ASM_SOURCE_DIR:?}" LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
+// RUN: env ANNC_GEMM=2 annc-gemm-epilogue-kernel-compile %t.mlir --output-dir %t.aot
+// RUN: find %t.aot/model_generated_kernels -name '*.S' -print | count 0
+// RUN: find %t.aot/model_generated_kernels -name '*.o' -print | count 7
+// RUN: env ANNC_GEMM=2 LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
 // RUN: python3 -c "import ctypes; ctypes.CDLL(r'%t.so')"
-// RUN: llvm-nm -D --defined-only %t.so | grep generated | count 26
+// RUN: python3 -c "import glob,subprocess; objects=glob.glob(r'%t.aot/model_generated_kernels/*.o'); expected={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-g','--defined-only',*objects],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; actual={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-D','--defined-only',r'%t.so'],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; assert actual == expected, (actual-expected,expected-actual)"
 // RUN: llvm-nm -D --defined-only %t.so | FileCheck %t.dir/production.mlir --check-prefix=AOT-LINK
 
 //--- production.mlir
 
-// AOT-MANIFEST-COUNT-7: "file"
-// AOT-ERROR: ANNC_GEMM_ASM_SOURCE_DIR must point to a GEMM-ASM checkout
-// AOT-LINK: T {{.*}}generated_add_n_i1_relu_{{.*}}f32
+// AOT-LINK: T annc_gemm_agc{{[a-zA-Z0-9_]+}}
 
-// SVE-DAG: llvm.func @annc_aarch64_sve_kernel_rm_{{.*generated.*}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
-// SVE-DAG: llvm.func @annc_aarch64_sve_kernel_mr{{.*generated.*}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
-// NEON-DAG: llvm.func @annc_aarch64_neon_kernel_rm_{{.*generated.*}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
-// NEON-DAG: llvm.func @annc_aarch64_neon_kernel_mr{{.*generated.*}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
+// SVE-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
+// SVE-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
+// NEON-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
+// NEON-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
 
 // SVE-DIRECT-LABEL: func.func @smallshape_gemm(
 // SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_
@@ -58,7 +54,8 @@ func.func @smallshape_gemm(
 // is present; K=641 spans multiple KC blocks and only Final-K is generated.
 // NEON-DIRECT-LABEL: func.func @gemv_suffix_add_relu(
 // NEON-DIRECT: llvm.call @annc_aarch64_neon_matvec_mr4_k8_f32
-// NEON-DIRECT: llvm.call @annc_aarch64_neon_matvec_mr4_k1_generated_add_scalar_i1_relu_lBF800000_acc_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_tail_acc
+// NEON-DIRECT-SAME: normalized_request =
 // NEON-DIRECT-NOT: arith.maxnumf
 // NEON-MATVEC-OFF-LABEL: func.func @gemv_suffix_add_relu(
 // NEON-MATVEC-OFF: llvm.call @annc_aarch64_neon_kernel_rm_
@@ -92,10 +89,12 @@ func.func @gemv_suffix_add_relu(
 // COMMIT-NOT: "atir.Add"
 // COMMIT-NOT: "atir.Relu"
 // SVE-PACKED-LABEL: func.func @single_tail_add_relu(
-// SVE-PACKED: llvm.call @annc_aarch64_sve_kernel_mr{{.*}}_generated_add_n_i1_relu_{{.*}}_f32
+// SVE-PACKED: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// SVE-PACKED-SAME: normalized_request =
 // SVE-PACKED-NOT: arith.maxnumf
 // NEON-PACKED-LABEL: func.func @single_tail_add_relu(
-// NEON-PACKED: llvm.call @annc_aarch64_neon_kernel_mr{{.*}}_kg_r1_generated_add_n_i1_relu_{{.*}}_f32
+// NEON-PACKED: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+// NEON-PACKED-SAME: normalized_request =
 // NEON-PACKED-NOT: arith.maxnumf
 func.func @single_tail_add_relu(
     %a: !atir.tensor<2x5xf32>, %b: !atir.tensor<5x501xf32>,
@@ -138,10 +137,10 @@ func.func @single_add(
 // M broadcast is not supported by the fused leaf. The fixed candidate keeps
 // the preceding N-broadcast Add and materializes Mul as a suffix.
 // SVE-DIRECT-LABEL: func.func @add_then_m_mul(
-// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_mr3_n1vl_generated_add_n_i1_f32
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
 // SVE-DIRECT: arith.mulf
 // NEON-DIRECT-LABEL: func.func @add_then_m_mul(
-// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_generated_add_n_i1_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
 // NEON-DIRECT: arith.mulf
 func.func @add_then_m_mul(
     %a: !atir.tensor<3x5xf32>, %b: !atir.tensor<5x5xf32>,
@@ -167,9 +166,9 @@ func.func @add_then_m_mul(
 // Rank-1 length-one inputs use a constant-zero map and remain scalar through
 // cache and kernel tiling.
 // SVE-DIRECT-LABEL: func.func @single_scalar_add(
-// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_generated_add_scalar_i1_f32
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
 // NEON-DIRECT-LABEL: func.func @single_scalar_add(
-// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_generated_add_scalar_i1_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
 func.func @single_scalar_add(
     %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
     %out: !atir.tensor<1x5xf32>, %scalar: !atir.tensor<1xf32>) {
@@ -189,9 +188,9 @@ func.func @single_scalar_add(
 // A unary epilogue still receives a valid EpilogueArgs directory even though
 // it has no external pointer slots to populate.
 // SVE-DIRECT-LABEL: func.func @single_sigmoid(
-// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_generated_sigmoid_f32
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
 // NEON-DIRECT-LABEL: func.func @single_sigmoid(
-// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_generated_sigmoid_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
 func.func @single_sigmoid(
     %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
     %out: !atir.tensor<1x5xf32>) {
@@ -212,11 +211,11 @@ func.func @single_sigmoid(
 // SVE-DIRECT-LABEL: func.func @multi_k_add(
 // SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_f32
 // SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_acc_f32
-// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_generated_add_n_i1_acc_f32
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_accumulate
 // NEON-DIRECT-LABEL: func.func @multi_k_add(
 // NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_kg_r0_f32
 // NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_kg_r0_acc_f32
-// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_k1_generated_add_n_i1_acc_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_tail_acc
 func.func @multi_k_add(
     %a: !atir.tensor<1x17xf32>, %b: !atir.tensor<17x5xf32>,
     %out: !atir.tensor<1x5xf32>) {
@@ -513,7 +512,7 @@ func.func @main(
 
 //--- neon-vecmat-epilogue.mlir
 
-// NEON-VECMAT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}generated_add_n_i1{{.*}}_f32
+// NEON-VECMAT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
 // NEON-VECMAT-NOT: llvm.call @annc_aarch64_neon_vecmat
 func.func @vecmat_epilogue(
     %a: !atir.tensor<1x400xf32>, %b: !atir.tensor<400x400xf32>,
@@ -567,7 +566,7 @@ func.func @main(
 // THREAD-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
 // THREAD-EPILOGUE: func.func private @__annc_gemm_thread_task_
 // THREAD-EPILOGUE-SAME: memref<*xf32>
-// THREAD-EPILOGUE: llvm.call @annc_aarch64_sve_kernel_{{.*}}generated_add_n_i1_relu
+// THREAD-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
 // THREAD-EPILOGUE-NOT: arith.addf
 func.func @threaded_add_relu(
     %a: !atir.tensor<128x128xf32>, %b: !atir.tensor<128x128xf32>,
