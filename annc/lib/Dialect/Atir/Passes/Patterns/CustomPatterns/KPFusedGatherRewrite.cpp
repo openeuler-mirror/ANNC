@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/CustomPatterns/KPFusedGatherMatch.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
@@ -57,17 +58,7 @@ struct KPFusedGatherRewrite : public CustomFusionPatternBase<GatherOp> {
 
   CustomOpSchema getCustomOpSchema(GatherOp,
                                    llvm::ArrayRef<Operation *>) const override {
-    return CustomOpSchema::get("KPFusedGather")
-        .TypeVar("T")
-        .TypeVar("Tkeys")
-        .TypeVar("Tbegin")
-        .TypeVar("Tindices")
-        .MemRefArg("data", 2, "T")
-        .MemRefArg("keys", 2, "Tkeys")
-        .MemRefArg("begin", 1, "Tbegin")
-        .Result("unique_values", 1, "Tkeys")
-        .Result("unique_indices", 1, "Tindices")
-        .Result("gathered", 2, "T");
+    return *getContextKernelSchema("KPFusedGather");
   }
 
   void getOrderedBoundaryInputs(

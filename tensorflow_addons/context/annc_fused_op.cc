@@ -1,6 +1,5 @@
 #include "annc_fused_op.h"
 #include "annc_ciface_dispatch.h"
-#include "annc_fused_op_jit.h"
 
 #include <algorithm>
 #include <array>
@@ -8,21 +7,24 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
-#include <iostream>
 #include <string>
 #include <utility>
 
 #include "Support/GemmConfig.h"
+#include "Context/KernelContext.h"
 #include "Kernel/ExecutionContext.h"
 #include "Kernel/MemRefTypes.h"
 #include "Context/ThreadPool.h"
+#include "annc_fused_op_jit.h"
+#include "context/ThreadPool.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"
@@ -532,50 +534,6 @@ std::string BuildProfileKey(OpKernelContext* context, int total_inputs,
   return generic_key.str();
 }
 
-class TensorFlowAnncThreadPool final : public annc::threadpool::AnncThreadPool {
- public:
-  explicit TensorFlowAnncThreadPool(thread::ThreadPool* workers)
-      : workers_(workers) {}
-
-  int num_threads() const override {
-    return workers_ ? workers_->NumThreads() : 1;
-  }
-
-  bool in_parallel_region() const override {
-    return workers_ && workers_->CurrentThreadId() >= 0;
-  }
-
-  void parallel_for(int64_t total,
-                    const annc::threadpool::ParallelForOptions& options,
-                    const std::function<void(int64_t, int64_t)>& fn) override {
-    if (!workers_ || total <= 0) {
-      if (total > 0) fn(0, total);
-      return;
-    }
-
-    if (options.grain_size.has_value()) {
-      workers_->ParallelFor(
-          total,
-          thread::ThreadPool::SchedulingParams(
-              thread::ThreadPool::SchedulingStrategy::kFixedBlockSize,
-              std::nullopt, std::max<int64_t>(*options.grain_size, 1)),
-          fn);
-      return;
-    }
-
-    const int64_t cost_per_unit =
-        std::max<int64_t>(options.cost_per_unit.value_or(1), 1);
-    workers_->ParallelFor(total,
-                          thread::ThreadPool::SchedulingParams(
-                              thread::ThreadPool::SchedulingStrategy::kAdaptive,
-                              cost_per_unit, std::nullopt),
-                          fn);
-  }
-
- private:
-  thread::ThreadPool* workers_;
-};
-
 class ScopedAnncThreadPool final {
  public:
   ScopedAnncThreadPool(
@@ -607,19 +565,6 @@ class ScopedAnncThreadPool final {
   annc::threadpool::AnncThreadPool* previous_;
   bool active_;
 };
-
-thread::ThreadPool* GetTensorFlowCpuThreadPool(OpKernelContext* context) {
-  if (!context || !context->device()) {
-    return nullptr;
-  }
-
-  const DeviceBase::CpuWorkerThreads* worker_threads = nullptr;
-  // DeviceBase::tensorflow_cpu_worker_threads() CHECKs when no CPU worker
-  // threads were installed, so only call it for CPU devices where ANNCFused is
-  // registered today.
-  worker_threads = context->device()->tensorflow_cpu_worker_threads();
-  return worker_threads ? worker_threads->workers : nullptr;
-}
 
 template <int Rank>
 struct RankedMemRefDescriptor {
@@ -854,6 +799,7 @@ Status BuildRuntimeArgumentShapes(
     const std::vector<int>& output_ranks,
     const std::vector<std::vector<int64_t>>& output_specs,
     const std::vector<int>& configured_order,
+    const std::vector<int>& context_input_order, bool context_v3,
     std::vector<annc::jit::JitArgumentSignature>* arguments) {
   const int num_inputs = num_constants + num_fixed + num_dynamic;
   if (context->num_inputs() != num_inputs) {
@@ -870,6 +816,34 @@ Status BuildRuntimeArgumentShapes(
                                      input_ranks[i], ", got ", tensor.dims());
     }
     tensors.push_back({ShapeVector(tensor.shape())});
+  }
+
+  // V3 specializes canonical semantic inputs only. The adapter transports
+  // TensorFlow inputs in grouped order, so apply the same permutation here.
+  if (context_v3) {
+    if (!configured_order.empty()) {
+      return errors::InvalidArgument(
+          "annc_context_v3 does not accept kernel_arg_order");
+    }
+    arguments->clear();
+    arguments->reserve(tensors.size());
+    if (context_input_order.empty()) {
+      *arguments = std::move(tensors);
+      return OkStatus();
+    }
+    if (context_input_order.size() != tensors.size()) {
+      return errors::InvalidArgument(
+          "context_input_order must match total input count");
+    }
+    for (int transport_index : context_input_order) {
+      if (transport_index < 0 ||
+          transport_index >= static_cast<int>(tensors.size())) {
+        return errors::InvalidArgument("context_input_order index ",
+                                       transport_index, " is out of range");
+      }
+      arguments->push_back(tensors[transport_index]);
+    }
+    return OkStatus();
   }
 
   for (int i = 0; i < num_outputs; ++i) {
@@ -931,6 +905,12 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   OP_REQUIRES_OK(context, context->GetAttr("Nconstants", &num_constants_));
   OP_REQUIRES_OK(context, context->GetAttr("Nfixed", &num_fixed_));
   OP_REQUIRES_OK(context, context->GetAttr("Ndynamic", &num_dynamic_));
+  OP_REQUIRES(
+      context,
+      num_constants_ >= 0 && num_fixed_ >= 0 && num_dynamic_ >= 0 &&
+          static_cast<int64_t>(num_constants_) + num_fixed_ + num_dynamic_ <=
+              std::numeric_limits<int>::max(),
+      errors::InvalidArgument("ANNCFused input counts are out of range"));
 
   OP_REQUIRES_OK(context, context->GetAttr("kernel_name", &kernel_name_));
   if (context->HasAttr("template_fingerprint")) {
@@ -941,6 +921,10 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
   OP_REQUIRES_OK(context, context->GetAttr("output_ranks", &output_ranks_));
   if (context->HasAttr("input_ranks")) {
     OP_REQUIRES_OK(context, context->GetAttr("input_ranks", &input_ranks_));
+  }
+  if (context->HasAttr("context_input_order")) {
+    OP_REQUIRES_OK(context, context->GetAttr("context_input_order",
+                                             &context_input_order_));
   }
   if (context->HasAttr("output_shapes")) {
     OP_REQUIRES_OK(context, context->GetAttr("output_shapes", &output_shapes_));
@@ -997,7 +981,9 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
       context, !shared_lib_path_.empty() || !atir_module_path_.empty(),
       errors::InvalidArgument("ANNCFused requires shared_lib_path for AOT or "
                               "atir_module_path for JIT"));
-  OP_REQUIRES(context, abi_ == "mlir_ciface" || abi_ == "annc_execution_v2",
+  OP_REQUIRES(context,
+              abi_ == "mlir_ciface" ||
+                  abi_ == ANNC_CONTEXT_ABI_NAME || abi_ == "annc_execution_v2",
               errors::InvalidArgument("Unsupported ANNCFused abi: ", abi_));
   OP_REQUIRES(context, num_outputs_ == static_cast<int>(output_ranks_.size()),
               errors::InvalidArgument("num_outputs must match output_ranks"));
@@ -1018,6 +1004,89 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
                   output_shapes_.size() == static_cast<size_t>(num_outputs_),
               errors::InvalidArgument(
                   "output_shapes must be empty or match num_outputs"));
+
+  if (abi_ == ANNC_CONTEXT_ABI_NAME) {
+    if (context->HasAttr("context_i64_attrs"))
+      OP_REQUIRES_OK(
+          context, context->GetAttr("context_i64_attrs", &context_i64_attrs_));
+    const int num_inputs = num_constants_ + num_fixed_ + num_dynamic_;
+    OP_REQUIRES(context, kernel_arg_order_.empty(),
+                errors::InvalidArgument(
+                    "annc_context_v3 does not accept kernel_arg_order"));
+    OP_REQUIRES(
+        context,
+        context_input_order_.empty() ||
+            context_input_order_.size() == static_cast<size_t>(num_inputs),
+        errors::InvalidArgument(
+            "context_input_order must match total input count"));
+    std::vector<bool> seen(num_inputs, false);
+    for (int index : context_input_order_) {
+      OP_REQUIRES(context, index >= 0 && index < num_inputs && !seen[index],
+                  errors::InvalidArgument(
+                      "context_input_order must be a complete permutation"));
+      seen[index] = true;
+    }
+    for (const auto* ranks : {&input_ranks_, &output_ranks_}) {
+      for (int rank : *ranks) {
+        OP_REQUIRES(context, rank >= 0 && rank <= ANNC_CONTEXT_MAX_RANK,
+                    errors::InvalidArgument(
+                        "annc_context_v3 requires ranks in [0, 8]"));
+      }
+    }
+    for (const char* attr : {"Tconstants", "Tfixed", "Tdynamic"}) {
+      std::vector<DataType> types;
+      OP_REQUIRES_OK(context, context->GetAttr(attr, &types));
+      const int expected = std::strcmp(attr, "Tconstants") == 0
+                               ? num_constants_
+                               : std::strcmp(attr, "Tfixed") == 0
+                                     ? num_fixed_
+                                     : num_dynamic_;
+      OP_REQUIRES(context, types.size() == static_cast<size_t>(expected),
+                  errors::InvalidArgument(attr, " must match its input count"));
+      input_types_.insert(input_types_.end(), types.begin(), types.end());
+    }
+    OP_REQUIRES(context, input_types_.size() == static_cast<size_t>(num_inputs),
+                errors::InvalidArgument(
+                    "annc_context_v3 input types must match total input count"));
+    OP_REQUIRES(context, output_types_.size() ==
+                             static_cast<size_t>(num_outputs_),
+                errors::InvalidArgument("annc_context_v3 requires Toutputs"));
+    for (const auto* types : {&input_types_, &output_types_}) {
+      for (DataType type : *types) {
+        OP_REQUIRES(context, ToAnncElementType(type) != 0 ||
+                        (types == &input_types_ && type == DT_STRING),
+                    errors::InvalidArgument(
+                        "annc_context_v3 requires numeric tensors or string inputs"));
+      }
+    }
+  }
+
+  // fusion.metadata is intentionally excluded from the compiler's template
+  // fingerprint. Include its positional runtime contract here. Serialize
+  // canonical types/ranks too; TensorFlow transport order is not code identity.
+  jit_template_identity_ = template_fingerprint_ + ":" + abi_;
+  if (abi_ == ANNC_CONTEXT_ABI_NAME) {
+    auto append = [&](const std::string& value) {
+      jit_template_identity_ +=
+          ":" + std::to_string(value.size()) + ":" + value;
+    };
+    append("annc-context-slots-v2");
+    append(std::to_string(context_i64_attrs_.size()));
+    for (int64_t value : context_i64_attrs_) append(std::to_string(value));
+    append(std::to_string(input_types_.size()));
+    for (size_t i = 0; i < input_types_.size(); ++i) {
+      const size_t transport =
+          context_input_order_.empty() ? i : context_input_order_[i];
+      append(std::to_string(static_cast<int>(input_types_[transport])));
+      append(input_ranks_.empty() ? "runtime"
+                                  : std::to_string(input_ranks_[transport]));
+    }
+    append(std::to_string(output_types_.size()));
+    for (size_t i = 0; i < output_types_.size(); ++i) {
+      append(std::to_string(static_cast<int>(output_types_[i])));
+      append(std::to_string(output_ranks_[i]));
+    }
+  }
 }
 
 ANNCFusedOp::~ANNCFusedOp() {}
@@ -1070,7 +1139,8 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   const bool jit_mode = shared_lib_path_.empty();
   // 稳态判定：JIT 模式下仅 cache 命中算稳态；AOT 模式下未触发库加载即稳态。
   bool steady_call = !jit_mode;
-  thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
+  thread::ThreadPool* tf_thread_pool =
+      annc_context::GetTensorFlowCpuThreadPool(context);
 
   std::shared_ptr<annc::jit::JitExecutable> jit_executable;
   std::shared_ptr<AnncJitBinding> jit_binding;
@@ -1090,7 +1160,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
         context, BuildRuntimeArgumentShapes(
                      context, num_constants_, num_fixed_, num_dynamic_,
                      num_outputs_, input_ranks_, output_ranks_,
-                     output_shape_specs_, kernel_arg_order_, &arguments));
+                     output_shape_specs_, kernel_arg_order_,
+                     context_input_order_, abi_ == ANNC_CONTEXT_ABI_NAME,
+                     &arguments));
     if (profile_enabled) {
       profile_sample.jit_arg_shapes_us = ElapsedUs(t_jit_arg_shapes_start);
     }
@@ -1248,17 +1320,23 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
 
   Status execute_status;
   auto t_threadpool_start = profile_enabled ? Clock::now() : TimePoint{};
-  TensorFlowAnncThreadPool adapter(tf_thread_pool);
+  annc_context::TensorFlowAnncThreadPool adapter(tf_thread_pool);
   ScopedAnncThreadPool scoped(tf_thread_pool ? &adapter : nullptr,
                               set_thread_pool, get_thread_pool);
   if (profile_enabled) {
     profile_sample.threadpool_setup_us = ElapsedUs(t_threadpool_start);
   }
 
-  if (abi_ == "annc_execution_v2") {
-    execute_status =
-        ExecuteExecutionV2Kernel(context, kernel_function, profile_enabled,
-                                 &profile_sample, jit_binding.get());
+  if (abi_ == ANNC_CONTEXT_ABI_NAME) {
+    auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
+    execute_status = ExecuteContextV3Kernel(context, kernel_function);
+    if (profile_enabled) {
+      profile_sample.kernel_us = ElapsedUs(t_kernel_start);
+    }
+  } else if (abi_ == "annc_execution_v2") {
+    execute_status = ExecuteExecutionV2Kernel(
+        context, kernel_function, profile_enabled, &profile_sample,
+        jit_binding.get());
   } else {
     execute_status =
         ExecuteMlirCifaceKernel(context, kernel_function, profile_enabled,

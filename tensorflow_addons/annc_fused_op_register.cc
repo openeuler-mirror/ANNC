@@ -21,8 +21,11 @@ REGISTER_OP("ANNCFused")
     .Attr("num_outputs: int >= 1")
     .Attr("output_ranks: list(int)")      // Rank for each output
     .Attr("input_ranks: list(int) = []")  // Rank for each runtime input
-    // Comma-separated dimensions; "?" uses the corresponding dynamic input
-    // dimension.
+    // Canonical input slot -> TensorFlow transport input slot.
+    .Attr("context_input_order: list(int) = []")
+    .Attr("context_i64_attrs: list(int) = []")
+    // Legacy paths use "?" as the corresponding dynamic input dimension.
+    // annc_context_v3 obtains actual output dimensions from kernel callbacks.
     .Attr("output_shapes: list(string) = []")
     // Permutation over the combined [input memrefs..., output memrefs...] list.
     .Attr("kernel_arg_order: list(int) = []")

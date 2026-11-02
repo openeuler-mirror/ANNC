@@ -6,7 +6,7 @@
 namespace tensorflow {
 void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
   std::call_once(jit_weights_once_, [&] {
-    jit_identity_ = template_fingerprint_ + ":packed-rhs-v1:" + abi_;
+    jit_identity_ = jit_template_identity_ + ":packed-rhs-v1";
     const int inputs = context->num_inputs();
     jit_argument_order_ = kernel_arg_order_;
     if (jit_argument_order_.empty()) {

@@ -1,16 +1,18 @@
-#include "ConfigFusionSupport.h"
-
 #include <algorithm>
 #include <cstring>
 #include <optional>
 #include <set>
 #include <unordered_set>
 
+#include "ConfigFusionSupport.h"
+#include "Dialect/Atir/BuiltinKernelSchema.h"
+#include "Dialect/Atir/CustomOpSchema.h"
+#include "Dialect/Atir/Passes/Patterns/CustomPatterns/KPFusedGatherMatch.h"
 #include "FusionMetadata/FusionMetadata.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/SHA256.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -103,9 +105,17 @@ static ArrayAttr makeFusionArgArray(
   return ArrayAttr::get(ctx, attrs);
 }
 
-static DictionaryAttr buildFusionMetadata(MLIRContext *ctx,
-                                          const annc::fusion::FusionInfo &info,
-                                          const std::map<std::string, std::string> &patternAttrs) {
+static ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
+  Builder builder(ctx);
+  SmallVector<mlir::Attribute> attrs;
+  for (int64_t value : values)
+    attrs.push_back(builder.getI64IntegerAttr(value));
+  return ArrayAttr::get(ctx, attrs);
+}
+
+static DictionaryAttr buildFusionMetadata(
+    MLIRContext *ctx, const annc::fusion::FusionInfo &info,
+    const std::map<std::string, std::string> &patternAttrs) {
   Builder builder(ctx);
   SmallVector<NamedAttribute> attrs;
   attrs.push_back(
@@ -117,8 +127,9 @@ static DictionaryAttr buildFusionMetadata(MLIRContext *ctx,
   attrs.push_back(builder.getNamedAttr("args", makeFusionArgArray(ctx, info.args)));
   attrs.push_back(
       builder.getNamedAttr("outputs", makeFusionArgArray(ctx, info.outputs)));
-  attrs.push_back(
-      builder.getNamedAttr("abi", builder.getStringAttr(info.abi)));
+  attrs.push_back(builder.getNamedAttr("abi", builder.getStringAttr(info.abi)));
+  attrs.push_back(builder.getNamedAttr(
+      "context_i64_attrs", makeI64Array(ctx, info.contextI64Attrs)));
   SmallVector<NamedAttribute> patternAttrEntries;
   for (const auto &kv : patternAttrs) {
     patternAttrEntries.push_back(
@@ -1179,8 +1190,72 @@ func::FuncOp materializePattern(
   }
   if (orderedOps.empty()) return nullptr;
 
+  std::optional<CustomOpSchema> contextSchema;
+  if (rule.abi == "annc_context_v3") {
+    // Bind semantic slots from the matcher, independently of DSL alias names
+    // and declaration order. The exact boundary must be forwarded to the
+    // builtin unchanged after outlining.
+    for (Operation *op : orderedOps) {
+      auto gather = dyn_cast<GatherOp>(op);
+      if (!gather) continue;
+      auto match = matchKPFusedGather(gather);
+      if (failed(match)) continue;
+      SmallVector<Value> canonicalInputs = {match->data, match->keys,
+                                            match->begin};
+      if (!std::is_permutation(inputValues.begin(), inputValues.end(),
+                               canonicalInputs.begin(),
+                               canonicalInputs.end()) ||
+          !std::is_permutation(outputValues.begin(), outputValues.end(),
+                               match->boundaryOutputs.begin(),
+                               match->boundaryOutputs.end()))
+        continue;
+      contextSchema = getContextKernelSchema("KPFusedGather");
+      inputValues.assign(canonicalInputs.begin(), canonicalInputs.end());
+      outputValues.assign(match->boundaryOutputs.begin(),
+                          match->boundaryOutputs.end());
+      break;
+    }
+    // Stitch's variable arity is transported as N before metadata is exported;
+    // FastCodegen later verifies the cloned graph and its positional boundary.
+    if (!contextSchema && rule.pattern == "kp_sparse_dynamic_stitch") {
+      for (Operation *op : orderedOps) {
+        auto stitch = dyn_cast<ParallelDynamicStitchOp>(op);
+        if (!stitch || outputValues.size() != 1 ||
+            outputValues.front() != stitch.getResult() ||
+            inputValues.size() != stitch.getIndices().size() + 1)
+          continue;
+        contextSchema = getContextKernelSchema(
+            "KPFusedSparseDynamicStitch",
+            {static_cast<int64_t>(stitch.getIndices().size())});
+        break;
+      }
+    }
+    // Other configured outlines declare their canonical tensor slot order in
+    // inputs/outputs. FastCodegen matches the cloned graph against the shared
+    // builtin schema; the context entry pass rejects any reordered or
+    // incomplete boundary before forwarding the context.
+  }
+  if (contextSchema) {
+    SmallVector<mlir::Type> inputTypes, outputTypes;
+    for (Value value : inputValues) inputTypes.push_back(value.getType());
+    for (Value value : outputValues) outputTypes.push_back(value.getType());
+    auto bindings = inferTypeConstraintsFromSchema(
+        contextSchema->toMetadata(module.getContext()), inputTypes,
+        outputTypes);
+    if (!bindings) {
+      llvm::consumeError(bindings.takeError());
+      return nullptr;
+    }
+  }
+
   std::vector<Value> boundaryValues =
       collectBoundaryValues(orderedOps, state, inputValues);
+  if (rule.abi == "annc_context_v3" && boundaryValues != inputValues) {
+    debugLog([&](raw_ostream &os) {
+      os << "context entry requires exactly the declared ordered inputs";
+    });
+    return nullptr;
+  }
   std::vector<Value> outputBuffers;
   if (rule.bufferOutputs) {
     outputBuffers = collectOutputBuffers(outputValues);
@@ -1191,7 +1266,8 @@ func::FuncOp materializePattern(
       });
       return nullptr;
     }
-    for (Value buffer : outputBuffers) appendUniqueValue(boundaryValues, buffer);
+    for (Value buffer : outputBuffers)
+      appendUniqueValue(boundaryValues, buffer);
   }
   debugLog([&](raw_ostream &os) {
     os << "materialize rule '" << rule.name << "'";
@@ -1209,9 +1285,8 @@ func::FuncOp materializePattern(
   builder.setInsertionPointToStart(module.getBody());
 
   SmallVector<mlir::Type> inputTypes;
-  if (rule.abi == "annc_execution_v2") {
+  if (rule.abi == "annc_execution_v2")
     inputTypes.push_back(LLVM::LLVMPointerType::get(module.getContext()));
-  }
   for (Value value : boundaryValues) inputTypes.push_back(value.getType());
   SmallVector<mlir::Type> resultTypes;
   if (!rule.bufferOutputs) {
@@ -1227,13 +1302,12 @@ func::FuncOp materializePattern(
   func->setAttr("llvm.emit_c_interface", UnitAttr::get(builder.getContext()));
   func->setAttr("annc.kernel", UnitAttr::get(builder.getContext()));
 
-  MatchState clonedState = state;
   Block *entry = func.addEntryBlock();
   builder.setInsertionPointToStart(entry);
   IRMapping mapper;
-  unsigned argOffset = rule.abi == "annc_execution_v2" ? 1 : 0;
-  for (auto [boundaryValue, arg] : llvm::zip(
-           boundaryValues, entry->getArguments().drop_front(argOffset))) {
+  for (auto [boundaryValue, arg] :
+       llvm::zip(boundaryValues, entry->getArguments().drop_front(
+           rule.abi == "annc_execution_v2" ? 1 : 0))) {
     mapper.map(boundaryValue, arg);
   }
 
@@ -1251,48 +1325,37 @@ func::FuncOp materializePattern(
       }
     }
     Operation *cloned = builder.clone(*op, mapper);
-    for (auto [orig, cloneResult] : llvm::zip(op->getResults(), cloned->getResults())) {
-      for (auto it = clonedState.aliasValues.begin(); it != clonedState.aliasValues.end(); ++it) {
-        if (it->second == orig) it->second = cloneResult;
-      }
+    for (auto [orig, cloneResult] :
+         llvm::zip(op->getResults(), cloned->getResults())) {
       mapper.map(orig, cloneResult);
     }
   }
 
   SmallVector<Value> returns;
   if (!rule.bufferOutputs) {
-    for (const std::string &name : outputs) {
-      auto it = clonedState.aliasValues.find(name);
-      if (it == clonedState.aliasValues.end()) return nullptr;
-      returns.push_back(it->second);
-    }
+    for (Value value : outputValues) returns.push_back(mapper.lookup(value));
   }
   builder.setInsertionPointToEnd(entry);
   builder.create<func::ReturnOp>(func.getLoc(), returns);
 
   annc::fusion::FusionInfo info;
-  info.name = rule.abi == "annc_execution_v2"
+  info.name = (rule.abi == "annc_context_v3" || rule.abi == "annc_execution_v2")
                   ? (rule.pattern.empty() ? rule.name : rule.pattern)
                   : kernelName;
   info.pattern = rule.pattern.empty() ? rule.name : rule.pattern;
   info.kernelName = kernelName;
   info.abi = rule.abi;
-  for (const std::string &name : inputs) {
-    auto it = state.externalValues.find(name);
-    if (it == state.externalValues.end()) return nullptr;
-    Value value = it->second;
+  for (Value value : inputValues) {
     annc::fusion::FusionArg arg;
-    arg.role = inferInputRole(value);
+    // Preserve canonical schema order in one transport role group.
+    arg.role = rule.abi == "annc_context_v3" ? "dynamic" : inferInputRole(value);
     arg.tfName = getValueName(value);
     arg.shape = getShape(value.getType());
     arg.rank = getRank(value.getType());
     arg.dtype = getTensorDType(value.getType());
     info.args.push_back(std::move(arg));
   }
-  for (const std::string &name : outputs) {
-    auto it = state.aliasValues.find(name);
-    if (it == state.aliasValues.end()) return nullptr;
-    Value value = it->second;
+  for (Value value : outputValues) {
     annc::fusion::FusionArg out;
     out.role = "output";
     out.tfName = getFusionOutputName(value);
@@ -1300,6 +1363,11 @@ func::FuncOp materializePattern(
     out.rank = getRank(value.getType());
     out.dtype = getTensorDType(value.getType());
     info.outputs.push_back(std::move(out));
+  }
+  if (contextSchema) {
+    for (const auto &arg : contextSchema->args())
+      if (arg.kind == CustomOpSchema::ArgKind::I64Attr)
+        info.contextI64Attrs.push_back(arg.i64Value);
   }
   info.patternAttrs = patternAttrs;
 
@@ -1313,11 +1381,9 @@ func::FuncOp materializePattern(
   func->setAttr("annc.execution_mode",
                 builder.getStringAttr("aot"));
 
-  // Execution-v2 fused functions are consumed by the existing FastCodegen
-  // custom-pattern path.  Keep the original main graph untouched; prune-func
-  // will retain this private fusion function and FastCodegen will rewrite its
-  // body to the appropriate CustomizeOp.  Generic outlines keep the legacy
-  // main-level call replacement behavior.
+  // Context entries retain the source graph for model rewriting. Codegen
+  // consumes the outlined function after prune-func. Legacy outlines instead
+  // replace the matched region in main with a direct function call.
   if (rule.abi == "mlir_ciface" && !rule.bufferOutputs) {
     builder.setInsertionPoint(orderedOps.front());
     auto call = builder.create<func::CallOp>(
@@ -1334,8 +1400,7 @@ func::FuncOp materializePattern(
       }
     }
   } else {
-    // The execution-v2 path intentionally leaves the main graph in place for
-    // the later FastCodegen pass.  Mark the captured region so the config
+    // Mark the captured source region so the config
     // rewrite loop and optional builtin fusion do not consume it again.
     for (Operation *op : orderedOps) {
       op->setAttr("annc.fusion_materialized",

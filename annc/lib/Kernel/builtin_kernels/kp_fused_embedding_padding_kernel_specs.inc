@@ -1,35 +1,23 @@
-// KPFusedEmbeddingPaddingFast: two scalar outputs (padding_rows,
-// reshape_rows).  KPFusedEmbeddingPadding: scalar padding_rows + padded
-// [reshape_rows, reshape_cols] data output.  Execution V2: outputs are
-// allocated through the execution API (slot 0 = padding_rows, slot 1 =
-// reshape_rows / out_data).
+// Context ABI: the implementation consumes named tensors and runtime services.
 
-ANNC_KERNEL(
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_KPFusedEmbeddingPaddingFast_float,
     Name("KPFusedEmbeddingPaddingFast")
         .Backend("aarch64")
-        .Abi("annc_execution_v2")
-        .TypeConstraint<float>("T"),
-    (const AnncExecutionContext* execution, AnncMemRef1DI64* origin_shape,
-     AnncMemRef0DI32* input_rows, AnncMemRef0DI32* pack,
-     AnncMemRef2DF32* data, AnncMemRef1DI32* reshape_sizes),
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-        const auto status = kpFusedEmbeddingPaddingFast(
-            ::annc::threadpool::getCurrentThreadPool(), execution,
-            origin_shape, input_rows, pack, data, reshape_sizes);
-        return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, kpFusedEmbeddingPaddingFastImpl);
     })
 
-ANNC_KERNEL(
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_KPFusedEmbeddingPadding_float,
     Name("KPFusedEmbeddingPadding")
         .Backend("aarch64")
-        .Abi("annc_execution_v2")
-        .TypeConstraint<float>("T"),
-    (const AnncExecutionContext* execution, AnncMemRef1DI64* origin_shape,
-     AnncMemRef0DI32* input_rows, AnncMemRef0DI32* pack,
-     AnncMemRef2DF32* data, AnncMemRef1DI32* reshape_sizes),
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-        const auto status = kpFusedEmbeddingPaddingFull(
-            ::annc::threadpool::getCurrentThreadPool(), execution,
-            origin_shape, input_rows, pack, data, reshape_sizes);
-        return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, kpFusedEmbeddingPaddingImpl);
     })

@@ -5,14 +5,13 @@
 // CHECK-NOT: atir.Customize
 module attributes {module.state = "atir"} {
   func.func private @unsupported_f64(
-      %execution: !llvm.ptr,
       %lhs: !atir.tensor<2x2xf64>,
       %rhs: !atir.tensor<2x2xf64>,
       %bias: !atir.tensor<2xf64>)
       -> (!atir.tensor<2x2xf64>, !atir.tensor<2x2xf64>)
       attributes {
         annc.kernel,
-        fusion.metadata = {abi = "annc_execution_v2"}
+        fusion.metadata = {abi = "annc_context_v3"}
       } {
     %matmul_out = "atir.buffer"() : () -> !atir.tensor<2x2xf64>
     %add_out = "atir.buffer"() : () -> !atir.tensor<2x2xf64>

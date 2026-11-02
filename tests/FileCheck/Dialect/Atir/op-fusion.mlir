@@ -1,6 +1,5 @@
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s -atir-op-fusion | FileCheck %s
-// OpFusion: 将 MatMulOp 替换为 call @fused_* + private kernel 函数
-// MatMul operand 顺序: (C=输出buffer, lhs, rhs)
+// OpFusion: outline plain MatMul as a Context V3 builtin when available.
 
 // main 函数内部有 matmul，触发 fusion
 // CHECK-LABEL: func @main
@@ -9,24 +8,15 @@ func.func @main(
     %b: !atir.tensor<128x64xf32>,
     %c: !atir.tensor<64x64xf32>) -> !atir.tensor<64x64xf32> {
   %0 = "atir.MatMul"(%c, %a, %b) <{do_relu = false, left_transpose = false, output_transpose = false, relu_limit = -1.0 : f32, right_transpose = false, withBias = false}> : (!atir.tensor<64x64xf32>, !atir.tensor<64x128xf32>, !atir.tensor<128x64xf32>) -> !atir.tensor<64x64xf32>
-  // CHECK: call @fused_matmul
+  // CHECK: "atir.MatMul"
+  // CHECK-SAME: annc.fusion_materialized
+  // CHECK-NOT: call @fused_matmul
   // CHECK: func.func private @fused_matmul
   // CHECK: annc.execution_mode = "jit"
   // CHECK: fusion.metadata
-  // CHECK: args = [
-  // CHECK: execution_mode = "jit"
-  // CHECK: outputs = [
-  // CHECK: template_fingerprint =
-  // CHECK-NOT: tf.inputs
-  // CHECK-NOT: tf.input_shapes
-  // CHECK-NOT: tf.output
-  // CHECK-NOT: Nconstants
-  // CHECK-NOT: Nfixed
-  // CHECK-NOT: Ndynamic
-  // CHECK-NOT: num_outputs
-  // CHECK-NOT: input_ranks
-  // CHECK-NOT: output_ranks
-  // CHECK-NOT: output_shapes
+  // CHECK-SAME: abi = "annc_context_v3"
+  // CHECK-SAME: template_fingerprint =
+  // CHECK: custom.op_name = "MatMul"
   return %0 : !atir.tensor<64x64xf32>
 }
 
@@ -58,7 +48,7 @@ func.func @main(
 // -----
 
 // Add escapes through a non-return consumer and Relu escapes through the
-// return. Materialize both boundary values in the v2 private kernel.
+// return. Materialize both boundary values in the context private kernel.
 // CHECK-LABEL: func.func @main
 // CHECK: "atir.MatMul"
 // CHECK-SAME: annc.fusion_materialized
@@ -67,13 +57,12 @@ func.func @main(
 // CHECK-NOT: call @fused_matmul_add_relu
 // CHECK: return %{{.*}}, %{{.*}}
 // CHECK-LABEL: func.func private @fused_matmul_add_relu
-// CHECK-SAME: %[[CTX:.*]]: !llvm.ptr,
 // CHECK-SAME: !atir.tensor<2x3xf32, name = "lhs:0">,
 // CHECK-SAME: !atir.tensor<3x4xf32, name = "rhs:0">,
 // CHECK-SAME: !atir.tensor<4xf32, name = "bias:0">)
 // CHECK-SAME: -> (!atir.tensor<2x4xf32, name = "bias_add:0">, !atir.tensor<2x4xf32, name = "relu:0">)
 // CHECK: fusion.metadata = {
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: tf_name = "bias_add:0"
 // CHECK-SAME: tf_name = "relu:0"

@@ -70,9 +70,8 @@ def test_kp_fused_gather_can_be_materialized_from_external_config(tmp_path):
 
     text = fused_atir.read_text()
     assert 'func.func private @fused_kp_fused_gather_external_' in text
-    assert '!llvm.ptr' in text
-    assert 'abi = "annc_execution_v2"' in text
-    assert text.count('role = "fixed"') >= 3
+    assert 'abi = "annc_context_v3"' in text
+    assert text.count('role = "dynamic"') == 3
     assert 'fusion.pattern = "kp_fused_gather_external"' in text
     assert 'tf_name = "first_unique:0"' in text
     assert 'tf_name = "first_unique:1"' in text

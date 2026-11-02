@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Kernel/ExecutionContext.h"
+#include "Context/KernelContext.h"
 #include "annc_jit_cache.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -64,6 +64,8 @@ class ANNCFusedOp : public OpKernel {
                                   void* kernel_function, bool profile_enabled,
                                   AnncFusedProfileSample* profile_sample,
                                   const AnncJitBinding* binding = nullptr);
+  Status ExecuteContextV3Kernel(OpKernelContext* context,
+                                void* kernel_function);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;
@@ -74,6 +76,9 @@ class ANNCFusedOp : public OpKernel {
   std::string kernel_name_;
   // Name-independent identity of the fusion function used by the JIT cache.
   std::string template_fingerprint_;
+  // Template identity plus ABI and canonical context schema, built once after
+  // validation. Transport permutations do not change the compiled function.
+  std::string jit_template_identity_;
   int num_outputs_;
   // One entry per output; used to build ranked output memref descriptors.
   std::vector<int> output_ranks_;
@@ -81,6 +86,11 @@ class ANNCFusedOp : public OpKernel {
   std::vector<int> dynamic_dims_;
   // One entry per input in constants/fixed/dynamic TensorFlow input order.
   std::vector<int> input_ranks_;
+  // TensorFlow input dtypes in transport order.
+  std::vector<DataType> input_types_;
+  // canonical input slot -> TensorFlow transport input slot.
+  std::vector<int> context_input_order_;
+  std::vector<int64_t> context_i64_attrs_;
   // Comma-separated dimensions per output; "?" denotes a dynamic dimension.
   std::vector<std::string> output_shapes_;
   // output_shapes_ parsed once in the constructor (-1 for dynamic dimensions);
@@ -99,8 +109,8 @@ class ANNCFusedOp : public OpKernel {
   std::string shared_lib_path_;
   // Fusion-only ATIR module consumed by runtime JIT compilation.
   std::string atir_module_path_;
-  // Calling convention: legacy "mlir_ciface" or context-based
-  // "annc_execution_v2".
+  // Calling convention: legacy "mlir_ciface", or
+  // the uniform single-pointer "annc_context_v3".
   std::string abi_;
   // Whether runtime clears output tensors before calling the generated kernel.
   bool zero_initialize_outputs_;

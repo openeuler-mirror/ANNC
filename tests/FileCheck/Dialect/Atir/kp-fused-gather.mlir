@@ -1,25 +1,22 @@
-// RUN: annc-opt --split-input-file %s --atir-identity-canonicalize --atir-op-fusion | FileCheck %s
+// RUN: annc-opt --split-input-file %s --atir-identity-canonicalize --atir-config-fusion="config=%S/config-fusion-kp-fused-gather.json run-builtin-after=false" | FileCheck %s
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=FAST
 
+// CHECK-LABEL: func.func private @fused_kp_fused_gather_external_
+// CHECK-SAME: %arg0: !atir.tensor<2x4xf32>, %arg1: !atir.tensor<4x3xi64>, %arg2: !atir.tensor<2xi32>
+// CHECK-SAME: fusion.metadata = {
+// CHECK-SAME: abi = "annc_context_v3"
+// CHECK-SAME: tf_name = "first_unique:0"
+// CHECK-SAME: tf_name = "first_unique:1"
+// CHECK-SAME: tf_name = "outer_gather:0"
 // CHECK-LABEL: func.func @main
 // CHECK: atir.Gather
 // CHECK: atir.Gather
 // CHECK-SAME: annc.fusion_materialized
-// CHECK-LABEL: func.func private @fused_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<2x4xf32>, %arg2: !atir.tensor<4x3xi64>, %arg3: !atir.tensor<2xi32>
-// CHECK: fusion.metadata = {
-// CHECK-SAME: abi = "annc_execution_v2"
-// CHECK-SAME: tf_name = "first_unique:0"
-// CHECK-SAME: tf_name = "first_unique:1"
-// CHECK-SAME: tf_name = "outer_gather:0"
 
 // FAST-LABEL: func.func private @fused_kp_fused_gather
-// FAST-SAME: %{{.*}}: !llvm.ptr,
 // FAST-SAME: %{{.*}}: !atir.tensor<2x4xf32>, %{{.*}}: !atir.tensor<4x3xi64>, %{{.*}}: !atir.tensor<2xi32>
 // FAST: atir.Customize
 // FAST-SAME: custom.op_name = "KPFusedGather"
-// FAST-SAME: custom.result_names = ["unique_values", "unique_indices", "gathered"]
 // FAST-NOT: atir.Unique
 // FAST-NOT: atir.Gather
 module attributes {module.state = "atir"} {
@@ -87,13 +84,14 @@ module attributes {module.state = "atir"} {
 
 // ss.end = [0, 1] (masked by end_mask=1): the end values are ignored by TF
 // semantics and by the kernel — the value check must not block the match.
+// CHECK-LABEL: func.func private @fused_kp_fused_gather_external_
+// CHECK-SAME: %arg0: !atir.tensor<2x4xf32>, %arg1: !atir.tensor<4x3xi64>, %arg2: !atir.tensor<2xi32>
+// CHECK-SAME: fusion.metadata = {
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-LABEL: func.func @main
 // CHECK: atir.Gather
 // CHECK: atir.Gather
 // CHECK-SAME: annc.fusion_materialized
-// CHECK-LABEL: func.func private @fused_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: fusion.metadata = {
 module attributes {module.state = "atir"} {
   func.func @main(
       %data: !atir.tensor<2x4xf32>, %keys: !atir.tensor<4x3xi64>,
@@ -158,13 +156,12 @@ module attributes {module.state = "atir"} {
 // -----
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_fused_gather(
-      %execution: !llvm.ptr,
       %data: !atir.tensor<2x4xf32>, %keys: !atir.tensor<4x3xi64>,
       %begin: !atir.tensor<2xi32>)
       -> (!atir.tensor<?xi64>, !atir.tensor<?xi32>, !atir.tensor<?x4xf32>)
       attributes {
         annc.kernel,
-        fusion.metadata = {abi = "annc_execution_v2"}
+        fusion.metadata = {abi = "annc_context_v3"}
       } {
     %axis = atir.constant "public" @"axis" ->
       <i32, name = "axis", data = dense<0> : tensor<i32>>
@@ -211,13 +208,12 @@ module attributes {module.state = "atir"} {
 // FAST-NOT: atir.Unique
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_fused_gather_end_01(
-      %execution: !llvm.ptr,
       %data: !atir.tensor<2x4xf32>, %keys: !atir.tensor<4x3xi64>,
       %begin: !atir.tensor<2xi32>)
       -> (!atir.tensor<?xi64>, !atir.tensor<?xi32>, !atir.tensor<?x4xf32>)
       attributes {
         annc.kernel,
-        fusion.metadata = {abi = "annc_execution_v2"}
+        fusion.metadata = {abi = "annc_context_v3"}
       } {
     %axis = atir.constant "public" @"axis" ->
       <i32, name = "axis", data = dense<0> : tensor<i32>>

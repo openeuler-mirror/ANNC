@@ -58,7 +58,7 @@ gtest_discover_tests(annc-ep-compile-test)
 # (no ORT host needed): the fixture suites never provoke a failing ORT call.
 add_executable(annc-ep-execution-test
     "${CMAKE_CURRENT_SOURCE_DIR}/annc_ep_execution_test.cpp"
-    "${CMAKE_SOURCE_DIR}/addons/onnxruntime/annc_ep_execution.cc"
+    "${CMAKE_SOURCE_DIR}/addons/onnxruntime/context/annc_ep_execution.cc"
 )
 target_include_directories(annc-ep-execution-test SYSTEM PRIVATE
     "${ANNC_ONNXRUNTIME_INCLUDE_DIR}"

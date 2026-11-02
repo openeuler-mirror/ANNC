@@ -18,7 +18,7 @@
 | 文件 | 说明 |
 |------|------|
 | `tensorflow_addons/annc_optimizer.cc` | Grappler 优化器插件，自动调用 `annc-tf-pipeline` 重写计算图 |
-| `tensorflow_addons/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
+| `tensorflow_addons/context/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
 | `tensorflow_addons/annc_fused_op_register.cc` | 注册 `ANNCFused` Op |
 | `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
 

@@ -1,14 +1,12 @@
-ANNC_KERNEL(
-    Name("MatMul").Backend("kdnn_packed").TypeConstraint<float>("T"),
-    (AnncMemRef2DF32* output,
-     AnncMemRef2DF32* lhs,
-     AnncMemRef2DF32* rhs),
+// Context ABI: the implementation consumes named tensors and runtime services.
+
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_MatMul_kdnn_packed_float,
+    Name("MatMul")
+        .Backend("kdnn_packed")
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-        const auto status =
-            ::annc::kernels::kdnn_adaptor::matmul_kdnn_packed_impl(
-                ::annc::threadpool::getCurrentThreadPool(),
-                output,
-                lhs,
-                rhs);
-        return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, ::annc::kernels::kdnn_adaptor::matmul_kdnn_packed_impl);
     })

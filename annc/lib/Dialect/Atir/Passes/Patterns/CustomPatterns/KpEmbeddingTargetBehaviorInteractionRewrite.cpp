@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,7 +12,7 @@ using namespace atir;
 //
 // The first level (OpFusion's FuseKpTargetBehaviorInteractionAsFuncCallPattern)
 // extracts the subgraph into a private func with annc.kernel +
-// fusion.metadata, taking (batch_input, weight, bias, tile_input, output).
+// fusion.metadata, taking (batch_input, weight, bias, tile_input) -> output.
 // This pattern rewrites that func's body into a single atir.Customize call
 // to the hand-written KPFusedTargetBehaviorInteraction kernel.
 //
@@ -40,23 +41,24 @@ struct KpEmbeddingTargetBehaviorInteractionRewrite
       ConcatV2Op anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
     // Only rewrite inside the kernel func extracted by the first-level
-    // pattern: private func with annc.kernel, 5 arguments, no results.
+    // pattern: private func with annc.kernel, 4 tensor arguments and one
+    // result.
     auto func = anchor->template getParentOfType<func::FuncOp>();
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if (func.getNumArguments() != 5) {
+    if (func.getNumArguments() != 4) {
       return failure();
     }
-    if (!func.getFunctionType().getResults().empty()) {
+    if (func.getNumResults() != 1) {
       return failure();
     }
     Value batchInputArg = func.getArgument(0);
     Value weightArg = func.getArgument(1);
     Value biasArg = func.getArgument(2);
     Value tileInputArg = func.getArgument(3);
-    Value outputArg = func.getArgument(4);
-    if (anchor.getOutput() != outputArg) {
+    Value outputArg = anchor.getOutput();
+    if (!outputArg.getDefiningOp<BufferOp>()) {
       return failure();
     }
 
@@ -213,31 +215,17 @@ struct KpEmbeddingTargetBehaviorInteractionRewrite
     return "KPFusedTargetBehaviorInteraction";
   }
 
+  void getOrderedBoundaryInputs(
+      ConcatV2Op anchor, llvm::ArrayRef<mlir::Operation *>,
+      llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
+    auto func = anchor->template getParentOfType<func::FuncOp>();
+    llvm::append_range(inputs, func.getArguments());
+  }
+
   CustomOpSchema getCustomOpSchema(
       ConcatV2Op anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    auto func = anchor->template getParentOfType<func::FuncOp>();
-    Value batchInputArg = func.getArgument(0);
-    Value weightArg = func.getArgument(1);
-    Value biasArg = func.getArgument(2);
-    Value tileInputArg = func.getArgument(3);
-
-    auto getRank = [](Type type) -> int64_t {
-      if (auto tensorType = dyn_cast<atir::TensorType>(type))
-        return static_cast<int64_t>(tensorType.getShape().size());
-      return 0;
-    };
-
-    // Arg order matches the base class's collected inputValues:
-    //   [output buffer, real inputs in fusedOps order] =
-    //   [output, batch_input, weight, bias, tile_input]
-    return CustomOpSchema::get("KPFusedTargetBehaviorInteraction")
-        .TypeVar("T")
-        .MemRefArg("output", 3, "T")
-        .MemRefArg("batch_input", getRank(batchInputArg.getType()), "T")
-        .MemRefArg("weight", getRank(weightArg.getType()), "T")
-        .MemRefArg("bias", getRank(biasArg.getType()), "T")
-        .MemRefArg("tile_input", getRank(tileInputArg.getType()), "T");
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
  private:

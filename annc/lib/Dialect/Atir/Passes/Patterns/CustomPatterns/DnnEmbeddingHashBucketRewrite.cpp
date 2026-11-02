@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -26,10 +27,10 @@ using namespace atir;
 //                                           SparseReshape ──►┘ ─►
 //                                           SparseSegmentMean
 //                                                                                         │
-//                                                                                         ─► ... ─► Reshape(arg2)  (sink)
+//                                                                                         ─► ... ─► Reshape -> return (sink)
 //
 // Kernel ABI (base class collects in this order):
-//   [output=arg2, input=arg0, embedding_weight=arg1]
+//   [input=arg0, embedding_weight=arg1] -> output
 struct DnnEmbeddingHashBucketRewrite
     : public CustomFusionPatternBase<StringToHashBucketFastOp> {
   DnnEmbeddingHashBucketRewrite(MLIRContext *context,
@@ -45,16 +46,15 @@ struct DnnEmbeddingHashBucketRewrite
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if (func.getNumArguments() != 3) {
+    if (func.getNumArguments() != 2) {
       return failure();
     }
-    if (!func.getFunctionType().getResults().empty()) {
+    if (func.getNumResults() != 1) {
       return failure();
     }
 
     Value inputArg = func.getArgument(0);   // dynamic string input
     Value weightArg = func.getArgument(1);  // embedding weights
-    Value outputArg = func.getArgument(2);  // output buffer
 
     // Reverse chain: anchor ← GatherNd ← ExpandDims ← inputArg.
     auto gatherNd = anchor.getOperand(1).getDefiningOp<GatherNdOp>();
@@ -69,20 +69,11 @@ struct DnnEmbeddingHashBucketRewrite
       return failure();
     }
 
-    // Forward: find the sink — the Reshape whose output buffer is outputArg.
-    ReshapeOp sink = nullptr;
-    for (Operation *user : outputArg.getUsers()) {
-      auto reshape = dyn_cast<ReshapeOp>(user);
-      if (reshape && reshape->getParentOfType<func::FuncOp>() == func) {
-        if (sink) {
-          return failure();  // ambiguous: more than one sink
-        }
-        sink = reshape;
-      }
-    }
-    if (!sink) {
-      return failure();
-    }
+    auto ret = dyn_cast<func::ReturnOp>(func.front().getTerminator());
+    auto sink = ret && ret.getNumOperands() == 1
+                    ? ret.getOperand(0).getDefiningOp<ReshapeOp>()
+                    : ReshapeOp{};
+    if (!sink || !sink.getOutput().getDefiningOp<BufferOp>()) return failure();
 
     // Reachability check: the anchor must reach the sink through def-use
     // chains, and the subgraph must contain a SparseSegmentMean (the
@@ -101,9 +92,9 @@ struct DnnEmbeddingHashBucketRewrite
     }
 
     // Collect all defining ops from sink in post-order, stopping at the
-    // three function arguments.  This yields ops in def-use order, which
+    // two function arguments.  This yields ops in def-use order, which
     // the base class relies on for input/output collection.
-    SmallVector<Value, 3> boundaryValues = {inputArg, weightArg, outputArg};
+    SmallVector<Value, 2> boundaryValues = {inputArg, weightArg};
     SmallPtrSet<Operation *, 32> visited;
     collectDefiningOpsPostOrder(sink.getOperation(), boundaryValues, visited,
                                 fusedOps);
@@ -148,28 +139,8 @@ struct DnnEmbeddingHashBucketRewrite
   CustomOpSchema getCustomOpSchema(
       StringToHashBucketFastOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    auto numBuckets = anchor.getNumBucketsAttr().getInt();
-    auto func = anchor->getParentOfType<func::FuncOp>();
-    Value output = func.getArgument(2);
-    Value input = func.getArgument(0);
-    Value weight = func.getArgument(1);
-
-    auto getRank = [](Type type) -> int64_t {
-      if (auto tensorType = dyn_cast<atir::TensorType>(type))
-        return static_cast<int64_t>(tensorType.getShape().size());
-      return 0;
-    };
-
-    // Arg order matches the base class's collected inputValues:
-    //   [output buffer, real inputs in fusedOps order]
-    // ExpandDims (uses arg0) precedes Gather (uses arg1) in def-use order,
-    // so real inputs are [input, weight].
-    return CustomOpSchema::get("KPFusedDnnEmbeddingWithHashBucket")
-        .TypeVar("T")
-        .MemRefArg("output", getRank(output.getType()), "T")
-        .MemRefArg("input", getRank(input.getType()), "")
-        .MemRefArg("embedding_weight", getRank(weight.getType()), "T")
-        .I64AttrArg("num_buckets", numBuckets);
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps),
+                                   {anchor.getNumBucketsAttr().getInt()});
   }
 
  private:

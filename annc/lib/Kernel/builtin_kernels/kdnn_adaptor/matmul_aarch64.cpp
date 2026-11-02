@@ -1,61 +1,42 @@
 #include <exception>
 
-#include "Kernel/ExecutionContextUtils.h"
-#include "Kernel/KernelStatus.h"
-#include "Context/ThreadPool.h"
+#include "Context/KernelContextUtils.h"
 #include "kdnn.hpp"
 #include "kdnn_adaptor/KDNNTensorInfoAdaptor.h"
 #include "kdnn_adaptor/KDNNThreadPoolAdaptor.h"
-#include "llvm/Support/raw_ostream.h"
 
 namespace annc::kernels::kdnn_adaptor {
 
-KernelStatus matmul_kdnn_impl(annc::threadpool::AnncThreadPool* thread_pool,
-                              AnncMemRef2DF32* output,
-                              AnncMemRef2DF32* lhs,
-                              AnncMemRef2DF32* rhs) {
-    try {
-        ScopedKDNNThreadPoolActivation scoped_thread_pool(thread_pool);
+AnncStatusCode matmul_kdnn_impl(KernelContext& context) {
+  const auto* lhs = context.getStridedInput(0);
+  const auto* rhs = context.getStridedInput(1);
+  if (!lhs || !rhs) return context.status();
+  if (lhs->element_type != ANNC_ELEMENT_TYPE_F32 ||
+      rhs->element_type != ANNC_ELEMENT_TYPE_F32 || lhs->rank != 2 ||
+      rhs->rank != 2)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "KDNN MatMul requires rank-2 F32 inputs");
+  if (lhs->sizes[1] != rhs->sizes[0]) return ANNC_STATUS_INVALID_ARGUMENT;
+  auto* output =
+      context.allocateOutput<float>(0, {lhs->sizes[0], rhs->sizes[1]});
+  if (!output) return context.status();
 
-        const auto lhs_ref = makeDenseTensorRef(*lhs, KDNN::Layout::AB);
-        const auto rhs_ref = makeDenseTensorRef(*rhs, KDNN::Layout::AB);
-        auto output_ref = makeMutableDenseTensorRef(*output, KDNN::Layout::AB);
+  try {
+    ScopedKDNNThreadPoolActivation scoped_thread_pool(context);
 
-        KDNN::Gemm gemm(lhs_ref.info, rhs_ref.info, output_ref.info);
-        gemm.Run(lhs_ref.data, rhs_ref.data, output_ref.data);
-        return KernelStatus::Success;
-    } catch (const std::exception& ex) {
-        llvm::errs() << "[ANNC KDNN] MatMul failed: " << ex.what() << '\n';
-        return KernelStatus::RuntimeError;
-    } catch (...) {
-        llvm::errs() << "[ANNC KDNN] MatMul failed: unknown exception\n";
-        return KernelStatus::UnknownError;
-    }
+    const auto lhs_ref = makeDenseTensorRef(*lhs, KDNN::Layout::AB);
+    const auto rhs_ref = makeDenseTensorRef(*rhs, KDNN::Layout::AB);
+    auto output_ref = makeMutableDenseTensorRef(*output, KDNN::Layout::AB);
+
+    KDNN::Gemm gemm(lhs_ref.info, rhs_ref.info, output_ref.info);
+    gemm.Run(lhs_ref.data, rhs_ref.data, output_ref.data);
+    return context.status();
+  } catch (const std::exception& ex) {
+    return context.error(ANNC_STATUS_INTERNAL, ex.what());
+  } catch (...) {
+    return context.error(ANNC_STATUS_INTERNAL,
+                         "[ANNC KDNN] MatMul failed: unknown exception\n");
+  }
 }
 
-// Execution-v2 form: the output is allocated through the execution context
-// (slot 0) and the thread pool is resolved from that context, falling back to
-// the TLS-injected pool (the TensorFlow path).
-KernelStatus matmul_kdnn_exec_v2_impl(const AnncExecutionContext* execution,
-                                      AnncMemRef2DF32* lhs,
-                                      AnncMemRef2DF32* rhs) {
-    if (!execution || !lhs || !rhs) return KernelStatus::InvalidArgument;
-
-    const int64_t m = lhs->sizes[0];
-    const int64_t n = rhs->sizes[1];
-    if (m < 0 || n < 0 || lhs->sizes[1] != rhs->sizes[0])
-        return KernelStatus::InvalidArgument;
-
-    auto output = annc::kernels::execution::allocateOutput2DF32(
-        execution, /*slot=*/0, m, n, ANNC_ALLOCATION_NONE);
-    if (!output) {
-        llvm::consumeError(output.takeError());
-        return KernelStatus::RuntimeError;
-    }
-
-    return matmul_kdnn_impl(
-        annc::kernels::execution::resolveThreadPool(execution),
-        &*output, lhs, rhs);
-}
-
-} // namespace annc::kernels::kdnn_adaptor
+}  // namespace annc::kernels::kdnn_adaptor

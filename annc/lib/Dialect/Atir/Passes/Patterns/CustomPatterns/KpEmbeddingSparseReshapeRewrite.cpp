@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,8 +12,8 @@ using namespace atir;
 namespace {
 
 // Shared chain match for the 812 KPFusedSparseReshape subgraph (second level,
-// anchor = SparseReshape, a functional op).  Execution V2: the kernel func
-// signature is (!llvm.ptr, keys, begin, pack_const, new_shape) -> 2 results;
+// anchor = SparseReshape, a functional op).  Context V3: the kernel func
+// signature is (keys, begin, pack_const, new_shape) -> 2 results;
 // the .Result() schema entries replace A's functional output buffer handling
 // (mapFunctionalOutputBuffers is not needed).
 struct SparseReshapeChain {
@@ -30,7 +31,6 @@ struct SparseReshapeChain {
   Value begin;
   Value newShape;
   Value packConst;
-  Value limit;  // Range.limit (常量或 0-D i32 动态边界)
 };
 
 // 常量 helper (与其余 812 二级 pattern 相同实现)。
@@ -100,16 +100,10 @@ LogicalResult matchSparseReshapeChain(SparseReshapeOp anchor,
   auto range = reshape1.getInput().getDefiningOp<RangeOp>();
   if (!range) return failure();
   chain.range = range;
-  // 812 只查 delta=1; 移植补查 start=0。limit 允许常量或 0-D i32 动态值
-  // (kernel func 中是额外 block arg; kernel 不用该值)。
+  // The downloaded kernel regenerates the row range from the input row count;
+  // only a constant limit or the in-chain Shape(keys)[0] value is valid.
   if (!checkConstantIntForChain(range.getStart(), 0)) return failure();
   if (!checkConstantIntForChain(range.getDelta(), 1)) return failure();
-  if (!checkConstantForChain(range.getLimit())) {
-    auto lType = dyn_cast<atir::TensorType>(range.getLimit().getType());
-    if (!lType || !lType.getElementType().isInteger(32) ||
-        lType.getShape().size() != 0)
-      return failure();
-  }
 
   // 分支 B: Reshape(StridedSlice(keys, begin), {-1,1}).
   auto reshape = concat.getValues()[1].getDefiningOp<ReshapeOp>();
@@ -150,19 +144,20 @@ LogicalResult matchSparseReshapeChain(SparseReshapeOp anchor,
     return failure();
   auto shape = ss1.getInput().getDefiningOp<ShapeOp>();
   if (!shape) return failure();
+  if (!checkConstantForChain(range.getLimit()) &&
+      range.getLimit() != ss1.getResult())
+    return failure();
   chain.shape = shape;
 
   chain.keys = shape.getInput();
   chain.begin = ss.getBegin();
   chain.newShape = anchor.getNewShape();
   chain.packConst = pack.getInputs()[1];
-  chain.limit = range.getLimit();
   return success();
 }
 
 bool checkSparseReshapeDtype(SparseReshapeChain &chain) {
-  // new_shape 固定 i64 (SparseReshape/ReshapeKp 语义), pack_const 为 T
-  // (i32/i64, kernel 特化) — 两者不必一致。
+  // new_shape and pack_const follow the downloaded kernel's i64 contract.
   auto kType = dyn_cast<atir::TensorType>(chain.keys.getType());
   auto bType = dyn_cast<atir::TensorType>(chain.begin.getType());
   auto nType = dyn_cast<atir::TensorType>(chain.newShape.getType());
@@ -176,8 +171,7 @@ bool checkSparseReshapeDtype(SparseReshapeChain &chain) {
   if (!nType || !nType.getElementType().isInteger(64) ||
       nType.getShape().size() != 1 || nType.getShape()[0] != 2)
     return false;
-  if (!pType || !(pType.getElementType().isInteger(32) ||
-                  pType.getElementType().isInteger(64)) ||
+  if (!pType || !pType.getElementType().isInteger(64) ||
       pType.getShape().size() != 0)
     return false;
   auto t1 = dyn_cast<atir::TensorType>(chain.cast1.getResult().getType());
@@ -186,8 +180,7 @@ bool checkSparseReshapeDtype(SparseReshapeChain &chain) {
          t2.getElementType().isInteger(64);
 }
 
-bool checkSparseReshapeEscape(SparseReshapeChain &chain,
-                              Operation *anchorOp) {
+bool checkSparseReshapeEscape(SparseReshapeChain &chain, Operation *anchorOp) {
   for (Operation *user : chain.range.getResult().getUsers()) {
     if (user != chain.reshape1.getOperation()) return false;
   }
@@ -245,9 +238,9 @@ void collectSparseReshapeOps(Operation *op, ArrayRef<Value> boundaryValues,
   ops.push_back(op);
 }
 
-// Second level: rewrite the V2 kernel func (extracted by OpFusion's
+// Second level: rewrite the context kernel func (extracted by OpFusion's
 // FuseKpSparseReshapeAsFuncCallPattern) into a single atir.Customize call to
-// the hand-written KPFusedSparseReshape<Idx> kernel.  The two .Result()
+// the hand-written KPFusedSparseReshapeI64 kernel.  The two .Result()
 // entries map to execution slots 0 (out_indices) and 1 (out_shape).
 struct KpEmbeddingSparseReshapeRewrite
     : public CustomFusionPatternBase<SparseReshapeOp> {
@@ -264,17 +257,12 @@ struct KpEmbeddingSparseReshapeRewrite
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if ((func.getNumArguments() != 5 && func.getNumArguments() != 6) ||
-        !isa<LLVM::LLVMPointerType>(func.getArgument(0).getType())) {
-      return failure();
-    }
+    if (func.getNumArguments() != 4) return failure();
     if (func.getFunctionType().getResults().size() != 2) return failure();
-    Value keysArg = func.getArgument(1);
-    Value beginArg = func.getArgument(2);
-    Value packConstArg = func.getArgument(3);
-    Value newShapeArg = func.getArgument(4);
-    Value limitArg =
-        func.getNumArguments() == 6 ? func.getArgument(5) : Value();
+    Value keysArg = func.getArgument(0);
+    Value beginArg = func.getArgument(1);
+    Value packConstArg = func.getArgument(2);
+    Value newShapeArg = func.getArgument(3);
 
     SparseReshapeChain chain;
     if (failed(matchSparseReshapeChain(anchor, chain))) {
@@ -284,14 +272,6 @@ struct KpEmbeddingSparseReshapeRewrite
         chain.newShape != newShapeArg || chain.packConst != packConstArg) {
       return failure();
     }
-    // 动态 limit ⇔ 6-arg 签名 (一级同约定); 5-arg 时 limit 必须是常量, 或是
-    // 链内交叉引用 ss1 (= num_rows, 一级 limitFromSs1 走非 DynLimit 特化)。
-    if (static_cast<bool>(limitArg)) {
-      if (chain.limit != limitArg) return failure();
-    } else if (!checkConstantForChain(chain.limit) &&
-               chain.limit != chain.ss1.getResult()) {
-      return failure();
-    }
     if (!checkSparseReshapeDtype(chain)) {
       return failure();
     }
@@ -299,9 +279,8 @@ struct KpEmbeddingSparseReshapeRewrite
       return failure();
     }
 
-    SmallVector<Value, 5> boundaryValues = {keysArg, beginArg, packConstArg,
+    SmallVector<Value, 4> boundaryValues = {keysArg, beginArg, packConstArg,
                                             newShapeArg};
-    if (static_cast<bool>(limitArg)) boundaryValues.push_back(limitArg);
     SmallPtrSet<Operation *, 32> visited;
     collectSparseReshapeOps(anchor.getOperation(), boundaryValues, visited,
                             fusedOps);
@@ -312,8 +291,8 @@ struct KpEmbeddingSparseReshapeRewrite
         !llvm::is_contained(fusedOps, anchor.getOperation()))
       return failure();
 
-    // V2 result contract: the two functional anchor results are consumed by
-    // the enclosing func return only.
+    // context result contract: the two functional anchor results are consumed
+    // by the enclosing func return only.
     for (Value result : anchor->getResults()) {
       bool usedByReturnOnly = !result.use_empty();
       for (Operation *user : result.getUsers()) {
@@ -329,42 +308,23 @@ struct KpEmbeddingSparseReshapeRewrite
       SparseReshapeOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    auto packType =
-        dyn_cast<atir::TensorType>(func.getArgument(3).getType());
-    std::string name = "KPFusedSparseReshape";
-    name +=
-        (packType && packType.getElementType().isInteger(64)) ? "I64" : "I32";
-    if (func.getNumArguments() == 6) name += "DynLimit";
-    return name;
+    return "KPFusedSparseReshapeI64";
   }
 
   CustomOpSchema getCustomOpSchema(
       SparseReshapeOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    // MemRef arg order = getOrderedBoundaryInputs = kernel wrapper inputs.
-    // T binds pack_const only; new_shape is fixed i64.  DynLimit variants
-    // carry an extra unused 0-D i32 range_limit.
-    auto func = anchor->template getParentOfType<func::FuncOp>();
-    auto schema = CustomOpSchema::get(getCustomOpName(anchor, fusedOps))
-                      .TypeVar("T")
-                      .MemRefArg("slice_input", 2, "")
-                      .MemRefArg("begin", 1, "")
-                      .MemRefArg("pack_const", 0, "T")
-                      .MemRefArg("new_shape", 1, "");
-    if (func.getNumArguments() == 6) schema.MemRefArg("range_limit", 0, "");
-    return schema.Result("out_indices", 2, "").Result("out_shape", 1, "");
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
   void getOrderedBoundaryInputs(
       SparseReshapeOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    inputs.push_back(func.getArgument(1));  // keys (slice_input)
-    inputs.push_back(func.getArgument(2));  // begin
-    inputs.push_back(func.getArgument(3));  // pack_const
-    inputs.push_back(func.getArgument(4));  // new_shape
-    if (func.getNumArguments() == 6)
-      inputs.push_back(func.getArgument(5));  // range_limit (dynamic limit)
+    inputs.push_back(func.getArgument(0));  // keys (slice_input)
+    inputs.push_back(func.getArgument(1));  // begin
+    inputs.push_back(func.getArgument(2));  // pack_const
+    inputs.push_back(func.getArgument(3));  // new_shape
   }
 };
 

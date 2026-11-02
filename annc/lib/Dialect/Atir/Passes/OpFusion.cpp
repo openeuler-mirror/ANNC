@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
@@ -35,16 +36,16 @@ namespace {
 
 constexpr StringLiteral kAotExecutionMode = "aot";
 constexpr StringLiteral kJitExecutionMode = "jit";
-static void setExecutionMode(func::FuncOp function,
-                             PatternRewriter &rewriter, StringRef mode) {
+static void setExecutionMode(func::FuncOp function, PatternRewriter &rewriter,
+                             StringRef mode) {
   function->setAttr("annc.execution_mode", rewriter.getStringAttr(mode));
 }
 
-static void addExecutionModeMetadata(
-    SmallVectorImpl<NamedAttribute> &metadata, PatternRewriter &rewriter,
-    StringRef mode) {
-  metadata.push_back(rewriter.getNamedAttr("execution_mode",
-                                           rewriter.getStringAttr(mode)));
+static void addExecutionModeMetadata(SmallVectorImpl<NamedAttribute> &metadata,
+                                     PatternRewriter &rewriter,
+                                     StringRef mode) {
+  metadata.push_back(
+      rewriter.getNamedAttr("execution_mode", rewriter.getStringAttr(mode)));
 }
 
 static std::string sanitizeName(std::string name) {
@@ -434,8 +435,7 @@ static void clearClonedEpilogueSourceMetadata(Operation *cloned) {
   });
 }
 
-static SmallVector<Value> collectExecutionV2Inputs(
-    ArrayRef<Operation *> fusedOps) {
+static SmallVector<Value> collectBuiltinInputs(ArrayRef<Operation *> fusedOps) {
   SmallPtrSet<Operation *, 8> fusedSet(fusedOps.begin(), fusedOps.end());
   llvm::SetVector<Value> inputs;
   for (Operation *op : fusedOps) {
@@ -444,6 +444,131 @@ static SmallVector<Value> collectExecutionV2Inputs(
     }
   }
   return SmallVector<Value>(inputs.begin(), inputs.end());
+}
+
+// The semantic matchers below own fusion decisions. This helper materializes
+// the shared context contract after a match, preserving the model for fallback.
+static LogicalResult outlineContextBuiltin(
+    ModuleOp module, PatternRewriter &rewriter, Operation *anchor,
+    StringRef opName, StringRef pattern, ArrayRef<Value> inputs,
+    ArrayRef<Value> outputs, ArrayRef<Operation *> fusedOps,
+    StringRef executionMode, int64_t i64Attribute = 0,
+    ArrayRef<StringRef> roles = {}, bool enableKdnn = false) {
+  auto schema = getContextKernelSchema(opName, {i64Attribute});
+  if (!schema || outputs.size() != schema->results().size() ||
+      (!roles.empty() && roles.size() != inputs.size()))
+    return failure();
+  SmallVector<Type> inputTypes, outputTypes;
+  size_t inputIndex = 0;
+  for (const auto &arg : schema->args()) {
+    if (arg.kind != CustomOpSchema::ArgKind::MemRef) continue;
+    if (inputIndex >= inputs.size()) return failure();
+    auto type = dyn_cast<atir::TensorType>(inputs[inputIndex++].getType());
+    if (!type || !type.hasKnownRank() || getRank(type) != arg.rank)
+      return failure();
+    inputTypes.push_back(type);
+  }
+  if (inputIndex != inputs.size()) return failure();
+  for (auto [value, result] : llvm::zip(outputs, schema->results())) {
+    auto type = dyn_cast<atir::TensorType>(value.getType());
+    if (!type || !type.hasKnownRank() || getRank(type) != result.rank)
+      return failure();
+    outputTypes.push_back(type);
+  }
+  auto bindings = inferTypeConstraintsFromSchema(
+      schema->toMetadata(rewriter.getContext()), inputTypes, outputTypes);
+  if (!bindings) {
+    llvm::consumeError(bindings.takeError());
+    return failure();
+  }
+  annc::kernels::KernelResolveRequest request;
+  request.op_type = opName.str();
+  request.abi = "annc_context_v3";
+  request.type_constraints = std::move(*bindings);
+  auto rhsFormat = anchor->getAttrOfType<StringAttr>("rhs_format");
+  if (rhsFormat) request.rhs_format = rhsFormat.str();
+  auto kdnn = module->getAttrOfType<BoolAttr>("annc.enable_kdnn");
+  if (!annc::kernels::hasAnyAvailableKernel(request, enableKdnn || (kdnn && kdnn.getValue())))
+    return failure();
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  std::string base = getStableFusionKernelName(getTfName(anchor), pattern);
+  if (auto matmul = dyn_cast<MatMulOp>(anchor))
+    base = opName == "MatMul"
+               ? getStableMatMulKernelName(matmul)
+               : getStableMatMulFusionKernelName(matmul, pattern);
+  std::string kernelName = uniquifySymbolName(module, base);
+  rewriter.setInsertionPointToEnd(module.getBody());
+  auto function = rewriter.create<func::FuncOp>(
+      anchor->getLoc(), kernelName,
+      rewriter.getFunctionType(inputTypes, outputTypes));
+  function.setPrivate();
+  function->setAttr("annc.kernel", rewriter.getUnitAttr());
+  function->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+  function->setAttr("fusion.pattern", rewriter.getStringAttr(pattern));
+  setExecutionMode(function, rewriter, executionMode);
+  auto *entry = function.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  auto custom = rewriter.create<CustomizeOp>(
+      anchor->getLoc(), outputTypes, entry->getArguments(),
+      rewriter.getStringAttr(opName),
+      schema->toMetadata(rewriter.getContext()));
+  if (rhsFormat) custom->setAttr("rhs_format", rhsFormat);
+  rewriter.create<func::ReturnOp>(anchor->getLoc(), custom.getResults());
+
+  SmallVector<FusionArgSpec> args, results;
+  SmallVector<int64_t> attributes;
+  inputIndex = 0;
+  for (const auto &arg : schema->args()) {
+    if (arg.kind == CustomOpSchema::ArgKind::I64Attr) {
+      attributes.push_back(arg.i64Value);
+      continue;
+    }
+    Value input = inputs[inputIndex];
+    StringRef role = roles.empty() ? "dynamic" : roles[inputIndex];
+    args.push_back({role.str(), getValueName(input), input.getType()});
+    ++inputIndex;
+  }
+  for (Value value : outputs)
+    results.push_back({"output", getFusionOutputName(value), value.getType()});
+  SmallVector<NamedAttribute> metadata;
+  metadata.push_back(
+      rewriter.getNamedAttr("fusion.pattern", rewriter.getStringAttr(pattern)));
+  metadata.push_back(
+      rewriter.getNamedAttr("kernel_name", rewriter.getStringAttr(kernelName)));
+  metadata.push_back(rewriter.getNamedAttr(
+      "tf.name",
+      rewriter.getStringAttr(uniquifyFusionName(
+          module,
+          sanitizeName("annc_fused_" + getFusionOutputName(outputs.back()))))));
+  metadata.push_back(rewriter.getNamedAttr(
+      "args", makeFusionArgArray(rewriter.getContext(), args)));
+  metadata.push_back(rewriter.getNamedAttr(
+      "outputs", makeFusionArgArray(rewriter.getContext(), results)));
+  metadata.push_back(
+      rewriter.getNamedAttr("abi", rewriter.getStringAttr("annc_context_v3")));
+  metadata.push_back(rewriter.getNamedAttr(
+      "context_i64_attrs", makeI64Array(rewriter.getContext(), attributes)));
+  metadata.push_back(rewriter.getNamedAttr(
+      "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
+  metadata.push_back(rewriter.getNamedAttr(
+      "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+  metadata.push_back(
+      rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
+  metadata.push_back(rewriter.getNamedAttr(
+      "fallback_function", rewriter.getStringAttr("original_subgraph")));
+  metadata.push_back(rewriter.getNamedAttr(
+      "template_fingerprint",
+      rewriter.getStringAttr(atir::computeAtirTemplateFingerprint(function))));
+  metadata.push_back(rewriter.getNamedAttr(
+      "member_node_names",
+      rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
+  addExecutionModeMetadata(metadata, rewriter, executionMode);
+  function->setAttr("fusion.metadata", rewriter.getDictionaryAttr(metadata));
+  for (Operation *op : fusedOps)
+    op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+  anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
+  return success();
 }
 
 static func::FuncOp createExecutionV2KernelFunc(
@@ -492,45 +617,6 @@ static func::FuncOp createExecutionV2KernelFunc(
   SmallVector<Value> returns;
   for (Value output : boundaryOutputs) returns.push_back(mapper.lookup(output));
   rewriter.create<func::ReturnOp>(func.getLoc(), returns);
-  return func;
-}
-
-static func::FuncOp createDnnEmbeddingHashBucketKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type dynamicInputType, Type weightType, Type outputType, int64_t numBuckets,
-    ArrayRef<Operation *> kernelOps, Value dynamicInput, Value embeddingWeight,
-    Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {dynamicInputType, weightType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("dnn_embedding_hash_bucket"));
-  func->setAttr("fusion.num_buckets", rewriter.getI64IntegerAttr(numBuckets));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(dynamicInput, entry->getArgument(0));
-  mapper.map(embeddingWeight, entry->getArgument(1));
-  mapper.map(outputBuffer, entry->getArgument(2));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
   return func;
 }
 
@@ -770,7 +856,6 @@ static void eraseDeadFusionOps(PatternRewriter &rewriter,
   }
 }
 
-
 // ==== KP fusion (kp-01/02/03) migrated from ANNC-812new ====
 // match helpers + one-level patterns; ABI stays mlir_ciface.
 
@@ -851,32 +936,55 @@ static LogicalResult matchKpEmbeddingActionIdGather(
     ConcatV2Op anchor, KpEmbeddingActionIdGatherMatch &match) {
   // anchor: ConcatV2 with 2 values and axis constant -1.
 
-  if (anchor.getValues().size() != 2) { return failure(); }
-  if (!isConstantInt(anchor.getAxis(), -1)) { return failure(); }
+  if (anchor.getValues().size() != 2) {
+    return failure();
+  }
+  if (!isConstantInt(anchor.getAxis(), -1)) {
+    return failure();
+  }
 
-  auto reshape =
-      anchor.getValues()[0].getDefiningOp<ReshapeOp>();
-  if (!reshape) { return failure(); }
+  auto reshape = anchor.getValues()[0].getDefiningOp<ReshapeOp>();
+  if (!reshape) {
+    return failure();
+  }
   auto packShape = reshape.getTargetShape().getDefiningOp<PackOp>();
-  if (!packShape || packShape.getInputs().size() != 2) { return failure(); }
-  if (packShape.getAxis() != 0) { return failure(); }
-  if (!isConstantInt(packShape.getInputs()[1], -1)) { return failure(); }
+  if (!packShape || packShape.getInputs().size() != 2) {
+    return failure();
+  }
+  if (packShape.getAxis() != 0) {
+    return failure();
+  }
+  if (!isConstantInt(packShape.getInputs()[1], -1)) {
+    return failure();
+  }
   auto outer = reshape.getInput().getDefiningOp<GatherOp>();
-  if (!outer || !isConstantInt(outer.getAxis(), 0)) { return failure(); }
+  if (!outer || !isConstantInt(outer.getAxis(), 0)) {
+    return failure();
+  }
   auto inner = outer.getParams().getDefiningOp<GatherOp>();
   if (!inner || !isConstantInt(inner.getAxis(), 0)) return failure();
 
   auto fill = anchor.getValues()[1].getDefiningOp<FillOp>();
-  if (!fill) { return failure(); }
-  if (!isConstantZero(fill.getValueInput())) { return failure(); }
+  if (!fill) {
+    return failure();
+  }
+  if (!isConstantZero(fill.getValueInput())) {
+    return failure();
+  }
   auto packDims = fill.getShapeInput().getDefiningOp<PackOp>();
-  if (!packDims || packDims.getInputs().size() != 2) { return failure(); }
-  if (packDims.getAxis() != 0) { return failure(); }
+  if (!packDims || packDims.getInputs().size() != 2) {
+    return failure();
+  }
+  if (packDims.getAxis() != 0) {
+    return failure();
+  }
   // The Reshape shape Pack's first input must be the same pack_size value
   // the kernel receives (packDims input 0).  812's rewriter does not check
   // this; a mismatch would make the reshape shape and the kernel's pack_size
   // disagree, silently corrupting semantics.
-  if (packShape.getInputs()[0] != packDims.getInputs()[0]) { return failure(); }
+  if (packShape.getInputs()[0] != packDims.getInputs()[0]) {
+    return failure();
+  }
 
   // dtype contract: params float32; indices1/indices2 为 int32/int64 的
   // 4 种组合之一 (JD 注册同款 4 组合, registry 按 T1/T2 约束选 kernel)。
@@ -925,9 +1033,9 @@ static LogicalResult matchKpEmbeddingActionIdGather(
   match.outputBuffer = anchor.getOutput();
   match.anchor = anchor;
 
-  SmallVector<Value, 6> boundaryValues = {
-      match.indices1, match.params,  match.indices2,
-      match.packDim,  match.pack,    match.outputBuffer};
+  SmallVector<Value, 6> boundaryValues = {match.indices1, match.params,
+                                          match.indices2, match.packDim,
+                                          match.pack,     match.outputBuffer};
   SmallPtrSet<Operation *, 32> visitedKernelOps;
   collectDefiningOpsPostOrder(anchor.getOperation(), boundaryValues,
                               visitedKernelOps, match.kernelOps);
@@ -1018,17 +1126,14 @@ static LogicalResult matchKpTargetBehaviorInteraction(
     ConcatV2Op anchor, KpTargetBehaviorInteractionMatch &match) {
   if (anchor.getValues().size() != 4) return failure();
   if (!isConstantInt(anchor.getAxis(), -1)) {
-
     return failure();
   }
 
   auto realdiv = anchor.getValues()[0].getDefiningOp<MulOp>();
   if (!realdiv) {
-
     return failure();
   }
   if (!isConstantFloat(realdiv.getY(), 0.5f)) {
-
     return failure();
   }
 
@@ -1082,14 +1187,11 @@ static LogicalResult matchKpTargetBehaviorInteraction(
   if (!biType || !biType.getElementType().isF32() ||
       biType.getShape().size() != 3)
     return failure();
-  if (!wType || !wType.getElementType().isF32() ||
-      wType.getShape().size() != 2)
+  if (!wType || !wType.getElementType().isF32() || wType.getShape().size() != 2)
     return failure();
-  if (!bType || !bType.getElementType().isF32() ||
-      bType.getShape().size() != 1)
+  if (!bType || !bType.getElementType().isF32() || bType.getShape().size() != 1)
     return failure();
-  if (!tType || !tType.getElementType().isF32() ||
-      tType.getShape().size() != 3)
+  if (!tType || !tType.getElementType().isF32() || tType.getShape().size() != 3)
     return failure();
 
   // Single-output contract: intermediate results may not escape.
@@ -1130,59 +1232,18 @@ static LogicalResult matchKpTargetBehaviorInteraction(
   match.outputBuffer = anchor.getOutput();
   match.anchor = anchor;
 
-  SmallVector<Value, 5> boundaryValues = {
-      match.batchInput, match.weight, match.bias, match.tileInput,
-      match.outputBuffer};
+  SmallVector<Value, 5> boundaryValues = {match.batchInput, match.weight,
+                                          match.bias, match.tileInput,
+                                          match.outputBuffer};
   SmallPtrSet<Operation *, 32> visitedKernelOps;
   collectDefiningOpsPostOrder(anchor.getOperation(), boundaryValues,
                               visitedKernelOps, match.kernelOps);
 
   if (!isClosedKernelOpSet(match.kernelOps, boundaryValues)) {
-
     return failure();
   }
 
   return success();
-}
-
-static func::FuncOp createKpTargetBehaviorInteractionKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type batchInputType, Type weightType, Type biasType, Type tileInputType,
-    Type outputType, ArrayRef<Operation *> kernelOps, Value batchInput,
-    Value weight, Value bias, Value tileInput, Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {batchInputType, weightType, biasType,
-                                  tileInputType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_target_behavior_interaction"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(batchInput, entry->getArgument(0));
-  mapper.map(weight, entry->getArgument(1));
-  mapper.map(bias, entry->getArgument(2));
-  mapper.map(tileInput, entry->getArgument(3));
-  mapper.map(outputBuffer, entry->getArgument(4));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
 }
 
 // ── KP sparse dynamic stitch (一级) ─────────────────────────────────────────
@@ -1207,14 +1268,13 @@ struct KpSparseDynamicStitchMatch {
 static LogicalResult matchKpSparseDynamicStitch(
     ParallelDynamicStitchOp anchor, KpSparseDynamicStitchMatch &match) {
   const int64_t N = anchor.getIndices().size();
-  if (N < 2 || N > 16) return failure();
+  if (N < 2) return failure();
   if (anchor.getData().size() != N) return failure();
 
   // Left branch: indices[0] and all other indices come from the same
   // DynamicPartition (the fused kernel only needs x and the variables, so
   // all index streams must agree with the partition semantics).
-  auto partition =
-      anchor.getIndices()[0].getDefiningOp<DynamicPartitionOp>();
+  auto partition = anchor.getIndices()[0].getDefiningOp<DynamicPartitionOp>();
   if (!partition || partition.getNumPartitions() != N) return failure();
   for (int64_t j = 1; j < N; ++j) {
     if (anchor.getIndices()[j] != partition.getOutputs()[j]) return failure();
@@ -1239,46 +1299,37 @@ static LogicalResult matchKpSparseDynamicStitch(
 
   // Right branch: one Gather per partition.
   for (int64_t i = 0; i < N; ++i) {
-
     auto gather = anchor.getData()[i].getDefiningOp<GatherOp>();
     if (!gather) {
-
       return failure();
     }
     if (!isConstantInt(gather.getAxis(), 0)) {
-
       return failure();
     }
     auto vType = dyn_cast<atir::TensorType>(gather.getParams().getType());
     if (!vType || !vType.getElementType().isF32() ||
         vType.getShape().size() != 2) {
-
       return failure();
     }
     match.variables.push_back(gather.getParams());
     auto partition1 = gather.getIndices().getDefiningOp<DynamicPartitionOp>();
     if (!partition1) {
-
       return failure();
     }
     if (partition1.getNumPartitions() != N) {
       return failure();
     }
     if (gather.getIndices() != partition1.getOutputs()[i]) {
-
       return failure();
     }
     auto floorDiv = partition1.getData().getDefiningOp<FloorDivOp>();
     if (!floorDiv) {
-
       return failure();
     }
     if (floorDiv.getX() != x) {
-
       return failure();
     }
     if (!isConstantInt(floorDiv.getY(), N)) {
-
       return failure();
     }
   }
@@ -1308,8 +1359,7 @@ static LogicalResult matchKpSparseDynamicStitch(
     for (Operation *user : partitionJ.getOutputs()[j].getUsers()) {
       if (user != gatherJ.getOperation()) return failure();
     }
-    FloorDivOp floorDivJ =
-        partitionJ.getData().getDefiningOp<FloorDivOp>();
+    FloorDivOp floorDivJ = partitionJ.getData().getDefiningOp<FloorDivOp>();
     for (Operation *user : floorDivJ.getResult().getUsers()) {
       if (user != partitionJ.getOperation()) return failure();
     }
@@ -1331,44 +1381,6 @@ static LogicalResult matchKpSparseDynamicStitch(
   return success();
 }
 
-static func::FuncOp createKpSparseDynamicStitchKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Value> inputs, Value outputBuffer, ArrayRef<Operation *> kernelOps) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes;
-  for (Value v : inputs) inputTypes.push_back(v.getType());
-  inputTypes.push_back(outputBuffer.getType());
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_sparse_dynamic_stitch"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    mapper.map(inputs[i], entry->getArgument(i));
-  }
-  mapper.map(outputBuffer, entry->getArgument(inputs.size()));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
-}
-
 // ── KP sparse segment reduce (一级, 2 输出) ──────────────────────────────────
 //
 // anchor = StridedSlice(shrink=1, begin 常量 1 元素) ← Shape ←
@@ -1376,7 +1388,6 @@ static func::FuncOp createKpSparseDynamicStitchKernelFunc(
 // keys 列 StridedSlice: shrink=2, begin_mask=1, end_mask=1, begin 常量 shape{2}
 // 2 输出: segment 结果 + 标量 slice_output (= begin_1[0]==0 ? batch : embed)。
 // 移植补查 (812 未查): numSegments=0、strides=[1,1]、ellipsis/newaxis=0。
-
 
 struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
     : public OpRewritePattern<ExpandDimsOp> {
@@ -1392,70 +1403,20 @@ struct FuseDnnEmbeddingHashBucketAsFuncCallPattern
     ModuleOp module = expandDims->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string kernelBase =
-        getStableFusionKernelName(match.prefix, "dnn_embedding_hash_bucket");
-    std::string kernelName = uniquifySymbolName(module, kernelBase);
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(match.prefix + "/rec_embed_kp_dnn_bucket"));
-
-    auto kernelFunc = createDnnEmbeddingHashBucketKernelFunc(
-        module, rewriter, kernelName, match.dynamicInput.getType(),
-        match.embeddingWeight.getType(), match.outputBuffer.getType(),
-        match.hashBucket.getNumBuckets(), match.kernelOps, match.dynamicInput,
-        match.embeddingWeight, match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("dnn_embedding_hash_bucket")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"fixed", getValueName(match.embeddingWeight),
-                        match.embeddingWeight.getType()});
-    argSpecs.push_back({"dynamic", getValueName(match.dynamicInput),
-                        match.dynamicInput.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back({"output", getTfName(match.finalReshape),
-                           match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(
-        rewriter.getNamedAttr("abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {1, 0, 2})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:0|S:1;?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(match.finalReshape);
-    rewriter.create<func::CallOp>(
-        match.finalReshape.getLoc(), kernelFunc,
-        ValueRange{match.dynamicInput, match.embeddingWeight,
-                   match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(match.finalReshape.getResult(),
-                                match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.candidateOps, outputBufferDef);
-    return success();
+    if (expandDims->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, expandDims, "KPFusedDnnEmbeddingWithHashBucket",
+        "dnn_embedding_hash_bucket",
+        {match.dynamicInput, match.embeddingWeight},
+        {match.finalReshape.getResult()}, match.kernelOps, kAotExecutionMode,
+        match.hashBucket.getNumBuckets(), {"dynamic", "fixed"});
   }
 };
 
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-// Outlines a GEMM chain as an AOT kdnn site on the annc_execution_v2 ABI
+// Outlines a GEMM chain as an AOT kdnn site on the annc_context_v3 ABI
 // (one calling convention for the TF and ONNX hosts; the kernel takes its
-// thread pool from the execution context). Only active at ANNC_GEMM=1.
+// thread pool from the kernel context). Only active at ANNC_GEMM=1.
 // Epilogue (2), Prepack (3), and All (99) use the native GEMM path; All
 // combines epilogue fusion and prepacking without enabling this AOT pattern.
 // Greedy prefix truncation from
@@ -1514,117 +1475,28 @@ struct FuseKdnnMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                                    : StringRef("MatMul");
     if (!customOpFilter.isEnabled(formOpType)) return failure();
 
-    // Site-level availability probe (kdnn registers f32 kernels only); opt
-    // runs before asm so the annc.enable_kdnn module attribute is not set.
-    CustomOpSchema schema = CustomOpSchema::get(formOpType)
-                                .TypeVar("T")
-                                .MemRefArg("lhs", 2, "T")
-                                .MemRefArg("rhs", 2, "T");
-    if (addOp) schema.MemRefArg("bias", 1, "T");
-    schema.Result(reluOp  ? StringRef("relu")
-                  : addOp ? StringRef("add")
-                          : StringRef("output"),
-                  2, "T");
-    SmallVector<Type> schemaInputTypes = {matmulOp.getLhs().getType(),
-                                          matmulOp.getRhs().getType()};
-    if (addOp) schemaInputTypes.push_back(bias.getType());
-    auto typeConstraints = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(schemaInputTypes),
-        TypeRange{terminal->getResult(0).getType()});
-    if (!typeConstraints) {
-      llvm::consumeError(typeConstraints.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = formOpType;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*typeConstraints);
-    if (!annc::kernels::hasAnyAvailableKernel(request, /*enableKdnn=*/true))
-      return failure();
-
     StringRef pattern = reluOp  ? StringRef("matmul_add_relu")
                         : addOp ? StringRef("matmul_add")
                                 : StringRef("matmul");
-    std::string matmulName = getTfName(matmulOp);
-    std::string outputName =
-        addOp ? getFusionOutputName(terminal->getResult(0)) : matmulName;
-    if (outputName.empty()) outputName = getTfName(terminal);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableMatMulFusionKernelName(matmulOp, pattern));
-    std::string clusterName =
-        uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
-
-    // Fixed (weight-like) vs dynamic (batch-carrying) args follow the JIT
-    // matmul sites. The v2 host passes inputs positionally after the
-    // execution pointer and resolves dynamic output dims from the input at
-    // index num_fixed, so the kernel signature and the metadata args share
-    // the fixed-first order.
     Type outputType = terminal->getResult(0).getType();
     bool lhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getLhs().getType(), outputType);
     bool rhsIsDynamic =
         hasMatchingBatchDim(matmulOp.getRhs().getType(), outputType);
-    if (lhsIsDynamic == rhsIsDynamic) {
-      lhsIsDynamic = true;
-      rhsIsDynamic = false;
+    if (lhsIsDynamic == rhsIsDynamic) lhsIsDynamic = true;
+    // Context slots follow the schema. Transport fixed/dynamic ordering is
+    // handled separately by the framework adapter.
+    SmallVector<Value> inputs = {matmulOp.getLhs(), matmulOp.getRhs()};
+    SmallVector<StringRef> roles = {lhsIsDynamic ? "dynamic" : "fixed",
+                                   lhsIsDynamic ? "fixed" : "dynamic"};
+    if (addOp) {
+      inputs.push_back(bias);
+      roles.push_back("fixed");
     }
-    Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
-    Value dynamicInput = lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
-    SmallVector<Value> boundaryInputs = {fixedInput};
-    if (addOp) boundaryInputs.push_back(bias);
-    boundaryInputs.push_back(dynamicInput);
-    SmallVector<Value> boundaryOutputs = {terminal->getResult(0)};
-
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs, boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern", rewriter.getStringAttr(pattern));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back(
-        {"fixed", getValueName(fixedInput), fixedInput.getType()});
-    if (addOp)
-      argSpecs.push_back({"fixed", getValueName(bias), bias.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(dynamicInput), dynamicInput.getType()});
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr("fusion.pattern",
-                                             rewriter.getStringAttr(pattern)));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(
-        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back({"output", outputName, outputType});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(
-        rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "member_node_names",
-        rewriter.getArrayAttr(collectMemberNodeNames(rewriter, fusedOps))));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    // The v2 ABI needs an execution context that only exists at the host
-    // boundary, so the main-graph region stays as the fallback and is only
-    // marked to keep other patterns from building a site on it.
-    for (Operation *op : fusedOps) {
-      op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    }
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, matmulOp, formOpType, pattern, inputs,
+        {terminal->getResult(0)}, fusedOps, kAotExecutionMode,
+        /*numBuckets=*/0, roles, /*enableKdnn=*/true);
   }
 
  private:
@@ -1647,117 +1519,31 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    Value executionV2Bias;
-    AddOp executionV2Add = findUniqueMatMulAddUser(matmulOp, executionV2Bias);
-    ReluOp executionV2Relu =
-        executionV2Add ? findUniqueAddReluUser(executionV2Add) : nullptr;
-    if (isExecutionV2BuiltinCompatible(matmulOp, executionV2Add,
-                                       executionV2Relu)) {
+    Value builtinBias;
+    AddOp builtinAdd = findUniqueMatMulAddUser(matmulOp, builtinBias);
+    ReluOp builtinRelu =
+        builtinAdd ? findUniqueAddReluUser(builtinAdd) : nullptr;
+    if (isContextBuiltinCompatible(matmulOp, builtinAdd, builtinRelu)) {
       SmallVector<Operation *> fusedOps = {matmulOp.getOperation(),
-                                           executionV2Add.getOperation(),
-                                           executionV2Relu.getOperation()};
+                                           builtinAdd.getOperation(),
+                                           builtinRelu.getOperation()};
       SmallVector<Value> boundaryOutputs = collectEscapingResults(fusedOps);
       bool hasExactTwoOutputContract =
           boundaryOutputs.size() == 2 &&
-          boundaryOutputs[0] == executionV2Add.getResult() &&
-          boundaryOutputs[1] == executionV2Relu.getResult();
+          boundaryOutputs[0] == builtinAdd.getResult() &&
+          boundaryOutputs[1] == builtinRelu.getResult();
       if (hasExactTwoOutputContract) {
-        SmallVector<Value> boundaryInputs = collectExecutionV2Inputs(fusedOps);
+        SmallVector<Value> boundaryInputs = collectBuiltinInputs(fusedOps);
         if (boundaryInputs.size() != 3 ||
             boundaryInputs[0] != matmulOp.getLhs() ||
             boundaryInputs[1] != matmulOp.getRhs() ||
-            boundaryInputs[2] != executionV2Bias) {
+            boundaryInputs[2] != builtinBias) {
           return failure();
         }
-        auto schema = CustomOpSchema::get("MatMulAddReluWithAddOutput")
-                          .TypeVar("T")
-                          .MemRefArg("lhs", 2, "T")
-                          .MemRefArg("rhs", 2, "T")
-                          .MemRefArg("bias", 1, "T")
-                          .Result("add", 2, "T")
-                          .Result("relu", 2, "T");
-        SmallVector<Type> inputTypes;
-        for (Value input : boundaryInputs)
-          inputTypes.push_back(input.getType());
-        SmallVector<Type> outputTypes;
-        for (Value output : boundaryOutputs)
-          outputTypes.push_back(output.getType());
-        auto typeConstraints = inferTypeConstraintsFromSchema(
-            schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-            TypeRange(outputTypes));
-        if (!typeConstraints) {
-          llvm::consumeError(typeConstraints.takeError());
-          return failure();
-        }
-        annc::kernels::KernelResolveRequest request;
-        request.op_type = "MatMulAddReluWithAddOutput";
-        request.abi = "annc_execution_v2";
-        request.type_constraints = std::move(*typeConstraints);
-        auto enableKdnnAttr =
-            module->getAttrOfType<BoolAttr>("annc.enable_kdnn");
-        if (!annc::kernels::hasAnyAvailableKernel(
-                request, enableKdnnAttr && enableKdnnAttr.getValue())) {
-          return failure();
-        }
-
-        std::string kernelName = uniquifySymbolName(
-            module,
-            getStableMatMulFusionKernelName(matmulOp, "matmul_add_relu"));
-        std::string clusterName = uniquifyFusionName(
-            module,
-            sanitizeName("annc_fused_" + getValueName(boundaryOutputs.back())));
-        auto kernelFunc =
-            createExecutionV2KernelFunc(module, rewriter, kernelName, fusedOps,
-                                        boundaryInputs, boundaryOutputs);
-        setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
-        std::string templateFingerprint =
-            atir::computeAtirTemplateFingerprint(kernelFunc);
-
-        SmallVector<NamedAttribute> metadata;
-        metadata.push_back(rewriter.getNamedAttr(
-            "fusion.pattern", rewriter.getStringAttr("matmul_add_relu")));
-        addExecutionModeMetadata(metadata, rewriter, kJitExecutionMode);
-        metadata.push_back(rewriter.getNamedAttr(
-            "kernel_name", rewriter.getStringAttr(kernelName)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "template_fingerprint",
-            rewriter.getStringAttr(templateFingerprint)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "tf.name", rewriter.getStringAttr(clusterName)));
-
-        SmallVector<FusionArgSpec> argSpecs;
-        for (Value input : boundaryInputs) {
-          StringRef role = input == matmulOp.getLhs() ? "dynamic" : "fixed";
-          argSpecs.push_back(
-              {role.str(), getValueName(input), input.getType()});
-        }
-        metadata.push_back(rewriter.getNamedAttr(
-            "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-
-        SmallVector<FusionArgSpec> outputSpecs;
-        for (Value output : boundaryOutputs) {
-          outputSpecs.push_back(
-              {"output", getFusionOutputName(output), output.getType()});
-        }
-        metadata.push_back(rewriter.getNamedAttr(
-            "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-        metadata.push_back(rewriter.getNamedAttr(
-            "abi", rewriter.getStringAttr("annc_execution_v2")));
-        metadata.push_back(rewriter.getNamedAttr(
-            "kernel_arg_order",
-            makeI64Array(rewriter.getContext(), ArrayRef<int64_t>{})));
-        metadata.push_back(rewriter.getNamedAttr(
-            "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-        metadata.push_back(rewriter.getNamedAttr(
-            "symbolic_signature", rewriter.getStringAttr("F:0|S:1;?,?")));
-        metadata.push_back(rewriter.getNamedAttr(
-            "fallback_function", rewriter.getStringAttr("original_subgraph")));
-        kernelFunc->setAttr(
-            "fusion.metadata",
-            DictionaryAttr::get(rewriter.getContext(), metadata));
-
-        matmulOp->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-        return success();
+        return outlineContextBuiltin(
+            module, rewriter, matmulOp, "MatMulAddReluWithAddOutput",
+            "matmul_add_relu", boundaryInputs, boundaryOutputs, fusedOps,
+            kJitExecutionMode, 0, {"dynamic", "fixed", "fixed"});
       }
     }
 
@@ -1770,13 +1556,48 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
                          : DictionaryAttr();
     if (candidate) {
       auto parsed = parseEpilogueCandidatePlan(candidate);
-      if (failed(parsed) || failed(bindEpilogueProgramToSource(matmulOp,
-                                                               *parsed))) {
+      if (failed(parsed) ||
+          failed(bindEpilogueProgramToSource(matmulOp, *parsed))) {
         matmulOp.emitOpError(
             "epilogue candidate does not match the current source chain");
         return failure();
       }
       epilogue = std::move(*parsed);
+    }
+
+    // Prefer the context kernel for a plain rank-2 MatMul. Keep generated
+    // GEMM as the compatibility path for variants outside the builtin schema
+    // or when the context specialization is unavailable.
+    if (!epilogue && !matmulOp.getWithBias() && !matmulOp.getDoRelu() &&
+        !matmulOp.getRightTranspose() && !matmulOp.getLeftTranspose() &&
+        !matmulOp.getOutputTranspose() && !matmulOp.getMStart() &&
+        !matmulOp.getNStart() && !matmulOp.getKStart() &&
+        !matmulOp.getMSize() && !matmulOp.getNSize() &&
+        !matmulOp.getKSize() && !matmulOp->getAttr("rhs_format")) {
+      auto resultType = dyn_cast<atir::TensorType>(
+          matmulOp.getResult().getType());
+      auto lhsType = dyn_cast<atir::TensorType>(matmulOp.getLhs().getType());
+      auto rhsType = dyn_cast<atir::TensorType>(matmulOp.getRhs().getType());
+      if (resultType && lhsType && rhsType && resultType.hasKnownRank() &&
+          lhsType.hasKnownRank() && rhsType.hasKnownRank() &&
+          getRank(resultType) == 2 && getRank(lhsType) == 2 &&
+          getRank(rhsType) == 2) {
+        bool lhsIsDynamic =
+            hasMatchingBatchDim(matmulOp.getLhs().getType(),
+                                matmulOp.getResult().getType());
+        bool rhsIsDynamic =
+            hasMatchingBatchDim(matmulOp.getRhs().getType(),
+                                matmulOp.getResult().getType());
+        if (lhsIsDynamic == rhsIsDynamic) lhsIsDynamic = true;
+        SmallVector<Operation *> fusedOps = {matmulOp.getOperation()};
+        if (succeeded(outlineContextBuiltin(
+                module, rewriter, matmulOp, "MatMul", "matmul",
+                {matmulOp.getLhs(), matmulOp.getRhs()},
+                {matmulOp.getResult()}, fusedOps, kJitExecutionMode, 0,
+                {lhsIsDynamic ? "dynamic" : "fixed",
+                 lhsIsDynamic ? "fixed" : "dynamic"})))
+          return success();
+      }
     }
 
     Operation *outputOp =
@@ -1788,17 +1609,18 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
     std::string outputName =
         epilogue ? getFusionOutputName(epilogue->result) : matmulName;
     if (outputName.empty()) outputName = getTfName(outputOp);
-    std::string kernelName = epilogue
-        ? uniquifySymbolName(
-              module, getStableMatMulFusionKernelName(matmulOp, pattern))
-        : uniquifySymbolName(module, getStableMatMulKernelName(matmulOp));
+    std::string kernelName =
+        epilogue
+            ? uniquifySymbolName(
+                  module, getStableMatMulFusionKernelName(matmulOp, pattern))
+            : uniquifySymbolName(module, getStableMatMulKernelName(matmulOp));
     std::string clusterName =
         uniquifyFusionName(module, sanitizeName("annc_fused_" + outputName));
 
-    auto kernelFunc = epilogue
-        ? createMatMulEpilogueKernelFunc(module, rewriter, kernelName, matmulOp,
-                                         *epilogue, output)
-        : createKernelFunc(module, rewriter, kernelName, matmulOp);
+    auto kernelFunc =
+        epilogue ? createMatMulEpilogueKernelFunc(module, rewriter, kernelName,
+                                                  matmulOp, *epilogue, output)
+                 : createKernelFunc(module, rewriter, kernelName, matmulOp);
     setExecutionMode(kernelFunc, rewriter, kJitExecutionMode);
     std::string templateFingerprint =
         atir::computeAtirTemplateFingerprint(kernelFunc);
@@ -1811,8 +1633,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         "kernel_name", rewriter.getStringAttr(kernelName)));
     metadata.push_back(rewriter.getNamedAttr(
         "template_fingerprint", rewriter.getStringAttr(templateFingerprint)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
+    metadata.push_back(
+        rewriter.getNamedAttr("tf.name", rewriter.getStringAttr(clusterName)));
 
     SmallVector<FusionArgSpec> argSpecs;
     SmallVector<int64_t> kernelArgOrder;
@@ -1854,8 +1676,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         rhsIsDynamic = false;
       }
       Value fixedInput = lhsIsDynamic ? matmulOp.getRhs() : matmulOp.getLhs();
-      Value dynamicInput =
-          lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
+      Value dynamicInput = lhsIsDynamic ? matmulOp.getLhs() : matmulOp.getRhs();
       kernelArgOrder = lhsIsDynamic ? SmallVector<int64_t>{1, 0, 2}
                                     : SmallVector<int64_t>{0, 1, 2};
       argSpecs.push_back(
@@ -1924,75 +1745,18 @@ struct FuseKpSparseDynamicStitchAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_dynamic_stitch"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    SmallVector<Value, 10> callInputs;
-    callInputs.push_back(match.x);
-    for (Value v : match.variables) callInputs.push_back(v);
-
-    auto kernelFunc = createKpSparseDynamicStitchKernelFunc(
-        module, rewriter, kernelName, callInputs, match.outputBuffer,
-        match.kernelOps);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_dynamic_stitch")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"dynamic", getValueName(match.x), match.x.getType()});
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    SmallVector<Value> callInputs = {match.x};
+    SmallVector<StringRef> roles = {"dynamic"};
     for (Value v : match.variables) {
-      argSpecs.push_back({"fixed", getValueName(v), v.getType()});
+      callInputs.push_back(v);
+      roles.push_back("fixed");
     }
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    // The GraphDef rewrite emits the inputs fixed-first, dynamic-last:
-    //   [v0..vN-1, x, output]
-    // while the kernel function signature is [x, v0..vN-1, output].
-    // Map the runtime list onto that signature explicitly.
-    SmallVector<int64_t> kernelArgOrder;
-    const int64_t numVariables =
-        static_cast<int64_t>(match.variables.size());
-    kernelArgOrder.push_back(numVariables);  // x
-    for (int64_t i = 0; i < numVariables; ++i) {
-      kernelArgOrder.push_back(i);  // v0..vN-1
-    }
-    kernelArgOrder.push_back(numVariables + 1);  // output
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), kernelArgOrder)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:1|S:?;?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    SmallVector<Value, 10> callArgs(callInputs);
-    callArgs.push_back(match.outputBuffer);
-    rewriter.create<func::CallOp>(anchor.getLoc(), kernelFunc, callArgs);
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedSparseDynamicStitch",
+        "kp_sparse_dynamic_stitch", callInputs, {anchor.getResult()},
+        match.kernelOps, kAotExecutionMode,
+        static_cast<int64_t>(match.variables.size()), roles);
   }
 };
 
@@ -2010,70 +1774,13 @@ struct FuseKpTargetBehaviorInteractionAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_target_behavior_interaction"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    auto kernelFunc = createKpTargetBehaviorInteractionKernelFunc(
-        module, rewriter, kernelName, match.batchInput.getType(),
-        match.weight.getType(), match.bias.getType(),
-        match.tileInput.getType(), match.outputBuffer.getType(),
-        match.kernelOps, match.batchInput, match.weight, match.bias,
-        match.tileInput, match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern",
-        rewriter.getStringAttr("kp_target_behavior_interaction")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back({"dynamic", getValueName(match.batchInput),
-                        match.batchInput.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.weight), match.weight.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.bias), match.bias.getType()});
-    argSpecs.push_back({"dynamic", getValueName(match.tileInput),
-                        match.tileInput.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order",
-        makeI64Array(rewriter.getContext(), {0, 1, 2, 3, 4})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:2|S:2;?,?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    rewriter.create<func::CallOp>(
-        anchor.getLoc(), kernelFunc,
-        ValueRange{match.batchInput, match.weight, match.bias,
-                   match.tileInput, match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedTargetBehaviorInteraction",
+        "kp_target_behavior_interaction",
+        {match.batchInput, match.weight, match.bias, match.tileInput},
+        {anchor.getResult()}, match.kernelOps, kAotExecutionMode, 0,
+        {"dynamic", "fixed", "fixed", "dynamic"});
   }
 };
 
@@ -2091,83 +1798,26 @@ struct FuseKpEmbeddingActionIdGatherAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_embedding_action_id_gather"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-
-    auto kernelFunc = createKpEmbeddingActionIdGatherKernelFunc(
-        module, rewriter, kernelName, match.indices1.getType(),
-        match.params.getType(), match.indices2.getType(),
-        match.packDim.getType(), match.pack.getType(),
-        match.outputBuffer.getType(), match.kernelOps, match.indices1,
-        match.params, match.indices2, match.packDim, match.pack,
-        match.outputBuffer);
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern",
-        rewriter.getStringAttr("kp_embedding_action_id_gather")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> argSpecs;
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.indices1), match.indices1.getType()});
-    argSpecs.push_back(
-        {"fixed", getValueName(match.params), match.params.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.indices2), match.indices2.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.packDim), match.packDim.getType()});
-    argSpecs.push_back(
-        {"dynamic", getValueName(match.pack), match.pack.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), argSpecs)));
-    SmallVector<FusionArgSpec> outputSpecs;
-    outputSpecs.push_back(
-        {"output", anchorName, match.outputBuffer.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputSpecs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("mlir_ciface")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order",
-        makeI64Array(rewriter.getContext(), {0, 1, 2, 3, 4, 5})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "symbolic_signature", rewriter.getStringAttr("F:1|S:4;?,?,?,?")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-        DictionaryAttr::get(rewriter.getContext(), metadata));
-
-    rewriter.setInsertionPoint(anchor);
-    rewriter.create<func::CallOp>(
-        anchor.getLoc(), kernelFunc,
-        ValueRange{match.indices1, match.params, match.indices2,
-                   match.packDim, match.pack, match.outputBuffer});
-
-    Operation *outputBufferDef = match.outputBuffer.getDefiningOp();
-    rewriter.replaceAllUsesWith(anchor.getResult(), match.outputBuffer);
-    eraseDeadFusionOps(rewriter, match.kernelOps, outputBufferDef);
-    return success();
+    if (anchor->hasAttr("annc.fusion_materialized")) return failure();
+    return outlineContextBuiltin(
+        module, rewriter, anchor,
+        "KPFusedEmbeddingActionIdGatherR" +
+            std::to_string(getRank(match.indices1.getType())) + "x" +
+            std::to_string(getRank(match.indices2.getType())),
+        "kp_embedding_action_id_gather",
+        {match.params, match.indices1, match.indices2, match.packDim,
+         match.pack},
+        {anchor.getResult()}, match.kernelOps, kAotExecutionMode, 0,
+        {"fixed", "dynamic", "dynamic", "dynamic", "dynamic"});
   }
 };
 
-
-// ── KP sparse segment reduce (一级, Execution V2) ────────────────────────────
+// ── KP sparse segment reduce (一级, Context V3) ────────────────────────────
 //
 // anchor = StridedSlice(shrink=1) ← Shape ← SparseSegmentMean|Sum(
 //     segment_ids = StridedSlice(shrink=2, keys))
 // 2 输出: output f32[batch,E] (batch = max(seg_id)+1 值依赖) + slice_output
-// i32 标量。V2 ABI 原生解决值依赖形状; combiner 与 Tidx 走多名字特化。
+// i32 标量。context ABI 原生解决值依赖形状; combiner 与 Tidx 走多名字特化。
 
 struct KpSparseSegmentReduceMatch {
   Value data;
@@ -2258,14 +1908,14 @@ static LogicalResult matchKpSparseSegmentReduce(
   auto dType = dyn_cast<atir::TensorType>(dataVal.getType());
   auto kType = dyn_cast<atir::TensorType>(keysSs.getInput().getType());
   auto iType = dyn_cast<atir::TensorType>(indicesVal.getType());
-  if (!dType || !dType.getElementType().isF32() ||
-      dType.getShape().size() != 2)
+  if (!dType || !dType.getElementType().isF32() || dType.getShape().size() != 2)
     return failure();
   if (!kType || !kType.getElementType().isInteger(64) ||
       kType.getShape().size() != 2)
     return failure();
-  if (!iType || !(iType.getElementType().isInteger(32) ||
-                  iType.getElementType().isInteger(64)) ||
+  if (!iType ||
+      !(iType.getElementType().isInteger(32) ||
+        iType.getElementType().isInteger(64)) ||
       iType.getShape().size() != 1)
     return failure();
 
@@ -2307,23 +1957,10 @@ static std::string getKpSparseSegmentReduceOpName(int64_t combiner,
                                                   Type indicesType) {
   auto tensorType = dyn_cast<atir::TensorType>(indicesType);
   std::string name = "KPFusedSparseSegmentReduce";
-  name += (tensorType && tensorType.getElementType().isInteger(64)) ? "I64"
-                                                                    : "I32";
+  name +=
+      (tensorType && tensorType.getElementType().isInteger(64)) ? "I64" : "I32";
   name += (combiner == 1) ? "Mean" : "Sum";
   return name;
-}
-
-static CustomOpSchema getKpSparseSegmentReduceSchema(StringRef opName) {
-  return CustomOpSchema::get(opName)
-      .TypeVar("T")
-      .TypeVar("Tidx")
-      .MemRefArg("keys", 2, "")
-      .MemRefArg("begin", 1, "")
-      .MemRefArg("data", 2, "T")
-      .MemRefArg("indices", 1, "Tidx")
-      .MemRefArg("begin_1", 1, "")
-      .Result("output", 2, "T")
-      .Result("slice_output", 0, "");
 }
 
 struct FuseKpSparseSegmentReduceAsFuncCallPattern
@@ -2338,11 +1975,9 @@ struct FuseKpSparseSegmentReduceAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    SmallVector<Value, 5> boundaryInputs = {match.keys, match.begin,
-                                            match.data, match.indices,
-                                            match.begin1};
-    SmallVector<Value, 2> boundaryOutputs = {match.ssResult,
-                                             match.sliceResult};
+    SmallVector<Value, 5> boundaryInputs = {match.keys, match.begin, match.data,
+                                            match.indices, match.begin1};
+    SmallVector<Value, 2> boundaryOutputs = {match.ssResult, match.sliceResult};
     SmallVector<Operation *> fusedOps;
     SmallPtrSet<Operation *, 32> visited;
     for (Value output : boundaryOutputs) {
@@ -2354,81 +1989,13 @@ struct FuseKpSparseSegmentReduceAsFuncCallPattern
 
     std::string customOpName =
         getKpSparseSegmentReduceOpName(match.combiner, match.indices.getType());
-    auto schema = getKpSparseSegmentReduceSchema(customOpName);
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = customOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module,
-        getStableFusionKernelName(anchorName, "kp_sparse_segment_reduce"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_segment_reduce"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_segment_reduce")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output", outputName(match.ssResult, "ss_mean:0"),
-                       match.ssResult.getType()});
-    outputs.push_back({"output", outputName(match.sliceResult, "slice_out:0"),
-                       match.sliceResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(module, rewriter, anchor, customOpName,
+                                 "kp_sparse_segment_reduce", boundaryInputs,
+                                 boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 
-
-// ── KP embedding padding (一级, Execution V2) ────────────────────────────────
+// ── KP embedding padding (一级, Context V3) ────────────────────────────────
 //
 // 公共链: Cast(origin_shape) ─► StridedSlice ─► Sub ─► Pack ─► Fill ─►
 //         ConcatV2(data, fill) ─► Reshape
@@ -2436,7 +2003,7 @@ struct FuseKpSparseSegmentReduceAsFuncCallPattern
 //             (padding_rows) + anchor 结果 (padded data 2D f32)
 // PaddingFast: anchor = StridedSlice(shrink=1) ← Shape ← Reshape, 2 输出:
 //             sub 标量 (padding_rows) + anchor 标量 (reshape_rows)
-// reshape_rows 值依赖 (origin_shape[0] - input_rows) —— V2 原生解决。
+// reshape_rows 值依赖 (origin_shape[0] - input_rows) —— context 原生解决。
 // 移植补查 (812 未查): Fill value=0、ConcatV2 axis=0、ss begin/end/strides。
 
 struct KpEmbeddingPaddingMatch {
@@ -2526,8 +2093,8 @@ static LogicalResult matchKpEmbeddingPaddingChain(
   return success();
 }
 
-static LogicalResult matchKpEmbeddingPadding(
-    ReshapeOp anchor, KpEmbeddingPaddingMatch &match) {
+static LogicalResult matchKpEmbeddingPadding(ReshapeOp anchor,
+                                             KpEmbeddingPaddingMatch &match) {
   // anchor 结果必须有 ConcatV2 用户 (812 检查)。
   bool hasConcatUser = false;
   for (Operation *user : anchor.getResult().getUsers()) {
@@ -2554,8 +2121,7 @@ static LogicalResult matchKpEmbeddingPadding(
   if (!oType || !oType.getElementType().isInteger(64) ||
       oType.getShape().size() != 1)
     return failure();
-  if (!dType || !dType.getElementType().isF32() ||
-      dType.getShape().size() != 2)
+  if (!dType || !dType.getElementType().isF32() || dType.getShape().size() != 2)
     return failure();
 
   // 逃逸检查: 中间结果不逃逸 (concat 的结果只被 anchor 用; anchor 结果逃逸
@@ -2601,8 +2167,7 @@ static LogicalResult matchKpEmbeddingPaddingFast(
   if (!oType || !oType.getElementType().isInteger(64) ||
       oType.getShape().size() != 1)
     return failure();
-  if (!dType || !dType.getElementType().isF32() ||
-      dType.getShape().size() != 2)
+  if (!dType || !dType.getElementType().isF32() || dType.getShape().size() != 2)
     return failure();
 
   for (Operation *user : concat.getResult().getUsers()) {
@@ -2618,114 +2183,31 @@ static LogicalResult matchKpEmbeddingPaddingFast(
   return success();
 }
 
-static CustomOpSchema getKpEmbeddingPaddingSchema(StringRef opName,
-                                                  bool fast) {
-  auto schema = CustomOpSchema::get(opName)
-                    .TypeVar("T")
-                    .MemRefArg("origin_shape", 1, "")
-                    .MemRefArg("input_rows", 0, "")
-                    .MemRefArg("pack", 0, "")
-                    .MemRefArg("data", 2, "T")
-                    .MemRefArg("reshape_sizes", 1, "");
-  schema.Result("out_padding_rows", 0, "");
-  if (fast) {
-    schema.Result("out_reshape_rows", 0, "");
-  } else {
-    schema.Result("out_data", 2, "T");
-  }
-  return schema;
-}
-
-static LogicalResult fuseKpEmbeddingPadding(
-    Operation *anchorOp, KpEmbeddingPaddingMatch &match, bool fast,
-    StringRef patternName, PatternRewriter &rewriter) {
+static LogicalResult fuseKpEmbeddingPadding(Operation *anchorOp,
+                                            KpEmbeddingPaddingMatch &match,
+                                            bool fast, StringRef patternName,
+                                            PatternRewriter &rewriter) {
   ModuleOp module = anchorOp->getParentOfType<ModuleOp>();
   if (!module) return failure();
 
   SmallVector<Value, 5> boundaryInputs = {match.originShape, match.inputRows,
                                           match.pack, match.data,
                                           match.reshapeSizes};
-  SmallVector<Value, 2> boundaryOutputs = {match.subResult,
-                                           match.anchorResult};
+  SmallVector<Value, 2> boundaryOutputs = {match.subResult, match.anchorResult};
   SmallVector<Operation *> fusedOps;
   SmallPtrSet<Operation *, 32> visited;
   for (Value output : boundaryOutputs) {
-    collectDefiningOpsPostOrder(output.getDefiningOp(), boundaryInputs,
-                                visited, fusedOps);
+    collectDefiningOpsPostOrder(output.getDefiningOp(), boundaryInputs, visited,
+                                fusedOps);
   }
   if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
     return failure();
 
   const char *customOpName =
       fast ? "KPFusedEmbeddingPaddingFast" : "KPFusedEmbeddingPadding";
-  auto schema = getKpEmbeddingPaddingSchema(customOpName, fast);
-  SmallVector<Type> inputTypes;
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> outputTypes;
-  for (Value output : boundaryOutputs) outputTypes.push_back(output.getType());
-  auto inferred = inferTypeConstraintsFromSchema(
-      schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-      TypeRange(outputTypes));
-  if (!inferred) {
-    llvm::consumeError(inferred.takeError());
-    return failure();
-  }
-  annc::kernels::KernelResolveRequest request;
-  request.op_type = customOpName;
-  request.abi = "annc_execution_v2";
-  request.type_constraints = std::move(*inferred);
-  if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-  std::string anchorName = getTfName(anchorOp);
-  std::string kernelName = uniquifySymbolName(
-      module, getStableFusionKernelName(anchorName, patternName));
-  std::string clusterName = uniquifyFusionName(
-      module, sanitizeName(anchorName + "/kp_fused"));
-  auto kernelFunc = createExecutionV2KernelFunc(
-      module, rewriter, kernelName, fusedOps, boundaryInputs, boundaryOutputs);
-  kernelFunc->setAttr("fusion.pattern", rewriter.getStringAttr(patternName));
-  setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-  SmallVector<NamedAttribute> metadata;
-  metadata.push_back(rewriter.getNamedAttr(
-      "fusion.pattern", rewriter.getStringAttr(patternName)));
-  addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-  metadata.push_back(rewriter.getNamedAttr(
-      "kernel_name", rewriter.getStringAttr(kernelName)));
-  metadata.push_back(rewriter.getNamedAttr(
-      "tf.name", rewriter.getStringAttr(clusterName)));
-  SmallVector<FusionArgSpec> args;
-  for (Value input : boundaryInputs)
-    args.push_back({"dynamic", getValueName(input), input.getType()});
-  metadata.push_back(rewriter.getNamedAttr(
-      "args", makeFusionArgArray(rewriter.getContext(), args)));
-  SmallVector<FusionArgSpec> outputs;
-  auto outputName = [](Value value, StringRef fallback) {
-    std::string name = getFusionOutputName(value);
-    return name.empty() ? fallback.str() : name;
-  };
-  outputs.push_back({"output",
-                     outputName(match.subResult, "padding_rows:0"),
-                     match.subResult.getType()});
-  outputs.push_back(
-      {"output", outputName(match.anchorResult, anchorName + ":0"),
-       match.anchorResult.getType()});
-  metadata.push_back(rewriter.getNamedAttr(
-      "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-  metadata.push_back(rewriter.getNamedAttr(
-      "abi", rewriter.getStringAttr("annc_execution_v2")));
-  metadata.push_back(rewriter.getNamedAttr(
-      "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-  metadata.push_back(rewriter.getNamedAttr(
-      "dynamic_dims", makeI64Array(rewriter.getContext(), {1})));
-  metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                           rewriter.getStringAttr("")));
-  metadata.push_back(rewriter.getNamedAttr(
-      "fallback_function", rewriter.getStringAttr("original_subgraph")));
-  kernelFunc->setAttr("fusion.metadata",
-                      DictionaryAttr::get(rewriter.getContext(), metadata));
-  anchorOp->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-  return success();
+  return outlineContextBuiltin(module, rewriter, anchorOp, customOpName,
+                               patternName, boundaryInputs, boundaryOutputs,
+                               fusedOps, kAotExecutionMode);
 }
 
 struct FuseKpEmbeddingPaddingAsFuncCallPattern
@@ -2758,30 +2240,28 @@ struct FuseKpEmbeddingPaddingFastAsFuncCallPattern
   }
 };
 
-
-// ── KP sparse reshape (一级, Execution V2) ──────────────────────────────────
+// ── KP sparse reshape (一级, Context V3) ──────────────────────────────────
 //
 // 匹配链 (与二级 KpEmbeddingSparseReshapeRewrite 一致):
 //   keys ──┬─► Shape ─► StridedSlice(shrink=1) ─► Pack ◄─ pack_const
 //          │                                        │
 //          │  input_shape ◄─ Cast ◄─────────────────┘
 //          │
-//          ├─► StridedSlice(shrink=2, begin_mask=1, end_mask=1) ─► Reshape{-1,1} ─┐
-//          │                                                                     ├─► ConcatV2(axis={-1}) ─► indices
-//          └─► Range(0, limit, 1) ─► Reshape{-1,1} ─► Cast ──────────────────────┘
+//          ├─► StridedSlice(shrink=2, begin_mask=1, end_mask=1) ─►
+//          Reshape{-1,1} ─┐ │ ├─► ConcatV2(axis={-1}) ─► indices └─► Range(0,
+//          limit, 1) ─► Reshape{-1,1} ─► Cast ──────────────────────┘
 //   new_shape ───────────────────────────────────► SparseReshape (anchor)
 //
 // anchor 是 functional op (operand 0 = indices, 无输出 buffer), 故 kernel
-// func 用下方变体 helper (clone 时跳过 SparseReshapeOp 的 dest-style buffer
+// func uses the single i64 entry point (clone 时跳过 SparseReshapeOp 的 dest-style buffer
 // 映射)。输出: out_indices i64[R,rank] (R 值依赖) + out_shape i64[rank]。
-// T = pack_const 元素类型 (i32/i64, 多名字特化); new_shape 固定 i64。
+// pack_const and new_shape are fixed i64 values.
 
 struct KpSparseReshapeMatch {
   Value keys;
   Value begin;
   Value newShape;
   Value packConst;
-  Value rangeLimit;  // 动态 Range.limit 边界 (常量为 null)
   Value outIndicesResult;
   Value outShapeResult;
   SparseReshapeOp anchor;
@@ -2803,18 +2283,10 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   if (!areConstantInts(reshape1.getTargetShape(), {-1, 1})) return failure();
   auto range = reshape1.getInput().getDefiningOp<RangeOp>();
   if (!range) return failure();
-  // 812 只查 delta=1; 移植补查 start=0。limit 允许常量或 0-D i32 动态值
-  // (varlen batch 图: StridedSlice(Shape(x)) 提取); 动态时作为额外边界输入
-  // 传入 kernel func——kernel 不用 limit 值, 内部自行重生成行号列。
+  // The downloaded kernel regenerates the row range from the input row count.
   if (!isConstantInt(range.getStart(), 0)) return failure();
   if (!isConstantInt(range.getDelta(), 1)) return failure();
   bool limitIsConst = range.getLimit().getDefiningOp<ConstantOp>() != nullptr;
-  if (!limitIsConst) {
-    auto lType = dyn_cast<atir::TensorType>(range.getLimit().getType());
-    if (!lType || !lType.getElementType().isInteger(32) ||
-        lType.getShape().size() != 0)
-      return failure();
-  }
   // 分支 B: Reshape(StridedSlice(keys, begin), {-1,1}) — keys 列。
   auto reshape = concat.getValues()[1].getDefiningOp<ReshapeOp>();
   if (!reshape) return failure();
@@ -2849,25 +2321,20 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   auto shape = ss1.getInput().getDefiningOp<ShapeOp>();
   if (!shape) return failure();
 
-  // D-2 放宽 2: 两个分支交叉引用同一个 num_rows。ss1 = Shape(keys)[0] 既喂
-  // input_shape 分支的 Pack, 又当 indices 分支 Range 的 limit (cvr history /
-  // hmv session 族实测)。这是链内交叉引用而非逃逸——两端都在融合区内。
-  // 此时 limit 不作边界输入: 它就是 num_rows, kernel 从 slice_input->sizes[0]
-  // 已能得到, 故走非 DynLimit 特化。
+  // Shape(keys)[0] is also a valid in-chain Range.limit reference. The kernel
+  // derives the same row count from slice_input, so it is not a boundary.
   bool limitFromSs1 = (range.getLimit() == ss1.getResult());
 
   match.keys = shape.getInput();
   match.begin = ss.getBegin();
   match.newShape = anchor.getNewShape();
   match.packConst = pack.getInputs()[1];
-  match.rangeLimit =
-      (limitIsConst || limitFromSs1) ? Value() : range.getLimit();
+  if (!limitIsConst && !limitFromSs1) return failure();
   match.anchor = anchor;
   match.outIndicesResult = anchor.getOutputIndices();
   match.outShapeResult = anchor.getOutputShape();
 
-  // dtype 契约: keys i64 2D; begin i32 1D 2 元素; new_shape 固定 i64; T =
-  // pack_const (i32/i64); 两处 Cast 结果为 i64。
+  // dtype contract: keys, new_shape and pack_const are i64; begin is i32.
   auto kType = dyn_cast<atir::TensorType>(match.keys.getType());
   auto bType = dyn_cast<atir::TensorType>(match.begin.getType());
   auto nType = dyn_cast<atir::TensorType>(match.newShape.getType());
@@ -2881,8 +2348,7 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   if (!nType || !nType.getElementType().isInteger(64) ||
       nType.getShape().size() != 1 || nType.getShape()[0] != 2)
     return failure();
-  if (!pType || !(pType.getElementType().isInteger(32) ||
-                  pType.getElementType().isInteger(64)) ||
+  if (!pType || !pType.getElementType().isInteger(64) ||
       pType.getShape().size() != 0)
     return failure();
   {
@@ -2935,82 +2401,12 @@ static LogicalResult matchKpSparseReshape(SparseReshapeOp anchor,
   return success();
 }
 
-// Multi-name scheme: T (pack_const element type) is a kernel specialization;
-// the DynLimit variants take an extra unused 0-D i32 range_limit boundary
-// (dynamic Range.limit in varlen-batch graphs).
-static std::string getKpSparseReshapeOpName(Type packConstType,
-                                            bool hasRangeLimit) {
-  auto tensorType = dyn_cast<atir::TensorType>(packConstType);
-  std::string name = "KPFusedSparseReshape";
-  name +=
-      (tensorType && tensorType.getElementType().isInteger(64)) ? "I64" : "I32";
-  if (hasRangeLimit) name += "DynLimit";
-  return name;
-}
+static constexpr StringLiteral kKpSparseReshapeOpName =
+    "KPFusedSparseReshapeI64";
 
-static CustomOpSchema getKpSparseReshapeSchema(StringRef opName,
-                                               bool hasRangeLimit) {
-  auto schema = CustomOpSchema::get(opName)
-                    .TypeVar("T")
-                    .MemRefArg("slice_input", 2, "")
-                    .MemRefArg("begin", 1, "")
-                    .MemRefArg("pack_const", 0, "T")
-                    .MemRefArg("new_shape", 1, "");
-  if (hasRangeLimit) schema.MemRefArg("range_limit", 0, "");
-  return schema.Result("out_indices", 2, "").Result("out_shape", 1, "");
-}
-
-// Functional-anchor variant of createExecutionV2KernelFunc: SparseReshapeOp
+// SparseReshapeOp has a functional anchor:
 // takes its semantic input as operand 0 (no dest-style output buffer), so the
 // buffer mapping is skipped for it during clone.
-static func::FuncOp createKpSparseReshapeV2KernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Operation *> fusedOps, ArrayRef<Value> boundaryInputs,
-    ArrayRef<Value> boundaryOutputs) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> resultTypes;
-  for (Value output : boundaryOutputs) resultTypes.push_back(output.getType());
-
-  auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-  IRMapping mapper;
-  for (auto [index, input] : llvm::enumerate(boundaryInputs)) {
-    mapper.map(input, entry->getArgument(index + 1));
-  }
-  for (Operation *op : fusedOps) {
-    if (!isa<UniqueOp, ConstantOp, BufferOp, SparseReshapeOp>(op)) {
-      Value outputBuffer = op->getOperand(0);
-      if (!mapper.contains(outputBuffer)) {
-        Value localBuffer =
-            rewriter.create<BufferOp>(func.getLoc(), outputBuffer.getType());
-        mapper.map(outputBuffer, localBuffer);
-      }
-    }
-    rewriter.clone(*op, mapper);
-  }
-
-  SmallVector<Value> returns;
-  for (Value output : boundaryOutputs) returns.push_back(mapper.lookup(output));
-  rewriter.create<func::ReturnOp>(func.getLoc(), returns);
-  return func;
-}
-
 struct FuseKpSparseReshapeAsFuncCallPattern
     : public OpRewritePattern<SparseReshapeOp> {
   using OpRewritePattern<SparseReshapeOp>::OpRewritePattern;
@@ -3023,12 +2419,9 @@ struct FuseKpSparseReshapeAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    // 边界顺序 = kernel wrapper 序 (slice_input, begin, pack_const,
-    // new_shape[, range_limit]), 二级 getOrderedBoundaryInputs 与此一致。
+    // Boundary order follows the single downloaded-kernel entry point.
     SmallVector<Value, 4> boundaryInputs = {match.keys, match.begin,
                                             match.packConst, match.newShape};
-    bool hasRangeLimit = static_cast<bool>(match.rangeLimit);
-    if (hasRangeLimit) boundaryInputs.push_back(match.rangeLimit);
     SmallVector<Value, 2> boundaryOutputs = {match.outIndicesResult,
                                              match.outShapeResult};
     SmallVector<Operation *> fusedOps;
@@ -3040,106 +2433,38 @@ struct FuseKpSparseReshapeAsFuncCallPattern
     if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
       return failure();
 
-    std::string customOpName =
-        getKpSparseReshapeOpName(match.packConst.getType(), hasRangeLimit);
-    auto schema = getKpSparseReshapeSchema(customOpName, hasRangeLimit);
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = customOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_reshape"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createKpSparseReshapeV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_reshape"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_reshape")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output",
-                       outputName(match.outIndicesResult,
-                                  anchorName + "/output_indices"),
-                       match.outIndicesResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.outShapeResult,
-                                  anchorName + "/output_shape"),
-                       match.outShapeResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(module, rewriter, anchor,
+                                 kKpSparseReshapeOpName,
+                                 "kp_sparse_reshape", boundaryInputs,
+                                 boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 
-
-// ── KP sparse select (一级, Execution V2) ────────────────────────────────────
+// ── KP sparse select (一级, Context V3) ────────────────────────────────────
 //
 //   a ─► Reshape{-1,1} ─► Compare(GT, gt) ─► Cast ─┐
-//                                                  ├► Where(equal, (fill, ·)) ─┐
-//   b ─► Reshape{-1,1} ─┬► Compare(EQ, eq1) ─► Where(equal1, (fill0, ·)) ──────┘
-//                       └► Compare(EQ, eq2) ────────────────────────────────────► ConcatV2(axis=1)
-//   c ─► Reshape{-1,1} ─► Compare(EQ, eq3) ─► Where(equal2, (fill2, fill1)) ───►
-//   empty [?,0] (Fill) ─────────────────────────────────────────────────────────►
+//                                                  ├► Where(equal, (fill, ·))
+//                                                  ─┐
+//   b ─► Reshape{-1,1} ─┬► Compare(EQ, eq1) ─► Where(equal1, (fill0, ·))
+//   ──────┘
+//                       └► Compare(EQ, eq2)
+//                       ────────────────────────────────────► ConcatV2(axis=1)
+//   c ─► Reshape{-1,1} ─► Compare(EQ, eq3) ─► Where(equal2, (fill2, fill1))
+//   ───► empty [?,0] (Fill)
+//   ─────────────────────────────────────────────────────────►
 //
 // 输出: x = reshape_4 结果 (i32 [N,1]), y = select_0 结果 (f32 [N,1]),
-//       w = concat 结果 (f32 [N,2] = [y, 1.0])。N 值依赖 → V2。
-// 7 个边界输入 (a/b/c + 4 比较常量) = V2 输入上限 7, 恰好卡线。
+//       w = concat 结果 (f32 [N,2] = [y, 1.0])。N 值依赖 → context。
+// 7 个边界输入：a/b/c 与 4 个比较标量 tensor。
 
 struct KpSparseSelectMatch {
   Value a;
   Value b;
   Value c;
-  Value gt;   // greater 常量 (0-D i32)
-  Value eq1;  // equal 常量
-  Value eq2;  // equal_1 常量
-  Value eq3;  // equal_2 常量
+  Value gt;       // greater 常量 (0-D i32)
+  Value eq1;      // equal 常量
+  Value eq2;      // equal_1 常量
+  Value eq3;      // equal_2 常量
   Value xResult;  // reshape_4 结果
   Value yResult;  // select_0 结果
   Value wResult;  // concat 结果
@@ -3188,7 +2513,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
       emptyType.getShape().size() != 2 || emptyType.getShape()[1] != 0)
     return failure();
 
-    // left branch: select_0 = Where(equal_1, (fill_0, select_1))
+  // left branch: select_0 = Where(equal_1, (fill_0, select_1))
   auto select0 = anchor.getValues()[0].getDefiningOp<WhereOp>();
   if (!select0 || select0.getInputs().size() != 3) return failure();
   auto equal1 = select0.getInputs()[0].getDefiningOp<CompareOp>();
@@ -3210,13 +2535,13 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
   auto greater = cast.getInput().getDefiningOp<CompareOp>();
   if (!greater) return failure();
 
-    auto reshape4 = matchSelectCompareAgainstConst(greater, "GT", &match.gt);
+  auto reshape4 = matchSelectCompareAgainstConst(greater, "GT", &match.gt);
   auto reshape1a = matchSelectCompareAgainstConst(equal, "EQ", &match.eq1);
   auto reshape1b = matchSelectCompareAgainstConst(equal1, "EQ", &match.eq2);
   if (!reshape4 || !reshape1a || !reshape1b || reshape1a != reshape1b)
     return failure();
 
-    // right branch: select_2 = Where(equal_2, (fill_2, fill_1)) — 恒 1.0
+  // right branch: select_2 = Where(equal_2, (fill_2, fill_1)) — 恒 1.0
   auto select2 = anchor.getValues()[1].getDefiningOp<WhereOp>();
   if (!select2 || select2.getInputs().size() != 3) return failure();
   auto equal2 = select2.getInputs()[0].getDefiningOp<CompareOp>();
@@ -3230,7 +2555,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
   auto reshape2 = matchSelectCompareAgainstConst(equal2, "EQ", &match.eq3);
   if (!reshape2) return failure();
 
-    match.a = reshape4.getInput();
+  match.a = reshape4.getInput();
   match.b = reshape1a.getInput();
   match.c = reshape2.getInput();
   match.anchor = anchor;
@@ -3250,7 +2575,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
       return failure();
   }
 
-    // 逃逸检查: 链中间结果只被链内 op 使用; x/w 输出须有主图消费者 (y 在
+  // 逃逸检查: 链中间结果只被链内 op 使用; x/w 输出须有主图消费者 (y 在
   // 812 图中只喂 concat, 不要求主图用户)。
   auto checkOnly = [](Value v, ArrayRef<Operation *> allowed) {
     for (Operation *user : v.getUsers()) {
@@ -3258,7 +2583,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
     }
     return true;
   };
-  // 注: reshape_4 结果 (x 输出) 在 V2 ABI 下由 kernel func return 消费,
+  // 注: reshape_4 结果 (x 输出) 在 context ABI 下由 kernel func return 消费,
   // 无需主图用户 (二级 checkSparseSelectEscape 的 checkOnlyOrReturn 已
   // 覆盖该契约), 故一级不再要求 x 逃逸到主图。
   if (!checkOnly(greater.getResult(), {cast.getOperation()})) return failure();
@@ -3277,8 +2602,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
   if (!checkOnly(equal1.getResult(), {select0.getOperation()}))
     return failure();
   if (!checkOnly(fill.getResult(), {select1.getOperation()})) return failure();
-  if (!checkOnly(fill0.getResult(), {select0.getOperation()}))
-    return failure();
+  if (!checkOnly(fill0.getResult(), {select0.getOperation()})) return failure();
   if (!checkOnly(select1.getResult(), {select0.getOperation()}))
     return failure();
   if (!checkOnly(select0.getResult(), {anchor.getOperation()}))
@@ -3296,8 +2620,7 @@ static LogicalResult matchKpSparseSelect(ConcatV2Op anchor,
     return failure();
   if (!checkOnly(fill1Op.getResult(), {select2.getOperation()}))
     return failure();
-  if (!checkOnly(fill2.getResult(), {select2.getOperation()}))
-    return failure();
+  if (!checkOnly(fill2.getResult(), {select2.getOperation()})) return failure();
   if (!checkOnly(select2.getResult(), {anchor.getOperation()}))
     return failure();
   if (anchor.getResult().use_empty()) return failure();
@@ -3320,10 +2643,9 @@ struct FuseKpSparseSelectAsFuncCallPattern
     ModuleOp module = anchor->getParentOfType<ModuleOp>();
     if (!module) return failure();
 
-    // 7 边界输入 = V2 上限 (恰好可用)。
-    SmallVector<Value, 7> boundaryInputs = {match.a,  match.b,  match.c,
-                                            match.gt, match.eq1, match.eq2,
-                                            match.eq3};
+    // 7 个边界 tensor 输入。
+    SmallVector<Value, 7> boundaryInputs = {
+        match.a, match.b, match.c, match.gt, match.eq1, match.eq2, match.eq3};
     SmallVector<Value, 3> boundaryOutputs = {match.xResult, match.yResult,
                                              match.wResult};
     SmallVector<Operation *> fusedOps;
@@ -3335,92 +2657,9 @@ struct FuseKpSparseSelectAsFuncCallPattern
     if (fusedOps.empty() || !isClosedKernelOpSet(fusedOps, boundaryInputs))
       return failure();
 
-    static const char kOpName[] = "KPFusedSparseSelect";
-    auto schema = CustomOpSchema::get(kOpName)
-                      .TypeVar("T")
-                      .MemRefArg("a", 1, "T")
-                      .MemRefArg("b", 1, "T")
-                      .MemRefArg("c", 1, "T")
-                      .MemRefArg("gt", 0, "T")
-                      .MemRefArg("eq1", 0, "T")
-                      .MemRefArg("eq2", 0, "T")
-                      .MemRefArg("eq3", 0, "T")
-                      .Result("out_x", 2, "")
-                      .Result("out_y", 2, "")
-                      .Result("out_w", 2, "");
-    SmallVector<Type> inputTypes;
-    for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-    SmallVector<Type> outputTypes;
-    for (Value output : boundaryOutputs)
-      outputTypes.push_back(output.getType());
-    auto inferred = inferTypeConstraintsFromSchema(
-        schema.toMetadata(rewriter.getContext()), TypeRange(inputTypes),
-        TypeRange(outputTypes));
-    if (!inferred) {
-      llvm::consumeError(inferred.takeError());
-      return failure();
-    }
-    annc::kernels::KernelResolveRequest request;
-    request.op_type = kOpName;
-    request.abi = "annc_execution_v2";
-    request.type_constraints = std::move(*inferred);
-    if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
-
-    std::string anchorName = getTfName(match.anchor);
-    std::string kernelName = uniquifySymbolName(
-        module, getStableFusionKernelName(anchorName, "kp_sparse_select"));
-    std::string clusterName = uniquifyFusionName(
-        module, sanitizeName(anchorName + "/kp_fused"));
-    auto kernelFunc = createExecutionV2KernelFunc(
-        module, rewriter, kernelName, fusedOps, boundaryInputs,
-        boundaryOutputs);
-    kernelFunc->setAttr("fusion.pattern",
-                        rewriter.getStringAttr("kp_sparse_select"));
-    setExecutionMode(kernelFunc, rewriter, kAotExecutionMode);
-
-    SmallVector<NamedAttribute> metadata;
-    metadata.push_back(rewriter.getNamedAttr(
-        "fusion.pattern", rewriter.getStringAttr("kp_sparse_select")));
-    addExecutionModeMetadata(metadata, rewriter, kAotExecutionMode);
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_name", rewriter.getStringAttr(kernelName)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "tf.name", rewriter.getStringAttr(clusterName)));
-    SmallVector<FusionArgSpec> args;
-    for (Value input : boundaryInputs)
-      args.push_back({"dynamic", getValueName(input), input.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "args", makeFusionArgArray(rewriter.getContext(), args)));
-    SmallVector<FusionArgSpec> outputs;
-    auto outputName = [](Value value, StringRef fallback) {
-      std::string name = getFusionOutputName(value);
-      return name.empty() ? fallback.str() : name;
-    };
-    outputs.push_back({"output",
-                       outputName(match.xResult, anchorName + "/output_x"),
-                       match.xResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.yResult, anchorName + "/output_y"),
-                       match.yResult.getType()});
-    outputs.push_back({"output",
-                       outputName(match.wResult, anchorName + "/output_w"),
-                       match.wResult.getType()});
-    metadata.push_back(rewriter.getNamedAttr(
-        "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
-    metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
-    metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
-                                             rewriter.getStringAttr("")));
-    metadata.push_back(rewriter.getNamedAttr(
-        "fallback_function", rewriter.getStringAttr("original_subgraph")));
-    kernelFunc->setAttr("fusion.metadata",
-                        DictionaryAttr::get(rewriter.getContext(), metadata));
-    anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
-    return success();
+    return outlineContextBuiltin(
+        module, rewriter, anchor, "KPFusedSparseSelect", "kp_sparse_select",
+        boundaryInputs, boundaryOutputs, fusedOps, kAotExecutionMode);
   }
 };
 
@@ -5529,8 +4768,8 @@ class AtirOpFusionPass : public AtirOpFusionBase<AtirOpFusionPass> {
     if (!mainFunc) return;
 
     WalkResult validation = mainFunc.walk([&](MatMulOp matmul) {
-      auto candidate = matmul->getAttrOfType<DictionaryAttr>(
-          kGemmEpilogueCandidateAttr);
+      auto candidate =
+          matmul->getAttrOfType<DictionaryAttr>(kGemmEpilogueCandidateAttr);
       if (!candidate) return WalkResult::advance();
       auto parsed = parseEpilogueCandidatePlan(candidate);
       if (failed(parsed) ||

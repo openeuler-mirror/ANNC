@@ -1,7 +1,8 @@
 // RUN: annc-asm --atir-fast-codegen %s | FileCheck %s
+// RUN: annc-asm --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg %s | FileCheck %s --check-prefix=LOWER
+// LOWER: call @ANNCKernel_ContextV3_KPFusedDnnEmbeddingWithHashBucket_float_auto(%{{.*}}) : (!llvm.ptr) -> i32
 // The final output shape is [runtime_count, 16]. The fixed embedding width
 // must not be mistaken for a Tile multiplier.
-
 // CHECK-LABEL: func.func private @fused_dnn_embedding_hash_bucket
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedDnnEmbeddingWithHashBucket"
@@ -9,8 +10,9 @@
 module attributes {module.state = "atir"} {
   func.func private @fused_dnn_embedding_hash_bucket(
       %arg0: !atir.tensor<?xcomplex<f32>, encoding = <"string">, name = "input">,
-      %arg1: !atir.tensor<10000x16xf32, name = "embedding_weights">,
-      %arg2: !atir.tensor<?x16xf32, name = "output">) attributes {annc.kernel} {
+      %arg1: !atir.tensor<10000x16xf32, name = "embedding_weights">)
+      -> !atir.tensor<?x16xf32, name = "output"> attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3", context_i64_attrs = [10000]}} {
+    %arg2 = "atir.buffer"() : () -> !atir.tensor<?x16xf32, name = "output">
     %0 = "atir.buffer"() : () -> !atir.tensor<?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">
     %1 = atir.constant "public" @"expand_dim" -> <i32, name = "expand_dim", data = dense<-1> : tensor<i32>>
     %2 = atir.ExpandDims %0, %arg0, %1 : <?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">, <?xcomplex<f32>, encoding = <"string">, name = "input">, <i32, name = "expand_dim", data = dense<-1> : tensor<i32>> -> <?x1xcomplex<f32>, encoding = <"string">, name = "expanded_input">
@@ -57,6 +59,6 @@ module attributes {module.state = "atir"} {
     %44 = atir.constant "public" @"embedding_width" -> <i32, name = "embedding_width", data = dense<16> : tensor<i32>>
     %45 = atir.Pack %43, (%42, %44) axis = 0 : <2xi32, name = "output_shape">, !atir.tensor<i32, name = "runtime_count">, !atir.tensor<i32, name = "embedding_width", data = dense<16> : tensor<i32>> -> <2xi32, name = "output_shape">
     %46 = atir.Reshape %arg2, %36, %45 : <?x16xf32, name = "output">, <?x16xf32, name = "reshaped_embedding">, <2xi32, name = "output_shape"> -> <?x16xf32, name = "output">
-    return
+    return %46 : !atir.tensor<?x16xf32, name = "output">
   }
 }

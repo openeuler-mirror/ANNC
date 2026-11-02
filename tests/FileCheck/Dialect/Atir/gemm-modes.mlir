@@ -14,12 +14,15 @@
 // OFF-NOT: func.func private @fused_
 
 // PLAIN-LABEL: func.func @main(
-// PLAIN: call @fused_matmul_
+// PLAIN-NOT: call @fused_matmul_
+// PLAIN: "atir.MatMul"
+// PLAIN-SAME: annc.fusion_materialized
 // PLAIN: "atir.Add"
 // PLAIN: "atir.Relu"
 // PLAIN-LABEL: func.func private @fused_matmul_
+// PLAIN-SAME: abi = "annc_context_v3"
 // PLAIN-SAME: fusion.pattern = "matmul"
-// PLAIN: "atir.MatMul"
+// PLAIN: custom.op_name = "MatMul"
 // PLAIN-NOT: "atir.Add"
 // PLAIN-NOT: "atir.Relu"
 

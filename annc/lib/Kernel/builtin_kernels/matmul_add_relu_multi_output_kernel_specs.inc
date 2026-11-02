@@ -1,13 +1,12 @@
-ANNC_KERNEL(
+// Context ABI: the implementation consumes named tensors and runtime services.
+
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_MatMulAddReluWithAddOutput_float,
     Name("MatMulAddReluWithAddOutput")
         .Backend("aarch64")
-        .Abi("annc_execution_v2")
-        .TypeConstraint<float>("T"),
-    (const AnncExecutionContext* execution, AnncMemRef2DF32* lhs,
-     AnncMemRef2DF32* rhs, AnncMemRef1DF32* bias),
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-      const auto status = matmulAddReluWithAddOutputImpl(
-          ::annc::threadpool::getCurrentThreadPool(), execution, lhs, rhs,
-          bias);
-      return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, matmulAddReluWithAddOutputImpl);
     })

@@ -40,6 +40,7 @@ tests/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
 │   ├── build/              # build.sh 选项契约、双框架安装冒烟
 │   ├── python/             # Python 绑定手工 smoke（需 --enable-python）
+│   ├── kernel_context/     # 按 kernel 拆分的 TF/ORT Context 全链路测试
 │   └── tf/                 # TF predictor / KP embedding / model zoo 脚本
 └── fixtures/
     ├── kp_fused_gather_match.pbtxt
@@ -56,6 +57,10 @@ ctest --test-dir build --output-on-failure
 python3 -m pytest tests/ -v
 # 构建目录不在 build/ 时：
 ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
+
+# Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
+ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
+ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
 
 # FileCheck
 # ANNC_LLVM_BIN 不设置时读取 build/annc_llvm_bin.txt（configure 写入）
@@ -109,6 +114,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、FTDMM、fusion toggles、context-ABI e2e |
+| `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
 | `e2e/tf/e2e_kp_embedding_patterns.py` | L4 | KP embedding pattern 端到端 |
 | `e2e/tf/test_model_zoo_annc.sh` | L4 | model zoo 性能/正确性对拍 |

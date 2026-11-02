@@ -4,7 +4,7 @@
     {
       "name": "kp_fused_gather_external",
       "kernel": "fused_kp_fused_gather_external",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "graph": [
         "slice = StridedSlice(keys, begin)",
         "(first_unique, first_unique_indices) = Unique(slice)",

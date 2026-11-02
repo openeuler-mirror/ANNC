@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,10 +12,9 @@ using namespace atir;
 //
 // The first level (OpFusion's FuseKpEmbeddingActionIdGatherAsFuncCallPattern)
 // extracts the subgraph into a private func with annc.kernel +
-// fusion.metadata, taking (indices1, params, indices2, pack_dim, pack,
-// output).  This pattern rewrites that func's body into a single
-// atir.Customize call to the hand-written KPFusedEmbeddingActionIdGather
-// kernel.
+// fusion.metadata, taking (params, indices1, indices2, pack_dim, pack) ->
+// output.  This pattern rewrites that func's body into a single atir.Customize
+// call to the hand-written KPFusedEmbeddingActionIdGather kernel.
 //
 // Matched subgraph (ATIR ops only):
 //
@@ -28,9 +28,8 @@ using namespace atir;
 // reshaped to [pack_size, a_reshaped_cols] and zero-padded per row with
 // pack_const columns.
 //
-// v1 dtype contract: indices1 int64, indices2 int32, params float32 (the op
-// registration defaults).  R1/R2 (indices ranks, 1 or 2) become kernel
-// specialization attrs.
+// Dtype contract: float32 params and int32/int64 indices. Indices ranks
+// (1 or 2) select the specialized op name.
 struct KpEmbeddingActionIdGatherRewrite
     : public CustomFusionPatternBase<ConcatV2Op> {
   KpEmbeddingActionIdGatherRewrite(MLIRContext *context,
@@ -42,28 +41,29 @@ struct KpEmbeddingActionIdGatherRewrite
       ConcatV2Op anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
     // Only rewrite inside the kernel func extracted by the first-level
-    // pattern: private func with annc.kernel, 6 arguments, no results.
+    // pattern: private func with annc.kernel, 5 tensor arguments and one
+    // result.
     auto func = anchor->template getParentOfType<func::FuncOp>();
 
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
 
-    if (func.getNumArguments() != 6) {
+    if (func.getNumArguments() != 5) {
       return failure();
     }
 
-    if (!func.getFunctionType().getResults().empty()) {
+    if (func.getNumResults() != 1) {
       return failure();
     }
-    Value indices1Arg = func.getArgument(0);
-    Value paramsArg = func.getArgument(1);
+    Value indices1Arg = func.getArgument(1);
+    Value paramsArg = func.getArgument(0);
     Value indices2Arg = func.getArgument(2);
     Value packDimArg = func.getArgument(3);
     Value packArg = func.getArgument(4);
-    Value outputArg = func.getArgument(5);
+    Value outputArg = anchor.getOutput();
 
-    if (anchor.getOutput() != outputArg) {
+    if (!outputArg.getDefiningOp<BufferOp>()) {
       return failure();
     }
 
@@ -198,9 +198,8 @@ struct KpEmbeddingActionIdGatherRewrite
     }
 
     // Collect the subgraph in post-order, stopping at the func arguments.
-    SmallVector<Value, 6> boundaryValues = {indices1Arg, paramsArg,
-                                            indices2Arg, packDimArg,
-                                            packArg,    outputArg};
+    SmallVector<Value, 6> boundaryValues = {
+        paramsArg, indices1Arg, indices2Arg, packDimArg, packArg, outputArg};
     SmallPtrSet<Operation *, 32> visited;
     collectDefiningOpsPostOrder(anchor.getOperation(), boundaryValues, visited,
                                 fusedOps);
@@ -231,50 +230,23 @@ struct KpEmbeddingActionIdGatherRewrite
         return static_cast<int64_t>(tensorType.getShape().size());
       return 0;
     };
-    int64_t rank1 = getRank(func.getArgument(0).getType());
+    int64_t rank1 = getRank(func.getArgument(1).getType());
     int64_t rank2 = getRank(func.getArgument(2).getType());
     return "KPFusedEmbeddingActionIdGatherR" + std::to_string(rank1) + "x" +
            std::to_string(rank2);
   }
 
+  void getOrderedBoundaryInputs(
+      ConcatV2Op anchor, llvm::ArrayRef<mlir::Operation *>,
+      llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
+    auto func = anchor->template getParentOfType<func::FuncOp>();
+    llvm::append_range(inputs, func.getArguments());
+  }
+
   CustomOpSchema getCustomOpSchema(
       ConcatV2Op anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    auto func = anchor->template getParentOfType<func::FuncOp>();
-    Value indices1Arg = func.getArgument(0);
-    Value paramsArg = func.getArgument(1);
-    Value indices2Arg = func.getArgument(2);
-
-    auto getRank = [](Type type) -> int64_t {
-      if (auto tensorType = dyn_cast<atir::TensorType>(type))
-        return static_cast<int64_t>(tensorType.getShape().size());
-      return 0;
-    };
-    int64_t rank1 = getRank(indices1Arg.getType());
-    int64_t rank2 = getRank(indices2Arg.getType());
-
-    // Arg order matches the base class's collected inputValues:
-    //   [output buffer, real inputs in fusedOps order] =
-    //   [output, params, indices1, indices2, pack_dim, pack]
-    // (params precedes indices1: the inner Gather's operand order is
-    // (buffer, params, indices, axis), scanned before indices2/pack dims).
-    // R1/R2 specialize the kernel on the indices ranks (matched exactly via
-    // the registry attr mechanism).
-    // Schema name must match getCustomOpName: the CustomizeOp metadata
-    // records custom.op_name from here, and lowering reads opType from
-    // getCustomOpName — the two must agree for the multi-name scheme.
-    return CustomOpSchema::get(getCustomOpName(anchor, fusedOps))
-        .TypeVar("T")
-        .TypeVar("T1")
-        .TypeVar("T2")
-        .MemRefArg("output", 2, "T")
-        .MemRefArg("params", 2, "T")
-        .MemRefArg("indices1", rank1, "T1")
-        .MemRefArg("indices2", rank2, "T2")
-        .MemRefArg("pack_dim", 0, "")
-        .MemRefArg("pack", 0, "")
-        .I64AttrArg("R1", rank1)
-        .I64AttrArg("R2", rank2);
+    return *getContextKernelSchema(getCustomOpName(anchor, fusedOps));
   }
 
  private:
