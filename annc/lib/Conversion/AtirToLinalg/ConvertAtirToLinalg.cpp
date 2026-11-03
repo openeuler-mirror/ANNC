@@ -31,8 +31,8 @@ namespace atir {
                                    memref::MemRefDialect,
                                    tensor::TensorDialect,
                                    func::FuncDialect>();
-            target.addIllegalOp<atir::AddOp, atir::BufferOp, atir::MatMulOp,
-                                atir::ReluOp>();
+            target.addIllegalOp<atir::AddOp, atir::BufferOp, atir::DotOp,
+                                atir::MatMulOp, atir::ReluOp>();
             target.addDynamicallyLegalOp<atir::ReshapeOp>(
                 [](atir::ReshapeOp op) {
                   return !isSupportedInsertUnitDimensionBeforeN(op);

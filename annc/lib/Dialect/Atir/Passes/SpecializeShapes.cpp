@@ -122,6 +122,10 @@ class AtirSpecializeShapesPass
                    ? dyn_cast_or_null<StringAttr>(fusionMetadata.get("abi"))
                    : StringAttr{};
     const bool isContext = abi && abi.getValue() == "annc_context_v3";
+    auto pattern = function->getAttrOfType<StringAttr>("fusion.pattern");
+    // Empty tensordot batches produce an empty output without invoking GEMM.
+    const bool allowEmpty =
+        isContext || (pattern && pattern.getValue() == "tensordot_matmul");
     if (runtimeShapes->size() != function.getNumArguments()) {
       function.emitError() << "runtime shape spec has " << runtimeShapes->size()
                            << " arguments, expected "
@@ -157,7 +161,7 @@ class AtirSpecializeShapesPass
       }
       for (auto [declared, actual] :
            llvm::zip_equal(tensorType.getShape(), runtimeShape.shape)) {
-        if (actual < 0 || (!isContext && actual == 0) ||
+        if (actual < 0 || (!allowEmpty && actual == 0) ||
             (!ShapedType::isDynamic(declared) && declared != actual)) {
           function.emitError() << "argument " << runtimeShape.index
                                << " has incompatible runtime shape";
