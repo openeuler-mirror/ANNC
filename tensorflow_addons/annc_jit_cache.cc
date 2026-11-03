@@ -2,7 +2,6 @@
 
 #include <dlfcn.h>
 
-#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -49,7 +48,9 @@ bool BuildJitCacheKey(const std::string &templateFingerprint,
     *error = "template fingerprint is empty";
     return false;
   }
+  size_t dimensionCount = 0;
   for (const JitArgumentSignature &argument : arguments) {
+    dimensionCount += argument.dims.size();
     for (int64_t dimension : argument.dims) {
       if (dimension < 0) {
         *error = "runtime argument shape contains a negative dimension";
@@ -59,9 +60,9 @@ bool BuildJitCacheKey(const std::string &templateFingerprint,
   }
 
   std::string &serialized = key->digest;
-  serialized.reserve(sizeof(kKeySchema) + sizeof(uint64_t) +
-                     templateFingerprint.size() +
-                     sizeof(uint64_t) * (1 + arguments.size()));
+  serialized.reserve(
+      sizeof(kKeySchema) - 1 + templateFingerprint.size() +
+      sizeof(uint64_t) * (2 + arguments.size() + dimensionCount));
   serialized.append(kKeySchema);
   AppendU64(serialized, templateFingerprint.size());
   serialized.append(templateFingerprint);
@@ -72,22 +73,22 @@ bool BuildJitCacheKey(const std::string &templateFingerprint,
       AppendU64(serialized, static_cast<uint64_t>(dimension));
     }
   }
-  if (serialized.empty()) {
-    *error = "cannot serialize JIT cache key inputs";
-    return false;
-  }
   return true;
 }
 
 std::string CacheKeySummary(const JitCacheKey &key) {
+  // FNV-1a over the whole digest: the digest starts with the constant schema
+  // tag, so hex-encoding a prefix would print the same value for every key.
   static constexpr char kHex[] = "0123456789abcdef";
+  uint64_t hash = 14695981039346656037ULL;
+  for (unsigned char byte : key.digest) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
   std::string summary;
-  const size_t count = std::min<size_t>(8, key.digest.size());
-  summary.reserve(count * 2);
-  for (size_t i = 0; i < count; ++i) {
-    const unsigned char byte = static_cast<unsigned char>(key.digest[i]);
-    summary.push_back(kHex[byte >> 4]);
-    summary.push_back(kHex[byte & 0xf]);
+  summary.reserve(16);
+  for (int shift = 60; shift >= 0; shift -= 4) {
+    summary.push_back(kHex[(hash >> shift) & 0xf]);
   }
   return summary;
 }

@@ -13,17 +13,29 @@ set(_gemm_srcs
         Gemm/GemmCacheBlocking.cpp
         Gemm/GemmKernelTiling.cpp
         Gemm/GemmLeafMaterialization.cpp
+        Gemm/GemmMicrokernelSelection.cpp
         Gemm/GemmMicrokernelLowering.cpp
         Gemm/GemmABILowering.cpp
         Gemm/GemmEpilogueLowering.cpp
         Gemm/Epilogue/AtirGemmEpilogueCommit.cpp
-        Gemm/Epilogue/SveEpilogueEmitters.cpp
-        Gemm/Epilogue/NeonEpilogueEmitters.cpp
-        Gemm/Epilogue/EpilogueEmitterRegistry.cpp
-        Gemm/Epilogue/MicrokernelGenerator.cpp
         Gemm/VerifyGemmSchedule.cpp
         Gemm/Support/GemmPlanner.cpp
 )
+
+# Only this adapter sees the binary package C ABI. The object exporter can
+# reuse it without linking MLIR passes or machine-specific generation code.
+add_library(ANNCGemmCodegenAdapter STATIC Gemm/GemmCodegenAdapter.cpp)
+target_compile_features(ANNCGemmCodegenAdapter PUBLIC cxx_std_17)
+target_compile_definitions(ANNCGemmCodegenAdapter PRIVATE
+  ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
+target_include_directories(ANNCGemmCodegenAdapter PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/annc/include>
+  $<INSTALL_INTERFACE:include>)
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
+  target_link_libraries(ANNCGemmCodegenAdapter PRIVATE ANNC::GemmCodegen)
+endif()
+install(TARGETS ANNCGemmCodegenAdapter EXPORT MLIRTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 # Dispatcher entry points are referenced by generated MLIR, so keep them in
 # an installed runtime archive instead of the compiler-only pass library.
@@ -55,6 +67,7 @@ add_mlir_library(AArch64Codegen
 
         LINK_LIBS PUBLIC
         ANNCCheckpoint
+        ANNCGemmCodegenAdapter
         MLIRIR
         MLIRPass
         MLIRSupport
@@ -75,6 +88,12 @@ add_mlir_library(AArch64Codegen
         ContextConversion
 )
 
-if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE AND ANNC_ENABLE_CONSTANT_FOLDING)
+# This is a dependency capability, not a user-selectable optimization mode.
+# Apply it to the source so it also reaches MLIR's obj.AArch64Codegen target.
+set_property(SOURCE Gemm/ConstantFolding/GemmPrepackRhs.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS
+  ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
+
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
   target_link_libraries(AArch64Codegen PUBLIC ANNC::AArch64GemmMicrokernels)
 endif()

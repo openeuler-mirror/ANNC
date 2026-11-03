@@ -28,7 +28,7 @@ mlir::Value rank1BiasOperandOf(MatMulOp matmul, AddOp add);
 
 // True when the matmul/add/relu chain matches the annc_execution_v2 builtin
 // kernels: plain matmul, rank-1 bias, unbounded relu.
-bool isExecutionV2BuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu);
+bool isContextBuiltinCompatible(MatMulOp matmul, AddOp add, ReluOp relu);
 
 }  // namespace atir
 

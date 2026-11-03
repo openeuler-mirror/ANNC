@@ -140,10 +140,10 @@ def AArch64GemmLeafMaterialization
   ];
 }
 
-/* Select the handwritten microkernel symbol for every leaf call. */
+/* Bind the already selected microkernel symbol to every leaf call. */
 def AArch64GemmMicrokernelLowering
     : Pass<"aarch64-gemm-microkernel-lowering", "ModuleOp"> {
-  let summary = "select AArch64 handwritten GEMM microkernels";
+  let summary = "bind selected AArch64 handwritten GEMM microkernels";
   let constructor = "createAArch64GemmMicrokernelLowering()";
   let dependentDialects = [
     "mlir::func::FuncDialect"
@@ -163,14 +163,16 @@ def AArch64GemmABILowering
   ];
 }
 
-/* Diagnose unsupported AArch64 GEMM epilogues. */
+/* Analyze and lower epilogues after the leaf has selected its microkernel. */
 def AArch64GemmEpilogueLowering
     : Pass<"aarch64-gemm-epilogue-lowering", "ModuleOp"> {
-  let summary = "reject unsupported AArch64 GEMM epilogues";
+  let summary = "lower AArch64 GEMM epilogues after leaf selection";
   let constructor = "createAArch64GemmEpilogueLowering()";
   let dependentDialects = [
     "mlir::arith::ArithDialect",
-    "mlir::linalg::LinalgDialect"
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
   ];
 }
 

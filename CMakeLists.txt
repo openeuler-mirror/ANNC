@@ -12,7 +12,6 @@ option(ANNC_ENABLE_PYTHON "Build the ANNC Python bindings" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
-option(ANNC_ENABLE_CONSTANT_FOLDING "Enable ANNC constant-folding canonicalization feature" OFF)
 option(ANNC_ENABLE_COVERAGE "Enable gcov source coverage instrumentation" OFF)
 option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG); third-party build type unchanged" OFF)
 
@@ -45,10 +44,6 @@ if(ANNC_ENABLE_ONNXRUNTIME_EP)
   set(ANNC_KERNEL_MLAS ON CACHE BOOL
       "Let builtin kernels call MLAS GEMM entries with the host's native pool (automatically ON when ANNC_ENABLE_ONNXRUNTIME_EP=ON)" FORCE)
 endif()
-# The annc driver assembles generated AOT/JIT GEMM kernels against the GEMM-ASM
-# headers in <checkout>/Sve and <checkout>/Neon.  Baked in here as the default;
-# the runtime ANNC_GEMM_ASM_SOURCE_DIR environment variable overrides it.
-set(ANNC_GEMM_ASM_SOURCE_DIR "" CACHE PATH "GEMM-ASM checkout holding Sve/ and Neon/ assembly headers, used by the annc driver when ANNC_GEMM_ASM_SOURCE_DIR is not set at runtime")
 
 if(ANNC_ENABLE_TENSORFLOW_ADDON AND NOT ANNC_ENABLE_TENSORFLOW)
   message(FATAL_ERROR
@@ -398,7 +393,7 @@ if(ANNC_ENABLE_PYTHON)
 endif()
 # TensorFlow configuration is owned by the addon subdirectory alone, so it is
 # entered only when the addon is enabled: with the addon off no TensorFlow
-# headers or OpenSSL are looked up.
+# headers are looked up.
 if(ANNC_ENABLE_TENSORFLOW_ADDON)
   add_subdirectory(addons/tensorflow)
 endif()

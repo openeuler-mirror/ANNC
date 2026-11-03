@@ -18,7 +18,7 @@
 
 #include <onnxruntime_c_api.h>
 
-#include "annc_ep_execution.h"
+#include "context/annc_ep_execution.h"
 #include "Kernel/PackedB.h"
 
 namespace annc_ep {
@@ -505,21 +505,20 @@ TEST_F(ExecutionContextFailureTest, CostAboveTheThresholdSetsTheShardCount) {
   options.cost_per_unit = 128;
   std::vector<int64_t> shard_sizes;
 
-  // 4096 * 128 = 524288 cycles > kStartupCycles, so the range is cut into
-  // blocks the way ThreadPool::CalculateParallelForBlock cuts it: no block
-  // below kTaskSize/cost = 40000/128 = 312 units, and 342 is the coarsest
-  // block whose count still divides as evenly across the pool -> 12 shards.
+  // The cost exceeds the startup threshold. Request two shards explicitly
+  // so this test checks the limit independently of the machine's CPU count.
+  options.max_parallelism = 2;
   pool.parallel_for(4096, options, [&](int64_t begin, int64_t end) {
     shard_sizes.push_back(end - begin);
   });
 
   EXPECT_EQ(fake_.parallel_for_calls, 1);
-  EXPECT_EQ(fake_.last_parallel_total, 12u);
-  EXPECT_EQ(fake_.last_parallel_batches, 12u);
-  ASSERT_EQ(shard_sizes.size(), 12u);
+  EXPECT_EQ(fake_.last_parallel_total, 2u);
+  EXPECT_EQ(fake_.last_parallel_batches, 2u);
+  ASSERT_EQ(shard_sizes.size(), 2u);
   int64_t covered = 0;
   for (int64_t size : shard_sizes) {
-    EXPECT_GE(size, 312);  // kTaskSize cycles of work per block, at least
+    EXPECT_GT(size, 0);
     covered += size;
   }
   EXPECT_EQ(covered, 4096);  // every unit lands in exactly one shard
@@ -562,8 +561,15 @@ TEST_F(ExecutionContextFailureTest, NoCostSignalGetsOneUnitPerShard) {
                       shard_sizes.push_back(end - begin);
                     });
   EXPECT_EQ(fake_.parallel_for_calls, 1);
-  EXPECT_EQ(shard_sizes.size(), 64u);
-  EXPECT_EQ(fake_.last_parallel_batches, 64u);
+  const auto expected_shards = static_cast<size_t>(std::min(64, pool.num_threads()));
+  EXPECT_EQ(shard_sizes.size(), expected_shards);
+  EXPECT_EQ(fake_.last_parallel_batches, expected_shards);
+  int64_t covered = 0;
+  for (int64_t size : shard_sizes) {
+    EXPECT_GT(size, 0);
+    covered += size;
+  }
+  EXPECT_EQ(covered, 64);
 }
 
 TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {

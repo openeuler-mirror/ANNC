@@ -1,5 +1,7 @@
 #include "annc_ep_execution.h"
 
+#include "Context/KernelContextUtils.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -28,7 +30,7 @@ class ParallelRegionGuard {
 };
 
 // ANNC_EP_TIMING=1: per-call split of the context path -- "prepare" (read the
-// fused node's inputs, build their memref descriptors, copy the contract)
+// fused node's inputs and build borrowed tensor views)
 // versus "kernel" (the shared-library entry: allocate the outputs through the
 // callbacks, then the arithmetic, including the host-pool dispatch).  The
 // residual against the profiler's per-node time is ORT's dispatch.
@@ -125,14 +127,10 @@ size_t ElementSize(AnncElementType type) {
 
 // Byte count of a tensor description, or 0 when the shape is unusable.
 size_t DescribedBytes(const AnncTensorDesc* desc) {
-  const size_t element = ElementSize(desc->element_type);
-  if (element == 0 || desc->dims == nullptr) return 0;
-  size_t elements = 1;
-  for (uint32_t i = 0; i < desc->rank; ++i) {
-    if (desc->dims[i] < 0) return 0;
-    elements *= static_cast<size_t>(desc->dims[i]);
-  }
-  return elements * element;
+  size_t bytes = 0;
+  annc::kernels::contextByteCount(desc->element_type, desc->rank, desc->dims,
+                                 &bytes);
+  return bytes;
 }
 
 }  // namespace
@@ -305,9 +303,15 @@ void OrtThreadPool::parallel_for(
     std::int64_t total, const annc::threadpool::ParallelForOptions& options,
     const std::function<void(std::int64_t, std::int64_t)>& fn) {
   if (total <= 0) return;
+  const int parallelism = std::max(
+      1, std::min(num_threads(), options.max_parallelism.value_or(num_threads())));
+  if (parallelism == 1 || in_parallel_region()) {
+    fn(0, total);
+    return;
+  }
 
 #if defined(ANNC_EP_NATIVE_POOL)
-  if (native_enabled_) {
+  if (native_enabled_ && parallelism == num_threads()) {
     const std::int64_t grain =
         std::max<std::int64_t>(options.grain_size.value_or(0), 0);
     if (options.cost_per_unit.has_value()) {
@@ -318,9 +322,9 @@ void OrtThreadPool::parallel_for(
       // shard count is no longer ANNC's to estimate (the estimate was the
       // source of the 8x per-node dispatch gap and of 17-shard dispatches on
       // two-thread pools; task 20261013-019).  ANNC's cost units are already
-      // TensorOpCost's compute-cycles scale (Context/
-      // RowParallel.h), so the number passes through.  A null pool (intra-
-      // op=1) is serial inside TryParallelFor itself.
+      // TensorOpCost's compute-cycles scale (Context/RowParallel.h), so the
+      // number passes through. A null pool (intra-op=1) is serial inside
+      // TryParallelFor itself.
       const double cost_per_unit = static_cast<double>(
           std::max<std::int64_t>(*options.cost_per_unit, 1));
       const onnxruntime::TensorOpCost tensor_cost{0.0, 0.0, cost_per_unit};
@@ -376,14 +380,14 @@ void OrtThreadPool::parallel_for(
   // include/onnxruntime/core/platform/threadpool.h).  So this adapter applies
   // the framework's own rule -- the same Eigen model and the same block
   // calculation -- to the cost the kernel reports in ORT's units
-  // (include/Context/RowParallel.h).  Eigen's constants
+  // (Context/RowParallel.h).  Eigen's constants
   // (unsupported/Eigen/CXX11/src/Tensor/TensorCostModel.h): kStartupCycles =
   // kPerThreadCycles = 100000.
   //
   // A kernel that reports only grain_size asks for fixed-size blocks instead:
   // that is the TF adapter's kFixedBlockSize path, honoured verbatim.  With
   // neither signal the range is split like the in-tree pool splits an
-  // optionless call (Context/Parallel.cpp defaults grain_size to 1,
+  // optionless call (context/lib/Parallel.cpp defaults grain_size to 1,
   // one unit per block) and like ORT itself splits it when the caller passes
   // num_batches <= 0 ("it will be replaced to the value of
   // DegreeOfParallelism()", include/onnxruntime/core/platform/threadpool.h) --
@@ -407,16 +411,16 @@ void OrtThreadPool::parallel_for(
       batches = 1;  // CostModel::numThreads() == 1: run on the caller
     } else {
       const std::int64_t block =
-          CalculateParallelForBlock(total, cost_per_unit, num_threads());
+          CalculateParallelForBlock(total, cost_per_unit, parallelism);
       batches = DivCeil(total, block);
     }
   } else if (grain > 0) {
     batches = DivCeil(total, grain);
   } else {
-    batches = std::min<std::int64_t>(total, num_threads());
+    batches = std::min<std::int64_t>(total, parallelism);
   }
   batches =
-      std::min<std::int64_t>(std::max<std::int64_t>(batches, 1), num_threads());
+      std::min<std::int64_t>(std::max<std::int64_t>(batches, 1), parallelism);
   if (batches <= 1) {
     // Below the framework's parallelisation threshold: run the whole range
     // here, the way ThreadPool::ParallelFor does with f(0, n).
@@ -457,18 +461,36 @@ OnnxExecutionContext::OnnxExecutionContext(
       output_slots_(output_slots),
       allocated_(outputs.size(), false),
       pool_(api, kernel_context) {
-  handle_payload_.state = this;
-  handle_ = reinterpret_cast<AnncExecutionHandle*>(&handle_payload_);
-  context_.struct_size = sizeof(AnncExecutionContext);
-  context_.abi_version = ANNC_EXECUTION_ABI_VERSION;
-  context_.handle = handle_;
-  context_.allocate_output = &OnnxExecutionContext::AllocateOutput;
-  context_.allocate_temp = &OnnxExecutionContext::AllocateTemp;
-  context_.report_error = &OnnxExecutionContext::ReportError;
-  context_.thread_pool =
-      reinterpret_cast<AnncThreadPoolHandle*>(static_cast<
-          annc::threadpool::AnncThreadPool*>(&pool_));
-  context_.packed_b = nullptr;
+  legacy_.struct_size = sizeof(legacy_);
+  legacy_.abi_version = ANNC_EXECUTION_ABI_VERSION;
+  legacy_.handle = reinterpret_cast<AnncExecutionHandle*>(this);
+  legacy_.thread_pool = reinterpret_cast<AnncThreadPoolHandle*>(&pool_);
+  legacy_.allocate_output = [](AnncExecutionHandle* h, uint32_t slot, AnncTensorDesc* d) {
+    return reinterpret_cast<OnnxExecutionContext*>(h)->AllocateOutputImpl(slot, d, true);
+  };
+  legacy_.allocate_temp = [](AnncExecutionHandle* h, AnncTensorDesc* d) {
+    return reinterpret_cast<OnnxExecutionContext*>(h)->AllocateTempImpl(d);
+  };
+  legacy_.report_error = [](AnncExecutionHandle* h, AnncStatusCode code, const char* msg) {
+    reinterpret_cast<OnnxExecutionContext*>(h)->Fail(code, msg ? msg : "kernel error");
+  };
+  output_views_.resize(outputs.size());
+  services_ = {sizeof(AnncRuntimeServices),
+               ANNC_CONTEXT_ABI_VERSION,
+               this,
+               AllocateOutput,
+               AllocateTemp,
+               ReportError,
+               GetStatus,
+               ParallelFor,
+               NumThreads,
+               Shard,
+               NativePool};
+  context_.struct_size = sizeof(context_);
+  context_.abi_version = ANNC_CONTEXT_ABI_VERSION;
+  context_.outputs = output_views_.data();
+  context_.num_outputs = static_cast<uint32_t>(output_views_.size());
+  context_.services = &services_;
 }
 
 OnnxExecutionContext::~OnnxExecutionContext() {
@@ -484,14 +506,10 @@ OnnxExecutionContext::~OnnxExecutionContext() {
   if (error_ != nullptr) api_->ReleaseStatus(error_);
 }
 
-OnnxExecutionContext* OnnxExecutionContext::StateOf(
-    AnncExecutionHandle* handle) {
-  if (handle == nullptr) return nullptr;
-  return reinterpret_cast<HandlePayload*>(handle)->state;
-}
-
 AnncStatusCode OnnxExecutionContext::Fail(AnncStatusCode status,
                                           const std::string& message) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (status_.load() == ANNC_STATUS_OK) status_.store(status);
   if (error_ == nullptr) {
     error_ = api_->CreateStatus(ORT_FAIL,
                                 ("ANNC EP execution context: " + message)
@@ -503,6 +521,8 @@ AnncStatusCode OnnxExecutionContext::Fail(AnncStatusCode status,
 
 void OnnxExecutionContext::RecordStatus(OrtStatus* status) {
   if (status == nullptr) return;
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (status_.load() == ANNC_STATUS_OK) status_.store(ANNC_STATUS_INTERNAL);
   if (error_ == nullptr) {
     error_ = status;
     return;
@@ -511,6 +531,7 @@ void OnnxExecutionContext::RecordStatus(OrtStatus* status) {
 }
 
 OrtStatus* OnnxExecutionContext::TakeError() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   OrtStatus* error = error_;
   error_ = nullptr;
   return error;
@@ -521,16 +542,51 @@ bool OnnxExecutionContext::AllOutputsAllocated() const {
                      [](bool allocated) { return allocated; });
 }
 
-AnncStatusCode OnnxExecutionContext::AllocateOutput(AnncExecutionHandle* handle,
-                                                    uint32_t slot,
-                                                    AnncTensorDesc* desc) {
-  auto* state = StateOf(handle);
-  if (state == nullptr) return ANNC_STATUS_INVALID_ARGUMENT;
-  return state->AllocateOutputImpl(slot, desc);
+bool OnnxExecutionContext::BindView(const AnncTensorDesc& request, void* data,
+                                    AnncTensorView* result) {
+  shapes_.emplace_back();
+  auto& shape = shapes_.back();
+  int64_t stride = 1;
+  for (uint32_t i = request.rank; i > 0; --i) {
+    shape.sizes[i - 1] = request.dims[i - 1];
+    shape.strides[i - 1] = stride;
+    if (request.dims[i - 1] &&
+        stride > INT64_MAX / request.dims[i - 1]) return false;
+    stride *= request.dims[i - 1];
+  }
+  *result = {data, data, 0, shape.sizes.data(), shape.strides.data(),
+             request.element_type, request.rank, ANNC_LAYOUT_STRIDED,
+             ANNC_TENSOR_BOUND};
+  return true;
+}
+
+AnncStatusCode OnnxExecutionContext::AllocateOutput(
+    void* opaque, uint32_t slot, const AnncTensorDesc* request,
+    AnncTensorView* result) {
+  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
+  std::lock_guard<std::recursive_mutex> lock(state.mutex_);
+  size_t bytes = 0;
+  if (!request || request->struct_size < sizeof(*request) || !result ||
+      (request->flags & ~ANNC_ALLOCATION_ZERO) ||
+      !annc::kernels::contextByteCount(request->element_type, request->rank,
+                                      request->dims, &bytes))
+    return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid output request");
+  try {
+    AnncTensorDesc desc = *request;
+    auto code = state.AllocateOutputImpl(slot, &desc);
+    if (code != ANNC_STATUS_OK) return code;
+    if (!state.BindView(desc, desc.data, result))
+      return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "output stride overflow");
+    if (bytes && (desc.flags & ANNC_ALLOCATION_ZERO))
+      std::memset(desc.data, 0, bytes);
+    return ANNC_STATUS_OK;
+  } catch (...) {
+    return state.Fail(ANNC_STATUS_ALLOCATION_FAILED, "output allocation failed");
+  }
 }
 
 AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
-                                                        AnncTensorDesc* desc) {
+                                                        AnncTensorDesc* desc, bool legacy) {
   if (desc == nullptr || desc->struct_size < sizeof(*desc)) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT, "output description is invalid");
   }
@@ -554,10 +610,9 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   }
   // A zero-size tensor is legal (a batch-0 input produces an empty output):
   // the dims must be non-negative, but the byte count may be zero, and ORT
-  // then hands back a tensor whose data pointer can be null. dims itself is
-  // required for every rank -- rank 0 describes one element, not an empty
-  // tensor.
-  if (desc->dims == nullptr) {
+  // then hands back a tensor whose data pointer can be null. A rank-zero
+  // scalar needs no dims pointer and describes one element.
+  if ((legacy || desc->rank) && desc->dims == nullptr) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "output slot " + std::to_string(slot) + " has no dimensions");
   }
@@ -621,16 +676,33 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
     RecordStatus(status);
     return ANNC_STATUS_INTERNAL;
   }
+  if (!legacy && DescribedBytes(desc) && !data)
+    return Fail(ANNC_STATUS_ALLOCATION_FAILED, "output buffer is null");
   desc->data = data;
   allocated_[slot] = true;
   return ANNC_STATUS_OK;
 }
 
-AnncStatusCode OnnxExecutionContext::AllocateTemp(AnncExecutionHandle* handle,
-                                                  AnncTensorDesc* desc) {
-  auto* state = StateOf(handle);
-  if (state == nullptr) return ANNC_STATUS_INVALID_ARGUMENT;
-  return state->AllocateTempImpl(desc);
+AnncStatusCode OnnxExecutionContext::AllocateTemp(
+    void* opaque, const AnncTensorDesc* request, AnncTensorView* result) {
+  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
+  std::lock_guard<std::recursive_mutex> lock(state.mutex_);
+  size_t bytes;
+  if (!request || request->struct_size < sizeof(*request) || !result ||
+      (request->flags & ~ANNC_ALLOCATION_ZERO) ||
+      !annc::kernels::contextByteCount(request->element_type, request->rank,
+                                      request->dims, &bytes))
+    return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid temporary request");
+  try {
+    AnncTensorDesc desc = *request;
+    auto code = state.AllocateTempImpl(&desc);
+    if (code != ANNC_STATUS_OK) return code;
+    if (!state.BindView(desc, desc.data, result))
+      return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "temporary stride overflow");
+    return ANNC_STATUS_OK;
+  } catch (...) {
+    return state.Fail(ANNC_STATUS_ALLOCATION_FAILED, "temporary allocation failed");
+  }
 }
 
 AnncStatusCode OnnxExecutionContext::AllocateTempImpl(AnncTensorDesc* desc) {
@@ -642,7 +714,7 @@ AnncStatusCode OnnxExecutionContext::AllocateTempImpl(AnncTensorDesc* desc) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "temporary description has an unsupported element type");
   }
-  if (desc->dims == nullptr) {
+  if (desc->rank && desc->dims == nullptr) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "temporary description has no dimensions");
   }
@@ -680,23 +752,80 @@ AnncStatusCode OnnxExecutionContext::AllocateTempImpl(AnncTensorDesc* desc) {
     RecordStatus(status);
     return ANNC_STATUS_ALLOCATION_FAILED;
   }
+  if (!data) return Fail(ANNC_STATUS_ALLOCATION_FAILED, "allocator returned null");
   if (desc->flags & ANNC_ALLOCATION_ZERO) std::memset(data, 0, bytes);
-  temps_.push_back(data);
+  try {
+    temps_.push_back(data);
+  } catch (...) {
+    if (auto* error = api_->AllocatorFree(temp_allocator_, data))
+      api_->ReleaseStatus(error);
+    throw;
+  }
   desc->data = data;
   return ANNC_STATUS_OK;
 }
 
-void OnnxExecutionContext::ReportError(AnncExecutionHandle* handle,
-                                       AnncStatusCode status,
+void OnnxExecutionContext::ReportError(void* opaque, AnncStatusCode status,
                                        const char* message) {
-  auto* state = StateOf(handle);
-  if (state == nullptr) return;
-  state->Fail(status, message != nullptr ? message : "unspecified kernel error");
+  if (status != ANNC_STATUS_OK)
+    static_cast<OnnxExecutionContext*>(opaque)->Fail(
+        status, message ? message : "unspecified kernel error");
 }
 
-// ---------------------------------------------------------------------------
-// Context-ABI site execution
-// ---------------------------------------------------------------------------
+AnncStatusCode OnnxExecutionContext::GetStatus(void* opaque) {
+  return static_cast<OnnxExecutionContext*>(opaque)->status_.load();
+}
+
+int32_t OnnxExecutionContext::NumThreads(void* opaque) {
+  return static_cast<OnnxExecutionContext*>(opaque)->pool_.num_threads();
+}
+
+void* OnnxExecutionContext::NativePool(void* opaque, const char* provider) {
+  if (!provider || std::strcmp(provider, "onnxruntime") != 0) return nullptr;
+  return static_cast<OnnxExecutionContext*>(opaque)->pool_.native_pool();
+}
+
+AnncStatusCode OnnxExecutionContext::Dispatch(
+    int64_t total, const annc::threadpool::ParallelForOptions& options,
+    AnncContextTask task, void* task_data) {
+  if (total < 0 || !task)
+    return Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid parallel request");
+  if (!total) return status_.load();
+  try {
+    if (pool_.in_parallel_region() || options.max_parallelism.value_or(0) == 1)
+      task(task_data, 0, total);
+    else
+      pool_.parallel_for(total, options, [&](int64_t first, int64_t last) {
+        try { task(task_data, first, last); }
+        catch (...) { Fail(ANNC_STATUS_INTERNAL, "parallel task raised an exception"); }
+      });
+  } catch (...) {
+    return Fail(ANNC_STATUS_INTERNAL, "parallel dispatch raised an exception");
+  }
+  return status_.load();
+}
+
+AnncStatusCode OnnxExecutionContext::ParallelFor(
+    void* opaque, int64_t total, int64_t grain, AnncContextTask task,
+    void* task_data) {
+  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
+  if (grain < 0) return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "negative grain");
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = grain;
+  return state.Dispatch(total, options, task, task_data);
+}
+
+AnncStatusCode OnnxExecutionContext::Shard(
+    void* opaque, int32_t max_parallelism, int64_t total, int64_t cost,
+    AnncContextTask task, void* task_data) {
+  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
+  if (max_parallelism < 1 || cost < 0)
+    return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid shard options");
+  annc::threadpool::ParallelForOptions options;
+  options.max_parallelism = max_parallelism;
+  options.cost_per_unit = cost;
+  return state.Dispatch(total, options, task, task_data);
+}
 
 namespace {
 
@@ -730,7 +859,7 @@ void BuildMemRefDescriptor(int64_t rank, const int64_t* dims, void* data,
 
 }  // namespace
 
-OrtStatus* ComputeWithContext(const OrtApi* api,
+OrtStatus* ComputeLegacyContext(const OrtApi* api,
                               OrtKernelContext* kernel_context,
                               const ContextCall& request) {
   const bool timing = TimingEnabled();
@@ -832,10 +961,6 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   return nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// Kernel entry dispatch
-// ---------------------------------------------------------------------------
-
 std::int32_t CallContextKernel(void* symbol, const std::vector<void*>& args) {
   switch (args.size()) {
     case 1:
@@ -905,6 +1030,140 @@ std::int32_t CallContextKernel(void* symbol, const std::vector<void*>& args) {
     default:
       return -1;
   }
+}
+
+OrtStatus* ComputeWithContext(const OrtApi* api,
+                              OrtKernelContext* kernel_context,
+                              const ContextCall& request) {
+  if (request.abi == "annc_execution_v2")
+    return ComputeLegacyContext(api, kernel_context, request);
+  const bool timing = TimingEnabled();
+  const auto t_start = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+  OnnxExecutionContext context(api, kernel_context, request.outputs,
+                               &request.output_slots);
+
+  if (!request.symbol || request.arg_indices.size() != request.arg_ranks.size() ||
+      request.arg_types.size() != request.arg_ranks.size())
+    return api->CreateStatus(ORT_FAIL, "ANNC EP: invalid context call contract");
+  size_t input_count = 0;
+  if (OrtStatus* status = api->KernelContext_GetInputCount(kernel_context, &input_count))
+    return status;
+  constexpr size_t kMaxRank = ANNC_CONTEXT_MAX_RANK;
+  struct InputStorage { std::array<int64_t, kMaxRank> sizes{}, strides{}; };
+  std::vector<InputStorage> storage(request.arg_indices.size());
+  std::vector<AnncTensorView> inputs(storage.size());
+  std::vector<AnncAttributeView> attrs;
+  for (const auto& value : request.i64_attrs)
+    attrs.push_back({ANNC_ATTRIBUTE_I64, 0, &value, 1});
+  context.kernelAbi()->inputs = inputs.data();
+  context.kernelAbi()->num_inputs = static_cast<uint32_t>(inputs.size());
+  context.kernelAbi()->attrs = attrs.data();
+  context.kernelAbi()->num_attrs = static_cast<uint32_t>(attrs.size());
+
+  for (size_t i = 0; i < request.arg_indices.size(); ++i) {
+    if (request.arg_indices[i] < 0 ||
+        static_cast<size_t>(request.arg_indices[i]) >= input_count)
+      return api->CreateStatus(ORT_FAIL, "ANNC EP: invalid context input index");
+    const OrtValue* value = nullptr;
+    if (OrtStatus* status = api->KernelContext_GetInput(
+            kernel_context, static_cast<size_t>(request.arg_indices[i]),
+            &value)) {
+      return status;
+    }
+    ONNXTensorElementDataType ort_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    const int64_t* shape = nullptr;
+    size_t rank = 0;
+    OrtTensorTypeAndShapeInfo* info = nullptr;
+    if (api->GetTensorElementTypeAndShapeDataReference != nullptr) {
+      if (OrtStatus* status = api->GetTensorElementTypeAndShapeDataReference(
+              value, &ort_type, &shape, &rank)) return status;
+    } else {
+      if (OrtStatus* status = api->GetTensorTypeAndShape(value, &info)) return status;
+      if (OrtStatus* status = api->GetDimensionsCount(info, &rank)) {
+        api->ReleaseTensorTypeAndShapeInfo(info);
+        return status;
+      }
+      if (OrtStatus* status = api->GetTensorElementType(info, &ort_type)) {
+        api->ReleaseTensorTypeAndShapeInfo(info);
+        return status;
+      }
+    }
+    if (static_cast<int64_t>(rank) != request.arg_ranks[i] ||
+        rank > static_cast<size_t>(kMaxRank)) {
+      if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
+      return api->CreateStatus(
+          ORT_FAIL, "ANNC EP: kernel argument rank does not match the site");
+    }
+    auto* dims = storage[i].sizes.data();
+    if (rank > 0) {
+      if (shape != nullptr) {
+        std::copy_n(shape, rank, dims);
+      } else {
+        if (!info)
+          return api->CreateStatus(
+              ORT_FAIL, "ANNC EP: kernel argument has no shape data");
+        if (OrtStatus* status = api->GetDimensions(info, dims, rank)) {
+          api->ReleaseTensorTypeAndShapeInfo(info);
+          api->ReleaseStatus(status);  // replaced by the message below
+          return api->CreateStatus(
+              ORT_FAIL, "ANNC EP: cannot read a kernel argument shape");
+        }
+      }
+    }
+    if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
+    AnncElementType element = 0;
+    if (!AnncElementFromOrt(ort_type, &element)) {
+      return api->CreateStatus(
+          ORT_FAIL, "ANNC EP: unsupported kernel argument element type");
+    }
+    if (element != request.arg_types[i]) {
+      return api->CreateStatus(
+          ORT_FAIL,
+          "ANNC EP: kernel argument element type does not match the site");
+    }
+    const void* raw = nullptr;
+    if (OrtStatus* status = api->GetTensorData(value, &raw)) return status;
+    size_t bytes;
+    if (!annc::kernels::contextByteCount(element, rank, dims, &bytes) ||
+        (bytes && !raw))
+      return api->CreateStatus(ORT_FAIL, "ANNC EP: invalid input tensor shape or data");
+    int64_t stride = 1;
+    for (size_t axis = rank; axis > 0; --axis) {
+      storage[i].strides[axis - 1] = stride;
+      if (dims[axis - 1] && stride > INT64_MAX / dims[axis - 1])
+        return api->CreateStatus(ORT_FAIL, "ANNC EP: input stride overflow");
+      stride *= dims[axis - 1];
+    }
+    inputs[i] = {const_cast<void*>(raw), const_cast<void*>(raw), 0, dims,
+                 storage[i].strides.data(), element, static_cast<uint32_t>(rank),
+                 ANNC_LAYOUT_STRIDED, ANNC_TENSOR_BOUND | ANNC_TENSOR_READ_ONLY};
+  }
+
+  const auto t_prepared = timing ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  const AnncStatusCode status_code =
+      reinterpret_cast<AnncKernelFn>(request.symbol)(context.kernelAbi());
+  if (timing) {
+    const auto t_end = std::chrono::steady_clock::now();
+    ContextTimer().Note(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_prepared - t_start)
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_end - t_prepared)
+            .count());
+  }
+  if (OrtStatus* error = context.TakeError()) return error;
+  if (status_code != 0) {
+    char message[128];
+    std::snprintf(message, sizeof(message),
+                  "ANNC EP: kernel returned status %u", status_code);
+    return api->CreateStatus(ORT_FAIL, message);
+  }
+  if (!context.AllOutputsAllocated()) {
+    return api->CreateStatus(
+        ORT_FAIL, "ANNC EP: kernel did not allocate every declared output");
+  }
+  return nullptr;
 }
 
 }  // namespace annc_ep

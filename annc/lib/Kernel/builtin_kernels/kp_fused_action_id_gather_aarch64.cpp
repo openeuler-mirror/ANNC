@@ -1,208 +1,272 @@
-#include "Kernel/MemRefTypes.h"
-#include "Kernel/KernelStatus.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
+/* Copyright 2025 The Huawei Technologies Co. Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
 
-#include "llvm/Support/raw_ostream.h"
+#include "Context/KernelContextUtils.h"
 
 namespace {
 
-// Fused double gather, ported from the 812 KPFusedEmbeddingActionIdGather TF
-// kernel (tf_custom_ops/kernels/embedding_fused_action_id_gather.cc).
-//
-// Step 1: temp[i, j, :] = params[indices1[i, j], :]      ([I10, I11, P_row])
-// Step 2: output[i, j, (k), :] = temp[indices2[i, j], (k), :]
-// Fused:  output[i, j, (k), :] = params[indices1[indices2[i, j], (k)], :]
-//
-// R1/R2: rank of indices1/indices2 (1 or 2; 1-D is normalized to the
-// 2-D form [N, 1], i.e. I10 = N, I11 = 1 — matching the JD kernel's
-// I10/I11 convention).
-// T1/T2: element type of indices1/indices2 (int64/int32; the 4 (T1,T2)
-// combos mirror the JD kernel registration: (i64,i32), (i32,i32),
-// (i64,i64), (i32,i64)).
-// params is 2D [P0, P_row].  The gathered tensor is reshaped to
-// [pack_size, a_reshaped_cols] and zero-padded per row to
-// [pack_size, a_reshaped_cols + pack_const].
-template <int R1, int R2, typename T1, typename T2>
-annc::kernels::KernelStatus kp_fused_action_id_gather_impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    AnncMemRef2DF32* output,
-    const T1* indices1_data, int64_t I10, int64_t I11,
-    AnncMemRef2DF32* params,
-    const T2* indices2_data, int64_t I20, int64_t I21,
-    int32_t pack_size, int32_t pack_const) {
-    static_assert(R1 == 1 || R1 == 2, "indices1 rank must be 1 or 2");
-    static_assert(R2 == 1 || R2 == 2, "indices2 rank must be 1 or 2");
-
-    if (!output || !indices1_data || !params || !indices2_data) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "null memref argument\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-
-    const int64_t P0 = params->sizes[0];
-    const int64_t P_row = params->sizes[1];
-    const int64_t out_rows = output->sizes[0];
-    const int64_t out_cols = output->sizes[1];
-
-    if (pack_size <= 0 || P0 <= 0 || P_row <= 0 || out_rows <= 0 ||
-        out_cols <= 0 || pack_const < 0 || I10 <= 0 || I11 <= 0 || I20 <= 0 ||
-        I21 <= 0) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "invalid shape\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (params->offset < 0 || output->offset < 0) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "negative memref offset\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (!params->aligned || !output->aligned) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "null memref data\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (params->strides[0] != P_row || params->strides[1] != 1 ||
-        output->strides[0] != out_cols || output->strides[1] != 1) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "non-contiguous memref is unsupported\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    if (pack_size != out_rows) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "pack_size mismatch\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-
-    // gathered tensor: [I20*I21, I11, P_row] (R1==2) or [I20*I21, P_row]
-    // (R1==1, I11 normalized to 1).  Reshaped row-major to
-    // [pack_size, a_reshaped_cols].
-    const int64_t gathered_rows = I20 * I21;
-    const int64_t gathered_row_elems = I11 * P_row;
-    const int64_t gathered_elems = gathered_rows * gathered_row_elems;
-    if (gathered_elems % pack_size != 0) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "gathered size not divisible by pack_size\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-    const int64_t a_reshaped_cols = gathered_elems / pack_size;
-    if (out_cols != a_reshaped_cols + pack_const) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "output column count mismatch\n";
-        return annc::kernels::KernelStatus::InvalidArgument;
-    }
-
-    const float* params_data = ANNC_MEMREF_DATA(*params);
-    float* out = ANNC_MEMREF_DATA(*output);
-
-    try {
-        std::atomic<bool> failed{false};
-        annc::threadpool::parallel_for(
-            thread_pool, gathered_rows, [&](int64_t begin, int64_t end) {
-                for (int64_t flat = begin; flat < end; ++flat) {
-                    const T2 idx2 = indices2_data[flat];
-                    if (idx2 < 0 || idx2 >= I10) {
-                        failed.store(true, std::memory_order_relaxed);
-                        return;
-                    }
-                    for (int64_t k = 0; k < I11; ++k) {
-                        const T1 idx1 = indices1_data[idx2 * I11 + k];
-                        if (idx1 < 0 || idx1 >= P0) {
-                            failed.store(true, std::memory_order_relaxed);
-                            return;
-                        }
-                        // gathered 张量按 float 元素 reshape 到
-                        // [pack_size, a_reshaped_cols]: 块 (flat, k) 的
-                        // float 起点 = (flat * I11 + k) * P_row.
-                        const int64_t float_lin = (flat * I11 + k) * P_row;
-                        const int64_t row = float_lin / a_reshaped_cols;
-                        const int64_t col = float_lin % a_reshaped_cols;
-                        std::memcpy(out + row * out_cols + col,
-                                    params_data + idx1 * P_row,
-                                    static_cast<size_t>(P_row) * sizeof(float));
-                    }
-                }
-            });
-        if (failed.load(std::memory_order_relaxed)) {
-            llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather "
-                            "failed: index out of range\n";
-            return annc::kernels::KernelStatus::InvalidArgument;
-        }
-        if (pack_const > 0) {
-            annc::threadpool::parallel_for(
-                thread_pool, pack_size, [&](int64_t begin, int64_t end) {
-                    for (int64_t row = begin; row < end; ++row) {
-                        std::memset(out + row * out_cols + a_reshaped_cols, 0,
-                                    static_cast<size_t>(pack_const) *
-                                        sizeof(float));
-                    }
-                });
-        }
-        return annc::kernels::KernelStatus::Success;
-    } catch (const std::exception& ex) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     << ex.what() << '\n';
-        return annc::kernels::KernelStatus::RuntimeError;
-    } catch (...) {
-        llvm::errs() << "[ANNC Kernel] KPFusedEmbeddingActionIdGather failed: "
-                     "unknown exception\n";
-        return annc::kernels::KernelStatus::UnknownError;
-    }
+bool multiplyFits(int64_t lhs, int64_t rhs, int64_t *product) {
+  if (lhs < 0 || rhs < 0 ||
+      (lhs && rhs > std::numeric_limits<int64_t>::max() / lhs))
+    return false;
+  *product = lhs * rhs;
+  return true;
 }
 
-// Non-template dispatch entry points.  The ANNC_KERNEL macro body is
-// comma-split at the preprocessor level, so template argument lists like
-// <1, 1> cannot appear there; these function-pointer constants give the
-// specs a comma-free way to select the rank/dtype specialization.
+inline void ZeroPadding(float *output, int64_t count) {
+  if (count == 1) {
+    output[0] = 0.0f;
+  } else if (count != 0) {
+    std::memset(output, 0, static_cast<size_t>(count) * sizeof(float));
+  }
+}
+
+template <int64_t EmbeddingDim, typename Tindices1, typename Tindices2>
+static AnncStatusCode GatherOneEmbeddingPerRow(
+    const float *params_data, const Tindices1 *indices1_data,
+    const Tindices2 *indices2_data, int64_t row_count, int64_t output_stride,
+    int64_t pack_const, float *output, int max_parallelism,
+    const annc::kernels::KernelThreadPool &workers) {
+  auto work = [&](int64_t start_row, int64_t end_row) {
+    for (int64_t row = start_row; row < end_row; ++row) {
+      const int64_t idx2 = static_cast<int64_t>(indices2_data[row]);
+      const int64_t idx1 = static_cast<int64_t>(indices1_data[idx2]);
+      float *dst = output + row * output_stride;
+      std::memcpy(dst, params_data + idx1 * EmbeddingDim,
+                  EmbeddingDim * sizeof(float));
+      ZeroPadding(dst + EmbeddingDim, pack_const);
+    }
+  };
+  return annc::kernels::Shard(max_parallelism, workers, row_count,
+                              std::max<int64_t>(1, output_stride), work);
+}
+
 template <typename T1, typename T2>
-using ActionIdGatherFn = annc::kernels::KernelStatus (*)(
-    annc::threadpool::AnncThreadPool*, AnncMemRef2DF32*, const T1*,
-    int64_t, int64_t, AnncMemRef2DF32*, const T2*, int64_t, int64_t,
-    int32_t, int32_t);
+AnncStatusCode kp_fused_action_id_gather_typed(
+    annc::kernels::KernelContext &context) {
+  const auto *params = context.getInput(0);
+  const auto *indices1 = context.getInput(1);
+  const auto *indices2 = context.getInput(2);
+  const auto *packDim = context.getInput(3);
+  const auto *pack = context.getInput(4);
+  if (!params || !indices1 || !indices2 || !packDim || !pack)
+    return context.status();
+  if (params->rank != 2 || (indices1->rank != 1 && indices1->rank != 2) ||
+      (indices2->rank != 1 && indices2->rank != 2) || packDim->rank != 0 ||
+      pack->rank != 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather input rank mismatch");
 
-// v1 默认组合 (indices1 int64, indices2 int32): 保留原符号名。
-static constexpr ActionIdGatherFn<int64_t, int32_t> kActionIdGather11 =
-    &kp_fused_action_id_gather_impl<1, 1, int64_t, int32_t>;
-static constexpr ActionIdGatherFn<int64_t, int32_t> kActionIdGather21 =
-    &kp_fused_action_id_gather_impl<2, 1, int64_t, int32_t>;
-static constexpr ActionIdGatherFn<int64_t, int32_t> kActionIdGather12 =
-    &kp_fused_action_id_gather_impl<1, 2, int64_t, int32_t>;
-static constexpr ActionIdGatherFn<int64_t, int32_t> kActionIdGather22 =
-    &kp_fused_action_id_gather_impl<2, 2, int64_t, int32_t>;
+  const int64_t paramsRows = params->sizes[0];
+  const int64_t embeddingDim = params->sizes[1];
+  const int64_t indices1Rows = indices1->sizes[0];
+  const int64_t indices1Cols = indices1->rank == 1 ? 1 : indices1->sizes[1];
+  int64_t indices2Count = indices2->sizes[0];
+  if (indices2->rank == 2 &&
+      !multiplyFits(indices2->sizes[0], indices2->sizes[1], &indices2Count))
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather indices2 shape overflow");
+  const int64_t packSize = *annc::kernels::contextData<int32_t>(*packDim);
+  const int64_t packConst = *annc::kernels::contextData<int32_t>(*pack);
+  if (paramsRows < 0 || embeddingDim < 0 || indices1Rows < 0 ||
+      indices1Cols < 0 || indices2Count < 0 || packSize <= 0 || packConst < 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather shape or pack value is invalid");
 
-// JD 其余 3 组 (Tindices1, Tindices2) 组合 — 后缀 <T1><T2>。
-static constexpr ActionIdGatherFn<int32_t, int32_t> kActionIdGather11_I32I32 =
-    &kp_fused_action_id_gather_impl<1, 1, int32_t, int32_t>;
-static constexpr ActionIdGatherFn<int32_t, int32_t> kActionIdGather21_I32I32 =
-    &kp_fused_action_id_gather_impl<2, 1, int32_t, int32_t>;
-static constexpr ActionIdGatherFn<int32_t, int32_t> kActionIdGather12_I32I32 =
-    &kp_fused_action_id_gather_impl<1, 2, int32_t, int32_t>;
-static constexpr ActionIdGatherFn<int32_t, int32_t> kActionIdGather22_I32I32 =
-    &kp_fused_action_id_gather_impl<2, 2, int32_t, int32_t>;
+  const T1 *indices1Data = annc::kernels::contextData<T1>(*indices1);
+  const T2 *indices2Data = annc::kernels::contextData<T2>(*indices2);
+  int64_t indices1Count = 0;
+  if (!multiplyFits(indices1Rows, indices1Cols, &indices1Count))
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather indices1 shape overflow");
+  for (int64_t i = 0; i < indices1Count; ++i) {
+    const int64_t index = static_cast<int64_t>(indices1Data[i]);
+    if (index < 0 || index >= paramsRows)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "ActionIdGather indices1 index out of range");
+  }
+  for (int64_t i = 0; i < indices2Count; ++i) {
+    const int64_t index = static_cast<int64_t>(indices2Data[i]);
+    if (index < 0 || index >= indices1Rows)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "ActionIdGather indices2 index out of range");
+  }
 
-static constexpr ActionIdGatherFn<int64_t, int64_t> kActionIdGather11_I64I64 =
-    &kp_fused_action_id_gather_impl<1, 1, int64_t, int64_t>;
-static constexpr ActionIdGatherFn<int64_t, int64_t> kActionIdGather21_I64I64 =
-    &kp_fused_action_id_gather_impl<2, 1, int64_t, int64_t>;
-static constexpr ActionIdGatherFn<int64_t, int64_t> kActionIdGather12_I64I64 =
-    &kp_fused_action_id_gather_impl<1, 2, int64_t, int64_t>;
-static constexpr ActionIdGatherFn<int64_t, int64_t> kActionIdGather22_I64I64 =
-    &kp_fused_action_id_gather_impl<2, 2, int64_t, int64_t>;
+  int64_t vectorCount = 0;
+  int64_t gatheredElements = 0;
+  if (!multiplyFits(indices2Count, indices1Cols, &vectorCount) ||
+      !multiplyFits(vectorCount, embeddingDim, &gatheredElements) ||
+      gatheredElements % packSize != 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather output shape overflow");
+  const int64_t packedCols = gatheredElements / packSize;
+  int64_t outputCols = 0;
+  if (packedCols > std::numeric_limits<int64_t>::max() - packConst)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather output shape overflow");
+  outputCols = packedCols + packConst;
+  auto *output = context.allocateOutput<float>(0, {packSize, outputCols});
+  if (!output) return context.status();
 
-static constexpr ActionIdGatherFn<int32_t, int64_t> kActionIdGather11_I32I64 =
-    &kp_fused_action_id_gather_impl<1, 1, int32_t, int64_t>;
-static constexpr ActionIdGatherFn<int32_t, int64_t> kActionIdGather21_I32I64 =
-    &kp_fused_action_id_gather_impl<2, 1, int32_t, int64_t>;
-static constexpr ActionIdGatherFn<int32_t, int64_t> kActionIdGather12_I32I64 =
-    &kp_fused_action_id_gather_impl<1, 2, int32_t, int64_t>;
-static constexpr ActionIdGatherFn<int32_t, int64_t> kActionIdGather22_I32I64 =
-    &kp_fused_action_id_gather_impl<2, 2, int32_t, int64_t>;
+  float *outputData = annc::kernels::contextData<float>(*output);
+  const float *paramsData = annc::kernels::contextData<float>(*params);
+  const int64_t outputStride = outputCols;
+  if (!vectorCount || !embeddingDim) {
+    int64_t outputElements = 0;
+    if (!multiplyFits(packSize, outputStride, &outputElements))
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "ActionIdGather output size overflow");
+    if (outputElements && !outputData)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "ActionIdGather output data is null");
+    if (outputElements)
+      std::memset(outputData, 0,
+                  static_cast<size_t>(outputElements) * sizeof(float));
+    return context.status();
+  }
+  if (!paramsData || !outputData)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "ActionIdGather data is null");
 
-} // namespace
+  try {
+    auto workers = context.getThreadPool();
+    const int maxParallelism = workers.numThreads();
+    const size_t embedding_bytes =
+        static_cast<size_t>(embeddingDim) * sizeof(float);
+    const int64_t cost_per_row = std::max<int64_t>(1, outputStride);
+
+    // The graph rewriter usually produces packSize == indices2.NumElements()
+    // and indices1Cols == 1. Keep that path free of division and modulo in its
+    // inner loop.
+    if (vectorCount % packSize == 0) {
+      const int64_t vectors_per_row = vectorCount / packSize;
+      if (indices1Cols == 1) {
+        if (vectors_per_row == 1) {
+          switch (embeddingDim) {
+            case 32:
+              return GatherOneEmbeddingPerRow<32>(
+                  paramsData, indices1Data, indices2Data, packSize,
+                  outputStride, packConst, outputData, maxParallelism, workers);
+            case 64:
+              return GatherOneEmbeddingPerRow<64>(
+                  paramsData, indices1Data, indices2Data, packSize,
+                  outputStride, packConst, outputData, maxParallelism, workers);
+            default:
+              break;
+          }
+        }
+
+        auto work = [&](int64_t start_row, int64_t end_row) {
+          for (int64_t row = start_row; row < end_row; ++row) {
+            float *dst = outputData + row * outputStride;
+            const int64_t first_vector = row * vectors_per_row;
+            for (int64_t vector = 0; vector < vectors_per_row; ++vector) {
+              const int64_t gather_index = first_vector + vector;
+              const int64_t idx2 =
+                  static_cast<int64_t>(indices2Data[gather_index]);
+              const int64_t idx1 = static_cast<int64_t>(indices1Data[idx2]);
+              std::memcpy(dst + vector * embeddingDim,
+                          paramsData + idx1 * embeddingDim, embedding_bytes);
+            }
+            ZeroPadding(dst + packedCols, packConst);
+          }
+        };
+        return annc::kernels::Shard(maxParallelism, workers, packSize,
+                                    cost_per_row, work);
+      }
+
+      auto work = [&](int64_t start_row, int64_t end_row) {
+        for (int64_t row = start_row; row < end_row; ++row) {
+          float *dst = outputData + row * outputStride;
+          const int64_t first_vector = row * vectors_per_row;
+          for (int64_t vector = 0; vector < vectors_per_row; ++vector) {
+            const int64_t gather_index = first_vector + vector;
+            const int64_t index1_col = gather_index % indices1Cols;
+            const int64_t index2_pos = gather_index / indices1Cols;
+            const int64_t idx2 = static_cast<int64_t>(indices2Data[index2_pos]);
+            const int64_t idx1 = static_cast<int64_t>(
+                indices1Data[idx2 * indices1Cols + index1_col]);
+            std::memcpy(dst + vector * embeddingDim,
+                        paramsData + idx1 * embeddingDim, embedding_bytes);
+          }
+          ZeroPadding(dst + packedCols, packConst);
+        }
+      };
+      return annc::kernels::Shard(maxParallelism, workers, packSize,
+                                  cost_per_row, work);
+    }
+
+    // Generic path for a pack size that splits one or more embedding vectors.
+    // Copy the largest contiguous source segment that fits in each output row.
+    auto work = [&](int64_t start_row, int64_t end_row) {
+      for (int64_t row = start_row; row < end_row; ++row) {
+        float *dst = outputData + row * outputStride;
+        ZeroPadding(dst + packedCols, packConst);
+
+        int64_t source_offset = row * packedCols;
+        int64_t destination_offset = 0;
+        int64_t remaining = packedCols;
+        while (remaining != 0) {
+          const int64_t vector = source_offset / embeddingDim;
+          const int64_t vector_offset = source_offset % embeddingDim;
+          const int64_t index1_col = vector % indices1Cols;
+          const int64_t index2_pos = vector / indices1Cols;
+          const int64_t idx2 = static_cast<int64_t>(indices2Data[index2_pos]);
+          const int64_t idx1 = static_cast<int64_t>(
+              indices1Data[idx2 * indices1Cols + index1_col]);
+          const int64_t copy_count =
+              std::min(embeddingDim - vector_offset, remaining);
+          std::memcpy(dst + destination_offset,
+                      paramsData + idx1 * embeddingDim + vector_offset,
+                      static_cast<size_t>(copy_count) * sizeof(float));
+          source_offset += copy_count;
+          destination_offset += copy_count;
+          remaining -= copy_count;
+        }
+      }
+    };
+    return annc::kernels::Shard(maxParallelism, workers, packSize, cost_per_row,
+                                work);
+  } catch (...) {
+    return context.error(ANNC_STATUS_INTERNAL, "ActionIdGather failed");
+  }
+}
+
+AnncStatusCode kp_fused_action_id_gather_impl(
+    annc::kernels::KernelContext &context) {
+  const auto *indices1 = context.getInput(1);
+  const auto *indices2 = context.getInput(2);
+  if (!indices1 || !indices2) return context.status();
+  if (indices1->element_type == ANNC_ELEMENT_TYPE_I32) {
+    if (indices2->element_type == ANNC_ELEMENT_TYPE_I32)
+      return kp_fused_action_id_gather_typed<int32_t, int32_t>(context);
+    if (indices2->element_type == ANNC_ELEMENT_TYPE_I64)
+      return kp_fused_action_id_gather_typed<int32_t, int64_t>(context);
+  } else if (indices1->element_type == ANNC_ELEMENT_TYPE_I64) {
+    if (indices2->element_type == ANNC_ELEMENT_TYPE_I32)
+      return kp_fused_action_id_gather_typed<int64_t, int32_t>(context);
+    if (indices2->element_type == ANNC_ELEMENT_TYPE_I64)
+      return kp_fused_action_id_gather_typed<int64_t, int64_t>(context);
+  }
+  return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                       "ActionIdGather indices must be i32 or i64");
+}
+
+}  // namespace

@@ -246,6 +246,14 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
       ++position;
     }
   }
+  if (entry.contains("context_i64_attrs")) {
+    const auto& attrs = entry["context_i64_attrs"];
+    if (!attrs.is_array()) return false;
+    for (const auto& value : attrs) {
+      if (!value.is_number_integer()) return false;
+      site->contextI64Attrs.push_back(value.get<int64_t>());
+    }
+  }
   if (entry.contains("kernel_arg_order") && entry["kernel_arg_order"].is_array()) {
     for (const auto& value : entry["kernel_arg_order"]) {
       if (!value.is_number_integer()) return false;
@@ -259,7 +267,7 @@ bool ReadSite(const nlohmann::json& entry, Site* site) {
 
 std::string CacheEntryPath(const std::string& signature) {
   if (signature.size() < 2) return {};
-  return CacheRoot() + "/v1/" + signature.substr(0, 2) + "/" + signature;
+  return CacheRoot() + "/context-v3/" + signature.substr(0, 2) + "/" + signature;
 }
 
 std::string ProcessTempDir() {

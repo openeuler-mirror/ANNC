@@ -4,7 +4,7 @@
     {
       "name": "kp_embedding_padding_fast",
       "kernel": "fused_kp_embedding_padding_fast",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 200,
       "graph": [
         "origin_cast = Cast(origin_shape)",
@@ -39,7 +39,7 @@
     {
       "name": "kp_embedding_padding",
       "kernel": "fused_kp_embedding_padding",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 190,
       "graph": [
         "origin_cast = Cast(origin_shape)",
@@ -71,7 +71,7 @@
     {
       "name": "kp_sparse_select",
       "kernel": "fused_kp_sparse_select",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 180,
       "graph": [
         "x = Reshape(a)",
@@ -113,48 +113,9 @@
       ]
     },
     {
-      "name": "kp_sparse_reshape_dynamic_limit",
-      "kernel": "fused_kp_sparse_reshape_dynamic_limit",
-      "abi": "annc_execution_v2",
-      "priority": 160,
-      "graph": [
-        "keys_shape = Shape(keys)",
-        "rows = StridedSlice(keys_shape)",
-        "packed_shape = Pack(rows, pack_const)",
-        "input_shape = Cast(packed_shape)",
-        "keys_slice = StridedSlice(keys, begin)",
-        "keys_column = Reshape(keys_slice)",
-        "range = Range(start=0, range_limit, delta=1)",
-        "range_column = Reshape(range)",
-        "range_i64 = Cast(range_column)",
-        "indices = ConcatV2(range_i64, keys_column)",
-        "(out_indices, out_shape) = SparseReshape(indices, input_shape, new_shape)"
-      ],
-      "inputs": [
-        "keys",
-        "begin",
-        "pack_const",
-        "new_shape",
-        "range_limit"
-      ],
-      "outputs": ["out_indices", "out_shape"],
-      "where": [
-        "rows.shrinkAxisMask == 1",
-        "keys_slice.beginMask == 1",
-        "keys_slice.endMask == 1",
-        "keys_slice.shrinkAxisMask == 2",
-        "packed_shape.axis == 0",
-        "rank(keys) == 2",
-        "rank(begin) == 1",
-        "rank(pack_const) == 0",
-        "rank(new_shape) == 1",
-        "rank(range_limit) == 0"
-      ]
-    },
-    {
       "name": "kp_sparse_reshape",
       "kernel": "fused_kp_sparse_reshape",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 170,
       "graph": [
         "keys_shape = Shape(keys)",
@@ -187,7 +148,7 @@
       "name": "kp_sparse_segment_mean",
       "pattern": "kp_sparse_segment_reduce",
       "kernel": "fused_kp_sparse_segment_reduce",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 150,
       "graph": [
         "segment_ids = StridedSlice(keys, begin)",
@@ -213,7 +174,7 @@
       "name": "kp_sparse_segment_sum",
       "pattern": "kp_sparse_segment_reduce",
       "kernel": "fused_kp_sparse_segment_reduce",
-      "abi": "annc_execution_v2",
+      "abi": "annc_context_v3",
       "priority": 150,
       "graph": [
         "segment_ids = StridedSlice(keys, begin)",
@@ -238,8 +199,7 @@
     {
       "name": "kp_embedding_action_id_gather",
       "kernel": "fused_kp_embedding_action_id_gather",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 140,
       "graph": [
         "inner = Gather(params, indices1, axis=0)",
@@ -250,7 +210,7 @@
         "padding = Fill(padding_shape, value=0.0)",
         "output = ConcatV2(reshaped, padding, axis=-1)"
       ],
-      "inputs": ["indices1", "params", "indices2", "pack_dim", "pack"],
+      "inputs": ["params", "indices1", "indices2", "pack_dim", "pack"],
       "outputs": ["output"],
       "where": [
         "inner.batch_dims == 0",
@@ -266,8 +226,7 @@
     {
       "name": "kp_target_behavior_interaction",
       "kernel": "fused_kp_target_behavior_interaction",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 130,
       "graph": [
         "batch_matmul = BatchMatMul(batch_input, weight)",
@@ -294,8 +253,7 @@
       "name": "kp_sparse_dynamic_stitch_n2",
       "pattern": "kp_sparse_dynamic_stitch",
       "kernel": "fused_kp_sparse_dynamic_stitch_n2",
-      "abi": "mlir_ciface",
-      "buffer_outputs": true,
+      "abi": "annc_context_v3",
       "priority": 120,
       "graph": [
         "size = Size(x)",

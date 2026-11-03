@@ -1,138 +1,247 @@
+/* Copyright 2025 The Huawei Technologies Co. Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <exception>
+#include <limits>
+#include <string>
 
-#include "Kernel/ExecutionContextUtils.h"
-#include "Kernel/KernelStatus.h"
-#include "Kernel/MemRefTypes.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
+#include "Context/KernelContextUtils.h"
 
 namespace {
 
-// Fused embedding padding, ported from the 812 KPFusedEmbeddingPadding TF
-// kernel, adapted to the Execution V2 ABI (outputs allocated through the
-// execution context callbacks).
-//
-//   padding_rows = origin_shape[0] - input_rows
-//   reshape_rows = (padding_rows + data.rows) * data.cols / reshape_sizes[1]
-//   pack must equal data.cols (812 check: embedding dims)
-// Fast variant outputs two scalar slots only; the full variant also writes
-// slot 1 as the padded [reshape_rows, reshape_cols] data.
-//
-// 移植补查 (812 未查): data.rows == input_rows (不等时 812 会越界读或留未
-// 初始化区), 拒绝而非静默错误。
-template <bool HasOutData>
-annc::kernels::KernelStatus kpFusedEmbeddingPaddingImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef1DI64* origin_shape,
-    AnncMemRef0DI32* input_rows, AnncMemRef0DI32* pack, AnncMemRef2DF32* data,
-    AnncMemRef1DI32* reshape_sizes) {
-  (void)thread_pool;
-  if (!execution || !origin_shape || !input_rows || !pack || !data ||
-      !reshape_sizes) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+// Parallelism is useful only after the operation is large enough to amortize
+// worker-pool scheduling cost. The threshold is expressed in float elements.
+constexpr int64_t kParallelThresholdElements = 1 << 20;
+constexpr int kMaxParallelThreads = 8;
 
-  const int64_t data_rows = data->sizes[0];
-  const int64_t data_cols = data->sizes[1];
-  if (origin_shape->sizes[0] != 2 || reshape_sizes->sizes[0] != 2) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+bool MultiplyFitsInt64(int64_t lhs, int64_t rhs, int64_t* product) {
+  if (lhs < 0 || rhs < 0) {
+    return false;
   }
-  if (data_rows < 0 || data_cols <= 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+  if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
+    return false;
   }
-  const int64_t origin_rows = ANNC_MEMREF_DATA(*origin_shape)[0];
-  const int32_t input_rows_v = *ANNC_MEMREF_DATA(*input_rows);
-  const int32_t r0 = ANNC_MEMREF_DATA(*reshape_sizes)[0];
-  const int32_t reshape_cols = ANNC_MEMREF_DATA(*reshape_sizes)[1];
-  const int32_t pack_v = *ANNC_MEMREF_DATA(*pack);
+  *product = lhs * rhs;
+  return true;
+}
 
-  const int64_t padding_rows = origin_rows - input_rows_v;
-  if (padding_rows < 0 || input_rows_v < 0 || r0 != -1 || reshape_cols <= 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
-  // 812: pack 必须等于 embedding dims (Fill 形状与 data 一致的 ConcatV2
-  // 语义要求)。
-  if (pack_v != data_cols) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
-  if (input_rows_v != data_rows) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
-  if (data->strides[0] != data_cols || data->strides[1] != 1 ||
-      !data->aligned) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+bool FloatBufferFitsSizeT(int64_t elements) {
+  return elements >= 0 &&
+         static_cast<uint64_t>(elements) <=
+             std::numeric_limits<size_t>::max() / sizeof(float);
+}
 
-  const int64_t output_rows = padding_rows + data_rows;
-  const int64_t output_cols = data_cols;
-  if (output_rows * output_cols % reshape_cols != 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+void CopyAndPadSerial(const float* input_data, float* output_data,
+                      int64_t copy_elements, int64_t padding_elements) {
+  if (copy_elements != 0) {
+    std::memcpy(output_data, input_data,
+                static_cast<size_t>(copy_elements) * sizeof(float));
   }
-  const int64_t reshape_rows = output_rows * output_cols / reshape_cols;
-
-  try {
-    auto out_padding_rows =
-        annc::kernels::execution::allocateOutput0DI32(
-            execution, 0, ANNC_ALLOCATION_NONE);
-    if (!out_padding_rows) {
-      llvm::consumeError(out_padding_rows.takeError());
-      return annc::kernels::KernelStatus::RuntimeError;
-    }
-    if (HasOutData) {
-      auto out_data = annc::kernels::execution::allocateOutput2DF32(
-          execution, 1, reshape_rows, reshape_cols, ANNC_ALLOCATION_NONE);
-      if (!out_data) {
-        llvm::consumeError(out_data.takeError());
-        return annc::kernels::KernelStatus::RuntimeError;
-      }
-      float* out = ANNC_MEMREF_DATA(*out_data);
-      const float* src = ANNC_MEMREF_DATA(*data);
-      std::memcpy(out, src,
-                  static_cast<size_t>(input_rows_v) * data_cols *
-                      sizeof(float));
-      std::memset(out + static_cast<size_t>(input_rows_v) * data_cols, 0,
-                  static_cast<size_t>(padding_rows) * data_cols *
-                      sizeof(float));
-    } else {
-      auto out_reshape_rows =
-          annc::kernels::execution::allocateOutput0DI32(
-              execution, 1, ANNC_ALLOCATION_NONE);
-      if (!out_reshape_rows) {
-        llvm::consumeError(out_reshape_rows.takeError());
-        return annc::kernels::KernelStatus::RuntimeError;
-      }
-      *ANNC_MEMREF_DATA(*out_reshape_rows) =
-          static_cast<int32_t>(reshape_rows);
-    }
-    *ANNC_MEMREF_DATA(*out_padding_rows) =
-        static_cast<int32_t>(padding_rows);
-    return annc::kernels::KernelStatus::Success;
-  } catch (const std::exception&) {
-    return annc::kernels::KernelStatus::RuntimeError;
-  } catch (...) {
-    return annc::kernels::KernelStatus::UnknownError;
+  if (padding_elements != 0) {
+    std::memset(output_data + copy_elements, 0,
+                static_cast<size_t>(padding_elements) * sizeof(float));
   }
 }
 
-// Macro-safe dispatch helpers.
-annc::kernels::KernelStatus kpFusedEmbeddingPaddingFast(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef1DI64* origin_shape, AnncMemRef0DI32* input_rows,
-    AnncMemRef0DI32* pack, AnncMemRef2DF32* data,
-    AnncMemRef1DI32* reshape_sizes) {
-  return kpFusedEmbeddingPaddingImpl<false>(
-      tp, execution, origin_shape, input_rows, pack, data, reshape_sizes);
+void CopyAndPad(annc::kernels::KernelContext& context, const float* input_data,
+                float* output_data, int64_t input_rows, int64_t padding_rows,
+                int64_t cols) {
+  int64_t copy_elements = 0;
+  int64_t padding_elements = 0;
+  if (!MultiplyFitsInt64(input_rows, cols, &copy_elements) ||
+      !MultiplyFitsInt64(padding_rows, cols, &padding_elements)) {
+    // Shape validation in Compute normally catches this. Keep the helper
+    // defensive for callers that use it independently.
+    return;
+  }
+
+  if (padding_elements > std::numeric_limits<int64_t>::max() - copy_elements) {
+    return;
+  }
+  const int64_t total_elements = copy_elements + padding_elements;
+  // Keep small copies on the libc path; this also avoids worker-pool overhead.
+  if (total_elements < kParallelThresholdElements) {
+    CopyAndPadSerial(input_data, output_data, copy_elements, padding_elements);
+    return;
+  }
+
+  auto workers = context.getThreadPool();
+  const int64_t work_threads = total_elements / kParallelThresholdElements;
+  const int requested_threads = static_cast<int>(std::min<int64_t>(
+      {work_threads, workers.numThreads(), kMaxParallelThreads}));
+  if (requested_threads > 1) {
+    auto copy_and_zero = [&](int64_t begin, int64_t end) {
+      if (begin < copy_elements) {
+        const int64_t copy_end = std::min(end, copy_elements);
+        std::memcpy(output_data + begin, input_data + begin,
+                    static_cast<size_t>(copy_end - begin) * sizeof(float));
+      }
+      if (end > copy_elements) {
+        const int64_t padding_begin = std::max(begin, copy_elements);
+        std::memset(output_data + padding_begin, 0,
+                    static_cast<size_t>(end - padding_begin) * sizeof(float));
+      }
+    };
+    annc::kernels::Shard(requested_threads, workers, total_elements, 1,
+                         copy_and_zero);
+    return;
+  }
+
+  CopyAndPadSerial(input_data, output_data, copy_elements, padding_elements);
 }
 
-annc::kernels::KernelStatus kpFusedEmbeddingPaddingFull(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef1DI64* origin_shape, AnncMemRef0DI32* input_rows,
-    AnncMemRef0DI32* pack, AnncMemRef2DF32* data,
-    AnncMemRef1DI32* reshape_sizes) {
-  return kpFusedEmbeddingPaddingImpl<true>(
-      tp, execution, origin_shape, input_rows, pack, data, reshape_sizes);
+// Preserve TensorShape::DebugString diagnostics without a TensorFlow
+// dependency.
+std::string ShapeDebugString(const AnncTensorView& tensor) {
+  std::string shape = "[";
+  for (uint32_t i = 0; i < tensor.rank; ++i) {
+    if (i != 0) shape += ',';
+    shape += std::to_string(tensor.sizes[i]);
+  }
+  return shape + ']';
+}
+
+AnncStatusCode kpFusedEmbeddingPadding(annc::kernels::KernelContext& context,
+                                       bool fast) {
+  // Context slots follow the shared schema, rather than the TF op input order.
+  const auto* origin_shape = context.getInput(0);
+  const auto* input_rows = context.getInput(1);
+  const auto* pack = context.getInput(2);
+  const auto* input = context.getInput(3);
+  const auto* reshape_sizes = context.getInput(4);
+  if (!origin_shape || !input_rows || !pack || !input || !reshape_sizes)
+    return context.status();
+
+  if (origin_shape->rank != 1)
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("origin_shape dims must 1D, not " + ShapeDebugString(*origin_shape))
+            .c_str());
+  if (origin_shape->sizes[0] != 2)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         ("origin_shape NumElements must == 2, not " +
+                          std::to_string(origin_shape->sizes[0]))
+                             .c_str());
+  if (input->rank != 2)
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("input dims must 2D, not " + ShapeDebugString(*input)).c_str());
+  if (input_rows->rank != 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "input_rows must be a scalar");
+  if (reshape_sizes->rank != 1)
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("sizes input must be 1-D, not " + ShapeDebugString(*reshape_sizes))
+            .c_str());
+  if (reshape_sizes->sizes[0] != 2)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "reshape_sizes NumElements must == 2");
+
+  const int64_t origin_rows =
+      annc::kernels::contextData<int64_t>(*origin_shape)[0];
+  const int64_t input_rows_value =
+      *annc::kernels::contextData<int32_t>(*input_rows);
+  const int64_t reshape_cols =
+      annc::kernels::contextData<int32_t>(*reshape_sizes)[1];
+  const int64_t output_cols = input->sizes[1];
+  if (!(origin_rows >= 0 && input_rows_value >= 0 &&
+        input_rows_value <= origin_rows))
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("Pooling size(" + std::to_string(input_rows_value) +
+         ") is greater than Input size(" + std::to_string(origin_rows) + ")")
+            .c_str());
+  const int64_t padding_rows = origin_rows - input_rows_value;
+  if (input_rows_value != input->sizes[0])
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         ("input_rows(" + std::to_string(input_rows_value) +
+                          ") is not equal to input rows(" +
+                          std::to_string(input->sizes[0]) + ")")
+                             .c_str());
+  const int64_t output_rows = padding_rows + input_rows_value;
+  if (reshape_cols <= 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT, "reshape_cols must > 0");
+  if (annc::kernels::contextData<int32_t>(*reshape_sizes)[0] != -1)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT, "reshape[0] is not -1");
+  // TensorFlow's scalar accessor enforces this precondition implicitly.
+  if (pack->rank != 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT, "pack must be a scalar");
+  if (*annc::kernels::contextData<int32_t>(*pack) != output_cols)
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("pack(" + std::to_string(*annc::kernels::contextData<int32_t>(*pack)) +
+         ") is not equal to embedding dims")
+            .c_str());
+  if (padding_rows > std::numeric_limits<int32_t>::max())
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         ("padding rows exceed int32 output range: " +
+                          std::to_string(padding_rows))
+                             .c_str());
+
+  int64_t output_elements = 0;
+  if (!MultiplyFitsInt64(output_rows, output_cols, &output_elements))
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "output element count overflows int64");
+  if (!FloatBufferFitsSizeT(output_elements))
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "output byte size exceeds size_t range");
+
+  auto* output0 = context.allocateOutput<int32_t>(0, {});
+  if (!output0) return context.status();
+  *annc::kernels::contextData<int32_t>(*output0) =
+      static_cast<int32_t>(padding_rows);
+  if (output_elements % reshape_cols != 0)
+    return context.error(
+        ANNC_STATUS_INVALID_ARGUMENT,
+        ("padding cannot reshape to [-1, " + std::to_string(reshape_cols) + "]")
+            .c_str());
+  const int64_t reshape_rows = output_elements / reshape_cols;
+  if (fast) {
+    if (reshape_rows > std::numeric_limits<int32_t>::max())
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           ("reshape rows exceed int32 output range: " +
+                            std::to_string(reshape_rows))
+                               .c_str());
+    auto* output1 = context.allocateOutput<int32_t>(1, {});
+    if (!output1) return context.status();
+    *annc::kernels::contextData<int32_t>(*output1) =
+        static_cast<int32_t>(reshape_rows);
+    return context.status();
+  }
+
+  auto* output1 =
+      context.allocateOutput<float>(1, {reshape_rows, reshape_cols});
+  if (!output1) return context.status();
+  float* output_data = annc::kernels::contextData<float>(*output1);
+  const float* input_data = annc::kernels::contextData<float>(*input);
+  CopyAndPad(context, input_data, output_data, input_rows_value, padding_rows,
+             output_cols);
+  return context.status();
+}
+
+AnncStatusCode kpFusedEmbeddingPaddingImpl(
+    annc::kernels::KernelContext& context) {
+  return kpFusedEmbeddingPadding(context, false);
+}
+
+AnncStatusCode kpFusedEmbeddingPaddingFastImpl(
+    annc::kernels::KernelContext& context) {
+  return kpFusedEmbeddingPadding(context, true);
 }
 
 }  // namespace

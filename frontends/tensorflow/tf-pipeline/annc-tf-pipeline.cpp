@@ -11,6 +11,7 @@
 
 #include "Dialect/Atir/AtirOps.h"
 #include "Helper.h"
+#include "Support/GemmConfig.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -234,9 +235,9 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::vector<std::string> optArgs = {
       anncOpt, rawAtir.string(), rankInferencePass,
       identityCanonicalizePass};
-  // Epilogue discovery only matters at ANNC_GEMM=2; OpFusion applies the same
-  // gate when consuming the candidates, so plain-MatMul runs skip the pass.
-  if (annc::anncGemmFusionLevel() == 2)
+  // Discover epilogues only in Epilogue and All modes; OpFusion uses the
+  // same gate when consuming candidates. Prepack alone skips discovery.
+  if (annc::gemmConfig().epilogue)
     optArgs.push_back(epilogueDiscoveryPass);
   optArgs.insert(optArgs.end(), {fusionPass, "-o", fusedAtir.string()});
 
@@ -260,11 +261,11 @@ static bool runGraphDefRewrite(int argc, char **argv) {
         "--annc-aarch64-gemm-pipeline", "-o", loweredMlir.string()};
     std::vector<std::string> linkArgs = {
         annc, loweredMlir.string(), "--shared", "-o", generatedSo.string()};
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-    asmArgs[3] = "--annc-aarch64-gemm-pipeline=packed-c=" + packedC.string();
-    linkArgs.push_back("--packed-rhs-c");
-    linkArgs.push_back(packedC.string());
-#endif
+    if (annc::gemmConfig().prepack) {
+      asmArgs[3] = "--annc-aarch64-gemm-pipeline=packed-c=" + packedC.string();
+      linkArgs.push_back("--packed-rhs-c");
+      linkArgs.push_back(packedC.string());
+    }
     ok = ok && runCommand(asmArgs, opts.verbose) &&
          runCommand(linkArgs, opts.verbose);
   }

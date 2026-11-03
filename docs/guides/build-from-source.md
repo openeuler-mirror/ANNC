@@ -69,7 +69,6 @@ ninja && ninja install
 - `--kdnn-source [LOCAL|REMOTE|RELEASE]`：KDNN 来源（`build.sh` 默认 `RELEASE`，CMake 默认 `LOCAL`）；`LOCAL` 用本地 `third_party/KDNN`，`REMOTE` 从 git 仓库 FetchContent
 - `--enable-kdnn-adaptor` / `--disable-kdnn-adaptor`：启用/关闭内置 KDNN adaptor kernel（默认关闭）；关闭时 KDNN 来源选项不产生实际集成
 - `--kdnn-lib-variant <variant>`：RELEASE 模式下选择库变体（默认 `sve-threadpool`）
-- `--enable-constant-folding`：启用常量折叠与 KDNN packed-B 支持（默认关闭；需要 TensorFlow 前端，与 `--enable-ort` 互斥）
 - `--kdnn-dir <path>`：LOCAL 模式下的本地 KDNN 树（默认 `third_party/KDNN`；仅 `--kdnn-source LOCAL` 有效）
 - `--regen-tf-protos` / `--regen-onnx-protos`：强制重新生成 TF / ONNX protobuf 源码
 - `--coverage`：以覆盖率插桩方式配置；首次启用需配合 `--clean`（会重建 `build/`），复用既有构建目录的绕过方式见[覆盖率报告](#覆盖率报告gcov)
@@ -88,7 +87,8 @@ ninja && ninja install
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
 | `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR` 与宿主 MLAS/KleidiAI 归档，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
-| `ANNC_GEMM_ASM_SOURCE_DIR` | 路径 | 空 | GEMM-ASM checkout（含 `Sve/`、`Neon/`）；作为 `annc` driver 汇编生成微内核的编译期默认值，运行时同名环境变量可覆盖；生成 `model_generated_kernels/*.S` 时未配置则 `annc` 报错退出 |
+| `ANNC_GEMM_PACKAGE_DIR` | 路径 | `third_party/annc-gemm-kernels` | GEMM-ASM 完整二进制包目录；包含基础归档、codegen 共享库、公开头文件、CMake 配置和 manifest，配置时校验 API 1、kernel ABI 1 及包内文件哈希；无需私有源码 |
+| `ANNC_REQUIRE_GEMM_PACKAGE` | `ON`/`OFF` | `OFF` | 可选的构建期强校验；适合 CI、发布构建等场景。开启时 CMake configure 阶段缺少兼容完整 GEMM-ASM 包即失败，避免运行时才报错；关闭时允许只构建普通工具，但 GEMM microkernel、prepack 和 epilogue 请求会明确报错 |
 | `ANNC_ENABLE_KDNN_ADAPTOR` | `ON`/`OFF` | `OFF` | 构建 KDNN 后端的内置 kernel adaptor；对应 `build.sh --enable-kdnn-adaptor`，仅 AArch64 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `LOCAL`（`build.sh` 默认覆盖为 `RELEASE`） | KDNN 来源模式；仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 时参与集成 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
@@ -96,6 +96,14 @@ ninja && ninja install
 | `ANNC_KDNN_RELEASE_URL` | URL | `https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip` | RELEASE 模式 zip 包下载地址 |
 | `ANNC_KDNN_RELEASE_SHA256` | 字符串 | `61a4b0b55a80ca742b43dde638b7fdd63c7ef36f26f3615e4f1ad008750217a8` | RELEASE 模式 zip 包 SHA256 校验值；留空则跳过校验 |
 | `ANNC_KDNN_LIB_VARIANT` | 字符串 | `sve-threadpool` | RELEASE 模式下库变体，可选 `sve-threadpool`、`sve-omp`、`sve2-threadpool`、`sve2-omp` |
+
+### GEMM-ASM 完整包
+
+`ANNC_GEMM_PACKAGE_DIR` 指定完整 GEMM-ASM 包，默认路径为
+`third_party/annc-gemm-kernels`。包内基础归档、codegen 共享库、公开头文件、
+CMake 配置和 manifest 必须作为一个版本化整体存在；不再支持单独指定或替换
+基础 `.a`。缺包时普通编译工具仍可构建，但 GEMM microkernel、静态 RHS
+预打包和 epilogue 请求会明确报错。补齐完整包后须重新配置和构建。
 
 ## 验证安装
 
@@ -129,6 +137,7 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 
 - KDNN backend（`ANNC_ENABLE_KDNN_ADAPTOR=ON`）仅支持 AArch64 平台。
 - RELEASE 模式需要系统安装 `unzip`、`rpm2cpio`、`cpio`（openEuler：`sudo yum install -y unzip rpm cpio`）。
-- `--enable-constant-folding` 需要 TensorFlow 前端与 AArch64 GEMM 微内核归档（放在 `third_party/annc-gemm-kernels/`，或设置 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`）；`--enable-ort` 下传该选项会直接报错。
+- LOCAL / RELEASE 自动检测 KDNN packed-B 接口及链接符号，仅在可用时构建对应适配器；ANNC 原生预打包能力始终构建，不受影响。
+- REMOTE 源码构建自动应用 `patches/kdnn_rhs_packed` 补丁，提供 packed-B 接口。
 - `--build-type Debug` 会把 third_party（json）一起重编；只调试 ANNC 时改用 `--annc-debug`。
 - 切换 Python 环境或 TensorFlow 版本后需重新运行 CMake（configure 时自动检测 TF）。

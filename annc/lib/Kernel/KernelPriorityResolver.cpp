@@ -1,5 +1,6 @@
 #include "Kernel/KernelPriorityResolver.h"
 #include "Kernel/KernelRegistry.h"
+#include "Support/GemmConfig.h"
 
 namespace annc {
 namespace kernels {
@@ -23,8 +24,8 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
                            bool enableKdnn) {
     auto& registry = KernelRegistry::instance();
 
-    if (enableKdnn && request.hasPackedRhsFormat()) {
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+    if (enableKdnn && request.hasPackedRhsFormat() &&
+        annc::gemmConfig().prepack) {
         if (!request.requiresSpecialization()) {
             if (registry.hasKernel(request.op_type, "kdnn_packed", request.abi)) return true;
         } else {
@@ -35,7 +36,6 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
             q.abi = request.abi;
             if (registry.hasKernel(q)) return true;
         }
-#endif
     }
 
     if (enableKdnn) {
@@ -67,14 +67,13 @@ bool hasAnyAvailableKernel(const KernelResolveRequest& request,
 
 std::optional<KernelInfo> resolveBestKernelInfo(
     const KernelResolveRequest& request, bool enableKdnn) {
-    if (enableKdnn && request.hasPackedRhsFormat()) {
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+    if (enableKdnn && request.hasPackedRhsFormat() &&
+        annc::gemmConfig().prepack) {
         if (auto info = lookupKernelForBackend(request.op_type, "kdnn_packed",
                                                request.type_constraints,
                                                request.abi)) {
             return info;
         }
-#endif
     }
 
     if (enableKdnn) {

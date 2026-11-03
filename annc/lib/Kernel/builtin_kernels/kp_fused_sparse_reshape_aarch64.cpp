@@ -1,224 +1,242 @@
 #include <cstdint>
-#include <exception>
-#include <vector>
+#include <limits>
 
-#include "Kernel/ExecutionContextUtils.h"
-#include "Kernel/KernelStatus.h"
-#include "Kernel/MemRefTypes.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
+#include "Context/KernelContextUtils.h"
 
 namespace {
 
-// Fused sparse reshape, ported from the 812 KPFusedSparseReshape TF kernel,
-// adapted to the Execution V2 ABI (outputs allocated through the execution
-// context callbacks).  Semantics:
-//
-//   col = begin[1]                          (begin is 1-D i32, 2 elements)
-//   shape_in = [num_rows, pack_const]       (num_rows = slice_input rows)
-//   indices_in[i] = [i, slice_input[i, col]]
-//   ReshapeKp(indices_in, shape_in, new_shape) — standard TF SparseReshape
-//     row-major coordinate remap, one -1 dimension allowed.
-//
-// Outputs: slot 0 = out_indices (i64 [num_rows, output_rank]),
-//          slot 1 = out_shape (i64 [output_rank]).
-// T is the pack_const element type (int32/int64); new_shape is always i64.
-template <typename T>
-annc::kernels::KernelStatus kpFusedSparseReshapeImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef2DI64* slice_input,
-    AnncMemRef1DI32* begin, const T* pack_const_data,
-    const int64_t* new_shape_data, int64_t new_shape_len) {
-  (void)thread_pool;
-  if (!execution || !slice_input || !begin || !pack_const_data ||
-      !new_shape_data) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+bool multiplyFits(int64_t lhs, int64_t rhs, int64_t* product) {
+  if (lhs < 0 || rhs < 0 ||
+      (lhs && rhs > std::numeric_limits<int64_t>::max() / lhs))
+    return false;
+  *product = lhs * rhs;
+  return true;
+}
+
+// This kernel writes two int64 values per input row. Scheduling small calls
+// costs more than the transform itself.
+constexpr int64_t kParallelRowThreshold = 4096;
+
+template <typename Work>
+AnncStatusCode RunByRows(annc::kernels::KernelContext& context,
+                         int64_t row_count, int64_t cost_per_row,
+                         const Work& work) {
+  if (row_count >= kParallelRowThreshold) {
+    const auto workers = context.getThreadPool();
+    if (workers.numThreads() > 1) {
+      return annc::kernels::Shard(workers.numThreads(), workers, row_count,
+                                  cost_per_row, work);
+    }
+  }
+  work(0, row_count);
+  return context.status();
+}
+
+AnncStatusCode WriteSingleColumnIndices(const int64_t* slice_data,
+                                        int64_t row_count, int64_t slice_cols,
+                                        int64_t selected_col,
+                                        int64_t pack_const, int64_t* output,
+                                        annc::kernels::KernelContext& context) {
+  auto work = [&](int64_t start_row, int64_t end_row) {
+    const int64_t* selected =
+        slice_data + start_row * slice_cols + selected_col;
+    int64_t input_offset = start_row * pack_const;
+    int64_t* output_row = output + start_row * 2;
+    for (int64_t row = start_row; row < end_row; ++row) {
+      output_row[0] = input_offset + *selected;
+      output_row[1] = 0;
+      selected += slice_cols;
+      input_offset += pack_const;
+      output_row += 2;
+    }
+  };
+  return RunByRows(context, row_count, 4, work);
+}
+
+AnncStatusCode WriteIdentityIndices(const int64_t* slice_data,
+                                    int64_t row_count, int64_t slice_cols,
+                                    int64_t selected_col, int64_t* output,
+                                    annc::kernels::KernelContext& context) {
+  auto work = [&](int64_t start_row, int64_t end_row) {
+    const int64_t* selected =
+        slice_data + start_row * slice_cols + selected_col;
+    int64_t* output_row = output + start_row * 2;
+    for (int64_t row = start_row; row < end_row; ++row) {
+      output_row[0] = row;
+      output_row[1] = *selected;
+      selected += slice_cols;
+      output_row += 2;
+    }
+  };
+  return RunByRows(context, row_count, 4, work);
+}
+
+template <int64_t OutputCols>
+AnncStatusCode WriteFixedWidthIndices(const int64_t* slice_data,
+                                      int64_t row_count, int64_t slice_cols,
+                                      int64_t selected_col, int64_t pack_const,
+                                      int64_t* output,
+                                      annc::kernels::KernelContext& context) {
+  static_assert(OutputCols > 1, "single-column output has a cheaper path");
+  auto work = [&](int64_t start_row, int64_t end_row) {
+    const int64_t* selected =
+        slice_data + start_row * slice_cols + selected_col;
+    int64_t input_offset = start_row * pack_const;
+    int64_t* output_row = output + start_row * 2;
+    for (int64_t row = start_row; row < end_row; ++row) {
+      const int64_t linear_index = input_offset + *selected;
+      const int64_t output_row_index = linear_index / OutputCols;
+      output_row[0] = output_row_index;
+      output_row[1] = linear_index - output_row_index * OutputCols;
+      selected += slice_cols;
+      input_offset += pack_const;
+      output_row += 2;
+    }
+  };
+  return RunByRows(context, row_count, 8, work);
+}
+
+AnncStatusCode WriteGenericIndices(const int64_t* slice_data, int64_t row_count,
+                                   int64_t slice_cols, int64_t selected_col,
+                                   int64_t pack_const, int64_t output_cols,
+                                   int64_t* output,
+                                   annc::kernels::KernelContext& context) {
+  auto work = [&](int64_t start_row, int64_t end_row) {
+    const int64_t* selected =
+        slice_data + start_row * slice_cols + selected_col;
+    int64_t input_offset = start_row * pack_const;
+    int64_t* output_row = output + start_row * 2;
+    for (int64_t row = start_row; row < end_row; ++row) {
+      const int64_t linear_index = input_offset + *selected;
+      const int64_t output_row_index = linear_index / output_cols;
+      output_row[0] = output_row_index;
+      output_row[1] = linear_index - output_row_index * output_cols;
+      selected += slice_cols;
+      input_offset += pack_const;
+      output_row += 2;
+    }
+  };
+  return RunByRows(context, row_count, 8, work);
+}
+
+AnncStatusCode kpFusedSparseReshapeImpl(
+    annc::kernels::KernelContext& context) {
+  const auto* sliceInput = context.getInput(0);
+  const auto* begin = context.getInput(1);
+  const auto* packConst = context.getInput(2);
+  const auto* newShape = context.getInput(3);
+  if (!sliceInput || !begin || !packConst || !newShape) return context.status();
+  if (sliceInput->rank != 2 || begin->rank != 1 || begin->sizes[0] != 2 ||
+      packConst->rank != 0 || newShape->rank != 1 || newShape->sizes[0] != 2)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape input rank mismatch");
+
+  const int64_t rowCount = sliceInput->sizes[0];
+  const int64_t sliceCols = sliceInput->sizes[1];
+  const int64_t selectedColumn = annc::kernels::contextData<int32_t>(*begin)[1];
+  if (selectedColumn < 0 || selectedColumn >= sliceCols)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape begin column out of range");
+  if (packConst->element_type != ANNC_ELEMENT_TYPE_I64)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape pack_const must be i64");
+  const int64_t packValue =
+      *annc::kernels::contextData<int64_t>(*packConst);
+  if (packValue < 0) {
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape pack_const must be non-negative");
   }
 
-  const int64_t num_rows = slice_input->sizes[0];
-  const int64_t dims = slice_input->sizes[1];
-  const int64_t output_rank = new_shape_len;
+  int64_t denseSize = 0;
+  if (!multiplyFits(rowCount, packValue, &denseSize))
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape input shape size overflow");
 
-  if (num_rows < 0 || dims < 0 || output_rank < 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+  const int64_t* requested = annc::kernels::contextData<int64_t>(*newShape);
+  int64_t outputShape[2];
+  int64_t specifiedProduct = 1;
+  int unknownIndex = -1;
+  for (int i = 0; i < 2; ++i) {
+    const int64_t size = requested[i];
+    if (size == -1) {
+      if (unknownIndex != -1)
+        return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                             "SparseReshape has multiple unknown dimensions");
+      unknownIndex = i;
+      outputShape[i] = 1;
+    } else {
+      if (size < 0)
+        return context.error(
+            ANNC_STATUS_INVALID_ARGUMENT,
+            "SparseReshape requested dimension must be non-negative");
+      if (!multiplyFits(specifiedProduct, size, &specifiedProduct))
+        return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                             "SparseReshape requested shape size overflow");
+      outputShape[i] = size;
+    }
   }
-  // 812 checks: begin 1-D with 2 elements, new_shape 2 elements.
-  if (begin->sizes[0] != 2 || new_shape_len != 2) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+  if (unknownIndex != -1) {
+    if (specifiedProduct <= 0)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "SparseReshape cannot infer empty dimension");
+    const int64_t missing = denseSize / specifiedProduct;
+    int64_t reconstructed = 0;
+    if (!multiplyFits(specifiedProduct, missing, &reconstructed) ||
+        reconstructed != denseSize)
+      return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                           "SparseReshape inferred shape mismatch");
+    outputShape[unknownIndex] = missing;
   }
-  if (slice_input->offset < 0 || begin->offset < 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+  int64_t outputSize = 0;
+  if (!multiplyFits(outputShape[0], outputShape[1], &outputSize) ||
+      outputSize != denseSize)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape output shape mismatch");
+
+  auto* outputIndices = context.allocateOutput<int64_t>(0, {rowCount, 2});
+  if (!outputIndices) return context.status();
+  auto* outputShapeView = context.allocateOutput<int64_t>(1, {2});
+  if (!outputShapeView) return context.status();
+
+  int64_t* outputShapeData =
+      annc::kernels::contextData<int64_t>(*outputShapeView);
+  outputShapeData[0] = outputShape[0];
+  outputShapeData[1] = outputShape[1];
+  if (rowCount == 0) return context.status();
+
+  const int64_t* sliceData = annc::kernels::contextData<int64_t>(*sliceInput);
+  int64_t* outputIndexData =
+      annc::kernels::contextData<int64_t>(*outputIndices);
+  if (outputShape[0] == rowCount && outputShape[1] == packValue) {
+    return WriteIdentityIndices(sliceData, rowCount, sliceCols, selectedColumn,
+                                outputIndexData, context);
   }
-  if ((num_rows > 0 && dims > 0 && !slice_input->aligned) ||
-      !begin->aligned) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
-  if (slice_input->strides[0] != dims || slice_input->strides[1] != 1 ||
-      begin->strides[0] != 1) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+  if (outputShape[1] == 0)
+    return context.error(ANNC_STATUS_INVALID_ARGUMENT,
+                         "SparseReshape cannot map to zero-width output");
 
-  const int32_t col = ANNC_MEMREF_DATA(*begin)[1];
-  // 812: begin[1] must < slice_input.dim_size(1).
-  if (col < 0 || col >= dims) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
-
-  try {
-    // ReshapeKp: input shape is always [num_rows, pack_const] (rank 2).
-    const int64_t pack_const = static_cast<int64_t>(*pack_const_data);
-    const int64_t input_rank = 2;
-    const int64_t input_shape[2] = {num_rows, pack_const};
-    const int64_t dense_size = num_rows * pack_const;
-    if (pack_const < 0) {
-      return annc::kernels::KernelStatus::InvalidArgument;
-    }
-
-    // Resolve the target shape, inferring a single -1 dimension.
-    std::vector<int64_t> output_shape_vec;
-    output_shape_vec.reserve(output_rank);
-    int64_t product = 1;
-    int64_t unknown_index = -1;
-    for (int64_t d = 0; d < output_rank; ++d) {
-      const int64_t size = static_cast<int64_t>(new_shape_data[d]);
-      if (size == -1) {
-        if (unknown_index != -1) {
-          return annc::kernels::KernelStatus::InvalidArgument;
-        }
-        unknown_index = d;
-        output_shape_vec.push_back(1);
-      } else {
-        if (size < 0) {
-          return annc::kernels::KernelStatus::InvalidArgument;
-        }
-        product *= size;
-        output_shape_vec.push_back(size);
-      }
-    }
-    if (unknown_index != -1) {
-      if (product <= 0) {
-        return annc::kernels::KernelStatus::InvalidArgument;
-      }
-      const int64_t missing = dense_size / product;
-      if (product * missing != dense_size) {
-        return annc::kernels::KernelStatus::InvalidArgument;
-      }
-      output_shape_vec[unknown_index] = missing;
-    }
-    int64_t output_num_elems = 1;
-    for (int64_t d = 0; d < output_rank; ++d) {
-      output_num_elems *= output_shape_vec[d];
-    }
-    if (output_num_elems != dense_size) {
-      return annc::kernels::KernelStatus::InvalidArgument;
-    }
-
-    // V2: value-dependent out_indices shape [num_rows, output_rank].
-    auto out_indices = annc::kernels::execution::allocateOutput2DI64(
-        execution, 0, num_rows, output_rank, ANNC_ALLOCATION_NONE);
-    if (!out_indices) {
-      llvm::consumeError(out_indices.takeError());
-      return annc::kernels::KernelStatus::RuntimeError;
-    }
-    auto out_shape = annc::kernels::execution::allocateOutput1DI64(
-        execution, 1, output_rank, ANNC_ALLOCATION_NONE);
-    if (!out_shape) {
-      llvm::consumeError(out_shape.takeError());
-      return annc::kernels::KernelStatus::RuntimeError;
-    }
-
-    const int64_t* keys_data = ANNC_MEMREF_DATA(*slice_input);
-    int64_t* out_idx_data = ANNC_MEMREF_DATA(*out_indices);
-    int64_t* out_shape_data = ANNC_MEMREF_DATA(*out_shape);
-
-    // 812 shortcut: input_shape == output_shape → indices unchanged.
-    const bool same_shape =
-        output_rank == input_rank && output_shape_vec[0] == input_shape[0] &&
-        output_shape_vec[1] == input_shape[1];
-    if (same_shape) {
-      for (int64_t i = 0; i < num_rows; ++i) {
-        out_idx_data[i * 2 + 0] = i;
-        out_idx_data[i * 2 + 1] = keys_data[i * dims + col];
-      }
-      out_shape_data[0] = input_shape[0];
-      out_shape_data[1] = input_shape[1];
-      return annc::kernels::KernelStatus::Success;
-    }
-
-    // Row-major coordinate remap (812 ReshapeKp).
-    const int64_t input_strides[2] = {input_shape[1], 1};
-    std::vector<int64_t> output_strides(output_rank);
-    if (output_rank > 0) {
-      output_strides[output_rank - 1] = 1;
-      for (int64_t d = output_rank - 2; d >= 0; --d) {
-        output_strides[d] =
-            output_strides[d + 1] * output_shape_vec[d + 1];
-      }
-    }
-
-    for (int64_t i = 0; i < num_rows; ++i) {
-      int64_t id = static_cast<int64_t>(i) * input_strides[0] +
-                   keys_data[i * dims + col] * input_strides[1];
-      for (int64_t j = 0; j < output_rank; ++j) {
-        out_idx_data[i * output_rank + j] = id / output_strides[j];
-        id %= output_strides[j];
-      }
-    }
-    for (int64_t j = 0; j < output_rank; ++j) {
-      out_shape_data[j] = output_shape_vec[j];
-    }
-    return annc::kernels::KernelStatus::Success;
-  } catch (const std::exception&) {
-    return annc::kernels::KernelStatus::RuntimeError;
-  } catch (...) {
-    return annc::kernels::KernelStatus::UnknownError;
+  switch (outputShape[1]) {
+    case 1:
+      // CVR, HMV and Presort all use [-1, 1].
+      return WriteSingleColumnIndices(sliceData, rowCount, sliceCols,
+                                      selectedColumn, packValue,
+                                      outputIndexData, context);
+    case 492:
+      // ADX wide embedding branch.
+      return WriteFixedWidthIndices<492>(sliceData, rowCount, sliceCols,
+                                         selectedColumn, packValue,
+                                         outputIndexData, context);
+    case 1668:
+      // ADX deep embedding branch.
+      return WriteFixedWidthIndices<1668>(sliceData, rowCount, sliceCols,
+                                          selectedColumn, packValue,
+                                          outputIndexData, context);
+    default:
+      return WriteGenericIndices(sliceData, rowCount, sliceCols, selectedColumn,
+                                 packValue, outputShape[1], outputIndexData,
+                                 context);
   }
 }
 
-// Non-template dispatch entry points (macro-safe: all commas in parens).
-annc::kernels::KernelStatus kpFusedSparseReshapeI64(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef2DI64* slice_input, AnncMemRef1DI32* begin,
-    AnncMemRef0DI64* pack_const, AnncMemRef1DI64* new_shape) {
-  return kpFusedSparseReshapeImpl<int64_t>(
-      tp, execution, slice_input, begin, ANNC_MEMREF_DATA(*pack_const),
-      ANNC_MEMREF_DATA(*new_shape), new_shape->sizes[0]);
-}
-
-annc::kernels::KernelStatus kpFusedSparseReshapeI32(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef2DI64* slice_input, AnncMemRef1DI32* begin,
-    AnncMemRef0DI32* pack_const, AnncMemRef1DI64* new_shape) {
-  return kpFusedSparseReshapeImpl<int32_t>(
-      tp, execution, slice_input, begin, ANNC_MEMREF_DATA(*pack_const),
-      ANNC_MEMREF_DATA(*new_shape), new_shape->sizes[0]);
-}
-
-// DynLimit variants: the trailing 0-D i32 range_limit is the dynamic
-// Range.limit from varlen-batch graphs.  The kernel regenerates the
-// row-number column internally and never reads it; the parameter exists only
-// to match the ABI wrapper order (keys, begin, pack_const, new_shape,
-// range_limit).
-annc::kernels::KernelStatus kpFusedSparseReshapeI64DynLimit(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef2DI64* slice_input, AnncMemRef1DI32* begin,
-    AnncMemRef0DI64* pack_const, AnncMemRef1DI64* new_shape,
-    AnncMemRef0DI32* range_limit) {
-  (void)range_limit;
-  return kpFusedSparseReshapeImpl<int64_t>(
-      tp, execution, slice_input, begin, ANNC_MEMREF_DATA(*pack_const),
-      ANNC_MEMREF_DATA(*new_shape), new_shape->sizes[0]);
-}
-
-annc::kernels::KernelStatus kpFusedSparseReshapeI32DynLimit(
-    annc::threadpool::AnncThreadPool* tp, const AnncExecutionContext* execution,
-    AnncMemRef2DI64* slice_input, AnncMemRef1DI32* begin,
-    AnncMemRef0DI32* pack_const, AnncMemRef1DI64* new_shape,
-    AnncMemRef0DI32* range_limit) {
-  (void)range_limit;
-  return kpFusedSparseReshapeImpl<int32_t>(
-      tp, execution, slice_input, begin, ANNC_MEMREF_DATA(*pack_const),
-      ANNC_MEMREF_DATA(*new_shape), new_shape->sizes[0]);
-}
 
 }  // namespace

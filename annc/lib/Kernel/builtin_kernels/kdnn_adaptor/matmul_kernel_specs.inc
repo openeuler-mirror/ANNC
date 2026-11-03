@@ -1,30 +1,12 @@
-ANNC_KERNEL(
-    Name("MatMul").Backend("kdnn").TypeConstraint<float>("T"),
-    (AnncMemRef2DF32* output,
-     AnncMemRef2DF32* lhs,
-     AnncMemRef2DF32* rhs),
-    {
-        const auto status = ::annc::kernels::kdnn_adaptor::matmul_kdnn_impl(
-            ::annc::threadpool::getCurrentThreadPool(),
-            output,
-            lhs,
-            rhs);
-        return ::annc::kernels::statusCode(status);
-    })
+// Context ABI: the implementation consumes named tensors and runtime services.
 
-// Execution-v2 variant: output allocated via the execution context, thread
-// pool resolved from the context (ONNX) or TLS (TF).
-ANNC_KERNEL(
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_MatMul_kdnn_float,
     Name("MatMul")
         .Backend("kdnn")
-        .Abi("annc_execution_v2")
-        .TypeConstraint<float>("T"),
-    (const AnncExecutionContext* execution,
-     AnncMemRef2DF32* lhs,
-     AnncMemRef2DF32* rhs),
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-        const auto status =
-            ::annc::kernels::kdnn_adaptor::matmul_kdnn_exec_v2_impl(
-                execution, lhs, rhs);
-        return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, ::annc::kernels::kdnn_adaptor::matmul_kdnn_impl);
     })

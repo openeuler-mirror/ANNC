@@ -19,7 +19,6 @@
 | `<TF_ROOT>` | TensorFlow 构建/安装根目录（含 `install/bin/predictor_server`） |
 | `<MODEL_ROOT>` | 模型与压测数据根目录 |
 | `<BRPC_CLIENT>` | brpc 压测客户端可执行文件 |
-| `<GEMM_ASM>` | GEMM-ASM 源码/include 树（含 `Sve/`、`Neon/`） |
 | `<GEMM_CONFIG>` | 外部 AArch64 GEMM tuning JSON（仓库不跟踪） |
 | `<ORT_ROOT>` | ORT 1.26.0 源码树（仅 `--all` 需要） |
 | `<ORT_BUILD>` | 同一次 ORT 构建的 `Release/` 目录（仅 `--all` 需要） |
@@ -47,8 +46,6 @@ git checkout dev
 git log -1 --oneline
 ```
 
-- `<GEMM_ASM>` 必须包含 `Sve/` 与 `Neon/`，作为汇编 include 树，在 AOT/JIT
-  编译期汇编生成的 `.S` kernel；它不是预编译 kernel 二进制。
 - 代码基线以本地 ANNC 工作树为准；远程仓库
   （`https://gitcode.com/openeuler/ANNC.git`）不包含 `third_party/KDNN`、
   `benchmark/annc-bench` 等本地/外部组件；它们按特性作为前置条件，见 §1.3。
@@ -57,7 +54,7 @@ git log -1 --oneline
 
   ```shell
   yum install cmake ninja-build protobuf-devel protobuf-compiler \
-              gcc gcc-c++ openssl-devel python3-devel numactl unzip rpm cpio \
+              gcc gcc-c++ python3-devel numactl unzip rpm cpio \
               llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
               llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
               llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
@@ -80,18 +77,16 @@ git log -1 --oneline
 | 特性 | 需要的前置 | 缺失时的行为 |
 |---|---|---|
 | AArch64 GEMM 编译/调优 | `ANNC_GEMM_CONFIG` 指向的 GEMM tuning JSON（通常来自 `benchmark/annc-bench`） | GEMM pass 报 `requires --config-path or ANNC_GEMM_CONFIG for AArch64 GEMM`，AOT/JIT 无法完成 |
-| AArch64 GEMM 微内核/小形状 | `third_party/annc-gemm-kernels/libannc_gemm_microkernels.a`（或 `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`） | `ANNC_AARCH64_GEMM_KERNELS_AVAILABLE=OFF`；不链接微内核，`GemmSmallShapeMicrokernel` 测试不注册，其余目标可构建 |
-| AOT/JIT kernel 汇编（生成 `.S`） | `<GEMM_ASM>` 的 `Sve/`、`Neon/` include 树 | `annc` 无法汇编生成的 `.S`，报 `ANNC_GEMM_ASM_SOURCE_DIR must point to ...`；不是预编译 kernel 二进制 |
+| AArch64 GEMM 微内核、prepack 与小形状 | `ANNC_GEMM_PACKAGE_DIR` 指向完整 `third_party/annc-gemm-kernels/` 包（基础归档、codegen、头文件及 manifest） | 缺包时 `GEMM-ASM package unavailable`；不链接微内核，`GemmSmallShapeMicrokernel` 测试不注册，其余目标可构建；静态 RHS 预打包、SVE 主机布局校验和 epilogue 请求明确报错，补包后需重新配置和构建 |
+| AOT/JIT epilogue 生成（输出 `.o`） | 同一份完整 GEMM-ASM 二进制包 | 缺包时实际融合请求明确报错；无需私有源码目录，整包版本/哈希不匹配在配置时拒绝 |
 | KDNN 加速 | `third_party/KDNN`（LOCAL）或网络/Release（RELEASE）/git（REMOTE），并在构建时 `--enable-kdnn-adaptor` | 不启用 KDNN kernel；不要设置 `ANNC_BACKEND=kdnn`，它不能替代构建开关 |
 | 离线构建 | 预置 `third_party/json/`；LLVM/MLIR 20 由系统包提供 | FetchContent（json）需要网络或预置源码 |
 
 > `ANNC_GEMM_CONFIG` 是 AArch64 GEMM 编译的硬前置，不是可选调优项。没有
 > `annc-bench` 时，需要提供一份兼容的 tuning JSON。
 >
-> `<GEMM_ASM>` 是汇编源码/include 树，不是 kernel 二进制。预编译微内核二进制是
-> `third_party/annc-gemm-kernels/libannc_gemm_microkernels.a`，用于另一条特性路径。
-> 使用构建机预热好的缓存或已编译 AOT 产物时，目标机可能不需要源码；冷编译仍然
-> 需要 `Sve/`、`Neon/`。
+> AOT/JIT epilogue 生成使用 `third_party/annc-gemm-kernels/` 中的完整二进制包；
+> ANNC 构建与运行不读取 GEMM-ASM 私有源码树。
 
 ## 2. 构建与安装
 
@@ -114,7 +109,7 @@ cd <ANNC_ROOT>
 export ANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include
 export ANNC_TENSORFLOW_PRELOAD=ON
 export ANNC_TENSORFLOW_CXX11_ABI=1
-export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
+# 构建前将完整 GEMM-ASM 二进制包放入 third_party/annc-gemm-kernels/
 
 ./build.sh --no-install-deps \
   --build-type Release --install-prefix <ANNC_PREFIX> --enable-tf
@@ -122,8 +117,8 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
 
 - `--enable-tf`：仅 TensorFlow 前端 + addon，自动关闭 ORT 加速栈。
 - Python 绑定默认不构建；需要时加 `--enable-python`（同时安装 pybind11/nanobind）。
-- constant folding 默认关闭；需要时显式加 `--enable-constant-folding`，并按
-  §1.3 提供 GEMM 微内核归档。`--enable-ort` 下该特性不可用（组合会直接报错）。
+- GEMM 预打包能力随构建产物一同提供，运行时由 `ANNC_GEMM=3/99` 启用，
+  无需额外编译选项；预打包需要 §1.3 的 GEMM 微内核归档。
 - `--all`：同时构建 TensorFlow 与 ORT 加速栈；ORT 侧额外需要 ORT 头文件、
   ORT 构建树与 MLAS 头文件目录，见
   [ort-ep-build-and-deploy.md](ort-ep-build-and-deploy.md)。
@@ -135,9 +130,9 @@ export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
   `LOCAL`（使用 `third_party/KDNN`，仓库不跟踪）；离线或改用 `RELEASE`/`REMOTE`
   时按 KDNN 文档指定。predictor 的 `--enable_kdnn=false` 只关闭 TF 自身 KDNN
   路径，不能替代 ANNC 的构建开关。
-- 需要 AArch64 GEMM 微内核时，把 `libannc_gemm_microkernels.a` 放到
+- 需要 AArch64 GEMM 微内核、prepack 或 epilogue 时，把完整 GEMM-ASM 包放到
   `third_party/annc-gemm-kernels/`，或设置
-  `-DANNC_AARCH64_GEMM_KERNEL_LIBRARY=<path>`；否则该特性为 OFF，对应测试不注册。
+  `-DANNC_GEMM_PACKAGE_DIR=<path>`；不再支持单独指定基础 `.a`。
 - LLVM/MLIR 查找顺序：`-DLLVM_DIR`/`-DMLIR_DIR` → 环境变量 `ANNC_LLVM_BIN` →
   `LLVM_ROOT`/`MLIR_ROOT` → `llvm-config-{22,21,20} --cmakedir`。标准
   `llvm-toolset-20` 安装且 `llvm-config-20` 在 `PATH` 时无需导出；工具链在自定义
@@ -165,7 +160,7 @@ cmake -S <ANNC_ROOT> -B <ANNC_ROOT>/build -G Ninja \
   -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
   -DANNC_TENSORFLOW_PRELOAD=ON \
   -DANNC_TENSORFLOW_CXX11_ABI=1 \
-  -DANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
+  -DANNC_REQUIRE_GEMM_PACKAGE=ON
 ```
 
 需要 Python 绑定时（默认不构建），追加 `-DANNC_ENABLE_PYTHON=ON` 与：
@@ -219,7 +214,6 @@ ninja -C <ANNC_ROOT>/build install
 | `ANNC_FUSED_OP_PATH` | 写入 GraphDef 的 `libannc_fused_op.so` 路径 | 与 optimizer 同目录 |
 | `ANNC_WORK_DIR` | JIT kernel 工作根目录 | 系统临时目录 |
 | `ANNC_GEMM_CONFIG` | 外部 AArch64 GEMM 调优 JSON | 无（需外部提供） |
-| `ANNC_GEMM_ASM_SOURCE_DIR` | GEMM-ASM 源码/include 树（`Sve/`、`Neon/`），用于汇编生成的 `.S` | `annc` 编译期默认值 |
 | `ANNC_KERNEL_LIB_PATH` | ANNC 归档与微内核归档目录 | `<ANNC_PREFIX>/lib64`（GNUInstallDirs；aarch64） |
 | `ANNC_LLVM_BIN` | LLVM 20 bin 目录；其父目录的 `lib64`/`lib` 提供 LLVM 静态归档 | 构建期写入的工具目录 |
 | `ANNC_BACKEND` | 可选后端名（如 `kdnn`） | `generic` |
@@ -230,7 +224,7 @@ ninja -C <ANNC_ROOT>/build install
 要点：
 
 - 完整 GEMM/epilogue 融合需要 **`ANNC_GEMM=2`**；未设置时 MatMul/epilogue 不
-  融合。`2` 需要 `ANNC_GEMM_ASM_SOURCE_DIR` 可用。
+  融合。`2` 需要构建时接入兼容的 GEMM-ASM 二进制包，安装时携带 codegen 共享库。
 - `ANNC_ENABLE=1` 启用 ANNCOptimizer 及其图重写；`ANNC_GEMM` 是其中的
   GEMM/epilogue 门控，其他融合算子由图重写流程处理。
 - 环境变量按进程读取；修改后重启 predictor。
@@ -294,8 +288,8 @@ export TF_ENABLE_ONEDNN_OPTS=0
 
 - 打开：`ANNC_GEMM=2`（MatMul + epilogue 尾部融合）；`0` 关闭，`1` 只做普通
   MatMul 融合。
-- 前置：`ANNC_GEMM_CONFIG` 指向外部 tuning JSON；`ANNC_GEMM_ASM_SOURCE_DIR`
-  指向含 `Sve/`、`Neon/` 的 GEMM-ASM 树。
+- 前置：`ANNC_GEMM_CONFIG` 指向外部 tuning JSON；构建时接入完整 GEMM-ASM 二进制包，
+  安装后的编译工具可加载配套 codegen 共享库。
 - 本机按 3.2 设置 `ANNC_GEMM=2` 启动 predictor。
 
 证明：
@@ -496,7 +490,7 @@ export TF_MODEL=<MODEL_ROOT>/wd_dcn/1
 export TF_DATA=<MODEL_ROOT>/wd_dcn/wd_dcn.tsv
 export BRPC_CLIENT=<BRPC_CLIENT>
 export ANNC_GEMM=2
-export ANNC_GEMM_ASM_SOURCE_DIR=<GEMM_ASM>
+# 构建前将完整 GEMM-ASM 二进制包放入 third_party/annc-gemm-kernels/
 python3 tests/e2e/tf/e2e_tf_predictor.py
 ```
 

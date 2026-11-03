@@ -1,13 +1,12 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for embedding padding (Padding + PaddingFast),
-// Execution V2: the subgraph is extracted into a private kernel func with
-// signature (!llvm.ptr, origin_shape, input_rows, pack, data, reshape_sizes)
-// -> (padding_rows, out_data/reshape_rows), abi = "annc_execution_v2".
+// Context V3 extracts the subgraph into a private kernel func with
+// signature (origin_shape, input_rows, pack, data, reshape_sizes)
+// -> (padding_rows, out_data/reshape_rows), abi = "annc_context_v3".
 
 // CONFIG: func.func private @fused_kp_embedding_padding_
-// CONFIG-SAME: %arg0: !llvm.ptr
 // CONFIG-SAME: annc.kernel
-// CONFIG-SAME: abi = "annc_execution_v2"
+// CONFIG-SAME: abi = "annc_context_v3"
 // CONFIG: func.func @main
 // CONFIG: annc.fusion_materialized
 
@@ -15,10 +14,9 @@
 // CHECK: atir.Reshape
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_embedding_padding_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<2xi64, name = "origin_shape">, %arg2: !atir.tensor<i32, name = "input_rows">, %arg3: !atir.tensor<i32, name = "pack">, %arg4: !atir.tensor<4x3xf32, name = "data">, %arg5: !atir.tensor<2xi32, name = "reshape_sizes">
+// CHECK-SAME: %arg0: !atir.tensor<2xi64, name = "origin_shape">, %arg1: !atir.tensor<i32, name = "input_rows">, %arg2: !atir.tensor<i32, name = "pack">, %arg3: !atir.tensor<4x3xf32, name = "data">, %arg4: !atir.tensor<2xi32, name = "reshape_sizes">
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_name = "fused_kp_embedding_padding_
 module attributes {module.state = "atir"} {
   func.func @main(
@@ -61,10 +59,9 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.StridedSlice
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_embedding_padding_fast_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<2xi64, name = "origin_shape">, %arg2: !atir.tensor<i32, name = "input_rows">, %arg3: !atir.tensor<i32, name = "pack">, %arg4: !atir.tensor<4x3xf32, name = "data">, %arg5: !atir.tensor<2xi32, name = "reshape_sizes">
+// CHECK-SAME: %arg0: !atir.tensor<2xi64, name = "origin_shape">, %arg1: !atir.tensor<i32, name = "input_rows">, %arg2: !atir.tensor<i32, name = "pack">, %arg3: !atir.tensor<4x3xf32, name = "data">, %arg4: !atir.tensor<2xi32, name = "reshape_sizes">
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_name = "fused_kp_embedding_padding_fast_
 module attributes {module.state = "atir"} {
   func.func @main(

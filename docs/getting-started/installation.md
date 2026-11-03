@@ -41,7 +41,7 @@ pip3 install -r requirements.txt
 基础系统依赖（两种 OS 相同）：
 
 ```shell
-sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel \
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel \
   gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
 ```
@@ -67,7 +67,6 @@ openEuler 22.03 没有 `llvm-toolset-20`：everything 仓库只提供 LLVM/MLIR 
 | `python3-devel` | pybind11 / nanobind 扩展需要的 `Python.h`（仅 `--enable-python`） |
 | `gtest-devel` | C++ 单元测试（CTest） |
 | `unzip` / `rpm`（提供 `rpm2cpio`） / `cpio` | KDNN RELEASE 模式解包 release zip；`build.sh` 默认 `--kdnn-source RELEASE`，在 CMake 之前检查这三个命令 |
-| `openssl-devel` | JIT cache key 哈希（OpenSSL Crypto）；仅 `ANNC_ENABLE_TENSORFLOW_ADDON=ON` 时需要 |
 | `protobuf-devel` / `protobuf-compiler` | 启用 TF 或 ONNX 前端时必需；`protoc` 用于校验与重新生成 proto 源码。ONNX 侧缺失即报错；TF 侧会先尝试自动下载 fallback protoc |
 
 ### 4. LLVM / MLIR 与 nlohmann/json
@@ -106,6 +105,26 @@ nlohmann/json 仍由 CMake `FetchContent` 在 configure 时获取到 `third_part
 运行期 `annc`/`annc-onnx-pipeline` 从 `ANNC_LLVM_BIN`（缺省为构建期记录值）解析 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`；目标机工具链路径与构建机不同时，需在运行环境导出。
 
 > `build.sh --enable-python` 会在缺失时自动安装 `pybind11` / `nanobind`（默认不构建 Python 绑定）；传入 `--no-install-deps` 可关闭自动安装。TensorFlow 需自行安装。
+
+### 5. GEMM 二进制依赖包
+
+使用 GEMM epilogue 时，将可信渠道交付的完整 GEMM-ASM 包放入
+`third_party/annc-gemm-kernels/`：基础 `libannc_gemm_microkernels.a`、
+`libannc_gemm_codegen.so` 及版本链接、`include/`、`cmake/`、
+`manifest.json` 和许可证一同保留。ANNC 默认就地发现并校验整包，
+无需 GEMM-ASM 私有源码，也无需预装系统 SDK。不要分别替换两个库。
+缺少完整包时仍能构建普通工具，但 GEMM microkernel、prepack 和 epilogue
+请求会在执行时报告缺少 GEMM-ASM 包。若要在构建期提前发现该问题，适合
+CI、发布构建等场景，可传 `-DANNC_REQUIRE_GEMM_PACKAGE=ON`，让 CMake
+configure 阶段在缺少兼容完整包时直接失败；自定义包目录使用
+`-DANNC_GEMM_PACKAGE_DIR=/path/to/package`。
+
+ANNC 安装会将整包复制到 `<prefix>/<libdir>/annc-gemm-kernels/`，
+编译工具通过相对 RPATH 加载 codegen；基础归档同时保持原有
+`<prefix>/<libdir>/libannc_gemm_microkernels.a` 链接位置。模型执行
+只使用已生成和链接的机器码，不加载 codegen 库。原
+`ANNC_GEMM_ASM_SOURCE_DIR` 已不再使用。版本、元数据与失败边界见
+[GEMM codegen 集成契约](../design/gemm-epilogue-codegen.md)。
 
 ## 验证
 

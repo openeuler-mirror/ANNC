@@ -1,5 +1,7 @@
 #include "Dialect/Atir/BuiltinKernelSchema.h"
 
+#include <limits>
+
 using namespace mlir;
 
 namespace atir {
@@ -52,13 +54,16 @@ std::optional<CustomOpSchema> getContextKernelSchema(
           .Result("output", 2, "T");
     }
   }
-  for (int n = 2; n <= 16; ++n) {
-    if (opName != "KPFusedSparseDynamicStitchN" + std::to_string(n)) continue;
+  if (opName == "KPFusedSparseDynamicStitch") {
+    if (attributes.size() != 1 || attributes[0] < 2 ||
+        attributes[0] > std::numeric_limits<int>::max())
+      return std::nullopt;
+    const int64_t n = attributes[0];
     auto schema =
         CustomOpSchema::get(opName).TypeVar("T").MemRefArg("x", 1, "");
     for (int i = 0; i < n; ++i)
       schema.MemRefArg("variable_" + std::to_string(i), 2, "T");
-    return schema.Result("output", 2, "T");
+    return schema.I64AttrArg("N", n).Result("output", 2, "T");
   }
   for (StringRef suffix : {"I32Sum", "I32Mean", "I64Sum", "I64Mean"}) {
     if (opName != ("KPFusedSparseSegmentReduce" + suffix).str()) continue;
@@ -87,7 +92,7 @@ std::optional<CustomOpSchema> getContextKernelSchema(
       return schema.Result("out_reshape_rows", 0, "");
     return schema.Result("out_data", 2, "T");
   }
-  for (StringRef suffix : {"I32", "I64", "I32DynLimit", "I64DynLimit"}) {
+  for (StringRef suffix : {"I64"}) {
     if (opName != ("KPFusedSparseReshape" + suffix).str()) continue;
     auto schema = CustomOpSchema::get(opName)
                       .TypeVar("T")
@@ -95,7 +100,6 @@ std::optional<CustomOpSchema> getContextKernelSchema(
                       .MemRefArg("begin", 1, "")
                       .MemRefArg("pack_const", 0, "T")
                       .MemRefArg("new_shape", 1, "");
-    if (suffix.ends_with("DynLimit")) schema.MemRefArg("range_limit", 0, "");
     return schema.Result("out_indices", 2, "").Result("out_shape", 1, "");
   }
   if (opName == "KPFusedSparseSelect") {

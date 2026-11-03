@@ -437,7 +437,7 @@ EP 的编译驱动负责创建缓存条目并复用已发布产物。发布协�
 
 实现方式复用 ORT 的 intra-op 线程池。ORT 不通过公开接口暴露线程池对象，但提供借用入口 `KernelContext_ParallelFor`（自 ORT 1.17 提供，位于 1.26.0 验收基线内）：该接口把 total 个迭代调度到当前会话的 intra-op 池上动态负载均衡执行，调用返回即全部迭代完成；会话未启用 intra-op 池（如单线程会话）时在调用线程上串行完成，不构成失败。
 
-除公开入口外，实现另有**原生池路径**（`annc_ep_native_pool.h`）：按与宿主版本绑定的 ORT 私有布局直接取出 operator pool（`kThreadPoolSlot`），经版本校验（`ANNC_EP_NATIVE_POOL_ORT_VERSION`）后调用其 `TryParallelFor`／固定块调度。该路径在构建期启用时默认可用，宿主版本不匹配时回落公开 `KernelContext_ParallelFor`。原生池使用私有 ABI，须链接宿主同源构建的归档；FTDMM/BMM 的 MLAS 路径仅在 `native_pool()` 非空时启用，其余情况走标量行路径（完整开关与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md)）。
+除公开入口外，实现另有**原生池路径**（`context/annc_ep_native_pool.h`）：按与宿主版本绑定的 ORT 私有布局直接取出 operator pool（`kThreadPoolSlot`），经版本校验（`ANNC_EP_NATIVE_POOL_ORT_VERSION`）后调用其 `TryParallelFor`／固定块调度。该路径在构建期启用时默认可用，宿主版本不匹配时回落公开 `KernelContext_ParallelFor`。原生池使用私有 ABI，须链接宿主同源构建的归档；FTDMM/BMM 的 MLAS 路径仅在 `native_pool()` 非空时启用，其余情况走标量行路径（完整开关与回落条件见 [addons/onnxruntime/README.md](../../../addons/onnxruntime/README.md)）。
 
 执行器的接入流程在两条宿主路径上分别实现，取池语义相同（kernel 均经 `resolveThreadPool` 取池，上下文优先）：
 
@@ -611,8 +611,8 @@ stateDiagram-v2
 | -------------------------------------------- | ------------------------------------------------------------ |
 | `addons/onnxruntime/annc_ep.cpp`             | EP 主体：符号表、参数绑定与执行、工厂与 Ep 及节点计算信息回调、C 入口                     |
 | `addons/onnxruntime/annc_ep_site.cc`         | 站点校验：上下文站点与兼容站点两套规则、模式白名单（§4.3）                       |
-| `addons/onnxruntime/annc_ep_execution.{h,cc}` | 执行上下文构造与三回调、线程池适配器、输出槽位分配与校验（§6.7）                     |
-| `addons/onnxruntime/annc_ep_native_pool.h`   | 原生 operator pool 私有布局镜像、宿主版本校验与可用性判定（§6.6）                    |
+| `addons/onnxruntime/context/annc_ep_execution.{h,cc}` | 执行上下文构造与三回调、线程池适配器、输出槽位分配与校验（§6.7）                     |
+| `addons/onnxruntime/context/annc_ep_native_pool.h`   | 原生 operator pool 私有布局镜像、宿主版本校验与可用性判定（§6.6）                    |
 | `addons/onnxruntime/annc_ep_compile.{h,cc}`  | 编译驱动：工具定位、子进程执行与超时、缓存条目与锁、报告解析                               |
 | `addons/onnxruntime/annc_ep_graph_export.cc` | 图导出后的确定性重命名、哈希与模型签名                                          |
 | `addons/onnxruntime/ort_graph_to_proto.h`    | 随 ORT 版本 vendored 的图到 ONNX 序列化器（含一处 ANNC 修改：字符串 initializer） |
@@ -620,4 +620,4 @@ stateDiagram-v2
 | `tests/integration/ort_ep/`                  | ctest 宿主夹具与端到端用例（AOT、上下文、FTDMM）                                     |
 | `addons/onnxruntime/CMakeLists.txt`          | 可选插件构建（默认关闭，要求外部 ORT SDK 头文件目录）                              |
 | `addons/onnxruntime/README.md`               | 使用说明与接入示例。其中少量表述与代码不符，见 §10 与各节注记                            |
-| `context/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/annc_fused_op.cc` |
+| `context/`               | ANNC 线程池抽象：线程局部安装接口与并行入口；EP 侧适配器按 §6.6 接入，TF 侧适配见 `tensorflow_addons/context/annc_fused_op.cc` |

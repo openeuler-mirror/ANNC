@@ -1,12 +1,11 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for sparse reshape (KPFusedSparseReshape),
-// Execution V2: kernel func signature (!llvm.ptr, keys, begin, pack_const,
+// Context V3 kernel func signature (keys, begin, pack_const,
 // new_shape) -> (out_indices, out_shape).
 
 // CONFIG: func.func private @fused_kp_sparse_reshape_
-// CONFIG-SAME: %arg0: !llvm.ptr
 // CONFIG-SAME: annc.kernel
-// CONFIG-SAME: abi = "annc_execution_v2"
+// CONFIG-SAME: abi = "annc_context_v3"
 // CONFIG: func.func @main
 // CONFIG: atir.SparseReshape
 // CONFIG-SAME: annc.fusion_materialized
@@ -15,17 +14,16 @@
 // CHECK: atir.SparseReshape
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<4x3xi64, name = "keys">, %arg2: !atir.tensor<2xi32, name = "begin">, %arg3: !atir.tensor<i32, name = "pack_const">, %arg4: !atir.tensor<2xi64, name = "new_shape">
+// CHECK-SAME: %arg0: !atir.tensor<4x3xi64, name = "keys">, %arg1: !atir.tensor<2xi32, name = "begin">, %arg2: !atir.tensor<i64, name = "pack_const">, %arg3: !atir.tensor<2xi64, name = "new_shape">
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_name = "fused_kp_sparse_reshape_
 module attributes {module.state = "atir"} {
   func.func @main(
       %arg0: !atir.tensor<4x3xi64, name = "keys">,
       %arg1: !atir.tensor<2xi32, name = "begin">,
       %arg2: !atir.tensor<2xi64, name = "new_shape">,
-      %arg3: !atir.tensor<i32, name = "pack_const">)
+      %arg3: !atir.tensor<i64, name = "pack_const">)
       -> (!atir.tensor<?x2xi64, name = "out_indices">, !atir.tensor<2xi64, name = "out_shape">) {
   %0 = atir.Shape %arg0 : (!atir.tensor<4x3xi64, name = "keys">) -> !atir.tensor<2xi32, name = "shape_out">
   %1 = "atir.buffer"() : () -> !atir.tensor<i32, name = "ss1_out">
@@ -33,10 +31,10 @@ module attributes {module.state = "atir"} {
   %3 = atir.constant "public" @"ss1_end" -> <1xi32, name = "ss1_end", data = dense<1> : tensor<1xi32>>
   %4 = atir.constant "public" @"ss1_strides" -> <1xi32, name = "ss1_strides", data = dense<1> : tensor<1xi32>>
   %5 = "atir.StridedSlice"(%1, %0, %2, %3, %4) <{beginMask = 0 : i32, endMask = 0 : i32, ellipsisMask = 0 : i32, newAxisMask = 0 : i32, shrinkAxisMask = 1 : i32}> : (!atir.tensor<i32, name = "ss1_out">, !atir.tensor<2xi32, name = "shape_out">, !atir.tensor<1xi32, name = "ss1_begin", data = dense<0> : tensor<1xi32>>, !atir.tensor<1xi32, name = "ss1_end", data = dense<1> : tensor<1xi32>>, !atir.tensor<1xi32, name = "ss1_strides", data = dense<1> : tensor<1xi32>>) -> !atir.tensor<i32, name = "ss1_out">
-  %6 = "atir.buffer"() : () -> !atir.tensor<2xi32, name = "pack_out">
-  %7 = "atir.Pack"(%6, %5, %arg3) <{axis = 0 : i64}> : (!atir.tensor<2xi32, name = "pack_out">, !atir.tensor<i32, name = "ss1_out">, !atir.tensor<i32, name = "pack_const">) -> !atir.tensor<2xi32, name = "pack_out">
+  %6 = "atir.buffer"() : () -> !atir.tensor<2xi64, name = "pack_out">
+  %7 = "atir.Pack"(%6, %5, %arg3) <{axis = 0 : i64}> : (!atir.tensor<2xi64, name = "pack_out">, !atir.tensor<i32, name = "ss1_out">, !atir.tensor<i64, name = "pack_const">) -> !atir.tensor<2xi64, name = "pack_out">
   %8 = "atir.buffer"() : () -> !atir.tensor<2xi64, name = "cast_out">
-  %9 = "atir.Cast"(%8, %7) : (!atir.tensor<2xi64, name = "cast_out">, !atir.tensor<2xi32, name = "pack_out">) -> !atir.tensor<2xi64, name = "cast_out">
+  %9 = "atir.Cast"(%8, %7) : (!atir.tensor<2xi64, name = "cast_out">, !atir.tensor<2xi64, name = "pack_out">) -> !atir.tensor<2xi64, name = "cast_out">
   %10 = "atir.buffer"() : () -> !atir.tensor<i64, name = "ss_out">
   %11 = atir.constant "public" @"ss_end" -> <2xi32, name = "ss_end", data = dense<[0, 0]> : tensor<2xi32>>
   %12 = atir.constant "public" @"ss_strides" -> <2xi32, name = "ss_strides", data = dense<[1, 1]> : tensor<2xi32>>
@@ -69,10 +67,9 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.SparseReshape
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_sparse_reshape_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg3: !atir.tensor<i64, name = "pack_const">
+// CHECK-SAME: %arg2: !atir.tensor<i64, name = "pack_const">
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 module attributes {module.state = "atir"} {
   func.func @main(
       %arg0: !atir.tensor<4x3xi64, name = "keys">,

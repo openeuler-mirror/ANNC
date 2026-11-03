@@ -4,6 +4,11 @@
 对 ORT 头文件编译的独立共享库（EP 插件），**默认不参与 ANNC 根构建**：默认
 `./build.sh` 不查找 ORT SDK、也不改变既有构建行为。
 
+`context/` 集中 ORT 执行上下文与线程池适配：
+`context/annc_ep_execution.*` 和 `context/annc_ep_native_pool.h`。
+框架无关 ABI 与服务保留在根目录 `context/`；编译、缓存及站点校验
+保留在本目录，测试保留在 `tests/`。
+
 需要把 EP 插件纳入根构建时用可选开关：
 
 ```shell
@@ -48,13 +53,13 @@ session init
 
 ## annc_execution_v2：ONNX 执行上下文
 
-上下文封装与 `tensorflow_addons/annc_fused_op.cc` 的 `TensorFlowExecutionState`
+上下文封装与 `tensorflow_addons/context/annc_fused_op.cc` 的 `TensorFlowExecutionState`
 一一对应（输出/临时/错误三类回调），差别是**线程池作为执行上下文成员传入**
 （ANNC ABI v3 的 `thread_pool` 字段），不再走宿主 TLS 注入。TF 与 ONNX 共用这
 一个上下文抽象：TF 侧构造的上下文 `thread_pool` 为空（其池仍经
 `annc_set_current_threadpool` 注入 kernel 库 TLS，kernel 从 TLS 取），kernel 侧
 用 `resolveThreadPool(execution)` 取池——上下文池优先、为空回退 TLS。实现见
-`annc_ep_execution.h/.cc`：
+`context/annc_ep_execution.h/.cc`：
 
 | 上下文成员 | ORT 实现 | 约束 |
 |---|---|---|
@@ -133,7 +138,7 @@ float 元素数。EP 在复制前要求该数量乘以 `sizeof(float)` 与 initi
 任一缺失时直接中止内核链接并报错，不会生成带未定义 `MlasGemmBatch` 符号的
 `.so`。
 
-原生池按 `annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
+原生池按 `context/annc_ep_native_pool.h` 中验证的私有布局读取 operator pool。版本字符串相同
 不能证明不同构建的 ABI 兼容，归档必须来自宿主同一次构建。宿主版本不匹配时回落公开
 API；原生路径的空池表示串行。
 

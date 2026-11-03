@@ -1,13 +1,12 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
-// Config fusion first level for sparse segment reduce, Execution V2: the
-// subgraph in main is extracted into a private kernel func with signature
-// (!llvm.ptr, keys, begin, data, indices, begin_1) -> (output, slice_output),
-// annc.kernel + fusion.metadata abi = "annc_execution_v2".
+// Config fusion first level for sparse segment reduce using Context V3.
+// The subgraph in main is extracted into a private kernel func with signature
+// (keys, begin, data, indices, begin_1) -> (output, slice_output),
+// annc.kernel + fusion.metadata abi = "annc_context_v3".
 
 // CONFIG: func.func private @fused_kp_sparse_segment_reduce_
-// CONFIG-SAME: %arg0: !llvm.ptr
 // CONFIG-SAME: annc.kernel
-// CONFIG-SAME: abi = "annc_execution_v2"
+// CONFIG-SAME: abi = "annc_context_v3"
 // CONFIG: func.func @main
 // CONFIG: annc.fusion_materialized
 
@@ -16,10 +15,9 @@
 // CHECK: atir.StridedSlice
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_sparse_segment_reduce_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<4x2xi64, name = "keys">, %arg2: !atir.tensor<2xi32, name = "begin">, %arg3: !atir.tensor<6x3xf32, name = "data">, %arg4: !atir.tensor<4xi64, name = "indices">, %arg5: !atir.tensor<1xi32, name = "begin_1">
+// CHECK-SAME: %arg0: !atir.tensor<4x2xi64, name = "keys">, %arg1: !atir.tensor<2xi32, name = "begin">, %arg2: !atir.tensor<6x3xf32, name = "data">, %arg3: !atir.tensor<4xi64, name = "indices">, %arg4: !atir.tensor<1xi32, name = "begin_1">
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_name = "fused_kp_sparse_segment_reduce_
 // CHECK-SAME: llvm.emit_c_interface
 module attributes {module.state = "atir"} {

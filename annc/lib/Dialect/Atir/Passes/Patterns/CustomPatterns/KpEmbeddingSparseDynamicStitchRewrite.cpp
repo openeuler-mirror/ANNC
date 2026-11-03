@@ -1,3 +1,4 @@
+#include "Dialect/Atir/BuiltinKernelSchema.h"
 #include "Dialect/Atir/Passes/Patterns/CustomFusionPatternBase.h"
 #include "Dialect/Atir/Passes/Patterns/PatternRegistryMacros.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,7 +12,7 @@ using namespace atir;
 //
 // The first level (OpFusion's FuseKpSparseDynamicStitchAsFuncCallPattern)
 // extracts the subgraph into a private func with annc.kernel +
-// fusion.metadata, taking (x, v0..vN-1, output).  This pattern rewrites the
+// fusion.metadata, taking (x, v0..vN-1) -> output.  This pattern rewrites the
 // func's body into a single atir.Customize call to the hand-written
 // KPFusedSparseDynamicStitch kernel.
 //
@@ -25,9 +26,8 @@ using namespace atir;
 //
 // Fused kernel: output[i] = variables[x[i] % N][x[i] / N].
 //
-// v1 dtype contract: x int64 1-D; variables float32 2-D (equal width).
-// N (2..8) becomes a kernel specialization attr; the schema carries N
-// variable memref args.
+// Dtype contract: x int64 1-D; variables float32 2-D (equal width).
+// One public entry takes N > 1 as an i64 attribute and N variable tensors.
 struct KpEmbeddingSparseDynamicStitchRewrite
     : public CustomFusionPatternBase<ParallelDynamicStitchOp> {
   KpEmbeddingSparseDynamicStitchRewrite(
@@ -40,7 +40,7 @@ struct KpEmbeddingSparseDynamicStitchRewrite
       ParallelDynamicStitchOp anchor,
       llvm::SmallVectorImpl<mlir::Operation *> &fusedOps) const override {
     const int64_t N = anchor.getIndices().size();
-    if (N < 2 || N > 16) {
+    if (N < 2) {
       return failure();
     }
     if (anchor.getData().size() != N) {
@@ -48,29 +48,28 @@ struct KpEmbeddingSparseDynamicStitchRewrite
     }
 
     // Only rewrite inside the kernel func extracted by the first-level
-    // pattern: private func with annc.kernel, N+2 arguments (x, v0..vN-1,
-    // output), no results.
+    // pattern: private func with annc.kernel, N+1 tensor arguments and one
+    // result.
     auto func = anchor->template getParentOfType<func::FuncOp>();
     if (!func || !func->hasAttr("annc.kernel")) {
       return failure();
     }
-    if (func.getNumArguments() != N + 2) {
+    if (func.getNumArguments() != N + 1) {
       return failure();
     }
-    if (!func.getFunctionType().getResults().empty()) {
+    if (func.getNumResults() != 1) {
       return failure();
     }
     Value xArg = func.getArgument(0);
-    Value outputArg = func.getArgument(N + 1);
-    if (anchor.getOutput() != outputArg) {
+    Value outputArg = anchor.getOutput();
+    if (!outputArg.getDefiningOp<BufferOp>()) {
       return failure();
     }
 
     // Left branch: indices[0] and all other indices come from the same
     // DynamicPartition (the fused kernel only needs x and the variables, so
     // all index streams must agree with the partition semantics).
-    auto partition =
-        anchor.getIndices()[0].getDefiningOp<DynamicPartitionOp>();
+    auto partition = anchor.getIndices()[0].getDefiningOp<DynamicPartitionOp>();
     if (!partition || partition.getNumPartitions() != N) {
       return failure();
     }
@@ -169,8 +168,7 @@ struct KpEmbeddingSparseDynamicStitchRewrite
       for (Operation *user : gather.getResult().getUsers()) {
         if (user != anchor.getOperation()) return failure();
       }
-      auto partition1 =
-          gather.getIndices().getDefiningOp<DynamicPartitionOp>();
+      auto partition1 = gather.getIndices().getDefiningOp<DynamicPartitionOp>();
       for (Operation *user : partition1.getOutputs()[j].getUsers()) {
         if (user != gather.getOperation()) return failure();
       }
@@ -202,8 +200,7 @@ struct KpEmbeddingSparseDynamicStitchRewrite
       return failure();
     }
     for (int64_t i = 0; i < N; ++i) {
-      if (!llvm::is_contained(
-              fusedOps, anchor.getData()[i].getDefiningOp())) {
+      if (!llvm::is_contained(fusedOps, anchor.getData()[i].getDefiningOp())) {
         return failure();
       }
     }
@@ -214,37 +211,22 @@ struct KpEmbeddingSparseDynamicStitchRewrite
   std::string getCustomOpName(
       ParallelDynamicStitchOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    // 多名字方案: 每 N 特化一个独立 op 名(同 kp-01 的说明)。
-    const int64_t n = anchor.getIndices().size();
-    return "KPFusedSparseDynamicStitchN" + std::to_string(n);
+    return "KPFusedSparseDynamicStitch";
+  }
+
+  void getOrderedBoundaryInputs(
+      ParallelDynamicStitchOp anchor, llvm::ArrayRef<mlir::Operation *>,
+      llvm::SmallVectorImpl<mlir::Value> &inputs) const override {
+    auto func = anchor->template getParentOfType<func::FuncOp>();
+    llvm::append_range(inputs, func.getArguments());
   }
 
   CustomOpSchema getCustomOpSchema(
       ParallelDynamicStitchOp anchor,
       llvm::ArrayRef<mlir::Operation *> fusedOps) const override {
-    const int64_t N = anchor.getIndices().size();
-    auto func = anchor->template getParentOfType<func::FuncOp>();
-    Value xArg = func.getArgument(0);
-
-    auto getRank = [](Type type) -> int64_t {
-      if (auto tensorType = dyn_cast<atir::TensorType>(type))
-        return static_cast<int64_t>(tensorType.getShape().size());
-      return 0;
-    };
-
-    // Arg order matches the base class's collected inputValues:
-    //   [output buffer, real inputs in fusedOps order] = [output, x, v0..vN-1]
-    // N is a kernel specialization attr (exact match via the registry).
-    // Schema name must match getCustomOpName (multi-name scheme).
-    CustomOpSchema schema =
-        CustomOpSchema::get(getCustomOpName(anchor, fusedOps)).TypeVar("T");
-    schema.MemRefArg("output", 2, "T");
-    schema.MemRefArg("x", getRank(xArg.getType()), "");
-    for (int64_t i = 0; i < N; ++i) {
-      schema.MemRefArg("variables", 2, "T");
-    }
-    schema.I64AttrArg("N", N);
-    return schema;
+    return *getContextKernelSchema(
+        getCustomOpName(anchor, fusedOps),
+        {static_cast<int64_t>(anchor.getIndices().size())});
   }
 
  private:

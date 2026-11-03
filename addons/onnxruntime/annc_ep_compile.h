@@ -86,6 +86,7 @@ struct Site {
   std::vector<Arg> args;
   std::vector<Arg> outputs;
   std::vector<int64_t> kernelArgOrder;
+  std::vector<int64_t> contextI64Attrs;
   int64_t flattenXIndex = -1;  // index of the dynamic (rank-3) input, if known
   int64_t weightIndex = -1;    // index of the fixed (rank-2) input, if known
   // True when every argument/output name was translated back to the original

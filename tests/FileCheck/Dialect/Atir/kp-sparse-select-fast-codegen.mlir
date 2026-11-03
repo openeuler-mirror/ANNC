@@ -1,20 +1,17 @@
 // RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
-// KP-style sparse select fusion, second level, Execution V2: inside the
+// KP-style sparse select fusion, second level, Context V3: inside the
 // kernel func (signature !llvm.ptr + 7 inputs, 3 results) the chain folds
 // into a single KPFusedSparseSelect CustomizeOp; the three .Result() entries
 // map to execution slots 0 (x), 1 (y), 2 (w).
 
 // 正例: 完整链。
 // CHECK-LABEL: func.func private @fused_kp_sparse_select
-// CHECK-SAME: %arg0: !llvm.ptr,
 // CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "KPFusedSparseSelect"
-// CHECK-SAME: custom.result_names = ["out_x", "out_y", "out_w"]
 // CHECK-NOT: atir.Where
 // CHECK-NOT: atir.Compare
 module attributes {module.state = "atir"} {
   func.func private @fused_kp_sparse_select(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<?xi32, name = "a">,
       %arg2: !atir.tensor<?xi32, name = "b">,
       %arg3: !atir.tensor<?xi32, name = "c">,
@@ -23,7 +20,7 @@ module attributes {module.state = "atir"} {
       %arg6: !atir.tensor<i32, name = "eq2_c">,
       %arg7: !atir.tensor<i32, name = "eq3_c">)
       -> (!atir.tensor<?x1xi32, name = "reshape_4">, !atir.tensor<?x1xf32, name = "select_0">, !atir.tensor<?x2xf32, name = "concat_out">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.constant "public" @"rs_shape" -> <2xi32, name = "rs_shape", data = dense<[-1, 1]> : tensor<2xi32>>
     %1 = "atir.buffer"() : () -> !atir.tensor<?x1xi32, name = "reshape_4">
     %2 = "atir.Reshape"(%1, %arg1, %0) : (!atir.tensor<?x1xi32, name = "reshape_4">, !atir.tensor<?xi32, name = "a">, !atir.tensor<2xi32, name = "rs_shape", data = dense<[-1, 1]> : tensor<2xi32>>) -> !atir.tensor<?x1xi32, name = "reshape_4">
@@ -75,7 +72,6 @@ module attributes {module.state = "atir"} {
 // CHECK: atir.ConcatV2
 module attributes {module.state = "atir"} {
   func.func private @bad_axis(
-      %arg0: !llvm.ptr,
       %arg1: !atir.tensor<?xi32, name = "a">,
       %arg2: !atir.tensor<?xi32, name = "b">,
       %arg3: !atir.tensor<?xi32, name = "c">,
@@ -84,7 +80,7 @@ module attributes {module.state = "atir"} {
       %arg6: !atir.tensor<i32, name = "eq2_c">,
       %arg7: !atir.tensor<i32, name = "eq3_c">)
       -> (!atir.tensor<?x1xi32, name = "reshape_4">, !atir.tensor<?x1xf32, name = "select_0">, !atir.tensor<?x2xf32, name = "concat_out">)
-      attributes {annc.kernel, fusion.metadata = {abi = "annc_execution_v2"}} {
+      attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
     %0 = atir.constant "public" @"rs_shape" -> <2xi32, name = "rs_shape", data = dense<[-1, 1]> : tensor<2xi32>>
     %1 = "atir.buffer"() : () -> !atir.tensor<?x1xi32, name = "reshape_4">
     %2 = "atir.Reshape"(%1, %arg1, %0) : (!atir.tensor<?x1xi32, name = "reshape_4">, !atir.tensor<?xi32, name = "a">, !atir.tensor<2xi32, name = "rs_shape", data = dense<[-1, 1]> : tensor<2xi32>>) -> !atir.tensor<?x1xi32, name = "reshape_4">

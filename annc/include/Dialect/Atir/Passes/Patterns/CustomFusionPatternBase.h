@@ -170,6 +170,17 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
         }
       }
     }
+    if (req.abi == "annc_context_v3") {
+      auto function = anchor->template getParentOfType<mlir::func::FuncOp>();
+      auto boundaryReturn = function && !function.empty()
+                                ? mlir::dyn_cast<mlir::func::ReturnOp>(
+                                      function.front().getTerminator())
+                                : mlir::func::ReturnOp{};
+      if (!function || !boundaryReturn ||
+          !llvm::equal(inputValues, function.getArguments()) ||
+          !llvm::equal(outputValues, boundaryReturn.getOperands()))
+        return failure();
+    }
     SmallVector<Type> inputTypes;
     inputTypes.reserve(inputValues.size());
     for (Value value : inputValues) inputTypes.push_back(value.getType());

@@ -1,8 +1,8 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for the embedding action-id gather: the
 // Gather->Gather->Reshape + Fill subgraph in main is extracted into a
-// private kernel func with annc.kernel + fusion.metadata. The legacy output
-// buffer ABI keeps the main graph for GraphDef rewriting.
+// private kernel func with annc.kernel + fusion.metadata. The context ABI
+// keeps the main graph for GraphDef rewriting.
 
 // CONFIG: func.func private @fused_kp_embedding_action_id_gather_
 // CONFIG-SAME: annc.kernel

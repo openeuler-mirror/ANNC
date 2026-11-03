@@ -676,7 +676,8 @@ llvm::Expected<FusionConfig> parseConfigFile(const std::string &path) {
       rule.pattern = pattern->value_or(rule.name);
       rule.kernel = kernel->value_or(std::string("fused_") + rule.name);
       rule.abi = abi->value_or("mlir_ciface");
-      if (rule.abi != "mlir_ciface" && rule.abi != "annc_execution_v2") {
+      if (rule.abi != "mlir_ciface" && rule.abi != "annc_execution_v2" &&
+          rule.abi != "annc_context_v3") {
         return llvm::createStringError(
             std::errc::invalid_argument,
             "%s.abi must be 'mlir_ciface' or 'annc_execution_v2'",

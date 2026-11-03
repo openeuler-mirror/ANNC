@@ -25,8 +25,8 @@ string getKernelLibPath() {
     return KERNEL_LIB_PATH;
 }
 
-#ifndef ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
-#define ANNC_AARCH64_GEMM_KERNELS_AVAILABLE 0
+#ifndef ANNC_GEMM_PACKAGE_AVAILABLE
+#define ANNC_GEMM_PACKAGE_AVAILABLE 0
 #endif
 
 // LLVM 20 toolchain location baked in at configure time. The ANNC_LLVM_BIN
@@ -300,7 +300,7 @@ private:
     }
 
     bool validateGemmKernelAvailability(const fs::path& objectFile) {
-#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
+#if ANNC_GEMM_PACKAGE_AVAILABLE
         return true;
 #else
         string output;
@@ -315,7 +315,7 @@ private:
         }
         cerr << "ANNC error: AArch64 GEMM output requires the optional "
                 "microkernel archive. Configure "
-                "ANNC_AARCH64_GEMM_KERNEL_LIBRARY with a valid library."
+                "ANNC_GEMM_PACKAGE_DIR with a complete package."
              << endl;
         return false;
 #endif
@@ -370,7 +370,7 @@ public:
                 return false;
             }
 
-            if (!step4b_GenerateAndAssembleAotKernels()) {
+            if (!step4b_ExportAotKernelObjects()) {
                 log("Step 4b failed");
                 return false;
             }
@@ -622,11 +622,13 @@ private:
         return true;
     }
 
-    bool step4b_GenerateAndAssembleAotKernels() {
-        log("Step 4b: export and assemble AOT generated kernels");
+    bool step4b_ExportAotKernelObjects() {
+        log("Step 4b: export AOT generated kernel objects");
 
         string exportTool =
-            (fs::path(config.programDir) / "annc-model-kernel-export").string();
+            (fs::path(config.programDir) /
+             "annc-gemm-epilogue-kernel-compile")
+                .string();
         fs::path aotDir = tempDir / "aot-kernels";
         fs::create_directories(aotDir);
         string exportCommand = "\"" + exportTool + "\" \"" +
@@ -639,47 +641,14 @@ private:
         }
 
         fs::path kernelsDir = aotDir / "model_generated_kernels";
-        if (!fs::exists(kernelsDir)) return true;
-
-        const char* asmRootEnv = getenv("ANNC_GEMM_ASM_SOURCE_DIR");
-        fs::path asmRoot = asmRootEnv && *asmRootEnv
-                               ? fs::path(asmRootEnv)
-                               : fs::path(ANNC_GEMM_ASM_SOURCE_DIR);
-        if (asmRoot.empty() || !fs::exists(asmRoot / "Sve") ||
-            !fs::exists(asmRoot / "Neon")) {
-            cerr << "ANNC_GEMM_ASM_SOURCE_DIR must point to a GEMM-ASM checkout "
-                    "containing Sve/ and Neon/ (set the environment variable, or "
-                    "configure ANNC with "
-                    "-DANNC_GEMM_ASM_SOURCE_DIR=<checkout>)"
-                 << endl;
-            return false;
-        }
-
-        string includeArgs = " -I \"" + (asmRoot / "Sve").string() +
-                             "\" -I \"" + (asmRoot / "Neon").string() + "\"";
-        vector<fs::path> sources;
-        for (const auto& entry : fs::directory_iterator(kernelsDir)) {
-            if (entry.path().extension() == ".S")
-                sources.push_back(entry.path());
-        }
-        sort(sources.begin(), sources.end());
-        for (const fs::path& source : sources) {
-            fs::path object = source;
-            object.replace_extension(".o");
-            const bool sve = source.filename().string().find("_sve_") !=
-                             string::npos;
-            string command = getClangPath() +
-                             (sve ? " -c -march=armv8-a+sve"
-                                  : " -c -march=armv8-a") +
-                             includeArgs + " \"" + source.string() +
-                             "\" -o \"" + object.string() + "\"";
-            logCommand(command);
-            if (!CommandExecutor::executeCommand(command)) {
-                log("AOT kernel assembly failed: " + source.string());
-                return false;
-            }
-            config.linkObjects.push_back(object.string());
-        }
+        // The compilation pipeline creates a fresh tempDir for each run.
+        vector<string> generatedObjects;
+        for (const auto& entry : fs::directory_iterator(kernelsDir))
+            if (entry.path().extension() == ".o" && entry.is_regular_file())
+                generatedObjects.push_back(entry.path().string());
+        sort(generatedObjects.begin(), generatedObjects.end());
+        config.linkObjects.insert(config.linkObjects.end(),
+                                  generatedObjects.begin(), generatedObjects.end());
         return true;
     }
 
@@ -745,8 +714,9 @@ private:
         for (const string& objectFile : config.linkObjects)
             command += " \"" + objectFile + "\"";
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
-#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
-        command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
+#if ANNC_GEMM_PACKAGE_AVAILABLE
+        command += " -L" + config.kernelLibPath +
+                   "/annc-gemm-kernels -lannc_gemm_microkernels";
 #endif
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
@@ -799,8 +769,9 @@ private:
         for (const string& objectFile : config.linkObjects)
             command += " \"" + objectFile + "\"";
         command += " -L" + config.kernelLibPath + " -lANNCBuiltinKernels";
-#if ANNC_AARCH64_GEMM_KERNELS_AVAILABLE
-        command += " -L" + config.kernelLibPath + " -lannc_gemm_microkernels";
+#if ANNC_GEMM_PACKAGE_AVAILABLE
+        command += " -L" + config.kernelLibPath +
+                   "/annc-gemm-kernels -lannc_gemm_microkernels";
 #endif
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";

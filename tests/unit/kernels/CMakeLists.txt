@@ -139,6 +139,8 @@ target_link_libraries(customcall_symbol_resolution_test PRIVATE ANNCKernel)
 annc_add_kernel_gtest(gemm_epilogue_test
     gemm_epilogue_test.cpp
 )
+target_compile_definitions(gemm_epilogue_test PRIVATE
+    ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
 target_link_libraries(gemm_epilogue_test
     PRIVATE
     AArch64Codegen
@@ -147,7 +149,7 @@ target_link_libraries(gemm_epilogue_test
     MLIRDialect
 )
 
-if(ANNC_AARCH64_GEMM_KERNELS_AVAILABLE)
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
     annc_add_kernel_gtest(gemm_smallshape_microkernel_test
         gemm_smallshape_microkernel_test.cpp
     )

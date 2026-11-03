@@ -15,7 +15,6 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_LLVM_BIN` | LLVM/MLIR 20/21 的 bin 目录 | 构建期由 `LLVM_TOOLS_BINARY_DIR` 写入 | 解析 `mlir-opt`/`mlir-translate`/`opt`/`llc`/`clang`/`FileCheck`；未设置时使用构建期默认值，工具缺失则明确报错。工具链 lib 目录（含 `libLLVMSupport.a`/`libLLVMDemangle.a`）由其父目录推导 |
 | `ANNC_KERNEL_LIB_PATH` | kernel 静态库目录 | `${CMAKE_INSTALL_FULL_LIBDIR}`（aarch64 为 `<prefix>/lib64`） | 覆盖内置 kernel、线程池归档的搜索目录；LLVM 静态归档不在其中，由 `ANNC_LLVM_BIN` 的父目录解析 |
 | `ANNC_EP_ORT_BUILD_TREE` | 目录路径 | 构建期值/未设置 | 宿主 ORT 构建树的 `Release/` 目录；按 `<tree>/` 与 `<tree>/_deps/*-build/` 的布局定位四个 MLAS 归档 `libonnxruntime_mlas.a`、`libkleidiai.a`、`libonnxruntime_common.a`、`libcpuinfo.a`；缺任一归档即拒绝链接 |
-| `ANNC_GEMM_ASM_SOURCE_DIR` | 目录路径 | 构建期 `-DANNC_GEMM_ASM_SOURCE_DIR` | GEMM-ASM checkout 根目录（须含 `Sve/`、`Neon/`）；`annc` 在存在 `model_generated_kernels/*.S` 时用它汇编微内核，未配置且未编译期指定则报错退出 |
 | `ANNC_LIBRARY_NAME` | `.so` 文件名 | 自动生成 | 动态测试使用；`annc` 的 step6 会自动设置，手工两步动态驱动流程需自行设为 `./<符号>.so` |
 
 也可对单次编译使用命令行参数 `--kernel-lib-path <dir>`。命令行参数优先于 `ANNC_KERNEL_LIB_PATH`；未指定时使用构建时配置的安装路径。移动 ANNC 安装目录后，需要通过命令行参数或环境变量指定新的 `lib` 目录。
@@ -24,7 +23,9 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_GEMM` | `0` / `1` / `2` | `0` | MatMul 融合级别：未设置或 `0` 关闭融合，`1` 融合 plain MatMul（KDNN adaptor 构建下为 AOT KDNN 站点），`2` 追加 epilogue 尾融合（需要 `ANNC_GEMM_ASM_SOURCE_DIR`）。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
+| `ANNC_GEMM` | `0` / `1` / `2` / `3` / `99` | `0` | GEMM 模式：`0`/未设置关闭自动 GEMM fusion，`1`=Basic（plain MatMul，KDNN adaptor 构建下为 AOT KDNN 站点），`2`=Epilogue（追加 epilogue 尾融合，构建时需要完整 GEMM-ASM 二进制包），`3`=Prepack（plain MatMul + 预打包缓存），`99`=All（Epilogue + 预打包缓存）。这是模式编号而非累进等级，`99` 固定保留给 All，未来模式使用未分配的较小编号。预打包与 epilogue 独立；预打包 pass 始终注册，无需额外优化编译开关；依赖归档的路径要求构建时提供 AArch64 微内核库，模式 `1`/`2` 关闭预打包、`3`/`99` 开启，可变权重使用 `1`/`2`。首尾空白允许，空值视为 `0`；非法值向 stderr 提示合法编号并回退 `0`，`ANNC_LOG_LEVEL=info` 可查看解析后的模式。启动前设置，首次读取后固定，修改后需重启；Op 构造时保存结果，只在首次 JIT / 上一次 shape 缓存未命中时使用。该变量同时控制 TF pipeline 自动 AOT 预打包及 packed KDNN 候选，已生成的 AOT 库不会因变量变化而重写。由 `annc-opt` 的 `OpFusion` 与 `annc-tf-pipeline` 读取；`annc` driver 本身不读取该变量 |
+
+`All` 表示同时启用 epilogue 尾融合和 RHS 预打包，不表示合并所有后端的融合策略。KDNN AOT GEMM outlining 仅在模式 `1` 下启用；模式 `2`、`3`、`99` 使用 native GEMM 路径。因此，模式 `3` 的 plain MatMul 不包含模式 `1` 专有的 KDNN AOT 分支。
 
 ## `annc-asm` / FastCodegen
 
@@ -101,3 +102,6 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
 | `ANNCOPT` / `ANNASM` / `ANNCFUSIONMETADATA` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
 | `MLIROPT` / `FILECHECK` | 可执行文件路径 | `$ANNC_LLVM_BIN/...`（未设置时读取 `build/annc_llvm_bin.txt`） | `tests/FileCheck/run.sh` 覆盖工具路径 |
+
+旧 `ANNC_GEMM_ASM_SOURCE_DIR` 已不再读取；包目录是构建期
+`ANNC_GEMM_PACKAGE_DIR`，详见[从源码构建](build-from-source.md)。

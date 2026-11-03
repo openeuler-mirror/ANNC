@@ -2,9 +2,7 @@
 
 #include <utility>
 
-#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/StringExtras.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
@@ -299,24 +297,6 @@ mlir::DictionaryAttr buildEpilogueCandidateAttr(
                    builder.getStringAttr(stringify(program.terminalView)));
   candidate.append("steps", builder.getArrayAttr(encodedSteps));
   return candidate.getDictionary(builder.getContext());
-}
-
-std::string staticSymbolSuffix(const EpilogueProgram &program,
-                               bool accumulate) {
-  std::string suffix = accumulate ? "_acc" : "";
-  for (const EpilogueStep &step : program.steps) {
-    suffix += "_" + stringify(step.opcode).str();
-    if (step.opcode == EpilogueOpcode::kAdd ||
-        step.opcode == EpilogueOpcode::kMul) {
-      suffix += "_" + stringify(step.broadcast).str() + "_i" +
-                llvm::utostr(step.inputIndex);
-    } else if (step.reluLimit) {
-      llvm::APFloat value(*step.reluLimit);
-      suffix += "_l" + llvm::utohexstr(value.bitcastToAPInt().getZExtValue());
-    }
-  }
-  suffix += "_f32";
-  return suffix;
 }
 
 }  // namespace atir

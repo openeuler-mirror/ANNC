@@ -1,12 +1,11 @@
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for sparse select (KPFusedSparseSelect),
-// Execution V2: kernel func signature (!llvm.ptr, a, b, c, gt, eq1, eq2,
-// eq3) -> (x, y, w); 7 inputs = exactly the V2 input limit.
+// Context V3 kernel func signature (a, b, c, gt, eq1, eq2,
+// eq3) -> (x, y, w); 7 canonical inputs.
 
 // CONFIG: func.func private @fused_kp_sparse_select_
-// CONFIG-SAME: %arg0: !llvm.ptr
 // CONFIG-SAME: annc.kernel
-// CONFIG-SAME: abi = "annc_execution_v2"
+// CONFIG-SAME: abi = "annc_context_v3"
 // CONFIG: func.func @main
 // CONFIG: atir.ConcatV2
 // CONFIG-SAME: annc.fusion_materialized
@@ -16,10 +15,9 @@
 // CHECK: atir.ConcatV2
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_kp_sparse_select_
-// CHECK-SAME: %arg0: !llvm.ptr,
-// CHECK-SAME: %arg1: !atir.tensor<?xi32, name = "a">, %arg2: !atir.tensor<?xi32, name = "b">, %arg3: !atir.tensor<?xi32, name = "c">, %arg4: !atir.tensor<i32, name = "gt_c", data = dense<0> : tensor<i32>>, %arg5: !atir.tensor<i32, name = "eq1_c", data = dense<1> : tensor<i32>>, %arg6: !atir.tensor<i32, name = "eq2_c", data = dense<2> : tensor<i32>>, %arg7: !atir.tensor<i32, name = "eq3_c", data = dense<3> : tensor<i32>>
+// CHECK-SAME: %arg0: !atir.tensor<?xi32, name = "a">, %arg1: !atir.tensor<?xi32, name = "b">, %arg2: !atir.tensor<?xi32, name = "c">, %arg3: !atir.tensor<i32, name = "gt_c", data = dense<0> : tensor<i32>>, %arg4: !atir.tensor<i32, name = "eq1_c", data = dense<1> : tensor<i32>>, %arg5: !atir.tensor<i32, name = "eq2_c", data = dense<2> : tensor<i32>>, %arg6: !atir.tensor<i32, name = "eq3_c", data = dense<3> : tensor<i32>>
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_name = "fused_kp_sparse_select_
 module attributes {module.state = "atir"} {
   func.func @main(

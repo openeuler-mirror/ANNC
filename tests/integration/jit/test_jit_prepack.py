@@ -1,6 +1,6 @@
 """Check weight-independent JIT kernels against full numerical references.
 
-Requires an AArch64 constant-folding build. Set ANNC_BUILD_DIR to select it;
+Requires a native AArch64 build. Set ANNC_BUILD_DIR to select it;
 the usual driver environment overrides remain available.
 """
 
@@ -70,8 +70,6 @@ def toolchain():
         if line and not line.startswith(("#", "//")) and "=" in line:
             key, value = line.split("=", 1)
             cache[key.split(":", 1)[0]] = value
-    if cache.get("ANNC_ENABLE_CONSTANT_FOLDING") != "ON":
-        pytest.skip("requires ANNC_ENABLE_CONSTANT_FOLDING=ON")
     for name in ("annc", "annc-asm"):
         if not (build / "bin" / name).is_file():
             pytest.skip(f"{name} is not built")

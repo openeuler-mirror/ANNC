@@ -40,7 +40,7 @@ cd ANNC
 
 # 2. 安装依赖（详见「安装 ANNC」）
 pip3 install -r requirements.txt
-sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel openssl-devel gtest-devel unzip rpm cpio
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel gtest-devel unzip rpm cpio
 sudo yum install -y protobuf-devel protobuf-compiler
 #    openEuler 24.03 使用系统 llvm-toolset-20；22.03 无该 toolset，需自建 LLVM/MLIR 20/21（见「安装 ANNC」步骤 4）
 sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
@@ -114,7 +114,7 @@ annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点�
 | `annc-fusion-metadata`     | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式）                                                          |
 | `annc-asm`                 | ATIR → lowered MLIR（linalg/affine/scf）                                                      |
 | `annc`                     | 编译驱动：lowered MLIR → `.so` / 可执行文件                                                           |
-| `annc-model-kernel-export` | 导出 lowered MLIR 中生成的 AArch64 微内核（`.S` + `manifest.json`），由 `annc` 在链接前自动调用                 |
+| `annc-gemm-epilogue-kernel-compile` | 将 lowered MLIR 中的 epilogue GEMM kernel 请求编译为 `.o`，由 `annc` 在链接前自动调用 |
 | `annc-verify`              | Kernel 正确性验证                                                                                |
 | `annc-converter`           | 基于融合元数据重写 TF GraphDef（把融合子图替换为 `ANNCFused` 节点）                                              |
 

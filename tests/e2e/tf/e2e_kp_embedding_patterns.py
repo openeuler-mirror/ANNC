@@ -75,7 +75,7 @@ def _parse_args():
     parser.add_argument(
         "--case",
         choices=("all", "sparse_select", "padding", "padding_fast",
-                 "sparse_reshape", "sparse_reshape_dynamic_limit",
+                 "sparse_reshape",
                  "sparse_segment_mean", "sparse_segment_sum",
                  "action_id_gather", "target_behavior_interaction",
                  "sparse_dynamic_stitch_n2"),
@@ -173,13 +173,13 @@ def _build_padding_case(fast=False):
     return graph.as_graph_def(add_shapes=True), feeds, ("output_0", "output_1")
 
 
-def _build_sparse_reshape_case(dynamic_limit=False):
+def _build_sparse_reshape_case():
     graph = tf.Graph()
     with graph.as_default():
         # Keep the row count dynamic so Shape(keys) remains an ATIR operation.
         keys = tf.compat.v1.placeholder(tf.int64, [None, 3], name="keys")
         begin = tf.compat.v1.placeholder(tf.int32, [2], name="begin")
-        pack_const = tf.compat.v1.placeholder(tf.int32, [], name="pack_const")
+        pack_const = tf.compat.v1.placeholder(tf.int64, [], name="pack_const")
         new_shape = tf.compat.v1.placeholder(tf.int64, [2], name="new_shape")
         keys_shape = tf.shape(keys, out_type=tf.int32, name="keys_shape")
         rows = tf.strided_slice(keys_shape, [0], [1], [1], shrink_axis_mask=1,
@@ -190,11 +190,7 @@ def _build_sparse_reshape_case(dynamic_limit=False):
                                       begin_mask=1, end_mask=1,
                                       shrink_axis_mask=2, name="keys_slice")
         keys_column = tf.reshape(keys_slice, [-1, 1], name="keys_column")
-        if dynamic_limit:
-            range_limit = tf.compat.v1.placeholder(tf.int32, [], name="range_limit")
-            range_value = tf.range(range_limit, dtype=tf.int32, name="range")
-        else:
-            range_value = tf.range(4, dtype=tf.int32, name="range")
+        range_value = tf.range(4, dtype=tf.int32, name="range")
         range_column = tf.reshape(range_value, [-1, 1], name="range_column")
         range_i64 = tf.cast(range_column, tf.int64, name="range_i64")
         indices = tf.concat([range_i64, tf.cast(keys_column, tf.int64)], axis=-1,
@@ -207,11 +203,9 @@ def _build_sparse_reshape_case(dynamic_limit=False):
     feeds = {
         "keys": np.asarray([[0, 2, 1], [1, 0, 2], [2, 1, 0], [0, 1, 2]], np.int64),
         "begin": np.asarray([0, 0], np.int32),
-        "pack_const": np.asarray(3, np.int32),
+        "pack_const": np.asarray(3, np.int64),
         "new_shape": np.asarray([2, 6], np.int64),
     }
-    if dynamic_limit:
-        feeds["range_limit"] = np.asarray(4, np.int32)
     return graph.as_graph_def(add_shapes=True), feeds, ("output_0", "output_1")
 
 
@@ -430,12 +424,8 @@ CASE_BUILDERS = {
         "kp_embedding_padding_fast",
     ),
     "sparse_reshape": lambda: (
-        *_build_sparse_reshape_case(False),
+        *_build_sparse_reshape_case(),
         "kp_sparse_reshape",
-    ),
-    "sparse_reshape_dynamic_limit": lambda: (
-        *_build_sparse_reshape_case(True),
-        "kp_sparse_reshape_dynamic_limit",
     ),
     "sparse_segment_mean": lambda: (
         *_build_segment_case("mean"),

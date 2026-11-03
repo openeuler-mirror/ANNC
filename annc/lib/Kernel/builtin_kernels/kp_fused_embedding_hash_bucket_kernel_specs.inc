@@ -1,12 +1,12 @@
-ANNC_KERNEL(
-    Name("KPFusedDnnEmbeddingWithHashBucket").Backend("aarch64").TypeConstraint<float>("T"),
-    (AnncMemRef2DF32* output,
-     AnncMemRef1DString* input,
-     AnncMemRef2DF32* embedding_weight,
-     int64_t num_buckets),
+// Context ABI: the implementation consumes named tensors and runtime services.
+
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_KPFusedDnnEmbeddingWithHashBucket_float,
+    Name("KPFusedDnnEmbeddingWithHashBucket")
+        .Backend("aarch64")
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
     {
-        const auto status = kp_fused_embedding_hash_bucket_aarch64_impl(
-            ::annc::threadpool::getCurrentThreadPool(), output, input,
-            embedding_weight, num_buckets);
-        return ::annc::kernels::statusCode(status);
+      return ::annc::kernels::invokeContextKernel(
+          context, kp_fused_embedding_hash_bucket_aarch64_impl);
     })

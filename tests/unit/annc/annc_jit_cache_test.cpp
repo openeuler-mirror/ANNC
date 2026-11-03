@@ -118,6 +118,7 @@ TEST(PackedRhsCacheTest, RejectsMismatchedSveVectorLengthBeforePacking) {
 
 using annc::jit::BuildJitCacheKey;
 using annc::jit::CacheEvent;
+using annc::jit::CacheKeySummary;
 using annc::jit::JitArgumentSignature;
 using annc::jit::JitCacheKey;
 using annc::jit::JitCompilationCache;
@@ -158,6 +159,16 @@ TEST(JitCacheKeyTest, RuntimeShapeChangesKey) {
 
   EXPECT_NE(BuildTestCacheKey("template", batch5),
             BuildTestCacheKey("template", batch8));
+}
+
+TEST(JitCacheKeyTest, SummaryDistinguishesDifferentKeys) {
+  const std::string batch5 =
+      CacheKeySummary(BuildTestCacheKey("template", {{{5, 128}}}));
+  const std::string batch8 =
+      CacheKeySummary(BuildTestCacheKey("template", {{{8, 128}}}));
+
+  EXPECT_EQ(batch5.size(), 16u);
+  EXPECT_NE(batch5, batch8);
 }
 
 TEST(JitCacheKeyTest, InvalidInputsDoNotProduceAKey) {

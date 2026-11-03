@@ -11,9 +11,11 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-extern "C" int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k, int64_t n);
-#endif
+// The helper is supplied by the optional AArch64 GEMM microkernel archive.
+// Keep the compiler build usable without that archive; reject SVE prepacking
+// below when the sizing contract cannot be checked.
+extern "C" int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k, int64_t n)
+    __attribute__((weak));
 
 namespace annc {
 using namespace mlir;
@@ -107,13 +109,18 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
         failedPack = true;
         return;
       }
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
+      if (s.isa && !annc_aarch64_sve_packed_b_elements_f32) {
+        op->emitError(
+            "JIT SVE RHS prepacking requires the AArch64 GEMM microkernel "
+            "archive");
+        failedPack = true;
+        return;
+      }
       if (s.isa && annc_aarch64_sve_packed_b_elements_f32(1, 1) != s.panel) {
         op->emitError("JIT packed RHS SVE vector length does not match target");
         failedPack = true;
         return;
       }
-#endif
       auto blocks = partitionCache2D(s.k, s.n, s.kc, s.nc);
       for (const auto& b : blocks) {
         const int64_t width = ((b.nSize + s.panel - 1) / s.panel) * s.panel;
@@ -123,14 +130,12 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
           failedPack = true;
           return;
         }
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
         if (s.isa && annc_aarch64_sve_packed_b_elements_f32(b.kSize, b.nSize) !=
                          b.kSize * width) {
           op->emitError("JIT packed RHS SVE sizing does not match target");
           failedPack = true;
           return;
         }
-#endif
         s.elements += b.kSize * width;
       }
       if (uint64_t(s.elements) >

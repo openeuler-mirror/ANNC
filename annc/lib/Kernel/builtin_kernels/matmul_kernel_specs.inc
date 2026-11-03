@@ -1,6 +1,12 @@
- ANNC_KERNEL(
- 	     Name("MatMul").Backend("aarch64").TypeConstraint<float>("T"),
- 	     (AnncMemRef2DF32* output,
- 	      AnncMemRef2DF32* lhs,
- 	      AnncMemRef2DF32* rhs),
- 	     { matmul_aarch64_impl(::annc::threadpool::getCurrentThreadPool(), output, lhs, rhs); })
+// Context ABI: the implementation consumes named tensors and runtime services.
+
+ANNC_CONTEXT_KERNEL_SPEC(
+    ContextV3_MatMul_float,
+    Name("MatMul")
+        .Backend("aarch64")
+        .TypeConstraint<float>("T")
+        .Abi("annc_context_v3"),
+    {
+      return ::annc::kernels::invokeContextKernel(
+          context, matmul_aarch64_impl);
+    })

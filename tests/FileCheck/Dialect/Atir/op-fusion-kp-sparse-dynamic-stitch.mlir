@@ -2,10 +2,11 @@
 // RUN: annc-opt %s --atir-op-fusion | FileCheck %s --check-prefix=OPFUSION
 // Config fusion first level for sparse dynamic stitch: the subgraph in
 // main is extracted into a private kernel func with annc.kernel +
-// fusion.metadata while preserving the legacy output-buffer ABI.
+// fusion.metadata while preserving the canonical context input/result ABI.
 
 // CONFIG: func.func private @fused_kp_sparse_dynamic_stitch_n2_
 // CONFIG-SAME: annc.kernel
+// CONFIG-SAME: context_i64_attrs = [2]
 // CONFIG-SAME: fusion.pattern = "kp_sparse_dynamic_stitch"
 // CONFIG: func.func @main
 // CONFIG: atir.ParallelDynamicStitch
@@ -22,10 +23,11 @@
 // CHECK-SAME: kernel_name = "fused_kp_sparse_dynamic_stitch_
 // CHECK-SAME: llvm.emit_c_interface
 // OPFUSION-LABEL: func.func private @fused_kp_sparse_dynamic_stitch_
-// The GraphDef rewrite emits fixed inputs first and the dynamic x last, so
-// the runtime order is [v0, v1, x, output]; the kernel signature is
-// [x, v0, v1, output].
-// OPFUSION-SAME: kernel_arg_order = [2, 0, 1, 3]
+// Context inputs follow the canonical [x, v0, v1] slots. Outputs are
+// allocated through context, so no legacy argument permutation is needed.
+// OPFUSION-SAME: abi = "annc_context_v3"
+// OPFUSION-SAME: context_i64_attrs = [2]
+// OPFUSION-SAME: kernel_arg_order = []
 module attributes {module.state = "atir"} {
 func.func @main(
     %arg0: !atir.tensor<4xi64, name = "x">,
