@@ -24,7 +24,7 @@
 #include "Kernel/MemRefTypes.h"
 #include "Context/ThreadPool.h"
 #include "annc_fused_op_jit.h"
-#include "context/ThreadPool.h"
+#include "ThreadPool.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"
