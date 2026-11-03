@@ -10,7 +10,7 @@
 #include "Context/KernelContext.h"
 #include "Context/ThreadPool.h"
 #include "annc_fused_op.h"
-#include "context/ThreadPool.h"
+#include "ThreadPool.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
