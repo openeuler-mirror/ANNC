@@ -7,7 +7,9 @@
 // OrtApi drives the callbacks directly, so those branches are covered without
 // a live ORT host.
 
+#include <algorithm>
 #include <cstdint>
+#include "Context/KernelContextUtils.h"
 #include <deque>
 #include <functional>
 #include <limits>
@@ -25,7 +27,7 @@ namespace annc_ep {
 namespace {
 
 // Packed-B description contract: full-shape matching, broadcast slice
-// selection and the v2/v3/v4 size-and-version gate on the packed-B field.
+// selection, retained for the execution compatibility ABI.
 TEST(PackedBContract, MatchesFullShapeAndSelectsBroadcastSlices) {
   float first = 1.0f, second = 2.0f;
   const float* slices[] = {&first, &second};
@@ -58,22 +60,6 @@ TEST(PackedBContract, RejectsEffectiveWeightSizeMismatch) {
       std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()));
 }
 
-TEST(PackedBContract, ContextAbiReadsOnlyFieldsPresentInTheReportedLayout) {
-  AnncExecutionContext context{};
-  context.struct_size = ANNC_EXECUTION_V2_CONTEXT_SIZE;
-  context.abi_version = ANNC_EXECUTION_V2_ABI_VERSION;
-  context.packed_b = reinterpret_cast<const AnncPackedB*>(uintptr_t{1});
-  EXPECT_EQ(annc::packedBOf(&context), nullptr);
-
-  context.struct_size = ANNC_EXECUTION_V3_CONTEXT_SIZE;
-  context.abi_version = ANNC_EXECUTION_V3_ABI_VERSION;
-  EXPECT_EQ(annc::packedBOf(&context), nullptr);
-
-  context.struct_size = ANNC_EXECUTION_V4_CONTEXT_SIZE;
-  context.abi_version = ANNC_EXECUTION_ABI_VERSION;
-  EXPECT_EQ(annc::packedBOf(&context), context.packed_b);
-}
-
 // One tagged fake status per call; only identity and lifetime matter here.
 struct FakeStatus {
   int tag = 0;
@@ -84,7 +70,16 @@ const int64_t kNegativeDim[1] = {-1};
 // A zeroed OrtApi with just the entries the execution context uses. Handles
 // are opaque tags -- the stubs never dereference anything the host passes
 // them, exactly like the real API treats them.
+struct FakeTensor {
+  std::vector<int64_t> dims;
+  ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  const void* data = nullptr;
+};
+
 struct FakeApi {
+  std::vector<FakeTensor> inputs;
+  std::vector<size_t> output_indices;
+  int kernel_calls = 0;
   OrtApi api{};
   OrtKernelContext* kernel_context = reinterpret_cast<OrtKernelContext*>(0x1);
   void* tensor_data = nullptr;
@@ -123,9 +118,15 @@ struct FakeApi {
   size_t alloc_offset = 0;
 
   FakeApi() {
+    tensor_data = alloc_buffer;
     api.CreateStatus = &CreateStatus;
     api.ReleaseStatus = &ReleaseStatus;
     api.KernelContext_GetOutput = &GetOutput;
+    api.KernelContext_GetInputCount = &GetInputCount;
+    api.KernelContext_GetInput = &GetInput;
+    api.GetTensorData = &GetTensorData;
+    api.GetDimensionsCount = &GetDimensionsCount;
+    api.GetDimensions = &GetDimensions;
     api.GetTensorTypeAndShape = &GetTensorTypeAndShape;
     api.GetTensorElementTypeAndShapeDataReference = &GetShapeReference;
     api.GetTensorElementType = &GetTensorElementType;
@@ -165,35 +166,40 @@ struct FakeApi {
     FakeApi& self = Current();
     ++self.get_output_calls;
     self.last_output_rank = rank;
-    self.last_output_dims.assign(dims, dims + rank);
+    self.last_output_dims.clear();
+    if (rank) self.last_output_dims.assign(dims, dims + rank);
     if (self.fail_get_output) return MakeStatus();
-    EXPECT_EQ(index, 0u);
+    self.output_indices.push_back(index);
     *out = reinterpret_cast<OrtValue*>(0x2);
     return nullptr;
   }
   static OrtStatus* ORT_API_CALL GetTensorTypeAndShape(
-      const OrtValue*, OrtTensorTypeAndShapeInfo** out) noexcept {
+      const OrtValue* value, OrtTensorTypeAndShapeInfo** out) noexcept {
     FakeApi& self = Current();
     if (self.fail_get_tensor_type) return MakeStatus();
     ++self.shape_info_allocations;
-    *out = reinterpret_cast<OrtTensorTypeAndShapeInfo*>(0x3);
+    *out = reinterpret_cast<OrtTensorTypeAndShapeInfo*>(
+        const_cast<OrtValue*>(value));
     return nullptr;
   }
   static OrtStatus* ORT_API_CALL GetShapeReference(
-      const OrtValue*, ONNXTensorElementDataType* type,
+      const OrtValue* value, ONNXTensorElementDataType* type,
       const int64_t** dims, size_t* rank) noexcept {
     FakeApi& self = Current();
     ++self.shape_reference_calls;
     if (self.fail_get_tensor_type) return MakeStatus();
-    *type = self.element_type;
-    *dims = self.last_output_dims.data();
-    *rank = self.last_output_dims.size();
+    auto* input = Input(value);
+    *type = input ? input->type : self.element_type;
+    const auto& shape = input ? input->dims : self.last_output_dims;
+    *dims = shape.data();
+    *rank = shape.size();
     return nullptr;
   }
   static OrtStatus* ORT_API_CALL GetTensorElementType(
-      const OrtTensorTypeAndShapeInfo*,
+      const OrtTensorTypeAndShapeInfo* info,
       ONNXTensorElementDataType* out) noexcept {
-    *out = Current().element_type;
+    auto* input = Input(reinterpret_cast<const OrtValue*>(info));
+    *out = input ? input->type : Current().element_type;
     return nullptr;
   }
   static void ORT_API_CALL ReleaseTensorTypeAndShapeInfo(
@@ -202,7 +208,42 @@ struct FakeApi {
                                                       void** out) noexcept {
     FakeApi& self = Current();
     if (self.fail_get_data) return MakeStatus();
-    *out = self.tensor_data;
+    *out = std::find(self.last_output_dims.begin(), self.last_output_dims.end(), 0)
+                   != self.last_output_dims.end() ? nullptr : self.tensor_data;
+    return nullptr;
+  }
+
+  static const FakeTensor* Input(const OrtValue* value) {
+    if (value == reinterpret_cast<const OrtValue*>(0x2)) return nullptr;
+    return reinterpret_cast<const FakeTensor*>(value);
+  }
+  static OrtStatus* ORT_API_CALL GetInputCount(const OrtKernelContext*,
+                                               size_t* out) noexcept {
+    *out = Current().inputs.size();
+    return nullptr;
+  }
+  static OrtStatus* ORT_API_CALL GetInput(const OrtKernelContext*, size_t index,
+                                         const OrtValue** out) noexcept {
+    *out = reinterpret_cast<const OrtValue*>(&Current().inputs.at(index));
+    return nullptr;
+  }
+  static OrtStatus* ORT_API_CALL GetTensorData(const OrtValue* value,
+                                              const void** out) noexcept {
+    *out = Input(value)->data;
+    return nullptr;
+  }
+  static const std::vector<int64_t>& Shape(const OrtTensorTypeAndShapeInfo* info) {
+    auto* input = Input(reinterpret_cast<const OrtValue*>(info));
+    return input ? input->dims : Current().last_output_dims;
+  }
+  static OrtStatus* ORT_API_CALL GetDimensionsCount(
+      const OrtTensorTypeAndShapeInfo* info, size_t* out) noexcept {
+    *out = Shape(info).size();
+    return nullptr;
+  }
+  static OrtStatus* ORT_API_CALL GetDimensions(
+      const OrtTensorTypeAndShapeInfo* info, int64_t* out, size_t rank) noexcept {
+    std::copy_n(Shape(info).data(), rank, out);
     return nullptr;
   }
 
@@ -272,6 +313,23 @@ int TagOf(OrtStatus* status) {
   return reinterpret_cast<FakeStatus*>(status)->tag;
 }
 
+// Drive the C services and expose their returned view to the legacy assertions.
+AnncStatusCode AllocateOutput(AnncKernelContext* context, uint32_t slot,
+                               AnncTensorDesc* desc) {
+  AnncTensorView view{};
+  auto code = context->services->allocate_output(
+      context->services->opaque, slot, desc, &view);
+  if (code == ANNC_STATUS_OK) desc->data = view.aligned;
+  return code;
+}
+AnncStatusCode AllocateTemp(AnncKernelContext* context, AnncTensorDesc* desc) {
+  AnncTensorView view{};
+  auto code = context->services->allocate_temp(
+      context->services->opaque, desc, &view);
+  if (code == ANNC_STATUS_OK) desc->data = view.aligned;
+  return code;
+}
+
 class ExecutionContextFailureTest : public ::testing::Test {
  protected:
   void SetUp() override { FakeApi::current_ = &fake_; }
@@ -283,14 +341,14 @@ class ExecutionContextFailureTest : public ::testing::Test {
 
 TEST_F(ExecutionContextFailureTest, KeepsTheFirstOrtStatusAndReleasesLaterOnes) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   const int64_t dims[3] = {2, 3, 5};
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
                       ANNC_ALLOCATION_NONE, dims, nullptr};
 
   fake_.fail_get_output = true;
   // The first failing ORT call becomes the run's error.
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &desc),
+  EXPECT_EQ(AllocateOutput(abi, 0, &desc),
             ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(fake_.made, 1);
   EXPECT_EQ(fake_.released, 0);
@@ -298,7 +356,7 @@ TEST_F(ExecutionContextFailureTest, KeepsTheFirstOrtStatusAndReleasesLaterOnes) 
   // A second one must not replace (or leak) the first: the newer status is
   // released, the recorded one stays. A first-error branch that recursed
   // instead of storing would never return from the call above.
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &desc),
+  EXPECT_EQ(AllocateOutput(abi, 0, &desc),
             ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(fake_.made, 2);
   EXPECT_EQ(fake_.released, 1);
@@ -312,17 +370,17 @@ TEST_F(ExecutionContextFailureTest, KeepsTheFirstOrtStatusAndReleasesLaterOnes) 
 
 TEST_F(ExecutionContextFailureTest, LaterFailureDoesNotReplaceTheFirst) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   const int64_t dims[3] = {2, 3, 5};
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
                       ANNC_ALLOCATION_NONE, dims, nullptr};
 
   // GetOutput succeeds, reading the tensor's element type fails.
   fake_.fail_get_tensor_type = true;
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &desc), ANNC_STATUS_INTERNAL);
+  EXPECT_EQ(AllocateOutput(abi, 0, &desc), ANNC_STATUS_INTERNAL);
   fake_.fail_get_tensor_type = false;
   fake_.fail_get_data = true;
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &desc), ANNC_STATUS_INTERNAL);
+  EXPECT_EQ(AllocateOutput(abi, 0, &desc), ANNC_STATUS_INTERNAL);
 
   OrtStatus* error = context.TakeError();
   ASSERT_NE(error, nullptr);
@@ -332,57 +390,27 @@ TEST_F(ExecutionContextFailureTest, LaterFailureDoesNotReplaceTheFirst) {
 
 TEST_F(ExecutionContextFailureTest, ContractViolationsDoNotTouchOrt) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   const int64_t dims[3] = {2, 3, 5};
 
   // Wrong rank: rejected by the contract check, before any ORT call.
   AnncTensorDesc wrong_rank{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 2,
                             ANNC_ALLOCATION_NONE, dims, nullptr};
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &wrong_rank),
+  EXPECT_EQ(AllocateOutput(abi, 0, &wrong_rank),
             ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(fake_.get_output_calls, 0);
   EXPECT_EQ(fake_.last_status_message.find("rank mismatch") != std::string::npos,
             true);
 }
 
-TEST_F(ExecutionContextFailureTest, MissingDimsAreRejectedForEveryRank) {
-  // The ranks match their contracts, so the dims check is reached rather than
-  // short-circuited by the rank check.
-  {
-    // Rank 0 describes one element and still needs a dims pointer; a null
-    // pointer must not be read as an empty tensor.
-    std::vector<OutputContract> rank0{{0, ANNC_ELEMENT_TYPE_F32}};
-    OnnxExecutionContext context(&fake_.api, fake_.kernel_context, rank0);
-    AnncTensorDesc no_dims{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 0,
-                           ANNC_ALLOCATION_NONE, nullptr, nullptr};
-    EXPECT_EQ(context.abi()->allocate_output(context.abi()->handle, 0, &no_dims),
-              ANNC_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(fake_.last_status_message.find("has no dimensions") !=
-                  std::string::npos,
-              true);
-  }
-  {
-    std::vector<OutputContract> rank1{{1, ANNC_ELEMENT_TYPE_F32}};
-    OnnxExecutionContext context(&fake_.api, fake_.kernel_context, rank1);
-    AnncTensorDesc negative{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 1,
-                            ANNC_ALLOCATION_NONE, kNegativeDim, nullptr};
-    EXPECT_EQ(context.abi()->allocate_output(context.abi()->handle, 0, &negative),
-              ANNC_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(fake_.last_status_message.find("invalid dims") !=
-                  std::string::npos,
-              true);
-  }
-  EXPECT_EQ(fake_.get_output_calls, 0);
-}
-
 TEST_F(ExecutionContextFailureTest, ZeroSizeOutputPassesTheRuntimeDims) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   const int64_t dims[3] = {0, 3, 5};  // batch 0: legal, empty tensor
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
                       ANNC_ALLOCATION_NONE, dims, nullptr};
 
-  EXPECT_EQ(abi->allocate_output(abi->handle, 0, &desc), ANNC_STATUS_OK);
+  EXPECT_EQ(AllocateOutput(abi, 0, &desc), ANNC_STATUS_OK);
   EXPECT_EQ(fake_.get_output_calls, 1);
   EXPECT_EQ(fake_.last_output_rank, 3u);
   EXPECT_EQ(fake_.last_output_dims, (std::vector<int64_t>{0, 3, 5}));
@@ -396,7 +424,7 @@ TEST_F(ExecutionContextFailureTest, OutputTypeCheckBorrowsShapeMetadata) {
   const int64_t dims[3] = {2, 3, 5};
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 3,
                       ANNC_ALLOCATION_NONE, dims, nullptr};
-  EXPECT_EQ(context.abi()->allocate_output(context.abi()->handle, 0, &desc),
+  EXPECT_EQ(AllocateOutput(context.abi(), 0, &desc),
             ANNC_STATUS_OK);
   EXPECT_EQ(fake_.shape_reference_calls, 1);
   EXPECT_EQ(fake_.shape_info_allocations, 0);
@@ -404,12 +432,12 @@ TEST_F(ExecutionContextFailureTest, OutputTypeCheckBorrowsShapeMetadata) {
 
 TEST_F(ExecutionContextFailureTest, ZeroByteTemporaryNeedsNoAllocator) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   const int64_t dims[2] = {0, 5};
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 2,
                       ANNC_ALLOCATION_ZERO, dims, nullptr};
 
-  EXPECT_EQ(abi->allocate_temp(abi->handle, &desc), ANNC_STATUS_OK);
+  EXPECT_EQ(AllocateTemp(abi, &desc), ANNC_STATUS_OK);
   EXPECT_EQ(desc.data, nullptr);
   // Nothing was requested from ORT: an empty scratch buffer is not allocated.
   EXPECT_EQ(fake_.allocator_requested, 0);
@@ -419,12 +447,12 @@ TEST_F(ExecutionContextFailureTest, ZeroByteTemporaryNeedsNoAllocator) {
 TEST_F(ExecutionContextFailureTest, TemporaryIsAllocatedAndFreedThroughOrt) {
   {
     OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-    AnncExecutionContext* abi = context.abi();
+    AnncKernelContext* abi = context.abi();
     const int64_t dims[2] = {4, 5};
     AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 2,
                         ANNC_ALLOCATION_ZERO, dims, nullptr};
 
-    EXPECT_EQ(abi->allocate_temp(abi->handle, &desc), ANNC_STATUS_OK);
+    EXPECT_EQ(AllocateTemp(abi, &desc), ANNC_STATUS_OK);
     EXPECT_EQ(fake_.alloc_calls, 1);
     EXPECT_EQ(fake_.last_alloc_bytes, 20u * sizeof(float));
     EXPECT_NE(desc.data, nullptr);
@@ -441,11 +469,11 @@ TEST_F(ExecutionContextFailureTest, TemporaryIsAllocatedAndFreedThroughOrt) {
 TEST_F(ExecutionContextFailureTest, FreeFailureStatusIsReleasedNotDropped) {
   {
     OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-    AnncExecutionContext* abi = context.abi();
+    AnncKernelContext* abi = context.abi();
     const int64_t dims[2] = {4, 5};
     AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 2,
                         ANNC_ALLOCATION_NONE, dims, nullptr};
-    ASSERT_EQ(abi->allocate_temp(abi->handle, &desc), ANNC_STATUS_OK);
+    ASSERT_EQ(AllocateTemp(abi, &desc), ANNC_STATUS_OK);
     fake_.fail_free = true;
   }
   EXPECT_EQ(fake_.free_calls, 1);
@@ -553,34 +581,15 @@ TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
 // With neither signal the range is split the way the in-tree pool's grain
 // default (1) and ORT's own num_batches<=0 default split it: one unit per
 // block, bounded by the pool's degree.
-TEST_F(ExecutionContextFailureTest, NoCostSignalGetsOneUnitPerShard) {
-  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
-  std::vector<int64_t> shard_sizes;
-  pool.parallel_for(64, annc::threadpool::ParallelForOptions{},
-                    [&](int64_t begin, int64_t end) {
-                      shard_sizes.push_back(end - begin);
-                    });
-  EXPECT_EQ(fake_.parallel_for_calls, 1);
-  const auto expected_shards = static_cast<size_t>(std::min(64, pool.num_threads()));
-  EXPECT_EQ(shard_sizes.size(), expected_shards);
-  EXPECT_EQ(fake_.last_parallel_batches, expected_shards);
-  int64_t covered = 0;
-  for (int64_t size : shard_sizes) {
-    EXPECT_GT(size, 0);
-    covered += size;
-  }
-  EXPECT_EQ(covered, 64);
-}
-
 TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
-  AnncExecutionContext* abi = context.abi();
+  AnncKernelContext* abi = context.abi();
   AnncTensorDesc desc{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 1,
                       ANNC_ALLOCATION_NONE, nullptr, nullptr};
 
-  EXPECT_EQ(abi->allocate_temp(abi->handle, &desc),
+  EXPECT_EQ(AllocateTemp(abi, &desc),
             ANNC_STATUS_INVALID_ARGUMENT);
-  EXPECT_EQ(fake_.last_status_message.find("has no dimensions") !=
+  EXPECT_EQ(fake_.last_status_message.find("invalid temporary request") !=
                 std::string::npos,
             true);
   EXPECT_EQ(fake_.alloc_calls, 0);

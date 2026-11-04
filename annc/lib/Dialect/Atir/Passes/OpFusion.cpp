@@ -551,8 +551,8 @@ static LogicalResult outlineContextBuiltin(
       "context_i64_attrs", makeI64Array(rewriter.getContext(), attributes)));
   metadata.push_back(rewriter.getNamedAttr(
       "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-  metadata.push_back(rewriter.getNamedAttr(
-      "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
+  // V3 kernels supply actual output shapes through allocation callbacks.
+  // Do not attach the legacy dynamic-input-to-output axis mapping.
   metadata.push_back(
       rewriter.getNamedAttr("symbolic_signature", rewriter.getStringAttr("")));
   metadata.push_back(rewriter.getNamedAttr(
@@ -569,55 +569,6 @@ static LogicalResult outlineContextBuiltin(
     op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
   anchor->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
   return success();
-}
-
-static func::FuncOp createExecutionV2KernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    ArrayRef<Operation *> fusedOps, ArrayRef<Value> boundaryInputs,
-    ArrayRef<Value> boundaryOutputs) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
-  for (Value input : boundaryInputs) inputTypes.push_back(input.getType());
-  SmallVector<Type> resultTypes;
-  for (Value output : boundaryOutputs) resultTypes.push_back(output.getType());
-
-  auto funcType = rewriter.getFunctionType(inputTypes, resultTypes);
-  auto func =
-      rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
-  func->setAttr("fusion.pattern", rewriter.getStringAttr("matmul_add_relu"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-  IRMapping mapper;
-  for (auto [index, input] : llvm::enumerate(boundaryInputs)) {
-    mapper.map(input, entry->getArgument(index + 1));
-  }
-  for (Operation *op : fusedOps) {
-    if (!isa<UniqueOp, ConstantOp, BufferOp>(op)) {
-      Value outputBuffer = op->getOperand(0);
-      if (!mapper.contains(outputBuffer)) {
-        Value localBuffer =
-            rewriter.create<BufferOp>(func.getLoc(), outputBuffer.getType());
-        mapper.map(outputBuffer, localBuffer);
-      }
-    }
-    rewriter.clone(*op, mapper);
-  }
-
-  SmallVector<Value> returns;
-  for (Value output : boundaryOutputs) returns.push_back(mapper.lookup(output));
-  rewriter.create<func::ReturnOp>(func.getLoc(), returns);
-  return func;
 }
 
 static func::FuncOp createKernelFunc(ModuleOp module, PatternRewriter &rewriter,
@@ -1042,48 +993,6 @@ static LogicalResult matchKpEmbeddingActionIdGather(
   if (!isClosedKernelOpSet(match.kernelOps, boundaryValues)) return failure();
 
   return success();
-}
-
-static func::FuncOp createKpEmbeddingActionIdGatherKernelFunc(
-    ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    Type indices1Type, Type paramsType, Type indices2Type, Type packDimType,
-    Type packType, Type outputType, ArrayRef<Operation *> kernelOps,
-    Value indices1, Value params, Value indices2, Value packDim, Value pack,
-    Value outputBuffer) {
-  if (auto existing = module.lookupSymbol<func::FuncOp>(kernelName)) {
-    return existing;
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToEnd(module.getBody());
-
-  SmallVector<Type> inputTypes = {indices1Type, paramsType, indices2Type,
-                                  packDimType, packType, outputType};
-  auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
-  auto func = rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
-  func.setPrivate();
-  func->setAttr("llvm.emit_c_interface", UnitAttr::get(rewriter.getContext()));
-  func->setAttr("fusion.pattern",
-                rewriter.getStringAttr("kp_embedding_action_id_gather"));
-  func->setAttr("annc.kernel", rewriter.getUnitAttr());
-
-  Block *entry = func.addEntryBlock();
-  rewriter.setInsertionPointToStart(entry);
-
-  IRMapping mapper;
-  mapper.map(indices1, entry->getArgument(0));
-  mapper.map(params, entry->getArgument(1));
-  mapper.map(indices2, entry->getArgument(2));
-  mapper.map(packDim, entry->getArgument(3));
-  mapper.map(pack, entry->getArgument(4));
-  mapper.map(outputBuffer, entry->getArgument(5));
-
-  for (Operation *op : kernelOps) {
-    rewriter.clone(*op, mapper);
-  }
-  rewriter.create<func::ReturnOp>(func.getLoc());
-
-  return func;
 }
 
 static bool isConstantFloat(Value v, float expected) {
@@ -2906,16 +2815,12 @@ static FailureOr<TensordotMatMulMatch> matchTensordotMatMul(MatMulOp matmul) {
   return match;
 }
 
-// Execution v2 的 kernel 函数：(execution, input, weight) -> output，体内只有
-// 一次 atir.CustomizeOp；CustomizeCallLowering 把首参（!llvm.ptr）透传给手写
+// Context v3 lowering 前的 kernel 函数：(input, weight) -> output，体内只有
+// 一次 atir.CustomizeOp；CustomizeCallLowering 将入口改写为单 context 参数调用手写
 // kernel `TensordotMatMul`（annc/lib/Kernel/builtin_kernels/tensordot_matmul_*），
 // 输出由 kernel 经上下文分配后作为 CustomizeOp 的结果返回。
 static atir::CustomOpSchema getTensordotMatMulSchema() {
-  return atir::CustomOpSchema::get("TensordotMatMul")
-      .TypeVar("T")
-      .MemRefArg("input", 3, "T")
-      .MemRefArg("weight", 2, "T")
-      .Result("output", 3, "T");
+  return *atir::getContextKernelSchema("TensordotMatMul");
 }
 
 static func::FuncOp createTensordotMatMulKernelFunc(
@@ -2929,7 +2834,7 @@ static func::FuncOp createTensordotMatMulKernelFunc(
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext()), match.input.getType(),
+      match.input.getType(),
       match.weight.getType()};
   auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
   auto func =
@@ -2944,7 +2849,7 @@ static func::FuncOp createTensordotMatMulKernelFunc(
   rewriter.setInsertionPointToStart(entry);
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange{match.output.getType()},
-      ValueRange{entry->getArgument(1), entry->getArgument(2)},
+      ValueRange{entry->getArgument(0), entry->getArgument(1)},
       rewriter.getStringAttr("TensordotMatMul"),
       getTensordotMatMulSchema().toMetadata(rewriter.getContext()));
   rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
@@ -2986,7 +2891,7 @@ struct FuseTensordotMatMulAsFuncCallPattern
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = "TensordotMatMul";
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -3050,11 +2955,9 @@ struct FuseTensordotMatMulAsFuncCallPattern
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -3065,7 +2968,7 @@ struct FuseTensordotMatMulAsFuncCallPattern
     kernelFunc->setAttr("fusion.metadata",
                         DictionaryAttr::get(rewriter.getContext(), metadata));
 
-    // execution v2 的主图区域保留原样（AOT 裁剪丢弃主图函数），只做标记，
+    // context v3 的主图区域保留原样（AOT 裁剪丢弃主图函数），只做标记，
     // 避免通用 MatMul fusion 在同一区域上再建站点。
     for (Operation *op : fusedOps) {
       op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
@@ -3104,8 +3007,8 @@ struct FuseTensordotMatMulAsFuncCallPattern
 //
 // 匹配条件对齐 ORT 的 FusedMaskedMul（annc_opt 0005，
 // masked-mul-patch/0005-add-fused-masked-mul.patch::MatchMaskedMul）。
-// 与 dev 线（任务 20260924-016）的差别只在交付形态：kernel 函数首参为执行
-// 上下文、输出由 kernel 经上下文回调分配（不再有输出 memref 形参），主图区域
+// 与 dev 线（任务 20260924-016）的差别只在交付形态：kernel 仅接收 context，
+// 输入按槽位读取、输出经上下文回调分配，主图区域
 // 只标记 annc.fusion_materialized、不重写，AOT 裁剪会丢弃主图。
 
 // 站点里的一个 Mul。
@@ -3576,7 +3479,8 @@ static FailureOr<MaskedMulMatch> matchMaskedMul(MulOp anchor) {
     site.fed = true;
     fedSites.push_back(site);
   }
-  if (rawSites.empty()) return failure();
+  // argMap carries one four-bit index per raw output in a single i64.
+  if (rawSites.empty() || rawSites.size() > 16) return failure();
 
   // 实参表：每个不同的 data 源一个（前 rawCount 个），随后是 Sum 的其它输入。
   for (const MaskedMulSite &site : rawSites) {
@@ -3615,33 +3519,21 @@ static std::string getMaskedMulOpName(const MaskedMulMatch &match) {
 
 // 实参顺序 (data..., extras..., ids)；padding / argMap / divisorBits 是属性，
 // 输出在 kernel 侧经上下文按槽位分配，故不在调用参数里。
-static atir::CustomOpSchema getMaskedMulSchema(const MaskedMulMatch &match) {
-  auto schema =
-      atir::CustomOpSchema::get(getMaskedMulOpName(match))
-          .TypeVar("T")
-          .TypeVar("TMask");
-  for (size_t i = 0; i < match.args.size(); ++i) {
-    schema.MemRefArg("arg" + std::to_string(i), 3, "T");
-  }
-  schema.MemRefArg("ids", 2, "TMask");
-  for (size_t i = 0; i < match.sites.size(); ++i) {
-    schema.Result("output" + std::to_string(i), 3, "T");
-  }
-  if (match.flatMask) schema.Result("flat", 2, "T");
-  schema.I64AttrArg("dataArgs", match.rawCount);
-  schema.I64AttrArg("rawMuls", static_cast<int64_t>(match.sites.size()) - match.fedCount);
-  schema.I64AttrArg("fedMuls", match.fedCount);
-  schema.I64AttrArg("argMap", match.argMap);
-  schema.I64AttrArg("sumMask", match.sumMask);
-  schema.I64AttrArg("interiorKind", match.interiorKind);
-  schema.I64AttrArg("divisorBits", f32Bits(match.divisor));
-  schema.I64AttrArg("padding", match.padding);
-  return schema;
+static SmallVector<int64_t> getMaskedMulAttributes(const MaskedMulMatch &match) {
+  return {match.rawCount,
+          static_cast<int64_t>(match.sites.size()) - match.fedCount,
+          match.fedCount, match.argMap, match.sumMask, match.interiorKind,
+          f32Bits(match.divisor), match.padding};
 }
 
-// Execution v2 的 kernel 函数：(execution, data..., extras..., ids) ->
+static atir::CustomOpSchema getMaskedMulSchema(const MaskedMulMatch &match) {
+  return *atir::getContextKernelSchema(getMaskedMulOpName(match),
+                                       getMaskedMulAttributes(match));
+}
+
+// Context v3 lowering 前的 kernel 函数：(data..., extras..., ids) ->
 // (output...[, flat])，体内只有一次 atir.CustomizeOp；CustomizeCallLowering 把
-// 首参（!llvm.ptr）透传给手写 kernel（annc/lib/Kernel/builtin_kernels/
+// 入口改写为单 context 参数调用手写 kernel（annc/lib/Kernel/builtin_kernels/
 // masked_mul_*），输出由 kernel 经上下文按槽位分配后作为 CustomizeOp 的结果
 // 返回（槽位顺序 = sites 顺序，最后是 flat）。
 static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
@@ -3655,8 +3547,7 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
 
-  SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext())};
+  SmallVector<Type> inputTypes;
   for (Value arg : match.args) inputTypes.push_back(arg.getType());
   inputTypes.push_back(match.ids.getType());
   SmallVector<Type> resultTypes;
@@ -3677,9 +3568,9 @@ static func::FuncOp createMaskedMulKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToStart(entry);
   SmallVector<Value> operands;
   for (size_t i = 0; i < match.args.size(); ++i) {
-    operands.push_back(entry->getArgument(i + 1));
+    operands.push_back(entry->getArgument(i));
   }
-  operands.push_back(entry->getArgument(match.args.size() + 1));
+  operands.push_back(entry->getArgument(match.args.size()));
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange(resultTypes), ValueRange(operands),
       rewriter.getStringAttr(getMaskedMulOpName(match)),
@@ -3702,7 +3593,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     if (!module) return failure();
     // 站点本轮只服务 ONNX 导入（同 FTDMM）：ONNX 前端在模块上留
     // annc.contract_version，据此把 pattern 限定在 ONNX 模块，TF 侧融合行为
-    // 不变（kernel 本身在 TF 宿主下也能跑，池走 TLS 回退）。
+    // 不变（kernel 可复用其他宿主的 context，无并行服务时串行执行）。
     if (!module->hasAttr("annc.contract_version")) return failure();
 
     SmallVector<Operation *, 8> fusedOps;
@@ -3732,6 +3623,9 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     }
 
     // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
+    if (!atir::getContextKernelSchema(getMaskedMulOpName(*match),
+                                      getMaskedMulAttributes(*match)))
+      return failure();
     auto schema = getMaskedMulSchema(*match);
     SmallVector<Type> schemaInputTypes;
     for (Value arg : match->args) schemaInputTypes.push_back(arg.getType());
@@ -3752,7 +3646,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = getMaskedMulOpName(*match);
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -3794,12 +3688,13 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
+    metadata.push_back(rewriter.getNamedAttr(
+        "context_i64_attrs", makeI64Array(rewriter.getContext(),
+                                          getMaskedMulAttributes(*match))));
     // 输出由 kernel 经执行上下文分配，不在调用参数里，故 kernel_arg_order 为空。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -3810,7 +3705,7 @@ struct FuseMaskedMulAsFuncCallPattern : public OpRewritePattern<MulOp> {
     kernelFunc->setAttr("fusion.metadata",
                         DictionaryAttr::get(rewriter.getContext(), metadata));
 
-    // execution v2 的主图区域保留原样（AOT 裁剪丢弃主图），只做标记。
+    // context v3 的主图区域保留原样（AOT 裁剪丢弃主图），只做标记。
     for (Operation *op : fusedOps) {
       op->setAttr("annc.fusion_materialized", rewriter.getUnitAttr());
     }
@@ -4042,16 +3937,10 @@ static FailureOr<LayerNormMatch> matchLayerNorm(AddOp out) {
   return match;
 }
 
-// Execution v2 的 kernel 函数：(execution, input, gamma, beta, eps) -> output，
+// Context v3 lowering 前的 kernel 函数：(input, gamma, beta, eps) -> output，
 // 体内一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
 static atir::CustomOpSchema getLayerNormSchema() {
-  return atir::CustomOpSchema::get("LayerNorm")
-      .TypeVar("T")
-      .MemRefArg("input", 2, "T")
-      .MemRefArg("gamma", 1, "T")
-      .MemRefArg("beta", 1, "T")
-      .MemRefArg("eps", 0, "T")
-      .Result("output", 2, "T");
+  return *atir::getContextKernelSchema("LayerNorm");
 }
 
 static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
@@ -4066,7 +3955,7 @@ static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext()), match.input.getType(),
+      match.input.getType(),
       match.gamma.getType(), match.beta.getType(), match.eps.getType()};
   auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
   auto func =
@@ -4080,8 +3969,8 @@ static func::FuncOp createLayerNormKernelFunc(ModuleOp module,
   rewriter.setInsertionPointToStart(entry);
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange{match.output.getType()},
-      ValueRange{entry->getArgument(1), entry->getArgument(2),
-                 entry->getArgument(3), entry->getArgument(4)},
+      ValueRange{entry->getArgument(0), entry->getArgument(1),
+                 entry->getArgument(2), entry->getArgument(3)},
       rewriter.getStringAttr("LayerNorm"),
       getLayerNormSchema().toMetadata(rewriter.getContext()));
   rewriter.create<func::ReturnOp>(func.getLoc(), customCall.getResult(0));
@@ -4117,7 +4006,7 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = "LayerNorm";
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -4159,12 +4048,10 @@ struct FuseLayerNormAsFuncCallPattern : public OpRewritePattern<AddOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
     // 输出由 kernel 经执行上下文分配，不在调用参数里。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(
@@ -4488,16 +4375,11 @@ static const char *getBatchedMatMulAddOpName(Type type) {
                                          : "BatchedMatMulAdd";
 }
 
-// Execution v2 的 kernel 函数：(execution, data, weight, bias) -> output，体内
+// Context v3 lowering 前的 kernel 函数：(data, weight, bias) -> output，体内
 // 一次 atir.CustomizeOp；输出由 kernel 经执行上下文按槽位 0 分配。
 static atir::CustomOpSchema getBatchedMatMulAddSchema(int64_t rank) {
-  return atir::CustomOpSchema::get(rank == 4 ? "BatchedMatMulAdd4"
-                                             : "BatchedMatMulAdd")
-      .TypeVar("T")
-      .MemRefArg("data", rank, "T")
-      .MemRefArg("weight", rank, "T")
-      .MemRefArg("bias", rank, "T")
-      .Result("output", rank, "T");
+  return *atir::getContextKernelSchema(
+      rank == 4 ? "BatchedMatMulAdd4" : "BatchedMatMulAdd");
 }
 
 static func::FuncOp createBatchedMatMulAddKernelFunc(
@@ -4511,7 +4393,7 @@ static func::FuncOp createBatchedMatMulAddKernelFunc(
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {
-      LLVM::LLVMPointerType::get(rewriter.getContext()), match.data.getType(),
+      match.data.getType(),
       match.weight.getType(), match.bias.getType()};
   auto funcType = rewriter.getFunctionType(inputTypes, match.output.getType());
   auto func =
@@ -4524,8 +4406,8 @@ static func::FuncOp createBatchedMatMulAddKernelFunc(
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
-  Value weight = entry->getArgument(2);
-  Value bias = entry->getArgument(3);
+  Value weight = entry->getArgument(1);
+  Value bias = entry->getArgument(2);
   if (match.foldedWeight) {
     // Keep original initializer arguments in the site input plan. Their
     // names bind to real ORT inputs; the transformed payloads live inside
@@ -4545,7 +4427,7 @@ static func::FuncOp createBatchedMatMulAddKernelFunc(
   }
   auto customCall = rewriter.create<atir::CustomizeOp>(
       func.getLoc(), TypeRange{match.output.getType()},
-      ValueRange{entry->getArgument(1), weight, bias},
+      ValueRange{entry->getArgument(0), weight, bias},
       rewriter.getStringAttr(getBatchedMatMulAddOpName(match.data.getType())),
       getBatchedMatMulAddSchema(batchedMatMulAddRank(match.data.getType()))
           .toMetadata(rewriter.getContext()));
@@ -4666,7 +4548,7 @@ struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
     }
     annc::kernels::KernelResolveRequest request;
     request.op_type = getBatchedMatMulAddOpName(match->data.getType());
-    request.abi = "annc_execution_v2";
+    request.abi = "annc_context_v3";
     request.type_constraints = std::move(*inferred);
     if (!annc::kernels::hasAnyAvailableKernel(request, false)) return failure();
 
@@ -4722,12 +4604,10 @@ struct FuseBatchedMatMulAddAsFuncCallPattern : public OpRewritePattern<AddOp> {
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(rewriter.getNamedAttr(
-        "abi", rewriter.getStringAttr("annc_execution_v2")));
+        "abi", rewriter.getStringAttr("annc_context_v3")));
     // 输出由 kernel 经执行上下文分配，不在调用参数里。
     metadata.push_back(rewriter.getNamedAttr(
         "kernel_arg_order", makeI64Array(rewriter.getContext(), {})));
-    metadata.push_back(rewriter.getNamedAttr(
-        "dynamic_dims", makeI64Array(rewriter.getContext(), {0})));
     metadata.push_back(rewriter.getNamedAttr("symbolic_signature",
                                              rewriter.getStringAttr("")));
     metadata.push_back(rewriter.getNamedAttr(

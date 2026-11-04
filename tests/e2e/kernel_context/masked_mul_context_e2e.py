@@ -48,32 +48,34 @@ def build_norm_model(path):
     a = helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])
     b = helper.make_tensor_value_info("b", TensorProto.FLOAT, [2, 3, 4])
     e = helper.make_tensor_value_info("e", TensorProto.FLOAT, [2, 3, 4])
-    outs = [helper.make_tensor_value_info(n, TensorProto.FLOAT, [2, 3, 4])
-            for n in OUTPUT_NAMES]
+    outs = [
+        helper.make_tensor_value_info(n, TensorProto.FLOAT, [2, 3, 4])
+        for n in OUTPUT_NAMES
+    ]
     pad = helper.make_tensor("pad", TensorProto.INT64, [], [0])
     axes = helper.make_tensor("axes", TensorProto.INT64, [1], [2])
     two = helper.make_tensor("two", TensorProto.FLOAT, [], [2.0])
     nodes = [
         helper.make_node("Equal", ["ids", "pad"], ["eq"], name="n_eq"),
         helper.make_node("Not", ["eq"], ["not_eq"], name="n_not"),
-        helper.make_node("Cast", ["not_eq"], ["mask"], name="n_cast",
-                         to=TensorProto.FLOAT),
-        helper.make_node("Unsqueeze", ["mask", "axes"], ["mask3"],
-                         name="n_unsqueeze"),
+        helper.make_node(
+            "Cast", ["not_eq"], ["mask"], name="n_cast", to=TensorProto.FLOAT
+        ),
+        helper.make_node("Unsqueeze", ["mask", "axes"], ["mask3"], name="n_unsqueeze"),
         helper.make_node("Mul", ["a", "mask3"], ["out_a"], name="n_mul_a"),
         helper.make_node("Mul", ["b", "mask3"], ["out_b"], name="n_mul_b"),
-        helper.make_node("Sum", ["out_a", "out_b", "e"], ["sum"],
-                         name="n_sum"),
+        helper.make_node("Sum", ["out_a", "out_b", "e"], ["sum"], name="n_sum"),
         helper.make_node("Div", ["sum", "two"], ["scaled"], name="n_div"),
-        helper.make_node("Mul", ["scaled", "mask3"], ["out_c"],
-                         name="n_mul_c"),
+        helper.make_node("Mul", ["scaled", "mask3"], ["out_c"], name="n_mul_c"),
     ]
-    graph = helper.make_graph(nodes, "masked_mul_norm", [ids, a, b, e],
-                              outs + [helper.make_tensor_value_info(
-                                  "out_c", TensorProto.FLOAT, [2, 3, 4])],
-                              initializer=[pad, axes, two])
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 13)])
+    graph = helper.make_graph(
+        nodes,
+        "masked_mul_norm",
+        [ids, a, b, e],
+        outs + [helper.make_tensor_value_info("out_c", TensorProto.FLOAT, [2, 3, 4])],
+        initializer=[pad, axes, two],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 7
     onnx.checker.check_model(model)
     onnx.save(model, path)
@@ -85,28 +87,32 @@ def build_product_model(path):
     ids = helper.make_tensor_value_info("ids", TensorProto.INT64, [2, 3])
     a = helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])
     b = helper.make_tensor_value_info("b", TensorProto.FLOAT, [2, 3, 4])
-    outs = [helper.make_tensor_value_info(n, TensorProto.FLOAT, [2, 3, 4])
-            for n in OUTPUT_NAMES]
+    outs = [
+        helper.make_tensor_value_info(n, TensorProto.FLOAT, [2, 3, 4])
+        for n in OUTPUT_NAMES
+    ]
     pad = helper.make_tensor("pad", TensorProto.INT64, [], [0])
     axes = helper.make_tensor("axes", TensorProto.INT64, [1], [2])
     nodes = [
         helper.make_node("Equal", ["ids", "pad"], ["eq"], name="n_eq"),
         helper.make_node("Not", ["eq"], ["not_eq"], name="n_not"),
-        helper.make_node("Cast", ["not_eq"], ["mask"], name="n_cast",
-                         to=TensorProto.FLOAT),
-        helper.make_node("Unsqueeze", ["mask", "axes"], ["mask3"],
-                         name="n_unsqueeze"),
+        helper.make_node(
+            "Cast", ["not_eq"], ["mask"], name="n_cast", to=TensorProto.FLOAT
+        ),
+        helper.make_node("Unsqueeze", ["mask", "axes"], ["mask3"], name="n_unsqueeze"),
         helper.make_node("Mul", ["a", "mask3"], ["out_a"], name="n_mul_a"),
         helper.make_node("Mul", ["b", "mask3"], ["out_b"], name="n_mul_b"),
         helper.make_node("Mul", ["out_a", "out_b"], ["mid"], name="n_mul_mid"),
         helper.make_node("Mul", ["mid", "mask3"], ["out_c"], name="n_mul_c"),
     ]
-    graph = helper.make_graph(nodes, "masked_mul_product", [ids, a, b],
-                              outs + [helper.make_tensor_value_info(
-                                  "out_c", TensorProto.FLOAT, [2, 3, 4])],
-                              initializer=[pad, axes])
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 13)])
+    graph = helper.make_graph(
+        nodes,
+        "masked_mul_product",
+        [ids, a, b],
+        outs + [helper.make_tensor_value_info("out_c", TensorProto.FLOAT, [2, 3, 4])],
+        initializer=[pad, axes],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 7
     onnx.checker.check_model(model)
     onnx.save(model, path)
@@ -124,16 +130,15 @@ def build_model(path, two_muls=True, flat=False):
     nodes = [
         helper.make_node("Equal", ["ids", "pad"], ["eq"], name="n_eq"),
         helper.make_node("Not", ["eq"], ["not_eq"], name="n_not"),
-        helper.make_node("Cast", ["not_eq"], ["mask2"], name="n_cast",
-                         to=TensorProto.FLOAT),
-        helper.make_node("Unsqueeze", ["mask2", "axes"], ["mask3"],
-                         name="n_unsqueeze"),
+        helper.make_node(
+            "Cast", ["not_eq"], ["mask2"], name="n_cast", to=TensorProto.FLOAT
+        ),
+        helper.make_node("Unsqueeze", ["mask2", "axes"], ["mask3"], name="n_unsqueeze"),
         helper.make_node("Tile", ["mask3", "repeats"], ["tiled"], name="n_tile"),
         helper.make_node("Mul", ["a", "tiled"], ["out_a"], name="n_mul_a"),
     ]
     if two_muls:
-        nodes.append(helper.make_node("Mul", ["b", "tiled"], ["out_b"],
-                                      name="n_mul_b"))
+        nodes.append(helper.make_node("Mul", ["b", "tiled"], ["out_b"], name="n_mul_b"))
     outputs = [out_a] + ([out_b] if two_muls else [])
     if flat:
         # model3 reads the pre-unsqueeze mask outside the site.  A Shape node
@@ -141,14 +146,26 @@ def build_model(path, two_muls=True, flat=False):
         # dtype Cast (not foldable, and the matcher allows any non-Mul user of
         # the chain's Cast result): the fused node must expose the flat mask
         # as an extra output and the Cast checks its values end to end.
-        nodes.append(helper.make_node("Cast", ["mask2"], ["flat_mask"],
-                                      name="n_flat_cast", to=TensorProto.DOUBLE))
-        outputs.append(helper.make_tensor_value_info(
-            "flat_mask", TensorProto.DOUBLE, [2, 3]))
-    graph = helper.make_graph(nodes, "masked_mul_chain", [ids, a, b],
-                              outputs, initializer=[pad, axes, repeats])
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 13)])
+        nodes.append(
+            helper.make_node(
+                "Cast",
+                ["mask2"],
+                ["flat_mask"],
+                name="n_flat_cast",
+                to=TensorProto.DOUBLE,
+            )
+        )
+        outputs.append(
+            helper.make_tensor_value_info("flat_mask", TensorProto.DOUBLE, [2, 3])
+        )
+    graph = helper.make_graph(
+        nodes,
+        "masked_mul_chain",
+        [ids, a, b],
+        outputs,
+        initializer=[pad, axes, repeats],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     # Match the FTDMM fixture's metadata: ORT 1.26 has no trouble with it.
     model.ir_version = 7
     onnx.checker.check_model(model)
@@ -180,41 +197,57 @@ def inputs():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-library", required=True)
-    parser.add_argument("--pipeline", required=True,
-                        help="annc-onnx-pipeline built from this tree")
-    parser.add_argument("--kernel-lib-dir", required=True,
-                        help="directory holding libANNCBuiltinKernels.a")
-    parser.add_argument("--llvm-lib-dir",
-                        help="directory holding the LLVM support archives")
-    parser.add_argument("--extra-lib-dir", action="append", default=[],
-                        help="further archive directories the driver links "
-                             "against (ANNCGemmSupport, GEMM microkernels)")
+    parser.add_argument(
+        "--pipeline", required=True, help="annc-onnx-pipeline built from this tree"
+    )
+    parser.add_argument(
+        "--kernel-lib-dir",
+        required=True,
+        help="directory holding libANNCBuiltinKernels.a",
+    )
+    parser.add_argument(
+        "--llvm-lib-dir", help="directory holding the LLVM support archives"
+    )
+    parser.add_argument(
+        "--extra-lib-dir",
+        action="append",
+        default=[],
+        help="further archive directories the driver links "
+        "against (ANNCGemmSupport, GEMM microkernels)",
+    )
     parser.add_argument("--work-dir")
     args = parser.parse_args()
 
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-masked-mul-"))
     (work / "cache").mkdir(parents=True, exist_ok=True)
     merged = merge_kernel_libs(
-        work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir])
-    for required in ("libANNCBuiltinKernels.a", "libLLVMSupport.a",
-                     "libANNCGemmSupport.a"):
+        work, [args.kernel_lib_dir, args.llvm_lib_dir, *args.extra_lib_dir]
+    )
+    for required in (
+        "libANNCBuiltinKernels.a",
+        "libLLVMSupport.a",
+        "libANNCGemmSupport.a",
+    ):
         assert (merged / required).exists(), (
             f"{required} missing from {merged}; build annc-onnx-pipeline, "
-            "and ANNCGemmSupport")
+            "and ANNCGemmSupport"
+        )
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
-    rtpy.register_execution_provider_library("AnncExecutionProvider",
-                                             args.ep_library)
-    env = dict(os.environ,
-               ANNC_EP_PIPELINE=args.pipeline,
-               ANNC_EP_FUSION_MASKED_MUL="1",
-               ANNC_KERNEL_LIB_PATH=str(merged))
+    rtpy.register_execution_provider_library("AnncExecutionProvider", args.ep_library)
+    env = dict(
+        os.environ,
+        ANNC_EP_PIPELINE=args.pipeline,
+        ANNC_EP_FUSION_MASKED_MUL="1",
+        ANNC_KERNEL_LIB_PATH=str(merged),
+    )
     gcc_runtime = Path("/usr/lib/gcc/aarch64-openEuler-linux/12")
     if gcc_runtime.is_dir() and not env.get("LIBRARY_PATH"):
         env["LIBRARY_PATH"] = str(gcc_runtime)
-    os.environ.update({k: v for k, v in env.items()
-                       if k.startswith("ANNC_") or k == "LIBRARY_PATH"})
+    os.environ.update(
+        {k: v for k, v in env.items() if k.startswith("ANNC_") or k == "LIBRARY_PATH"}
+    )
 
     for name in ("shared_chain", "one_mul", "norm", "product", "flat"):
         case = work / name
@@ -245,35 +278,43 @@ def run_case(work, kind):
     elif kind == "flat":
         output_names = ["out_a", "flat_mask"]
     reference = ort.InferenceSession(
-        str(model_path), options,
-        providers=["CPUExecutionProvider"]).run(None, feed)
+        str(model_path), options, providers=["CPUExecutionProvider"]
+    ).run(None, feed)
 
     for attempt in range(2):
         options.enable_profiling = True
         options.profile_file_prefix = str(work / f"ep-{attempt}")
         session = ort.InferenceSession(
-            str(model_path), options,
-            providers=["AnncExecutionProvider", "CPUExecutionProvider"])
+            str(model_path),
+            options,
+            providers=["AnncExecutionProvider", "CPUExecutionProvider"],
+        )
         actual = session.run(None, feed)
         for name, expected, got in zip(output_names, reference, actual):
-            np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-7,
-                                       equal_nan=True)
+            np.testing.assert_allclose(
+                got, expected, rtol=1e-3, atol=1e-7, equal_nan=True
+            )
         profile = json.loads(Path(session.end_profiling()).read_text())
-        ep_nodes = [event for event in profile if
-                    event.get("cat") == "Node" and
-                    event.get("args", {}).get("provider") ==
-                    "AnncExecutionProvider"]
+        ep_nodes = [
+            event
+            for event in profile
+            if event.get("cat") == "Node"
+            and event.get("args", {}).get("provider") == "AnncExecutionProvider"
+        ]
         assert len(ep_nodes) == 1, profile
     options.enable_profiling = False
 
-    entries = [p for p in (work / "cache").glob("v1/*/*")
-               if p.is_dir() and (p / "DONE").is_file()]
+    entries = [
+        p
+        for p in (work / "cache").glob("context-v3/*/*")
+        if p.is_dir() and (p / "DONE").is_file()
+    ]
     assert len(entries) == 1, entries
     sites = json.loads((entries[0] / "sites.json").read_text())["sites"]
     assert len(sites) == 1, sites
     site = sites[0]
     assert site["pattern"] == "masked_mul", site
-    assert site["abi"] == "annc_execution_v2", site
+    assert site["abi"] == "annc_context_v3", site
     assert site["kernel_arg_order"] == [], site
     if kind == "norm":
         # chain (4, no Tile) + three Muls + the Sum and the Div.
@@ -302,9 +343,11 @@ def run_case(work, kind):
         assert len(site["outputs"]) == 1, site
         assert [a["rank"] for a in site["args"]] == [3, 2], site
     assert (entries[0] / "libannc_kernels.so").is_file()
-    print(f"{work.name}: one masked_mul context-ABI site covering the whole "
-          "subgraph, members and outputs as expected, every output matched the "
-          "CPU EP (cold compile + warm cache)")
+    print(
+        f"{work.name}: one masked_mul context-ABI site covering the whole "
+        "subgraph, members and outputs as expected, every output matched the "
+        "CPU EP (cold compile + warm cache)"
+    )
 
 
 if __name__ == "__main__":

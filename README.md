@@ -67,7 +67,7 @@ python3 -m pytest tests/
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 第一次接触 ANNC      | [安装 ANNC](docs/getting-started/installation.md) → [从源码构建](docs/guides/build-from-source.md) → [CLI 工作流](docs/guides/cli-workflows.md)                                                                     |
 | TensorFlow 用户   | [端到端 GraphDef 重写](docs/guides/cli-workflows.md#端到端-graphdef-重写) → [运行时接入（Grappler / ANNCFused）](docs/architecture/runtime-integration.md)                                                                 |
-| ONNX Runtime 用户 | [addons/onnxruntime/README.md](addons/onnxruntime/README.md)：`--enable-ort`（别名 `--enable-ort-ep`）构建 → 注册 EP → 端到端验证（真实示例 `tests/integration/ort_ep/ftdmm_context_e2e.py`）→ [EP 接入设计](docs/design/onnx-support/ep-design.md) |
+| ONNX Runtime 用户 | [addons/onnxruntime/README.md](addons/onnxruntime/README.md)：`--enable-ort`（别名 `--enable-ort-ep`）构建 → 注册 EP → 端到端验证（真实示例 `tests/e2e/kernel_context/ftdmm_context_e2e.py`）→ [EP 接入设计](docs/design/onnx-support/ep-design.md) |
 | 编译器开发者          | [AGENTS.md](AGENTS.md)（工作原则与导航）→ [总体架构](docs/architecture/overview.md) → [特性与模块设计](docs/design/README.md) → [文档索引](docs/README.md)                                                                     |
 
 完整文档索引（按分区组织）见 [docs/README.md](docs/README.md)。

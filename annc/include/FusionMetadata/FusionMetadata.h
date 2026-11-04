@@ -88,6 +88,8 @@ struct FusionInfo {
 
   // Output-axis indices whose sizes are resolved from the dynamic input at
   // runtime. For example {0} marks the batch dimension as dynamic.
+  // Empty for annc_context_v3: kernels supply actual output shapes through
+  // allocation callbacks. An empty list does not imply static output shapes.
   std::vector<int64_t> dynamicDims;
 
   // Permutation applied before the C-interface call. Indices address the

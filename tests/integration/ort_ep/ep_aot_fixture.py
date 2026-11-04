@@ -167,8 +167,8 @@ def run_test(args):
             actual = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
                 None, {"x": x})[0]
             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
-        entries = list((work / "cache").glob("v1/*/*/DONE"))
-        assert not list((work / "cache").glob("v1/*/*.work"))
+        entries = list((work / "cache").glob("context-v3/*/*/DONE"))
+        assert not list((work / "cache").glob("context-v3/*/*.work"))
         assert not (work / "compute.log").exists()
         if args.mode == "zero-site":
             assert len(entries) == 1, entries
@@ -204,14 +204,14 @@ def run_test(args):
                        pool.submit(run_one, other, "x", expected_other)]
             for future in futures:
                 future.result()
-        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        entries = list((work / "cache").glob("context-v3/*/*/DONE"))
         assert len(entries) == 2, entries
         names = {json.loads((entry.parent / "sites.json").read_text())["sites"][0]["kernel_name"]
                  for entry in entries}
         assert names == {"fixture_matmul_5", "fixture_matmul_6"}, names
         assert (work / "compile.log").read_text().splitlines() == ["compile"] * 2
         assert (work / "compute.log").read_text().splitlines() == ["compute"] * 4
-        assert not list((work / "cache").glob("v1/*/*.work"))
+        assert not list((work / "cache").glob("context-v3/*/*.work"))
         print("Concurrent different models: overlapping compilers, isolated caches, warm hits")
         return
     if args.mode == "cache-config":
@@ -222,7 +222,7 @@ def run_test(args):
         second = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
         actual = second.run(None, {"x": x})[0]
         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
-        entries = list((work / "cache").glob("v1/*/*/DONE"))
+        entries = list((work / "cache").glob("context-v3/*/*/DONE"))
         assert len(entries) == 2, entries
         assert (work / "compile.log").read_text().splitlines() == ["compile", "compile"]
         assert (work / "compute.log").read_text().splitlines() == ["compute", "compute"]
@@ -234,8 +234,8 @@ def run_test(args):
         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7,
                                    equal_nan=True)
         print(f"session {attempt + 1}: numeric match")
-    entries = list((work / "cache").glob("v1/*/*/DONE"))
-    assert not list((work / "cache").glob("v1/*/*.work")), "work directories were not cleaned"
+    entries = list((work / "cache").glob("context-v3/*/*/DONE"))
+    assert not list((work / "cache").glob("context-v3/*/*.work")), "work directories were not cleaned"
     if args.mode == "missing-library":
         assert not entries, "incomplete cache must not be published"
         assert not (work / "compute.log").exists()

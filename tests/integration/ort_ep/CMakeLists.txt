@@ -29,9 +29,9 @@ foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report con
     TIMEOUT 60 ENVIRONMENT "${AnncEpTestEnvironment}")
 endforeach()
 
-# annc_execution_v2 sites: the context callbacks, the pool the context
+# annc_context_v3 sites: the context callbacks, the pool the context
 # carries, and the failure paths of both.
-foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot legacy-packed)
+foreach(mode IN ITEMS normal threads nested concurrent same-session error bad-slot packed-switch)
   add_test(NAME AnncEpContextFixture.${mode}
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/ep_context_fixture.py
@@ -106,7 +106,7 @@ set_tests_properties(AnncEpFusionToggles PROPERTIES
 if(TARGET annc-onnx-pipeline)
   add_test(NAME AnncEpFtdmmContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/ftdmm_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/ftdmm_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -117,7 +117,7 @@ if(TARGET annc-onnx-pipeline)
   # outputs need the report->fused-node permutation.
   add_test(NAME AnncEpMaskedMulContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/masked_mul_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/masked_mul_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -127,7 +127,7 @@ if(TARGET annc-onnx-pipeline)
   # layer_norm: rank-1 gamma/beta force name binding, eps is rank-0.
   add_test(NAME AnncEpLayerNormContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/layer_norm_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -137,7 +137,7 @@ if(TARGET annc-onnx-pipeline)
   # batched_matmul_add: all three arguments are rank-3 f32 (name binding).
   add_test(NAME AnncEpBatchedMatMulAddContextE2e
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/batched_matmul_add_context_e2e.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/batched_matmul_add_context_e2e.py
       --ep-library $<TARGET_FILE:annc_ep>
       --pipeline $<TARGET_FILE:annc-onnx-pipeline>
       --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
@@ -148,7 +148,7 @@ if(TARGET annc-onnx-pipeline)
     add_test(NAME AnncEpBatchedMatMulAddPackedContextE2e
       COMMAND ${CMAKE_COMMAND} -E env ANNC_EP_PACKED_B=1 ANNC_EP_DEBUG=1
         ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/batched_matmul_add_context_e2e.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../e2e/kernel_context/batched_matmul_add_context_e2e.py
         --packed-b-regression
         --ep-library $<TARGET_FILE:annc_ep>
         --pipeline $<TARGET_FILE:annc-onnx-pipeline>
