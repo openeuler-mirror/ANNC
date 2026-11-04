@@ -92,25 +92,7 @@ std::optional<SmallVector<SchemaResult>> readSchemaResults(
 
 std::optional<int64_t> readI64AttrAt(DictionaryAttr metadata, size_t index) {
   auto values = getArrayAttr(metadata, "custom.attr_values");
-  // Legacy producers are removed together with the builtin ABI migration.
-  if (!values) {
-    auto kinds = getArrayAttr(metadata, "custom.arg_kinds");
-    auto names = getArrayAttr(metadata, "custom.arg_names");
-    if (!kinds || !names || kinds->size() != names->size()) return std::nullopt;
-    size_t attributeIndex = 0;
-    for (size_t i = 0; i < kinds->size(); ++i) {
-      auto kind = dyn_cast<StringAttr>((*kinds)[i]);
-      if (!kind || kind.getValue() != "i64_attr") continue;
-      if (attributeIndex++ != index) continue;
-      auto name = dyn_cast<StringAttr>((*names)[i]);
-      if (!name) return std::nullopt;
-      auto attr = dyn_cast_or_null<IntegerAttr>(
-          metadata.get("custom.attr." + name.str()));
-      return attr ? std::optional<int64_t>(attr.getInt()) : std::nullopt;
-    }
-    return std::nullopt;
-  }
-  if (index >= values->size()) return std::nullopt;
+  if (!values || index >= values->size()) return std::nullopt;
   auto value = dyn_cast<IntegerAttr>((*values)[index]);
   return value ? std::optional<int64_t>(value.getInt()) : std::nullopt;
 }

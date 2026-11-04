@@ -5,16 +5,12 @@
 #include <arm_neon.h>
 #endif
 
-#include "Kernel/ExecutionContextUtils.h"
+#include "Context/KernelContextUtils.h"
 #include "Context/RowParallel.h"
-#include "Kernel/KernelStatus.h"
-#include "Kernel/MemRefTypes.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
 
 namespace {
 
-// FusedLayerNorm, execution-v2 form: the ONNX (TF-exported)
+// FusedLayerNorm, context-v3 form: the ONNX (TF-exported)
 // reciprocal-multiply LayerNorm chain
 //
 //   mean = ReduceMean(x, last axis, keepdims)
@@ -104,49 +100,47 @@ void layerNormRowNeon(const float* xRow, const float* gamma, const float* beta,
 }
 #endif  // __aarch64__
 
-annc::kernels::KernelStatus layerNormImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef2DF32* input,
-    AnncMemRef1DF32* gamma, AnncMemRef1DF32* beta, AnncMemRef0DF32* eps) {
-  if (execution == nullptr || !input || !gamma || !beta || !eps) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+AnncStatusCode layerNormImpl(annc::kernels::KernelContext& context) {
+  const auto* input = context.getInput(0);
+  const auto* gamma = context.getInput(1);
+  const auto* beta = context.getInput(2);
+  const auto* eps = context.getInput(3);
+  if (!input || !gamma || !beta || !eps) return context.status();
+  auto thread_pool = context.getThreadPool();
 
   const int64_t rows = input->sizes[0];
   const int64_t cols = input->sizes[1];
   if (rows < 0 || cols <= 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   if (gamma->sizes[0] != cols || beta->sizes[0] != cols) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   // Contiguous row-major operands: the host builds the descriptors that way
-  // (Kernel/ExecutionContextUtils.h -> makeMemRef), so this guards the
+  // (addons/onnxruntime/context/annc_ep_execution.cc), so this guards the
   // host/kernel contract rather than an arbitrary input layout.
   if (input->strides[1] != 1 || input->strides[0] != cols ||
       gamma->strides[0] != 1 || beta->strides[0] != 1) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   // Allocate in every case -- also when rows is zero -- because the host
   // checks that the call allocated every declared output slot.
-  auto output = annc::kernels::execution::allocateOutput2DF32(
-      execution, /*slot=*/0, rows, cols, ANNC_ALLOCATION_NONE);
+  auto output = context.allocateOutput<float>(0, {rows, cols});
   if (!output) {
-    llvm::consumeError(output.takeError());
-    return annc::kernels::KernelStatus::RuntimeError;
+    return ANNC_STATUS_ALLOCATION_FAILED;
   }
   if (output->strides[1] != 1 || output->strides[0] != cols) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
-  if (rows == 0) return annc::kernels::KernelStatus::Success;
+  if (rows == 0) return ANNC_STATUS_OK;
 
-  const float* x = ANNC_MEMREF_DATA(*input);
-  const float* g = ANNC_MEMREF_DATA(*gamma);
-  const float* b = ANNC_MEMREF_DATA(*beta);
-  const float epsilon = *ANNC_MEMREF_DATA(*eps);
-  float* out = ANNC_MEMREF_DATA(*output);
+  const float* x = annc::kernels::contextData<float>(*input);
+  const float* g = annc::kernels::contextData<float>(*gamma);
+  const float* b = annc::kernels::contextData<float>(*beta);
+  const float epsilon = *annc::kernels::contextData<float>(*eps);
+  float* out = annc::kernels::contextData<float>(*output);
 
   // The moments accumulate in f32, like the graph's own ReduceMean (ORT
   // accumulates in the tensor's element type): a double accumulator would be
@@ -163,8 +157,8 @@ annc::kernels::KernelStatus layerNormImpl(
                                          /*bytes_read=*/8) +
           /*row epilogue*/ 20,
       /*elements_per_row=*/3 * cols);
-  ::annc::threadpool::parallel_for(
-      thread_pool, rows, options,
+  annc::kernels::Shard(
+      thread_pool.numThreads(), thread_pool, rows, options.cost_per_unit.value_or(0),
       [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float* xRow = x + row * cols;
@@ -195,7 +189,7 @@ annc::kernels::KernelStatus layerNormImpl(
         }
       });
 
-  return annc::kernels::KernelStatus::Success;
+  return ANNC_STATUS_OK;
 }
 
 }  // namespace

@@ -101,6 +101,8 @@ std::array<float, 4> runMatMulKernel(const std::string& backend) {
                             1,
                             nullptr,
                             0,
+                            nullptr,
+                            0,
                             &services};
 
   auto symbolOpt = KernelRegistry::instance().lookupKernelSymbol(

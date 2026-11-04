@@ -1,30 +1,27 @@
-// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --implicit-check-not=dynamic_dims
 // RUN: env ANNC_EP_FUSION_BATCHED_MATMUL_ADD=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
 // DISABLED: atir.MatMul
 // DISABLED-NOT: custom.op_name = "BatchedMatMulAdd
 // DISABLED-NOT: func.func private @fused_batched_matmul_add_
-// FusedBatchedMatMulAdd 站点（execution v2 形态）：rank-3 MatMul + 广播 bias
-// Add 融成一个站点，kernel 函数首参为执行上下文、fusion.metadata 的 abi 为
-// annc_execution_v2、kernel_arg_order 为空（输出由 kernel 经上下文按槽位 0
+// FusedBatchedMatMulAdd 站点（context v3 形态）：rank-3 MatMul + 广播 bias
+// Add 融成一个站点，kernel 函数在 lowering 后只接收上下文、fusion.metadata 的 abi 为
+// annc_context_v3、kernel_arg_order 为空（输出由 kernel 经上下文按槽位 0
 // 分配）；主图区域只标记 annc.fusion_materialized。
 //
 // CHECK-LABEL: func.func @main
 // CHECK: atir.MatMul
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_batched_matmul_add_
-// CHECK-SAME: !llvm.ptr
 // CHECK-SAME: annc.execution_mode = "aot"
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: args = [{dtype = "f32", rank = 3 : i64, role = "dynamic", shape = [1, 2, 3], tf_name = "x"}, {dtype = "f32", rank = 3 : i64, role = "fixed", shape = [1, 3, 4], tf_name = "w"}, {dtype = "f32", rank = 3 : i64, role = "fixed", shape = [1, 1, 4], tf_name = "b"}]
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: member_node_names = ["n_add", "n_mm"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 2, 4], tf_name = "y:0"}]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["data", "weight", "bias"]
 // CHECK-SAME: custom.arg_ranks = [3, 3, 3]
 // CHECK-SAME: custom.op_name = "BatchedMatMulAdd"
-// CHECK-SAME: custom.result_names = ["output"]
 // CHECK-SAME: custom.result_ranks = [3]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<1x2x3xf32, name = "x">) -> !atir.tensor<1x2x4xf32, name = "y"> {
@@ -45,7 +42,7 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // batch 选取 weight/bias。
 // CHECK-LABEL: func.func @main
 // CHECK: func.func private @fused_batched_matmul_add_
-// CHECK: custom.arg_names = ["data", "weight", "bias"]
+// CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "BatchedMatMulAdd"
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<2x2x3xf32, name = "x">) -> !atir.tensor<2x2x4xf32, name = "y"> {
@@ -102,7 +99,7 @@ module attributes {module.state = "atir"} {
 // CHECK-LABEL: func.func @main
 // CHECK-NOT: tf_name = "affined"
 // CHECK: func.func private @fused_batched_matmul_add_
-// CHECK: custom.arg_names = ["data", "weight", "bias"]
+// CHECK: atir.Customize
 // CHECK-SAME: custom.op_name = "BatchedMatMulAdd"
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<1x2x3xf32, name = "x">) -> !atir.tensor<1x2x4xf32, name = "y"> {
@@ -166,14 +163,12 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK: atir.MatMul
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_batched_matmul_add_
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: member_node_names = ["n_add", "n_mm"]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["data", "weight", "bias"]
 // CHECK-SAME: custom.arg_ranks = [4, 4, 4]
 // CHECK-SAME: custom.op_name = "BatchedMatMulAdd4"
-// CHECK-SAME: custom.result_names = ["output"]
 // CHECK-SAME: custom.result_ranks = [4]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<2x1x?x32xf32, name = "x">) -> !atir.tensor<2x1x?x2xf32, name = "y"> {

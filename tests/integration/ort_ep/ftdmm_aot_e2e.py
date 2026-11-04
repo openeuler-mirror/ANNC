@@ -95,7 +95,7 @@ def main():
         np.testing.assert_allclose(outputs[-1], ref, rtol=1e-3, atol=1e-7,
                                    equal_nan=True)
         print(f"session {attempt + 1}: numeric match")
-    entries = [p for p in (work / "cache").glob("v1/*/*") if p.is_dir() and
+    entries = [p for p in (work / "cache").glob("context-v3/*/*") if p.is_dir() and
                (p / "DONE").is_file()]
     assert len(entries) == 1 and (entries[0] / "DONE").is_file(), entries
     assert (entries[0] / "sites.json").is_file()

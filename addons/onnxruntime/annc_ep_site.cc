@@ -78,46 +78,6 @@ bool ValidateLegacySite(const Site& site, bool matmul, std::string* error) {
 // in the report itself.
 // The outputs are a slot contract (rank/type) the callbacks check when the
 // kernel allocates.
-bool ValidateExecutionSite(const Site& site, std::string* error) {
-  if (!site.kernelArgOrder.empty()) {
-    return Fail(error,
-                "context-ABI site must not carry a kernel argument order");
-  }
-  // The kernel-call dispatch in annc_ep_execution.cc has one cast per argument
-  // count; both sides carry the same upper bound.  Fused subgraphs with several
-  // data arguments and a Sum's other inputs need more than the dev line's seven
-  // (model1's masked_mul sites reach twelve).
-  if (site.args.empty() || site.args.size() > 14) {
-    return Fail(error,
-                "context-ABI site must have between one and fourteen arguments");
-  }
-  if (site.outputs.empty()) {
-    return Fail(error, "context-ABI site must declare at least one output");
-  }
-  for (const Site::Arg& arg : site.args) {
-    if (arg.name.empty() || arg.role.empty() || arg.rank < 0 || arg.rank > 4 ||
-        static_cast<size_t>(arg.rank) != arg.shape.size()) {
-      return Fail(
-          error,
-          "context-ABI site argument has invalid name, role, rank, or shape");
-    }
-    if (arg.dtype != "f32" && arg.dtype != "i64") {
-      return Fail(error,
-                  "context-ABI site argument element type is not supported");
-    }
-  }
-  for (const Site::Arg& output : site.outputs) {
-    if (output.role != "output" || output.name.empty() || output.rank < 0 ||
-        output.rank > 4 ||
-        static_cast<size_t>(output.rank) != output.shape.size() ||
-        output.dtype != "f32") {
-      return Fail(error,
-                  "context-ABI site output has invalid role, rank, or type");
-    }
-  }
-  return true;
-}
-
 bool ValidateContextSite(const Site& site, std::string* error) {
   if (!site.kernelArgOrder.empty()) {
     return Fail(error,
@@ -170,7 +130,7 @@ bool FusionPatternEnabled(const std::string& pattern) {
 }
 
 bool SiteNeedsResolvedNames(const Site& site) {
-  if (site.abi != "annc_context_v3" && site.abi != "annc_execution_v2") return false;
+  if (site.abi != "annc_context_v3") return false;
   if (site.outputs.size() > 1) return true;
   std::unordered_set<int64_t> arg_ranks;
   for (const Site::Arg& arg : site.args) {
@@ -205,7 +165,6 @@ bool ValidateSite(const Site& site, std::string* error) {
     }
   }
 
-  if (site.abi == "annc_execution_v2") return ValidateExecutionSite(site, error);
   if (site.abi == "annc_context_v3") return ValidateContextSite(site, error);
   if (site.abi != "mlir_ciface") {
     return Fail(error, "site ABI is not supported by the EP");

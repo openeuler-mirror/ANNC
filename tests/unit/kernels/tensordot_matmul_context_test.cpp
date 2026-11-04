@@ -10,7 +10,8 @@
 
 namespace {
 
-using annc::kernels::KernelStatus;
+using annc::test::Invoke;
+using annc::test::View;
 using annc::test::ExpectNear;
 using annc::test::OutputBuffers;
 
@@ -38,8 +39,8 @@ TEST(TensordotMatMulContext, MatchesReferenceArithmetic) {
 
     OutputBuffers outputs;
     auto context = outputs.context();
-    ASSERT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-              KernelStatus::Success);
+    ASSERT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+              ANNC_STATUS_OK);
     ASSERT_EQ(outputs.allocate_calls, 1u);
     ASSERT_EQ(outputs.output().size(),
               static_cast<size_t>(shape.d0 * shape.d1 * shape.n));
@@ -73,8 +74,8 @@ TEST(TensordotMatMulContext, ZeroContractWritesZeros) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 3u);
@@ -97,8 +98,8 @@ TEST(TensordotMatMulContext, ZeroRowsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 3u);
@@ -119,8 +120,8 @@ TEST(TensordotMatMulContext, ZeroColumnsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 3u);
@@ -141,8 +142,8 @@ TEST(TensordotMatMulContext, RejectsMismatchedContractDimension) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -160,22 +161,22 @@ TEST(TensordotMatMulContext, RejectsNonContiguousInputs) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   input = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
       x.data(), 3, inputDims);
   weight.strides[0] = n + 1;
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   weight = annc::kernels::execution::makeMemRef<AnncMemRef2DF32>(
       w.data(), 2, weightDims);
   weight.strides[1] = 2;
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   input = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
@@ -183,15 +184,15 @@ TEST(TensordotMatMulContext, RejectsNonContiguousInputs) {
   weight = annc::kernels::execution::makeMemRef<AnncMemRef2DF32>(
       w.data(), 2, weightDims);
   input.strides[1] = k + 1;
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   input = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
       x.data(), 3, inputDims);
   input.strides[0] = d1 * k + 1;
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -208,8 +209,8 @@ TEST(TensordotMatMulContext, RejectsNegativeDimensions) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -227,8 +228,8 @@ TEST(TensordotMatMulContext, FailsWhenOutputAllocationFails) {
   OutputBuffers outputs;
   auto context = outputs.context();
   outputs.FailNextAllocation();
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::RuntimeError);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_NE(outputs.last_error.find("output allocation failed"),
             std::string::npos);
@@ -247,12 +248,12 @@ TEST(TensordotMatMulContext, RejectsNullArguments) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, nullptr, &input, &weight),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, nullptr, &weight),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(tensordotMatMulImpl(nullptr, &context, &input, nullptr),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, nullptr, {View(&input), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(nullptr), View(&weight)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(nullptr)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -269,8 +270,8 @@ TEST(TensordotMatMulContext, PropagatesNaN) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(tensordotMatMulImpl(nullptr, &context, &input, &weight),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(tensordotMatMulImpl, &context, {View(&input), View(&weight)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(), 1u);
   EXPECT_TRUE(std::isnan(outputs.output()[0]));
 }

@@ -60,10 +60,6 @@ class ANNCFusedOp : public OpKernel {
                                  void* kernel_function, bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample,
                                  const AnncJitBinding* binding = nullptr);
-  Status ExecuteExecutionV2Kernel(OpKernelContext* context,
-                                  void* kernel_function, bool profile_enabled,
-                                  AnncFusedProfileSample* profile_sample,
-                                  const AnncJitBinding* binding = nullptr);
   Status ExecuteContextV3Kernel(OpKernelContext* context,
                                 void* kernel_function);
 

@@ -25,7 +25,8 @@ Value createContextInputOverrides(OpBuilder &builder, Location loc,
   auto viewType = LLVM::LLVMStructType::getLiteral(
       builder.getContext(), {ptr, ptr, i64, ptr, ptr, i32, i32, i32, i32});
   auto contextType = LLVM::LLVMStructType::getLiteral(
-      builder.getContext(), {i32, i32, ptr, i32, ptr, i32, ptr, i32, ptr});
+      builder.getContext(),
+      {i32, i32, ptr, i32, ptr, i32, ptr, i32, ptr, i32, ptr});
   auto integer = [&](int64_t value, Type type) -> Value {
     return builder.create<LLVM::ConstantOp>(
         loc, type, builder.getIntegerAttr(type, value));

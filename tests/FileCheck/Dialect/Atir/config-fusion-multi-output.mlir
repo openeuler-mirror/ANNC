@@ -8,9 +8,9 @@
 // CHECK-SAME: tf_name = "TopK:0"}, {dtype = "i32"
 // CHECK-SAME: tf_name = "TopK:1"}]
 // CHECK-LABEL: func.func @main
-// CHECK: %[[VALUES:.*]], %[[INDICES:.*]] = call @fused_topk_multi_output_
+// CHECK: %[[RESULTS:.*]]:2 = call @fused_topk_multi_output_
 // CHECK-NOT: "atir.TopK"
-// CHECK: return %[[VALUES]], %[[INDICES]]
+// CHECK: return %[[RESULTS]]#0, %[[RESULTS]]#1
 func.func @main(
     %input: !atir.tensor<4x8xf32, name = "input">,
     %k: !atir.tensor<i32, name = "k">)

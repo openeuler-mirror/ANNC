@@ -1,11 +1,11 @@
-// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --implicit-check-not=dynamic_dims
 // RUN: env ANNC_EP_FUSION_TENSORDOT_MATMUL=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
 // DISABLED: "atir.MatMul"
 // DISABLED-NOT: fusion.pattern = "tensordot_matmul"
 // DISABLED-NOT: custom.op_name = "TensordotMatMul"
 // DISABLED-NOT: func.func private @fused_tensordot_matmul_
-// FTDMM 站点（execution v2 形态）：kernel 函数首参为执行上下文，fusion.metadata
-// 的 abi 为 annc_execution_v2、kernel_arg_order 为空（输出由 kernel 经上下文
+// FTDMM 站点（context v3 形态）：kernel 函数在 lowering 后只接收上下文，fusion.metadata
+// 的 abi 为 annc_context_v3、kernel_arg_order 为空（输出由 kernel 经上下文
 // 分配），成员名单记录整块；主图区域不再重写，只标记 annc.fusion_materialized
 // （AOT 裁剪丢弃主图函数）。
 //
@@ -13,10 +13,9 @@
 // CHECK: "atir.MatMul"
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_tensordot_matmul_
-// CHECK-SAME: !llvm.ptr
 // CHECK-SAME: annc.execution_mode = "aot"
 // CHECK-SAME: annc.kernel
-// CHECK: abi = "annc_execution_v2"
+// CHECK: abi = "annc_context_v3"
 // CHECK: kernel_arg_order = []
 // CHECK: member_node_names = [
 // CHECK-SAME: "transpose:0"
@@ -25,7 +24,6 @@
 // CHECK-SAME: "out"
 // CHECK: fusion.pattern = "tensordot_matmul"
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["input", "weight"]
 // CHECK-SAME: custom.arg_ranks = [3, 2]
 // CHECK-SAME: custom.op_name = "TensordotMatMul"
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
