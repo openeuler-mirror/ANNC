@@ -11,6 +11,7 @@
 | JIT 代码与预打包权重分离 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
 | TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
+| ANNC 异构图切分优化器（待评审） | [annc-partition/overview.md](annc-partition/overview.md) |
 
 ## 约定
 
