@@ -108,7 +108,7 @@ TF 路径：`annc-converter` 把元数据转为 GraphDef 节点属性供 `ANNCFu
 - C++ / TableGen / MLIR TD 使用根目录 `.clang-format`，但只格式化本次修改或新增的代码行；不要对包含既有代码的整个文件直接运行 `clang-format -i`，以免把无关空格、缩进和换行带入提交。新增文件可以整体格式化，已有文件先生成格式化候选，再人工保留变更行及其必要的相邻调整。
 - 提交前用 `git diff --check`，并用 `git diff --ignore-all-space` 对照检查，确认没有格式噪音掩盖功能差异。
 - Python 遵循 PEP 8 与 4 空格缩进（`python3 -m black python/ tests/`）；CMake 用 2 空格缩进。
-- 提交信息用简洁中 / 英文描述，重大变更在 PR 描述中说明。
+- 提交信息用简洁中 / 英文描述，重大变更在 PR 描述中说明。提交不得以任何形式标识 AI 工具或其自身：正文与 trailer（如 `Co-Authored-By`）、`Generated with ...` 类署名、作者 / 提交人身份等途径均不得出现工具署名，提交身份统一为开发者本人的 git 配置。
 
 ### 安全
 
