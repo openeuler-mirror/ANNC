@@ -52,6 +52,29 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
 
+TensorFlow Grappler 的普通 GEMM JIT 可按需配置：
+
+```shell
+export ANNC_BACKEND=generic
+export ANNC_GEMM=1
+export ANNC_TIMEOUT=1800
+export ANNC_GEMM_CONFIG=/path/to/gemm_tuning.json
+```
+
+`ANNC_BACKEND=generic` 目前只是传给 `annc-tf-pipeline`，该工具不解析此参数，
+因此它不会选择或强制 generic kernel。`ANNC_GEMM=1` 启用 Basic GEMM fusion；
+GEMM pipeline 需要 `ANNC_GEMM_CONFIG` 指向有效调优 JSON。若要使用 JIT RHS
+预打包，改用 `ANNC_GEMM=3` 或 `99`，并按需设置 checkpoint 来源：
+
+```shell
+export ANNC_GEMM=3
+export ANNC_GEMM_CONFIG=/path/to/gemm_tuning.json
+export ANNC_DEMO_CHECKPOINT_DIR=/path/to/checkpoint
+```
+
+`ANNC_DEMO_CHECKPOINT_DIR` 仅用于预打包候选的首次准入检查；未设置或不匹配时
+使用普通 runtime packing。完整模式语义见上方 `ANNC_GEMM` 条目。
+
 ## `ANNCFusedOp` 运行时
 
 | 变量 | 取值 | 默认值 | 说明 |
@@ -60,7 +83,8 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_FUSED_PROFILE_INTERVAL` | 正整数 | `100000` | 每隔多少次调用输出一次汇总统计 |
 | `ANNC_BACKEND` | 字符串 | 空 | 后端选择；当前仅识别 `openblas`，且该 MatMul 直通路径未实现（设置后融合 MatMul 报 `Unimplemented`） |
 | `ANNC_DEMO_CHECKPOINT_DIR` | checkpoint 目录 | 空 | 沿用静态 prepack 的权重来源目录；CF 开启时每个 Op 首次初始化读取，核对输入名称、F32 类型和字节数。未设置或未匹配时使用普通 packing；shape 切换不重复读取 |
-| `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存 |
+| `ANNC_JIT_CACHE_MAX_ENTRIES` | 非负整数 | `64` | 进程内 JIT Ready entry 上限；`0` 关闭缓存。首次创建全局缓存时读取并固定；空值使用默认值，非法值告警后回退 `64` |
+| `ANNC_ENABLE_JIT_SHAPE_FASTPATH` | `0` 关闭；其他值或未设置开启 | 开启 | 连续相同 shape 时，在当前 `ANNCFusedOp` 上直接复用最近一次 executable 和 binding，跳过全局缓存 key 构造与查找。仅字面值 `0` 关闭；首次读取后进程内固定，需在进程启动前设置。关闭后仍使用进程级 JIT 缓存 |
 
 ## ONNX Runtime EP 插件（`libannc_ep.so`）
 
@@ -102,6 +126,3 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |
 | `ANNCOPT` / `ANNASM` / `ANNCFUSIONMETADATA` | 可执行文件路径 | `build/bin/...` | `tests/FileCheck/run.sh` 覆盖工具路径 |
 | `MLIROPT` / `FILECHECK` | 可执行文件路径 | `$ANNC_LLVM_BIN/...`（未设置时读取 `build/annc_llvm_bin.txt`） | `tests/FileCheck/run.sh` 覆盖工具路径 |
-
-旧 `ANNC_GEMM_ASM_SOURCE_DIR` 已不再读取；包目录是构建期
-`ANNC_GEMM_PACKAGE_DIR`，详见[从源码构建](build-from-source.md)。

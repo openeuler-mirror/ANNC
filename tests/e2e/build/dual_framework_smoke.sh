@@ -33,12 +33,20 @@ fi
 
 help_text=$("${ANNC_SRC}/build.sh" --help)
 for var in ANNC_EP_ORT_BUILD_TREE ANNC_KERNEL_MLAS \
-           ANNC_MLAS_INCLUDE_DIR ANNC_GEMM_ASM_SOURCE_DIR; do
+           ANNC_MLAS_INCLUDE_DIR; do
   if ! grep -q "${var}" <<<"${help_text}"; then
     echo "FAIL: build.sh --help does not document ${var}" >&2
     exit 1
   fi
 done
+if ! grep -q -- "--gemm-package-dir" <<<"${help_text}"; then
+  echo "FAIL: build.sh --help does not document --gemm-package-dir" >&2
+  exit 1
+fi
+if ! grep -q -- "--require-gemm-package" <<<"${help_text}"; then
+  echo "FAIL: build.sh --help does not document --require-gemm-package" >&2
+  exit 1
+fi
 
 cache="${ANNC_SRC}/build/CMakeCache.txt"
 if [[ ! -f "${cache}" ]]; then
@@ -58,7 +66,7 @@ for entry in \
 done
 
 for key in ANNC_EP_ORT_BUILD_TREE ANNC_MLAS_INCLUDE_DIR \
-           ANNC_GEMM_ASM_SOURCE_DIR; do
+           ANNC_GEMM_PACKAGE_DIR ANNC_REQUIRE_GEMM_PACKAGE; do
   value=$(grep "^${key}:" "${cache}" | tail -n1 | cut -d= -f2-)
   if [[ -z "${value}" ]]; then
     echo "FAIL: cache has no value for ${key}" >&2

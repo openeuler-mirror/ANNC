@@ -5,7 +5,7 @@
 | 编号 | ANNC-JIT-CF-CACHE-001 |
 | 状态 | implemented，2026-10-25 |
 | 责任角色 | TensorFlow addon / AArch64 GEMM 维护者 |
-| 源码基线 | 0e554ff |
+| 源码基线 | `e040f8c` |
 | 关联决策 | [ADR-017](../../decisions/decisions.md#adr-017) |
 
 ## 范围与前提
