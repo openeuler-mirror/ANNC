@@ -28,6 +28,7 @@ tests/
 │   ├── annc/               # op_coverage、JIT cache、template fingerprint、ciface dispatch
 │   ├── kernels/            # kernel registry/priority、builtin spec、execution context、GEMM 等
 │   ├── onnx2atir/          # ONNX 前端 GTest
+│   ├── tensorflow/         # TF 前端、插件参数派发和跨 ABI 线程池回调
 │   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
 ├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
 ├── integration/
@@ -36,7 +37,7 @@ tests/
 │   ├── fusion/             # config fusion 集成 pytest
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
 │   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
-│   ├── tensorflow/         # TF1.15 插件宿主加载 CTest
+│   ├── tensorflow/         # TF1.15 插件宿主加载与 JIT C 接口 CTest
 │   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
 ├── e2e/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
@@ -60,9 +61,9 @@ python3 -m pytest tests/ -v
 # 构建目录不在 build/ 时：
 ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 
-# TF 插件 SDK 配置和 TF1.15 宿主加载
+# TF 插件 SDK 配置，以及 TF1.15 构建中的宿主加载和跨 ABI 调用
 python3 -m pytest tests/integration/cmake/test_tf_plugin_sdk.py -q
-ctest --test-dir build -R '^TensorFlowPluginLoad$' --output-on-failure
+ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
 
 # Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
 ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
