@@ -28,6 +28,15 @@ endif()
 # L0: C++ unit tests, grouped by the production subsystem they cover.
 add_subdirectory(unit/annc)
 add_subdirectory(unit/kernels)
+if(TARGET annc_tensorflow_support AND TARGET annc-tf-pipeline)
+  set(_tf_jit_env
+    "ANNC_PIPELINE_PATH=$<TARGET_FILE:annc-tf-pipeline>"
+    "ANNC_KERNEL_LIB_PATH=${PROJECT_BINARY_DIR}/lib"
+    "ANNC_KEEP_TEMPS=0")
+  if(ANNC_GEMM_PACKAGE_AVAILABLE)
+    list(APPEND _tf_jit_env "LIBRARY_PATH=${ANNC_GEMM_PACKAGE_DIR}:$ENV{LIBRARY_PATH}")
+  endif()
+endif()
 add_subdirectory(unit/tensorflow)
 
 # ONNX frontend unit test: registered only while ANNC_ENABLE_ONNX=ON, which is
@@ -44,6 +53,31 @@ endif()
 if(TARGET annc_ep)
   add_subdirectory(unit/ort_ep)
   add_subdirectory(integration/ort_ep)
+endif()
+
+if(TARGET annc_fused_op_1_15 AND TARGET annc-tf-pipeline)
+  set(_tf_tests "${CMAKE_CURRENT_SOURCE_DIR}/integration/tensorflow")
+  if(ANNC_TENSORFLOW_PRELOAD)
+    set(_tf_host "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" "${_tf_tests}/plugin_load.py")
+  else()
+    # Run against the same native SDK as the linked plugins. A Python wheel
+    # may already embed its own copy of TensorFlow's registration tables.
+    add_executable(tf_linked_host "${_tf_tests}/linked_plugin_load.cpp")
+    get_target_property(_sdk_standard annc_optimizer_1_15 CXX_STANDARD)
+    set_target_properties(tf_linked_host PROPERTIES
+      CXX_STANDARD ${_sdk_standard} CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    target_include_directories(tf_linked_host SYSTEM PRIVATE
+      $<TARGET_PROPERTY:annc_optimizer_1_15,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(tf_linked_host PRIVATE
+      $<TARGET_PROPERTY:annc_optimizer_1_15,COMPILE_DEFINITIONS>)
+    target_link_libraries(tf_linked_host PRIVATE
+      $<TARGET_PROPERTY:annc_optimizer_1_15,LINK_LIBRARIES>)
+    set(_tf_host $<TARGET_FILE:tf_linked_host>)
+  endif()
+  add_test(NAME TensorFlowPluginLoad COMMAND ${_tf_host}
+    $<TARGET_FILE:annc_optimizer_1_15> $<TARGET_FILE:annc_fused_op_1_15> plugin_load.pbtxt)
+  set_tests_properties(TensorFlowPluginLoad PROPERTIES
+    WORKING_DIRECTORY "${_tf_tests}/Inputs" ENVIRONMENT "${_tf_jit_env}")
 endif()
 
 if(ANNC_ENABLE_COVERAGE)

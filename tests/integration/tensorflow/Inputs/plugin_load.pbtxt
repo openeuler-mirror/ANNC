@@ -1,0 +1,41 @@
+node {
+  name: "lhs" op: "Const"
+  attr { key: "dtype" value { type: DT_FLOAT } }
+  attr { key: "value" value { tensor {
+    dtype: DT_FLOAT tensor_shape { dim { size: 1 } dim { size: 5 } }
+    float_val: [1, 2, 3, 4, 5]
+  } } }
+}
+node {
+  name: "rhs" op: "Const"
+  attr { key: "dtype" value { type: DT_FLOAT } }
+  attr { key: "value" value { tensor {
+    dtype: DT_FLOAT tensor_shape { dim { size: 1 } dim { size: 5 } }
+    float_val: [4, -8, 2, 0, 7]
+  } } }
+}
+node {
+  name: "reference" op: "Add" input: "lhs" input: "rhs"
+  attr { key: "T" value { type: DT_FLOAT } }
+}
+node {
+  name: "fused" op: "ANNCFused" input: "lhs" input: "rhs"
+  attr { key: "kernel_name" value { s: "add" } }
+  attr { key: "atir_module_path" value { s: "jit_add.mlir" } }
+  attr { key: "template_fingerprint" value { s: "plugin_load_add" } }
+  attr { key: "Tconstants" value { list {} } }
+  attr { key: "Tfixed" value { list { type: [DT_FLOAT, DT_FLOAT] } } }
+  attr { key: "Tdynamic" value { list {} } }
+  attr { key: "Toutputs" value { list { type: DT_FLOAT } } }
+  attr { key: "Nconstants" value { i: 0 } }
+  attr { key: "Nfixed" value { i: 2 } }
+  attr { key: "Ndynamic" value { i: 0 } }
+  attr { key: "num_outputs" value { i: 1 } }
+  attr { key: "input_ranks" value { list { i: [2, 2] } } }
+  attr { key: "output_ranks" value { list { i: 2 } } }
+  attr { key: "output_shapes" value { list { s: "1,5" } } }
+  attr { key: "kernel_arg_order" value { list { i: [0, 1, 2] } } }
+  attr { key: "symbolic_signature" value { s: "" } }
+  attr { key: "dynamic_dims" value { list {} } }
+  attr { key: "fallback_function" value { func { name: "unused" } } }
+}
