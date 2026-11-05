@@ -7,8 +7,8 @@
 | 文档集 | 位置 |
 | --- | --- |
 | GEMM epilogue 二进制 codegen | [gemm-epilogue-codegen.md](gemm-epilogue-codegen.md) |
-| JIT 常量折叠特性设计 | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
-| JIT 代码与预打包权重分离 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
+| JIT 常量折叠早期提案（历史记录；当前实现见右列） | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
+| TensorFlow JIT 代码与预打包权重分离实现契约 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
 | TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
 | ANNC 异构图切分优化器（待评审） | [annc-partition/overview.md](annc-partition/overview.md) |
