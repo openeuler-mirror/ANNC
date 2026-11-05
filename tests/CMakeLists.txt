@@ -26,8 +26,9 @@ endif()
 
 # ONNX Runtime EP tests: registered only while ANNC_ENABLE_ONNXRUNTIME_EP=ON,
 # which is what defines the annc_ep target.  The GTest suites live under
-# unit/ort_ep; the Python fixtures and e2e drivers (CTest add_test entries)
-# live under integration/ort_ep.
+# unit/ort_ep; Python fixtures live under integration/ort_ep, and Context
+# kernel e2e drivers under e2e/kernel_context. Their CTest registration stays
+# in integration/ort_ep.
 if(TARGET annc_ep)
   # The EP Python fixtures need onnx + onnxruntime, which the interpreter used
   # for the C++ build does not necessarily provide.  Keep the override local to

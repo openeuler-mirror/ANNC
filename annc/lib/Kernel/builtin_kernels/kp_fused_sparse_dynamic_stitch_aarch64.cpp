@@ -13,7 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#if defined(__aarch64__)
 #include <arm_neon.h>
+#endif
 
 #include <array>
 #include <atomic>
@@ -50,6 +52,7 @@ struct RowCopier {
   }
 };
 
+#if defined(__aarch64__)
 template <>
 struct RowCopier<3> {
   static inline void Copy(float* destination, const float* source) {
@@ -99,6 +102,7 @@ struct RowCopier<16> {
     vst1q_f32(destination + 12, vld1q_f32(source + 12));
   }
 };
+#endif
 
 template <int NumPartitions>
 inline int64_t DecodeTable(int64_t global_id, int64_t* row_id) {

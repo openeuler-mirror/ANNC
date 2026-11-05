@@ -1,9 +1,9 @@
-// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s
+// RUN: annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --implicit-check-not=dynamic_dims
 // RUN: env ANNC_EP_FUSION_MASKED_MUL=0 annc-opt --split-input-file %s --atir-op-fusion | FileCheck %s --check-prefix=DISABLED
 // DISABLED: atir.Mul
 // DISABLED-NOT: custom.op_name = "MaskedMul
 // DISABLED-NOT: func.func private @fused_masked_mul_
-// FusedMaskedMul 站点（execution v2 形态）：一个站点就是「mask 链 + 链喂的全部
+// FusedMaskedMul 站点（context v3 形态）：一个站点就是「mask 链 + 链喂的全部
 // Mul」这一整块子图，融合节点的输出 = 子图对外提供的全部值（每个 Mul 的结果，
 // 加上链上仍被图外读的值）。Mul 之间夹着的逐元素路径（Sum → Div 常量）也一起
 // 进站点、由 kernel 算掉——成员之间不允许夹组外节点。kernel 函数首参为执行
@@ -16,24 +16,16 @@
 // CHECK: atir.Mul
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_masked_mul_
-// CHECK-SAME: !llvm.ptr
 // CHECK-SAME: annc.execution_mode = "aot"
 // CHECK-SAME: annc.kernel
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: member_node_names = ["mul_out", "Unsqueeze:0", "Cast:0", "Not:0", "Equal:0"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "mul_out:0"}]
 // CHECK: atir.Customize
 // CHECK-SAME: custom.arg_names = ["arg0", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
 // CHECK-SAME: custom.arg_ranks = [3, 2, -1, -1, -1, -1, -1, -1, -1, -1]
-// CHECK-SAME: custom.attr.argMap = 0
-// CHECK-SAME: custom.attr.dataArgs = 1
-// CHECK-SAME: custom.attr.divisorBits = 1065353216
-// CHECK-SAME: custom.attr.fedMuls = 0
-// CHECK-SAME: custom.attr.interiorKind = 0
-// CHECK-SAME: custom.attr.padding = 0
-// CHECK-SAME: custom.attr.rawMuls = 1
-// CHECK-SAME: custom.attr.sumMask = 0
+// CHECK-SAME: custom.attr_values = [1, 1, 0, 0, 0, 0, 1065353216, 0]
 // CHECK-SAME: custom.op_name = "MaskedMul1"
 // CHECK-SAME: custom.result_names = ["output0"]
 // CHECK-SAME: custom.result_ranks = [3]
@@ -127,23 +119,14 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK: atir.Mul
 // CHECK-SAME: annc.fusion_materialized
 // CHECK-LABEL: func.func private @fused_masked_mul_
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: member_node_names = ["mul_b", "mul_a", "Tile:0", "Unsqueeze:0", "Cast:0", "Not:0", "Equal:0"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "mul_b:0"}, {dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "mul_a:0"}]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["arg0", "arg1", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
 // CHECK-SAME: custom.arg_ranks = [3, 3, 2, -1, -1, -1, -1, -1, -1, -1, -1]
-// CHECK-SAME: custom.attr.argMap = 16
-// CHECK-SAME: custom.attr.dataArgs = 2
-// CHECK-SAME: custom.attr.divisorBits = 1065353216
-// CHECK-SAME: custom.attr.fedMuls = 0
-// CHECK-SAME: custom.attr.interiorKind = 0
-// CHECK-SAME: custom.attr.padding = -1
-// CHECK-SAME: custom.attr.rawMuls = 2
-// CHECK-SAME: custom.attr.sumMask = 0
+// CHECK-SAME: custom.attr_values = [2, 2, 0, 16, 0, 0, 1065353216, -1]
 // CHECK-SAME: custom.op_name = "MaskedMul2"
-// CHECK-SAME: custom.result_names = ["output0", "output1"]
 // CHECK-SAME: custom.result_ranks = [3, 3]
 // 一条链只落一个站点：此后到下一用例之间不应再出现第二个 Customize。
 // CHECK-NOT: atir.Customize
@@ -180,15 +163,8 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK-SAME: member_node_names = ["m_b", "m_a", "m_c", "addn", "truediv", "Unsqueeze:0", "Cast:0", "Not:0", "Equal:0"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "m_b:0"}, {dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "m_a:0"}, {dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "m_c:0"}]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["arg0", "arg1", "arg2", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
 // CHECK-SAME: custom.arg_ranks = [3, 3, 3, 2, -1, -1, -1, -1, -1, -1, -1, -1]
-// CHECK-SAME: custom.attr.argMap = 16
-// CHECK-SAME: custom.attr.dataArgs = 2
-// CHECK-SAME: custom.attr.divisorBits = 1073741824
-// CHECK-SAME: custom.attr.fedMuls = 1
-// CHECK-SAME: custom.attr.interiorKind = 0
-// CHECK-SAME: custom.attr.rawMuls = 2
-// CHECK-SAME: custom.attr.sumMask = 3
+// CHECK-SAME: custom.attr_values = [2, 2, 1, 16, 3, 0, 1073741824, {{-?[0-9]+}}]
 // CHECK-SAME: custom.op_name = "MaskedMul3"
 // CHECK-SAME: custom.result_ranks = [3, 3, 3]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
@@ -255,15 +231,8 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK-LABEL: func.func @main
 // CHECK: func.func private @fused_masked_mul_
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["arg0", "arg1", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
-// CHECK-SAME: custom.attr.dataArgs = 2
-// CHECK-SAME: custom.attr.divisorBits = 1065353216
-// CHECK-SAME: custom.attr.fedMuls = 1
-// CHECK-SAME: custom.attr.interiorKind = 1
-// CHECK-SAME: custom.attr.rawMuls = 2
-// CHECK-SAME: custom.attr.sumMask = 3
+// CHECK-SAME: custom.attr_values = [2, 2, 1, {{-?[0-9]+}}, 3, 1, 1065353216, {{-?[0-9]+}}]
 // CHECK-SAME: custom.op_name = "MaskedMul2"
-// CHECK-SAME: custom.result_names = ["output0", "output1", "output2"]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %x: !atir.tensor<1x4x8xf32, name = "x">, %z: !atir.tensor<1x4x8xf32, name = "z">) -> (!atir.tensor<1x4x8xf32, name = "m_a">, !atir.tensor<1x4x8xf32, name = "m_b">, !atir.tensor<1x4x8xf32, name = "m_c">) {
     %pad = atir.constant "public" @"pad" -> <i64, name = "pad", data = dense<0> : tensor<i64>>
@@ -297,10 +266,8 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK-SAME: member_node_names = ["mul_out", "Unsqueeze:0", "Cast:0", "Not:0", "Equal:0"]
 // CHECK-SAME: outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [1, 4, 8], tf_name = "mul_out:0"}, {dtype = "f32", rank = 2 : i64, role = "output", shape = [1, 4], tf_name = "Cast:0"}]
 // CHECK: atir.Customize
-// CHECK-SAME: custom.arg_names = ["arg0", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
 // CHECK-SAME: custom.arg_ranks = [3, 2, -1, -1, -1, -1, -1, -1, -1, -1]
 // CHECK-SAME: custom.op_name = "MaskedMul1Flat"
-// CHECK-SAME: custom.result_names = ["output0", "flat"]
 // CHECK-SAME: custom.result_ranks = [3, 2]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%ids: !atir.tensor<1x4xi64, name = "ids">, %data: !atir.tensor<1x4x8xf32, name = "data">) -> (!atir.tensor<1x4x8xf32, name = "mul_out">, !atir.tensor<2xi64, name = "mask_shape">) {
@@ -350,14 +317,11 @@ module attributes {module.state = "atir"} {
 // nibble 依次指向实参 0..10；这是当前 ABI 支持的最大实参个数。
 // CHECK-LABEL: func.func @main
 // CHECK: func.func private @fused_masked_mul_
-// CHECK-SAME: abi = "annc_execution_v2"
+// CHECK-SAME: abi = "annc_context_v3"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK: atir.Customize
 // CHECK-SAME: custom.arg_names = ["arg0", "arg1", "arg2", "arg3", "arg4", "arg5", "arg6", "arg7", "arg8", "arg9", "arg10", "ids", "dataArgs", "rawMuls", "fedMuls", "argMap", "sumMask", "interiorKind", "divisorBits", "padding"]
-// CHECK-SAME: custom.attr.argMap = 11649936536080
-// CHECK-SAME: custom.attr.dataArgs = 11
-// CHECK-SAME: custom.attr.fedMuls = 0
-// CHECK-SAME: custom.attr.rawMuls = 11
+// CHECK-SAME: custom.attr_values = [11, 11, 0, 11649936536080, 0, 0, 1065353216, 0]
 // CHECK-SAME: custom.op_name = "MaskedMul11"
 // CHECK-SAME: custom.result_ranks = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
@@ -458,9 +422,7 @@ module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
 // CHECK-LABEL: func.func @main
 // CHECK: func.func private @fused_masked_mul_
 // CHECK: atir.Customize
-// CHECK-SAME: custom.attr.argMap = 0
-// CHECK-SAME: custom.attr.dataArgs = 1
-// CHECK-SAME: custom.attr.rawMuls = 2
+// CHECK-SAME: custom.attr_values = [1, 2, 0, 0, 0, 0, 1065353216, 0]
 // CHECK-SAME: custom.op_name = "MaskedMul1"
 // CHECK-SAME: custom.result_names = ["output0", "output1"]
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {

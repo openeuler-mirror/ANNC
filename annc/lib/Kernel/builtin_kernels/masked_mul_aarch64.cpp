@@ -8,16 +8,12 @@
 #include <arm_neon.h>
 #endif
 
-#include "Kernel/ExecutionContextUtils.h"
+#include "Context/KernelContextUtils.h"
 #include "Context/RowParallel.h"
-#include "Kernel/KernelStatus.h"
-#include "Kernel/MemRefTypes.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
 
 namespace {
 
-// FusedMaskedMul, execution-v2 form: the ONNX mask chain
+// FusedMaskedMul, context-v3 form: the ONNX mask chain
 //
 //   Equal(ids, padding) -> Not -> Cast(f32) -> Unsqueeze(last axis)
 //     -> [Tile(broadcast to N)] -> Mul(data_i, mask) -> y_i
@@ -69,29 +65,40 @@ int64_t maskedMulArgIndex(int64_t argMap, int64_t i) {
 // rest are the Sum's other inputs); the first `rawMuls` results are the ones
 // multiplied by the row factor.
 template <size_t Arity>
-annc::kernels::KernelStatus maskedMulSiteImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution,
-    AnncMemRef3DF32* const (&data)[Arity], AnncMemRef2DI64* ids,
-    int64_t dataArgs, int64_t rawMuls, int64_t fedMuls, int64_t argMap,
-    int64_t sumMask, int64_t interiorKind, int64_t divisorBits,
-    int64_t padding, bool writeFlat) {
-  if (execution == nullptr || ids == nullptr) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+AnncStatusCode maskedMulSiteImpl(annc::kernels::KernelContext& context,
+                                bool writeFlat) {
+  std::array<const AnncTensorView*, Arity> data;
+  for (size_t i = 0; i < Arity; ++i) data[i] = context.getInput(i);
+  const auto* ids = context.getInput(Arity);
+  std::array<int64_t, 8> attrs;
+  for (size_t i = 0; i < attrs.size(); ++i) {
+    auto value = context.getI64Attr(i);
+    if (!value) return context.status();
+    attrs[i] = *value;
   }
+  const auto dataArgs = attrs[0];
+  const auto rawMuls = attrs[1];
+  const auto fedMuls = attrs[2];
+  const auto argMap = attrs[3];
+  const auto sumMask = attrs[4];
+  const auto interiorKind = attrs[5];
+  const auto divisorBits = attrs[6];
+  const auto padding = attrs[7];
+  if (!ids) return context.status();
+  auto thread_pool = context.getThreadPool();
   // 实参个数是 data + Sum 的其它输入；输出个数是 Mul 的个数（raw + fed），两者
   // 不必相等——同一份 data 被多个 Mul 读时实参只出现一次（见 argMap）。
-  if (dataArgs < 1 || rawMuls < 1 || fedMuls < 0 ||
+  if (dataArgs < 1 || rawMuls < 1 || rawMuls > 16 || fedMuls < 0 ||
       dataArgs > static_cast<int64_t>(Arity)) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   for (int64_t i = 0; i < rawMuls; ++i) {
     if (maskedMulArgIndex(argMap, i) >= dataArgs) {
-      return annc::kernels::KernelStatus::InvalidArgument;
+      return ANNC_STATUS_INVALID_ARGUMENT;
     }
   }
   for (size_t i = 0; i < Arity; ++i) {
-    if (data[i] == nullptr) return annc::kernels::KernelStatus::InvalidArgument;
+    if (data[i] == nullptr) return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   // 所有实参（data 与 Sum 的其它输入）必须同形，且前缀与 ids 对齐——kernel
@@ -100,23 +107,23 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
   const int64_t d1 = data[0]->sizes[1];
   const int64_t n = data[0]->sizes[2];
   if (d0 < 0 || d1 < 0 || n < 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   if (ids->sizes[0] != d0 || ids->sizes[1] != d1) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   for (size_t i = 0; i < Arity; ++i) {
     if (data[i]->sizes[0] != d0 || data[i]->sizes[1] != d1 ||
         data[i]->sizes[2] != n) {
-      return annc::kernels::KernelStatus::InvalidArgument;
+      return ANNC_STATUS_INVALID_ARGUMENT;
     }
     if (n != 0 && (data[i]->strides[2] != 1 || data[i]->strides[1] != n ||
                    data[i]->strides[0] != d1 * n)) {
-      return annc::kernels::KernelStatus::InvalidArgument;
+      return ANNC_STATUS_INVALID_ARGUMENT;
     }
   }
   if (ids->strides[1] != 1 || ids->strides[0] != d1) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   constexpr int64_t kMaxSiteOutputs = 64;
@@ -124,54 +131,50 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
   // Validate generated metadata before sizing any allocation. This is normally
   // guaranteed by the spec generator, but keeps a malformed ABI attribute from
   // turning into an unbounded vector allocation.
-  if (rawMuls < 1 || fedMuls < 0 ||
-      rawMuls > kMaxSiteInputs || fedMuls > kMaxSiteOutputs ||
+  if (fedMuls > kMaxSiteOutputs ||
       rawMuls > kMaxSiteOutputs - fedMuls ||
-      rawMuls > kMaxSiteInputs ||
       rawMuls + Arity - dataArgs > kMaxSiteInputs) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   // Allocate in every case -- also when rows is zero -- because the host checks
   // that the call allocated every declared output slot.
   std::vector<float *> out(static_cast<size_t>(rawMuls + fedMuls), nullptr);
   for (int64_t i = 0; i < rawMuls + fedMuls; ++i) {
-    auto buffer = annc::kernels::execution::allocateOutput3DF32(
-        execution, static_cast<uint32_t>(i), d0, d1, n, ANNC_ALLOCATION_NONE);
+    auto buffer = context.allocateOutput<float>(static_cast<uint32_t>(i),
+                                                 {d0, d1, n});
     if (!buffer) {
-      llvm::consumeError(buffer.takeError());
-      return annc::kernels::KernelStatus::RuntimeError;
+      return ANNC_STATUS_ALLOCATION_FAILED;
     }
     if (n != 0 && (buffer->strides[2] != 1 || buffer->strides[1] != n ||
                    buffer->strides[0] != d1 * n)) {
-      return annc::kernels::KernelStatus::InvalidArgument;
+      return ANNC_STATUS_INVALID_ARGUMENT;
     }
-    out[i] = ANNC_MEMREF_DATA(*buffer);
+    out[i] = annc::kernels::contextData<float>(*buffer);
   }
   float *flat = nullptr;
   if (writeFlat) {
-    auto buffer = annc::kernels::execution::allocateOutput2DF32(
-        execution, static_cast<uint32_t>(rawMuls + fedMuls), d0, d1,
-        ANNC_ALLOCATION_NONE);
+    auto buffer = context.allocateOutput<float>(
+        static_cast<uint32_t>(rawMuls + fedMuls), {d0, d1});
     if (!buffer) {
-      llvm::consumeError(buffer.takeError());
-      return annc::kernels::KernelStatus::RuntimeError;
+      return ANNC_STATUS_ALLOCATION_FAILED;
     }
     if (buffer->strides[1] != 1 || buffer->strides[0] != d1) {
-      return annc::kernels::KernelStatus::InvalidArgument;
+      return ANNC_STATUS_INVALID_ARGUMENT;
     }
-    flat = ANNC_MEMREF_DATA(*buffer);
+    flat = annc::kernels::contextData<float>(*buffer);
   }
 
   const int64_t rows = d0 * d1;
-  if (rows == 0 || n == 0) return annc::kernels::KernelStatus::Success;
+  if (rows == 0 || n == 0) return ANNC_STATUS_OK;
 
   const float divisor = divisorFromBits(divisorBits);
   if (fedMuls > 0 && divisor == 0.0f) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   std::array<const float*, Arity> in{};
-  for (size_t i = 0; i < Arity; ++i) in[i] = ANNC_MEMREF_DATA(*data[i]);
-  const int64_t *idValues = ANNC_MEMREF_DATA(*ids);
+  for (size_t i = 0; i < Arity; ++i)
+    in[i] = annc::kernels::contextData<float>(*data[i]);
+  const int64_t *idValues = annc::kernels::contextData<int64_t>(*ids);
   // Decode site metadata once, outside the row/column loops. The sum inputs
   // retain their original order, including the initial +0 (or product 1).
   std::array<const float*, kMaxSiteInputs> rawInputs{};
@@ -207,8 +210,9 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
                                           bytesReadPerElement,
                                           bytesWrittenPerElement),
       n);
-  ::annc::threadpool::parallel_for(
-      thread_pool, rows, options, [&](int64_t begin, int64_t end) {
+  annc::kernels::Shard(
+      thread_pool.numThreads(), thread_pool, rows, options.cost_per_unit.value_or(0),
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const float factor = (idValues[row] != padding) ? 1.0f : 0.0f;
           for (int64_t i = 0; i < rawMuls; ++i) {
@@ -258,115 +262,17 @@ annc::kernels::KernelStatus maskedMulSiteImpl(
               }
             }
           }
-          if (flat != nullptr) flat[row] = factor;
+          if (writeFlat) {
+            if (flat != nullptr) flat[row] = factor;
+          }
         }
       });
-  return annc::kernels::KernelStatus::Success;
+  return ANNC_STATUS_OK;
 }
 
 // Entry points for the kernel symbols (annc/lib/Kernel/builtin_kernels/
 // masked_mul_kernel_specs.inc): one per argument count, plus a variant that also
 // writes the pre-unsqueeze mask when the graph still reads it.  The
-// execution-v2 C signature is fixed per symbol, hence the repetition.
-#define ANNC_MASKED_MUL_TAIL                                            \
-  AnncMemRef2DI64* ids, int64_t dataArgs, int64_t rawMuls, int64_t fedMuls, \
-      int64_t argMap, int64_t sumMask, int64_t interiorKind,            \
-      int64_t divisorBits, int64_t padding
-
-#define ANNC_MASKED_MUL_CALL(Data, WriteFlat)                           \
-  return maskedMulSiteImpl(thread_pool, execution, Data, ids, dataArgs, \
-                           rawMuls, fedMuls, argMap, sumMask,           \
-                           interiorKind, divisorBits, padding, WriteFlat)
-
-annc::kernels::KernelStatus maskedMul1Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul2Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul3Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul4Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, AnncMemRef3DF32* a3,
-    ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2, a3};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul6Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, AnncMemRef3DF32* a3,
-    AnncMemRef3DF32* a4, AnncMemRef3DF32* a5, ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2, a3, a4, a5};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul7Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, AnncMemRef3DF32* a3,
-    AnncMemRef3DF32* a4, AnncMemRef3DF32* a5, AnncMemRef3DF32* a6,
-    ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2, a3, a4, a5, a6};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul11Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, AnncMemRef3DF32* a3,
-    AnncMemRef3DF32* a4, AnncMemRef3DF32* a5, AnncMemRef3DF32* a6,
-    AnncMemRef3DF32* a7, AnncMemRef3DF32* a8, AnncMemRef3DF32* a9,
-    AnncMemRef3DF32* a10, ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10};
-  ANNC_MASKED_MUL_CALL(data, false);
-}
-
-annc::kernels::KernelStatus maskedMul1FlatImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0};
-  ANNC_MASKED_MUL_CALL(data, true);
-}
-
-annc::kernels::KernelStatus maskedMul3FlatImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2};
-  ANNC_MASKED_MUL_CALL(data, true);
-}
-
-annc::kernels::KernelStatus maskedMul4FlatImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* a0,
-    AnncMemRef3DF32* a1, AnncMemRef3DF32* a2, AnncMemRef3DF32* a3,
-    ANNC_MASKED_MUL_TAIL) {
-  AnncMemRef3DF32* data[] = {a0, a1, a2, a3};
-  ANNC_MASKED_MUL_CALL(data, true);
-}
-
-#undef ANNC_MASKED_MUL_CALL
-#undef ANNC_MASKED_MUL_TAIL
+// context-v3 C signature is fixed per symbol, hence the repetition.
 
 }  // namespace

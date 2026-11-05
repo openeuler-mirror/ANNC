@@ -27,7 +27,8 @@ inline bool validContext(const AnncKernelContext* context) {
          services->parallel_for && services->num_threads &&
          (!context->num_inputs || context->inputs) &&
          (!context->num_outputs || context->outputs) &&
-         (!context->num_attrs || context->attrs);
+         (!context->num_attrs || context->attrs) &&
+         (!context->num_resources || context->resources);
 }
 
 inline size_t contextElementSize(AnncElementType type) {
@@ -171,6 +172,20 @@ class KernelContext {
     std::memcpy(&value, attr.data, sizeof(value));
     if (status() != ANNC_STATUS_OK) return std::nullopt;
     return value;
+  }
+
+  // Optional resources are matched by feature ABI, independently of scalar
+  // slot order. Missing/incompatible resources leave optional fast paths off.
+  const void* getResource(const char* type, uint32_t version,
+                          size_t bytes) const {
+    for (uint32_t i = 0; i < context_->num_resources; ++i) {
+      const auto& resource = context_->resources[i];
+      if (resource.struct_size >= sizeof(AnncResourceView) && resource.type &&
+          std::strcmp(resource.type, type) == 0 &&
+          resource.version == version && resource.bytes >= bytes)
+        return resource.data;
+    }
+    return nullptr;
   }
 
   KernelThreadPool getThreadPool() const;

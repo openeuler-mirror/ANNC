@@ -57,6 +57,8 @@ ninja && ninja install
 
 - `--build-type [Debug|Release|RelWithDebInfo]`：构建类型（默认 Release）
 - `--install-prefix <path>`：安装路径（默认 `./install`）
+- `--gemm-package-dir <path>`：指定解压后的 GEMM-ASM 完整包根目录（默认 `third_party/annc-gemm-kernels`；对应 CMake 选项 `ANNC_GEMM_PACKAGE_DIR`）
+- `--require-gemm-package`：CMake 配置时强制要求完整 GEMM-ASM 包可用；缺包或版本不兼容时配置失败（对应 `ANNC_REQUIRE_GEMM_PACKAGE=ON`）
 - `--enable-python` / `--disable-python`：构建 / 不构建 ANNC Python 绑定（默认关闭；开启时自动安装 pybind11 / nanobind）
 - `--clean`：清理构建目录后重新构建
 - `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
@@ -88,7 +90,7 @@ ninja && ninja install
 | `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR` 与宿主 MLAS/KleidiAI 归档，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
 | `ANNC_GEMM_PACKAGE_DIR` | 路径 | `third_party/annc-gemm-kernels` | GEMM-ASM 完整二进制包目录；包含基础归档、codegen 共享库、公开头文件、CMake 配置和 manifest，配置时校验 API 1、kernel ABI 1 及包内文件哈希；无需私有源码 |
-| `ANNC_REQUIRE_GEMM_PACKAGE` | `ON`/`OFF` | `OFF` | 可选的构建期强校验；适合 CI、发布构建等场景。开启时 CMake configure 阶段缺少兼容完整 GEMM-ASM 包即失败，避免运行时才报错；关闭时允许只构建普通工具，但 GEMM microkernel、prepack 和 epilogue 请求会明确报错 |
+| `ANNC_REQUIRE_GEMM_PACKAGE` | `ON`/`OFF` | `OFF` | 可选的构建期强校验；适合 CI、发布构建等场景。开启时 CMake configure 阶段缺少兼容完整 GEMM-ASM 包即失败，避免运行时才报错；关闭时允许只构建普通工具，但 GEMM microkernel、prepack 和 epilogue 请求会明确报错。`build.sh` 对应 `--require-gemm-package` |
 | `ANNC_ENABLE_KDNN_ADAPTOR` | `ON`/`OFF` | `OFF` | 构建 KDNN 后端的内置 kernel adaptor；对应 `build.sh --enable-kdnn-adaptor`，仅 AArch64 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `LOCAL`（`build.sh` 默认覆盖为 `RELEASE`） | KDNN 来源模式；仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 时参与集成 |
 | `ANNC_KDNN_DIR` | 路径 | `third_party/KDNN` | LOCAL 模式下 KDNN 树根目录 |
@@ -104,6 +106,44 @@ ninja && ninja install
 CMake 配置和 manifest 必须作为一个版本化整体存在；不再支持单独指定或替换
 基础 `.a`。缺包时普通编译工具仍可构建，但 GEMM microkernel、静态 RHS
 预打包和 epilogue 请求会明确报错。补齐完整包后须重新配置和构建。
+
+包解压在其他目录时，可通过 `build.sh` 或直接调用 CMake 指定 package 根目录。
+使用 `build.sh` 时：
+
+```shell
+./build.sh --gemm-package-dir /opt/annc-gemm-kernels
+```
+
+该路径会传入 CMake 的 `ANNC_GEMM_PACKAGE_DIR`。复用已有 `build/` 时若更改包路径，
+需加 `--clean` 重新配置：
+
+```shell
+./build.sh --clean --gemm-package-dir /opt/annc-gemm-kernels
+```
+
+直接使用 CMake 时：
+
+```shell
+cmake -S . -B build -G Ninja \
+  -DANNC_GEMM_PACKAGE_DIR=/opt/annc-gemm-kernels \
+  -DANNC_TENSORFLOW_CXX11_ABI=1
+cmake --build build
+cmake --install build
+```
+
+CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使用两个选项：
+
+```shell
+./build.sh --gemm-package-dir /opt/annc-gemm-kernels --require-gemm-package
+```
+
+直接使用 CMake 时等价于添加 `-DANNC_REQUIRE_GEMM_PACKAGE=ON`。
+复用已有 `build/` 时，若更改强制检查开关，也需加 `--clean` 重新配置。
+
+路径必须直接包含 `manifest.json`、`cmake/`、`include/` 和对应库文件，不能指向
+`annc-gemm-kernels.tar.gz`。安装时整包复制到
+`<prefix>/<libdir>/annc-gemm-kernels/`；安装后的 ANNC 编译工具通过相对 RPATH
+加载 codegen 库，无需设置运行时包路径环境变量。
 
 ## 验证安装
 

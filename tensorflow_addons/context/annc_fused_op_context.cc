@@ -10,7 +10,7 @@
 #include "Context/KernelContext.h"
 #include "Context/ThreadPool.h"
 #include "annc_fused_op.h"
-#include "context/ThreadPool.h"
+#include "ThreadPool.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
@@ -366,16 +366,17 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
     attributes.reserve(context_i64_attrs_.size());
     for (const int64_t& value : context_i64_attrs_)
       attributes.push_back({ANNC_ATTRIBUTE_I64, 0, &value, 1});
-    AnncKernelContext execution{
-        sizeof(AnncKernelContext),
-        ANNC_CONTEXT_ABI_VERSION,
-        input_views.data(),
-        static_cast<uint32_t>(num_inputs),
-        output_views.data(),
-        static_cast<uint32_t>(num_outputs_),
-        attributes.data(),
-        static_cast<uint32_t>(attributes.size()),
-        &services};
+    AnncKernelContext execution{sizeof(AnncKernelContext),
+                                ANNC_CONTEXT_ABI_VERSION,
+                                input_views.data(),
+                                static_cast<uint32_t>(num_inputs),
+                                output_views.data(),
+                                static_cast<uint32_t>(num_outputs_),
+                                attributes.data(),
+                                static_cast<uint32_t>(attributes.size()),
+                                nullptr,
+                                0,
+                                &services};
     const AnncStatusCode status =
         reinterpret_cast<AnncKernelFn>(kernel_function)(&execution);
     TF_RETURN_IF_ERROR(state.Error());

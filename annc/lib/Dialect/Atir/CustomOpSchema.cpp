@@ -83,11 +83,11 @@ std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata, StringRef name) {
 DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
   SmallVector<NamedAttribute> attrs;
   Builder builder(ctx);
-  SmallVector<int64_t> attrValues;
   SmallVector<std::string> argNames;
   SmallVector<std::string> argKinds;
   SmallVector<int64_t> argRanks;
   SmallVector<std::string> argTypeVars;
+  SmallVector<int64_t> attrValues;
   SmallVector<std::string> resultNames;
   SmallVector<int64_t> resultRanks;
   SmallVector<std::string> resultTypeVars;
@@ -99,9 +99,6 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
     argTypeVars.push_back(arg.typeVar);
     if (arg.kind == ArgKind::I64Attr) {
       attrValues.push_back(arg.i64Value);
-      std::string attrName = "custom.attr." + arg.name;
-      attrs.push_back(builder.getNamedAttr(
-          attrName, builder.getI64IntegerAttr(arg.i64Value)));
     }
   }
 
@@ -111,27 +108,28 @@ DictionaryAttr CustomOpSchema::toMetadata(MLIRContext *ctx) const {
     resultTypeVars.push_back(result.typeVar);
   }
 
-  attrs.push_back(builder.getNamedAttr("custom.op_name",
-                                       builder.getStringAttr(name_)));
+  attrs.push_back(
+      builder.getNamedAttr("custom.op_name", builder.getStringAttr(name_)));
   attrs.push_back(builder.getNamedAttr("custom.type_vars",
                                        makeStringArray(ctx, typeVars_)));
-  attrs.push_back(builder.getNamedAttr("custom.arg_names",
-                                       makeStringArray(ctx, argNames)));
-  attrs.push_back(builder.getNamedAttr("custom.arg_kinds",
-                                       makeStringArray(ctx, argKinds)));
-  attrs.push_back(builder.getNamedAttr("custom.arg_ranks",
-                                       makeI64Array(ctx, argRanks)));
+  // Names describe the compiler schema; runtime bindings remain positional.
+  attrs.push_back(
+      builder.getNamedAttr("custom.arg_names", makeStringArray(ctx, argNames)));
+  attrs.push_back(
+      builder.getNamedAttr("custom.arg_kinds", makeStringArray(ctx, argKinds)));
+  attrs.push_back(
+      builder.getNamedAttr("custom.arg_ranks", makeI64Array(ctx, argRanks)));
   attrs.push_back(builder.getNamedAttr("custom.arg_type_vars",
                                        makeStringArray(ctx, argTypeVars)));
+  if (!attrValues.empty())
+    attrs.push_back(builder.getNamedAttr("custom.attr_values",
+                                         makeI64Array(ctx, attrValues)));
   attrs.push_back(builder.getNamedAttr("custom.result_names",
                                        makeStringArray(ctx, resultNames)));
   attrs.push_back(builder.getNamedAttr("custom.result_ranks",
                                        makeI64Array(ctx, resultRanks)));
   attrs.push_back(builder.getNamedAttr("custom.result_type_vars",
                                        makeStringArray(ctx, resultTypeVars)));
-  if (!attrValues.empty())
-    attrs.push_back(builder.getNamedAttr("custom.attr_values",
-                                         makeI64Array(ctx, attrValues)));
   return DictionaryAttr::get(ctx, attrs);
 }
 

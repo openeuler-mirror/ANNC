@@ -121,7 +121,7 @@ def cache_key_case(work, pipeline):
         )[0]
         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
 
-    entries = list(cache.glob("v1/*/*/DONE"))
+    entries = list(cache.glob("context-v3/*/*/DONE"))
     assert len(entries) == 2, (
         f"expected two cache entries (switch in fingerprint), got {entries}"
     )

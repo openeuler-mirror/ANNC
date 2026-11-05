@@ -4,7 +4,7 @@
 // CHECK: fusion.pattern = "mul_half"
 // CHECK-LABEL: func.func @main
 // CHECK: call @fused_mul_half_
-// CHECK-NOT: "atir.Mul"
+// CHECK-NOT: atir.Mul
 // CHECK: return
 func.func @main(
     %x: !atir.tensor<2x3xf32, name = "x">,
@@ -23,7 +23,7 @@ func.func @main(
 
 // CHECK-LABEL: func.func @main
 // CHECK-NOT: call @fused_mul_half_
-// CHECK: "atir.Mul"
+// CHECK: atir.Mul
 func.func @main(
     %x: !atir.tensor<2x3xf32, name = "x_bad">,
     %out: !atir.tensor<2x3xf32, name = "y_bad">)

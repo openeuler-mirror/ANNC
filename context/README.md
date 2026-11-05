@@ -57,10 +57,11 @@ C++ `KernelContext` 借用 `AnncKernelContext*`，不复制 tensor 或持有执�
 | `inputs` / `num_inputs` | 输入 tensor 视图及数量，支持可变输入 |
 | `outputs` / `num_outputs` | 语义输出槽位及数量，槽位可已绑定或尚未分配 |
 | `attrs` / `num_attrs` | 独立的属性槽位及数量 |
+| `resources` / `num_resources` | 借用的只读实例资源及数量，与属性分开 |
 | `services` | 本次执行的宿主服务表 |
 
 输入、输出、属性各自从索引 0 开始，彼此不共享索引空间。
-ABI 名称为 `annc_context_v3`，版本为 3；
+ABI 名称为 `annc_context_v3`。
 
 ### 3.1 Tensor 视图与分配请求
 
@@ -83,15 +84,24 @@ rank 0 表示一个标量元素；空 tensor 可没有数据地址，仍须用 B
 `AnncTensorView` 表达分配得到或预先绑定的实际 tensor，二者职责不同。
 `AnncStringRef` 只包含字符串指针和长度，不拥有字符数据，也不暴露 TF 字符串类型。
 
-### 3.2 标量属性
+### 3.2 属性
 
 `AnncAttributeView` 包含 `kind`、保留字段 `reserved`、`data` 和 `count`。
-当前仅定义 I64 标量属性，要求 `count == 1`、`reserved == 0`。
+I64 标量属性要求 `count == 1`、`reserved == 0`。
 使用 `getI64Attr(slot)` 返回 `std::optional<int64_t>`，失败时记录错误。
 
 属性与 tensor 标量不同：num_buckets 等配置放入 attrs；作为算子输入的零维
 F32/I32/I64 tensor 仍放入 inputs。数组 tensor 不因其内容为整数就改成属性。
 属性类别按实际需求扩展，不提前增加未使用的种类。
+
+### 3.3 实例资源
+
+`resources` 指向独立的 `AnncResourceView` 数组，`num_resources` 表示数量，
+不占用 `attrs` 的标量槽位。数量为零时可传空指针，非零时必须提供数组。
+每项资源通过 `getResource(type, version, bytes)` 查找；类型、版本或
+描述大小不匹配时返回空指针，供可选优化回退。实例负责保持描述及其引用内存
+有效，直到所有同步调用结束。当前用于 ONNX MLAS packed-B 的实例持久存储：
+初始化时创建、执行时复用、实例销毁时释放。资源地址不写入 IR 或 JSON。
 
 ## 4. 宿主服务、所有权与同步约定
 
@@ -125,6 +135,7 @@ shard 无可用的限并行度服务时串行执行以遵守限制。宿主回�
 | `getInput(slot)` | 获取连续输入视图 |
 | `getStridedInput(slot)` | 获取允许非连续布局的输入视图 |
 | `getI64Attr(slot)` | 获取 I64 标量属性 |
+| `getResource(type, version, bytes)` | 按特性 ABI 获取只读资源 |
 | `numInputs()` | 查询输入数量 |
 | `allocateOutput<T>(slot, dims, flags)` | 分配或复用输出，rank 从 dims 数量推导 |
 | `allocateTemp<T, Rank>(dims, &view)` | 请求临时 tensor |

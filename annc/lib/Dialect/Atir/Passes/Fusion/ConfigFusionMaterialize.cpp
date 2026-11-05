@@ -15,7 +15,6 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/SHA256.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -107,7 +106,7 @@ static ArrayAttr makeFusionArgArray(
 
 static ArrayAttr makeI64Array(MLIRContext *ctx, ArrayRef<int64_t> values) {
   Builder builder(ctx);
-  SmallVector<mlir::Attribute> attrs;
+  SmallVector<Attribute> attrs;
   for (int64_t value : values)
     attrs.push_back(builder.getI64IntegerAttr(value));
   return ArrayAttr::get(ctx, attrs);
@@ -1285,8 +1284,7 @@ func::FuncOp materializePattern(
   builder.setInsertionPointToStart(module.getBody());
 
   SmallVector<mlir::Type> inputTypes;
-  if (rule.abi == "annc_execution_v2")
-    inputTypes.push_back(LLVM::LLVMPointerType::get(module.getContext()));
+
   for (Value value : boundaryValues) inputTypes.push_back(value.getType());
   SmallVector<mlir::Type> resultTypes;
   if (!rule.bufferOutputs) {
@@ -1306,8 +1304,7 @@ func::FuncOp materializePattern(
   builder.setInsertionPointToStart(entry);
   IRMapping mapper;
   for (auto [boundaryValue, arg] :
-       llvm::zip(boundaryValues, entry->getArguments().drop_front(
-           rule.abi == "annc_execution_v2" ? 1 : 0))) {
+       llvm::zip(boundaryValues, entry->getArguments())) {
     mapper.map(boundaryValue, arg);
   }
 
@@ -1339,7 +1336,7 @@ func::FuncOp materializePattern(
   builder.create<func::ReturnOp>(func.getLoc(), returns);
 
   annc::fusion::FusionInfo info;
-  info.name = (rule.abi == "annc_context_v3" || rule.abi == "annc_execution_v2")
+  info.name = rule.abi == "annc_context_v3"
                   ? (rule.pattern.empty() ? rule.name : rule.pattern)
                   : kernelName;
   info.pattern = rule.pattern.empty() ? rule.name : rule.pattern;

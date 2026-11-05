@@ -42,6 +42,20 @@ enum { ANNC_CONTEXT_ABI_VERSION = 3, ANNC_CONTEXT_MAX_RANK = 8 };
 #define ANNC_LAYOUT_STRIDED ((uint32_t)0u)
 #define ANNC_ATTRIBUTE_I64 ((uint32_t)1u)
 
+// Process-local, read-only kernel feature resource. The type tag and version
+// identify the payload ABI; bytes is its descriptor size, not its allocation
+// size. The instance owner keeps the descriptor, tag and referenced storage
+// alive through all synchronous calls, and releases them after calls finish.
+// Never serialize this view or its pointers into IR / sites.json. Resources
+// have their own array in AnncKernelContext, separate from scalar attributes.
+typedef struct {
+  uint32_t struct_size;
+  uint32_t version;
+  const char* type;
+  const void* data;
+  uint64_t bytes;
+} AnncResourceView;
+
 // Borrowed metadata and data. Offset and strides are measured in elements.
 // Rank-zero views have no sizes/strides; empty bound views may have null data.
 // LLVM mirror: annc/lib/Conversion/Common/ContextInputOverrides.cpp (viewType).
@@ -66,6 +80,15 @@ typedef struct {
   uint64_t count;
 } AnncAttributeView;
 
+// request and its dims are borrowed only until this synchronous callback
+// returns. On success, result borrows host-owned storage and metadata valid
+// throughout the kernel call. Before returning ANNC_STATUS_OK, the kernel must
+// bind this returned view to context->outputs[slot]; passing that slot as
+// result satisfies the requirement directly. Preserve its data/metadata
+// pointers, offset, type, rank and layout, with BOUND set and READ_ONLY clear.
+// The kernel may write tensor elements, but must not modify the host-owned
+// sizes/strides. Already-bound outputs may instead be reused without invoking
+// this callback.
 typedef AnncStatusCode (*AnncContextAllocateOutput)(
     void* opaque, uint32_t slot, const AnncTensorDesc* request,
     AnncTensorView* result);
@@ -136,6 +159,10 @@ typedef struct {
   uint32_t num_outputs;
   const AnncAttributeView* attrs;
   uint32_t num_attrs;
+  // Borrowed instance resources, independent of positional attributes.
+  // A nonzero count requires a nonnull array.
+  const AnncResourceView* resources;
+  uint32_t num_resources;
   const AnncRuntimeServices* services;
 } AnncKernelContext;
 

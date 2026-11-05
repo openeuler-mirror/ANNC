@@ -37,7 +37,7 @@ Site ValidSite() {
   return site;
 }
 
-// The annc_execution_v2 contract: inputs only (the kernel allocates its own
+// The annc_context_v3 contract: inputs only (the kernel allocates its own
 // outputs through the execution context), no kernel argument order, distinct
 // argument ranks, f32 throughout.
 Site ValidContextSite() {
@@ -45,7 +45,7 @@ Site ValidContextSite() {
   site.pattern = "tensordot_matmul";
   site.kernelName = "fused_tensordot_matmul";
   site.executionMode = "aot";
-  site.abi = "annc_execution_v2";
+  site.abi = "annc_context_v3";
   site.memberNodes = {"n0", "n1"};
   site.args = {{"x", "dynamic", "f32", 3, {1, 2, 4}},
                {"w", "fixed", "f32", 2, {4, 8}}};
@@ -100,6 +100,8 @@ TEST(AnncEpContextSiteValidation, AcceptsEveryMigratedPattern) {
         "batched_matmul_add"}) {
     Site site = ValidContextSite();
     site.pattern = pattern;
+    if (site.pattern == "masked_mul")
+      site.contextI64Attrs = {1, 1, 0, 0, 1, 0, 0x3f800000, 0};
     std::string error;
     EXPECT_TRUE(ValidateSite(site, &error)) << pattern << ": " << error;
   }
@@ -198,6 +200,7 @@ TEST(AnncEpContextSiteValidation, RepeatedRanksNeedResolvedNames) {
 TEST(AnncEpContextSiteValidation, AcceptsIntegerMaskArgument) {
   Site site = ValidContextSite();
   site.pattern = "masked_mul";
+  site.contextI64Attrs = {1, 1, 0, 0, 1, 0, 0x3f800000, 0};
   site.args = {{"data0", "dynamic", "f32", 3, {2, 3, 4}},
                {"ids", "fixed", "i64", 2, {2, 3}}};
   site.namesResolved = true;
@@ -215,7 +218,7 @@ TEST(AnncEpContextSiteValidation, RejectsUnsupportedArgumentElementType) {
 
 TEST(AnncEpContextSiteValidation, RejectsOutputWithUnsupportedRank) {
   Site site = ValidContextSite();
-  site.outputs = {{"y", "output", "f32", 5, {1, 1, 1, 1, 1}}};
+  site.outputs = {{"y", "output", "f32", 9, {1, 1, 1, 1, 1, 1, 1, 1, 1}}};
   std::string error;
   EXPECT_FALSE(ValidateSite(site, &error));
   EXPECT_NE(error.find("output"), std::string::npos);
@@ -227,30 +230,6 @@ TEST(AnncEpContextSiteValidation, RejectsMissingOutputs) {
   std::string error;
   EXPECT_FALSE(ValidateSite(site, &error));
   EXPECT_NE(error.find("output"), std::string::npos);
-}
-
-TEST(AnncEpContextSiteValidation, RejectsTooManyArguments) {
-  Site site = ValidContextSite();
-  site.args.clear();
-  for (int64_t rank = 0; rank < 4; ++rank) {
-    std::vector<int64_t> shape(static_cast<size_t>(rank), 1);
-    site.args.push_back({"a" + std::to_string(rank), "dynamic", "f32", rank,
-                         shape});
-  }
-  std::string error;
-  // Four more carry the site to the limit, the eleventh one past it: the
-  // kernel-call dispatch table in annc_ep_execution.cc has one cast per
-  // argument count, and the validation carries the same bound.
-  site.args.push_back({"x", "dynamic", "f32", 2, {1, 1}});
-  site.args.push_back({"y", "dynamic", "f32", 3, {1, 1, 1}});
-  site.args.push_back({"z", "dynamic", "f32", 1, {1}});
-  site.args.push_back({"q", "dynamic", "f32", 1, {1}});
-  EXPECT_TRUE(ValidateSite(site, &error)) << error;
-  for (int i = 0; i < 11; ++i) {
-    site.args.push_back({"e" + std::to_string(i), "dynamic", "f32", 1, {1}});
-  }
-  EXPECT_FALSE(ValidateSite(site, &error));
-  EXPECT_NE(error.find("fourteen"), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

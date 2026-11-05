@@ -10,7 +10,8 @@
 
 namespace {
 
-using annc::kernels::KernelStatus;
+using annc::test::Invoke;
+using annc::test::View;
 using annc::test::ExpectNear;
 using annc::test::OutputBuffers;
 
@@ -111,9 +112,8 @@ TEST(BatchedMatMulAddContext, Rank3MatchesReference) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   ExpectRank3(outputs.output(),
               ReferenceRank3(data, dataBatch, d1, k, weight, dataBatch, n,
@@ -141,9 +141,8 @@ TEST(BatchedMatMulAddContext, Rank3BroadcastsDataBatch) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ExpectRank3(outputs.output(),
               ReferenceRank3(data, dataBatch, d1, k, weight, weightBatch, n,
                              bias));
@@ -170,9 +169,8 @@ TEST(BatchedMatMulAddContext, Rank3BroadcastsWeightBatch) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ExpectRank3(outputs.output(),
               ReferenceRank3(data, dataBatch, d1, k, weight, weightBatch, n,
                              bias));
@@ -197,9 +195,8 @@ TEST(BatchedMatMulAddContext, Rank3ZeroContractAddsBiasOnly) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(),
             static_cast<size_t>(dataBatch * d1 * n));
   for (int64_t i = 0; i < dataBatch; ++i) {
@@ -230,9 +227,8 @@ TEST(BatchedMatMulAddContext, Rank3ZeroRowsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 3u);
@@ -258,9 +254,8 @@ TEST(BatchedMatMulAddContext, Rank3ZeroColumnsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 3u);
@@ -286,9 +281,8 @@ TEST(BatchedMatMulAddContext, Rank3RejectsBiasBatchMismatch) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -311,9 +305,8 @@ TEST(BatchedMatMulAddContext, Rank3RejectsNonContiguousData) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -340,9 +333,8 @@ TEST(BatchedMatMulAddContext, Rank4MatchesReference) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   ExpectRank4(outputs.output(),
               ReferenceRank4(data, d0, d1, m, k, weight, w0, w1, n, bias,
@@ -372,9 +364,8 @@ TEST(BatchedMatMulAddContext, Rank4BroadcastsLeadingDims) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ExpectRank4(outputs.output(),
               ReferenceRank4(data, d0, d1, m, k, weight, w0, w1, n, bias,
                              out0, out1));
@@ -400,9 +391,8 @@ TEST(BatchedMatMulAddContext, Rank4RejectsBatchMismatch) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -426,9 +416,8 @@ TEST(BatchedMatMulAddContext, Rank4ZeroRowsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 4u);
@@ -458,9 +447,8 @@ TEST(BatchedMatMulAddContext, Rank3CoversSixteenWideBlock) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ExpectRank3(outputs.output(),
               ReferenceRank3(data, dataBatch, d1, k, weight, dataBatch, n,
                              bias));
@@ -489,9 +477,8 @@ TEST(BatchedMatMulAddContext, Rank4CoversSixteenWideBlock) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ExpectRank4(outputs.output(),
               ReferenceRank4(data, d0, d1, m, k, weight, w0, w1, n, bias,
                              out0, out1));
@@ -516,17 +503,15 @@ TEST(BatchedMatMulAddContext, Rank3RejectsNonContiguousWeightAndBias) {
   OutputBuffers outputs;
   auto context = outputs.context();
   weightRef.strides[2] = 2;
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 
   weightRef = annc::kernels::execution::makeMemRef<AnncMemRef3DF32>(
       weight.data(), 3, weightDims);
   biasRef.strides[1] = n + 1;
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -548,9 +533,8 @@ TEST(BatchedMatMulAddContext, Rank3RejectsNegativeDimensions) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -574,9 +558,8 @@ TEST(BatchedMatMulAddContext, Rank4RejectsNegativeDimensions) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -601,9 +584,8 @@ TEST(BatchedMatMulAddContext, Rank4ZeroContractAddsBiasOnly) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(), static_cast<size_t>(out0 * out1 * m * n));
   for (int64_t row = 0; row < m; ++row) {
     for (int64_t col = 0; col < n; ++col) {
@@ -632,9 +614,8 @@ TEST(BatchedMatMulAddContext, Rank4ZeroColumnsAllocatesAnEmptyOutput) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_EQ(outputs.last_slot, 0u);
   EXPECT_EQ(outputs.last_rank, 4u);
@@ -664,9 +645,8 @@ TEST(BatchedMatMulAddContext, Rank4RejectsNonContiguousData) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -690,18 +670,14 @@ TEST(BatchedMatMulAddContext, Rank4RejectsNullArguments) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, nullptr, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, nullptr, &weightRef,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, nullptr,
-                                      &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      nullptr),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, nullptr, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(nullptr), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(nullptr), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(nullptr)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 
@@ -723,9 +699,8 @@ TEST(BatchedMatMulAddContext, Rank3FailsWhenOutputAllocationFails) {
   OutputBuffers outputs;
   auto context = outputs.context();
   outputs.FailNextAllocation();
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::RuntimeError);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_NE(outputs.last_error.find("output allocation failed"),
             std::string::npos);
@@ -751,9 +726,8 @@ TEST(BatchedMatMulAddContext, Rank4FailsWhenOutputAllocationFails) {
   OutputBuffers outputs;
   auto context = outputs.context();
   outputs.FailNextAllocation();
-  EXPECT_EQ(batchedMatMulAddRank4Impl(nullptr, &context, &dataRef, &weightRef,
-                                      &biasRef),
-            KernelStatus::RuntimeError);
+  EXPECT_EQ(Invoke(batchedMatMulAddRank4Impl, &context, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_ALLOCATION_FAILED);
   EXPECT_EQ(outputs.allocate_calls, 1u);
   EXPECT_NE(outputs.last_error.find("output allocation failed"),
             std::string::npos);
@@ -778,9 +752,9 @@ TEST(BatchedMatMulAddContext, Rank3PropagatesNaN) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  ASSERT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::Success);
+  ASSERT_EQ(Invoke(batchedMatMulAddImpl, &context,
+                   {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_OK);
   ASSERT_EQ(outputs.output().size(), 1u);
   EXPECT_TRUE(std::isnan(outputs.output()[0]));
 }
@@ -802,18 +776,14 @@ TEST(BatchedMatMulAddContext, RejectsNullArguments) {
 
   OutputBuffers outputs;
   auto context = outputs.context();
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, nullptr, &dataRef, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, nullptr, &weightRef,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, nullptr,
-                                 &biasRef),
-            KernelStatus::InvalidArgument);
-  EXPECT_EQ(batchedMatMulAddImpl(nullptr, &context, &dataRef, &weightRef,
-                                 nullptr),
-            KernelStatus::InvalidArgument);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, nullptr, {View(&dataRef), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(nullptr), View(&weightRef), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(nullptr), View(&biasRef)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(Invoke(batchedMatMulAddImpl, &context, {View(&dataRef), View(&weightRef), View(nullptr)}),
+            ANNC_STATUS_INVALID_ARGUMENT);
   EXPECT_EQ(outputs.allocate_calls, 0u);
 }
 

@@ -17,8 +17,6 @@
 #include <vector>
 
 #include "Context/KernelContext.h"
-#include "Kernel/ExecutionContext.h"
-#include "Kernel/PackedB.h"
 #include "Context/ThreadPool.h"
 #include "annc_ep_native_pool.h"
 
@@ -103,9 +101,7 @@ class OnnxExecutionContext {
   OnnxExecutionContext& operator=(const OnnxExecutionContext&) = delete;
 
   // The ANNC ABI struct handed to the kernel as its only argument.
-  AnncKernelContext* kernelAbi() { return &context_; }
-  AnncExecutionContext* abi() { return &legacy_; }
-  void SetPackedB(const AnncPackedB* packed) { legacy_.packed_b = packed; }
+  AnncKernelContext* abi() { return &context_; }
 
 
   // Ownership of the returned status (the first error the callbacks recorded)
@@ -114,6 +110,10 @@ class OnnxExecutionContext {
 
   // True when the kernel allocated every declared output slot.
   bool AllOutputsAllocated() const;
+
+  // True when every slot preserves the view returned by its allocation.
+  // Called after the synchronous kernel and all its callbacks have finished.
+  bool AllOutputsBound() const;
 
  private:
   static AnncStatusCode AllocateOutput(void* opaque, uint32_t slot,
@@ -137,7 +137,7 @@ class OnnxExecutionContext {
   bool BindView(const AnncTensorDesc& request, void* data,
                 AnncTensorView* result);
 
-  AnncStatusCode AllocateOutputImpl(uint32_t slot, AnncTensorDesc* desc, bool legacy = false);
+  AnncStatusCode AllocateOutputImpl(uint32_t slot, AnncTensorDesc* desc);
   AnncStatusCode AllocateTempImpl(AnncTensorDesc* desc);
   // Stores the first error and reports it to stderr once.
   AnncStatusCode Fail(AnncStatusCode status, const std::string& message);
@@ -162,14 +162,13 @@ class OnnxExecutionContext {
   };
   std::deque<ShapeStorage> shapes_;
   std::vector<AnncTensorView> output_views_;
+  // Independent copies: the kernel can overwrite the public output slots.
+  std::vector<AnncTensorView> allocated_output_views_;
   std::recursive_mutex mutex_;
   std::atomic<AnncStatusCode> status_{ANNC_STATUS_OK};
   AnncRuntimeServices services_{};
   AnncKernelContext context_{};
-  AnncExecutionContext legacy_{};
 };
-
-std::int32_t CallContextKernel(void*, const std::vector<void*>&);
 
 // Maps an ORT tensor element type onto the ANNC element type the ABI uses;
 // false when the type has no ANNC counterpart (such a tensor can never fill a
@@ -208,8 +207,6 @@ ArgumentBinding BindArgumentsToInputs(
 // inputs.
 struct ContextCall {
   void* symbol = nullptr;
-  std::string abi = "annc_execution_v2";
-  const AnncPackedB* packed_b = nullptr;
   // Kernel call order: the rank and element type of each site argument (args
   // in the report).
   std::vector<int64_t> arg_ranks;
@@ -218,6 +215,9 @@ struct ContextCall {
   std::vector<int64_t> arg_indices;
   std::vector<OutputContract> outputs;
   std::vector<int64_t> i64_attrs;
+  // Runtime fusion metadata: process-local resources borrowed from this
+  // node's compute state. Never written back to the serialized Site report.
+  std::vector<AnncResourceView> resources;
   // ORT output index each declared output slot maps to; empty = identity.
   std::vector<uint32_t> output_slots;
 };
