@@ -721,4 +721,52 @@ LogicalResult PadOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// UnsupportedOp (artifact sink layer)
+//===----------------------------------------------------------------------===//
+
+::mlir::ParseResult UnsupportedOp::parse(::mlir::OpAsmParser &parser,
+                                           ::mlir::OperationState &result) {
+  // Format: attr-dict `(` operands `)` `:` functional-type
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return ::mlir::failure();
+  ::llvm::SmallVector<::mlir::OpAsmParser::UnresolvedOperand> operands;
+  auto loc = parser.getCurrentLocation();
+  if (parser.parseLParen() || parser.parseOperandList(operands) ||
+      parser.parseRParen() || parser.parseColon())
+    return ::mlir::failure();
+  ::mlir::Type allTypes;
+  if (parser.parseType(allTypes))
+    return ::mlir::failure();
+  auto fnType = llvm::dyn_cast<::mlir::FunctionType>(allTypes);
+  if (!fnType) {
+    parser.emitError(loc, "expected functional type");
+    return ::mlir::failure();
+  }
+  if (static_cast<size_t>(fnType.getNumInputs()) != operands.size()) {
+    parser.emitError(loc, "operand count mismatch with functional type");
+    return ::mlir::failure();
+  }
+  if (parser.resolveOperands(operands, fnType.getInputs(), loc,
+                             result.operands))
+    return ::mlir::failure();
+  result.addTypes(fnType.getResults());
+  return ::mlir::success();
+}
+
+void UnsupportedOp::print(::mlir::OpAsmPrinter &printer) {
+  printer.printOptionalAttrDict((*this)->getAttrs());
+  printer << " (";
+  llvm::interleaveComma(getInputs(), printer);
+  printer << ") : ";
+  printer.printFunctionalType(getOperation()->getOperandTypes(),
+                              getResultTypes());
+}
+
+LogicalResult UnsupportedOp::verify() {
+  if (getOpType().empty())
+    return emitOpError() << "requires a non-empty opType attribute";
+  return success();
+}
+
 } // namespace atir

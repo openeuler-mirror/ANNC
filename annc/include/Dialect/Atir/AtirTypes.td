@@ -254,6 +254,19 @@ def Atir_Resource : Atir_TypeDef<"Resource", "resource"> {
   let summary = "opaque handle to a runtime resource";
 }
 
+def Atir_String : Atir_TypeDef<"String", "string"> {
+  let summary = "DT_STRING element type carried as a host-side handle";
+  let description = [{
+    Element type for DT_STRING tensors. The values live on the host, so the
+    lowering maps a tensor of this element type to an i64 handle memref and no
+    numeric kernel ever sees it.
+
+    This is the explicit spelling of the legacy `complex<f32>` +
+    `encoding = "string"` convention; the sink's type compat layer recognises
+    both carriers on input so old IR keeps working.
+  }];
+}
+
 def Atir_TensorOrNone : AnyTypeOf<[Atir_Tensor, AnyStaticShapeMemRef, NoneType]>;
 
 #endif // ATIR_TYPES_TD
