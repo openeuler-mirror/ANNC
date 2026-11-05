@@ -1,5 +1,4 @@
 #include "Builder/MLIROpBuilder.h"
-#include "Builder/Transformers.h"
 
 #include <algorithm>
 #include <complex>
@@ -7,7 +6,6 @@
 #include <functional>
 #include <sstream>
 
-#include "llvm/ADT/StringMap.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -17,32 +15,6 @@ using namespace mlir;
 namespace annc {
 
 namespace {
-
-std::string tfAttrValueToString(const NodeInfo::TfAttrValue& value) {
-  return std::visit(
-      [](const auto& v) -> std::string {
-        using T = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<T, std::string>) {
-          return v;
-        } else if constexpr (std::is_same_v<T, bool>) {
-          return v ? "true" : "false";
-        } else if constexpr (std::is_arithmetic_v<T>) {
-          return std::to_string(v);
-        } else {
-          std::ostringstream os;
-          for (size_t i = 0; i < v.size(); ++i) {
-            if (i > 0) os << ",";
-            if constexpr (std::is_same_v<typename T::value_type, bool>) {
-              os << (v[i] ? "true" : "false");
-            } else {
-              os << v[i];
-            }
-          }
-          return os.str();
-        }
-      },
-      value);
-}
 
 // Converts a TF attr value to the existing MLIR attr type `target` (typed path
 // for Declared attr mappings; null when unrepresentable).
@@ -126,80 +98,7 @@ Attribute tfAttrToMlirAttr(OpBuilder& builder, const NodeInfo& node,
   return Attribute();
 }
 
-Attribute defBoolFalse(OpBuilder& b) { return b.getBoolAttr(false); }
-Attribute defF32NegOne(OpBuilder& b) { return b.getF32FloatAttr(-1.0f); }
-Attribute defI32Zero(OpBuilder& b) { return b.getI32IntegerAttr(0); }
-Attribute defPredEQ(OpBuilder& b) { return b.getStringAttr("EQ"); }
-Attribute defPredLT(OpBuilder& b) { return b.getStringAttr("LT"); }
-Attribute defPredNE(OpBuilder& b) { return b.getStringAttr("NE"); }
-Attribute defPredGT(OpBuilder& b) { return b.getStringAttr("GT"); }
-Attribute defPredGE(OpBuilder& b) { return b.getStringAttr("GE"); }
-Attribute defPredLE(OpBuilder& b) { return b.getStringAttr("LE"); }
-
-const AttrDefault kDefaultsAdd[] = {{"do_relu", defBoolFalse},
-                                    {"relu_limit", defF32NegOne}};
-const AttrDefault kDefaultsConcat[] = {{"axis", defI32Zero},
-                                       {"do_relu", defBoolFalse},
-                                       {"relu_limit", defF32NegOne},
-                                       {"round_mode", defI32Zero}};
-const AttrDefault kDefaultsRelu[] = {{"relu_limit", defF32NegOne}};
-const AttrDefault kDefaultsReduceMean[] = {{"keep_dims", defBoolFalse}};
-const AttrDefault kDefaultsPredEQ[] = {{"comparisonDirection", defPredEQ}};
-const AttrDefault kDefaultsPredLT[] = {{"comparisonDirection", defPredLT}};
-const AttrDefault kDefaultsPredNE[] = {{"comparisonDirection", defPredNE}};
-const AttrDefault kDefaultsPredGT[] = {{"comparisonDirection", defPredGT}};
-const AttrDefault kDefaultsPredGE[] = {{"comparisonDirection", defPredGE}};
-const AttrDefault kDefaultsPredLE[] = {{"comparisonDirection", defPredLE}};
-
-// Equal/NotEqual incompatible_shape_error: read as bool (TF default true) or
-// int64, mapped onto atir.Compare's incompatibleShapeError attr.
-Attribute transformIncompatibleShapeError(OpBuilder& b, const NodeInfo& node,
-                                          StringRef atirAttr) {
-  bool flag = true;
-  if (node.getAttr("incompatible_shape_error", flag))
-    return b.getBoolAttr(flag);
-  if (int64_t v; node.getAttr("incompatible_shape_error", v))
-    return b.getBoolAttr(v != 0);
-  return b.getBoolAttr(true);
-}
-
-const AttrMapping kMappingKeepDims[] = {
-    {"keep_dims", "keep_dims", AttrKind::Direct, nullptr}};
-const AttrMapping kMappingIncompatibleShapeError[] = {
-    {"incompatible_shape_error", "incompatibleShapeError", AttrKind::Transform,
-     transformIncompatibleShapeError}};
-
 }  // namespace
-
-#include "OpSpecTable.inc"
-
-namespace {
-
-// Shared storage for the table (referenced by the name map and getAllOpSpecs).
-const llvm::SmallVector<OpSpec, 0>& getOpSpecStorage() {
-  static const llvm::SmallVector<OpSpec, 0> kSpecs = [] {
-    llvm::SmallVector<OpSpec, 0> specs;
-    populateOpSpecTable(specs);
-    return specs;
-  }();
-  return kSpecs;
-}
-
-const llvm::StringMap<const OpSpec*>& getOpSpecTable() {
-  static llvm::StringMap<const OpSpec*> table = [] {
-    llvm::StringMap<const OpSpec*> map;
-    for (const auto& spec : getOpSpecStorage())
-      for (llvm::StringRef tfOp : spec.tfOps) map[tfOp] = &spec;
-    return map;
-  }();
-  return table;
-}
-
-}  // namespace
-
-llvm::ArrayRef<OpSpec> MLIRBuilder::getAllOpSpecs() {
-  return getOpSpecStorage();
-}
 
 Location OpContext::loc(llvm::StringRef name) const {
   return annc::getLoc(builder_.getContext(), name.str());
@@ -232,18 +131,12 @@ bool decodeIntConstValues(const NodeInfo* cnode, std::vector<int64_t>& out) {
   return false;
 }
 
-bool MLIRBuilder::isSupportedOp(llvm::StringRef opType) {
-  return getOpSpecTable().contains(opType);
-}
-
-const OpSpec* MLIRBuilder::lookupSpec(llvm::StringRef opType) const {
-  const auto& table = getOpSpecTable();
-  auto it = table.find(opType);
-  return it == table.end() ? nullptr : it->second;
-}
-
-// Default seam: the TF path never forces the opaque fallback.
+// Frameworks opt into their own opaque fallback and special-node handling.
 bool MLIRBuilder::shouldLowerToOpaque(const NodeInfo&) const { return false; }
+
+std::optional<LogicalResult> MLIRBuilder::buildFrontendNode(const NodeInfo&) {
+  return std::nullopt;
+}
 
 bool MLIRBuilder::buildFromNodes(const std::vector<NodeInfo>& nodes) {
   failed_ = false;
@@ -368,11 +261,7 @@ LogicalResult MLIRBuilder::emitNodeError(const NodeInfo& node,
 LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   const std::string& type = node.op_type;
 
-  if (type == "Switch" || type == "RefSwitch" || type == "Merge" ||
-      type == "RefMerge" || type == "Enter" || type == "RefEnter" ||
-      type == "Exit" || type == "RefExit" || type == "NextIteration" ||
-      type == "RefNextIteration" || type == "LoopCond")
-    return buildControlFlowMirrorNode(node);
+  if (auto result = buildFrontendNode(node)) return *result;
 
   if (shouldLowerToOpaque(node)) return buildOpaqueOp(node);
 
@@ -436,77 +325,6 @@ LogicalResult MLIRBuilder::addNode(const NodeInfo& node) {
   return success();
 }
 
-LogicalResult MLIRBuilder::buildControlFlowMirrorNode(
-    const NodeInfo& node) {
-  SmallVector<Value> inputs;
-  for (const std::string& inputName : node.inputs) {
-    Value input = resolveValue(inputName);
-    if (!input) {
-      // A NextIteration -> Merge edge is a TensorFlow loop backedge. It is
-      // preserved in tf.input.N metadata and intentionally omitted from the
-      // acyclic MLIR operand list when its producer is not available yet.
-      if (node.op_type == "Merge" || node.op_type == "RefMerge") continue;
-      return emitNodeError(node, "unknown control-flow input tensor '" +
-                                     inputName + "'");
-    }
-    inputs.push_back(input);
-  }
-
-  SmallVector<Type> outputs;
-  for (unsigned i = 0; i < node.outputs.size(); ++i) {
-    auto type = getTensorType(node, i);
-    if (failed(type)) return failure();
-    outputs.push_back(*type);
-  }
-
-  Location loc = annc::getLoc(builder_.getContext(), node.name);
-  OperationState state(loc, "atir.opaque");
-  if (node.op_type == "Switch" || node.op_type == "RefSwitch") {
-    if (inputs.size() != 2 || outputs.size() != 2)
-      return emitNodeError(node, "Switch requires two inputs and two outputs");
-    state.name = OperationName("atir.switch", builder_.getContext());
-  } else if (node.op_type == "Merge" || node.op_type == "RefMerge") {
-    if (inputs.empty() || outputs.size() != 2)
-      return emitNodeError(node,
-                           "Merge requires at least one available input and two outputs");
-    state.name = OperationName("atir.merge", builder_.getContext());
-  } else if (node.op_type == "Enter" || node.op_type == "RefEnter") {
-    state.name = OperationName("atir.enter", builder_.getContext());
-  } else if (node.op_type == "Exit" || node.op_type == "RefExit") {
-    state.name = OperationName("atir.exit", builder_.getContext());
-  } else if (node.op_type == "NextIteration" ||
-             node.op_type == "RefNextIteration") {
-    state.name = OperationName("atir.next_iteration", builder_.getContext());
-  } else {
-    state.name = OperationName("atir.loop_cond", builder_.getContext());
-  }
-  state.operands.append(inputs.begin(), inputs.end());
-  state.types.append(outputs.begin(), outputs.end());
-
-  SmallVector<NamedAttribute> metadata;
-  metadata.push_back(
-      builder_.getNamedAttr("tf.name", builder_.getStringAttr(node.name)));
-  metadata.push_back(builder_.getNamedAttr(
-      "tf.op", builder_.getStringAttr(node.op_type)));
-  for (const auto& [key, value] : node.tf_attrs) {
-    if (key == "tf.name" || key == "tf.op") continue;
-    metadata.push_back(
-        builder_.getNamedAttr(key, builder_.getStringAttr(value)));
-  }
-  for (const auto& [key, value] : node.attrs) {
-    if (key.empty() || key[0] == '_') continue;
-    metadata.push_back(builder_.getNamedAttr(
-        key, builder_.getStringAttr(tfAttrValueToString(value))));
-  }
-  state.addAttribute(builder_.getStringAttr("metadata"),
-                     DictionaryAttr::get(builder_.getContext(), metadata));
-
-  Operation* op = builder_.create(state);
-  for (unsigned i = 0; i < node.outputs.size(); ++i)
-    tensorValues_[node.outputs[i].name] = op->getResult(i);
-  return success();
-}
-
 FailureOr<Operation*> MLIRBuilder::buildGenericOp(const OpSpec& spec,
                                                   const NodeInfo& node,
                                                   ArrayRef<Type> outs,
@@ -527,7 +345,7 @@ FailureOr<Operation*> MLIRBuilder::buildGenericOp(const OpSpec& spec,
   return op;
 }
 
-// Fallback for TF ops with no OpSpec row: the graph still converts. The node
+// Fallback for nodes with no OpSpec row: the graph still converts. The node
 // becomes an atir.opaque placeholder that passes inputs/outputs through
 // structurally (types/shapes from graph facts). A warning flags the op for
 // later per-op addition; if no fusion pattern absorbs it, the lowering pass
@@ -605,6 +423,33 @@ LogicalResult MLIRBuilder::applyAttrMappings(Operation* op,
     if (attr) op->setAttr(mapping.atirAttr, attr);
   }
   return success();
+}
+
+std::string MLIRBuilder::tfAttrValueToString(
+    const NodeInfo::TfAttrValue& value) {
+  return std::visit(
+      [](const auto& v) -> std::string {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+          return v;
+        } else if constexpr (std::is_same_v<T, bool>) {
+          return v ? "true" : "false";
+        } else if constexpr (std::is_arithmetic_v<T>) {
+          return std::to_string(v);
+        } else {
+          std::ostringstream os;
+          for (size_t i = 0; i < v.size(); ++i) {
+            if (i > 0) os << ",";
+            if constexpr (std::is_same_v<typename T::value_type, bool>) {
+              os << (v[i] ? "true" : "false");
+            } else {
+              os << v[i];
+            }
+          }
+          return os.str();
+        }
+      },
+      value);
 }
 
 void MLIRBuilder::attachMetadata(Operation* op, const NodeInfo& node,

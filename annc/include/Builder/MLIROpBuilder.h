@@ -1,5 +1,6 @@
 #ifndef ANNC_OP_BUILDER_H
 #define ANNC_OP_BUILDER_H
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -61,35 +62,42 @@ bool OpContext::getAttr(const NodeInfo& node, llvm::StringRef name,
   return node.getAttr(name.str(), out);
 }
 
-// Table-driven TF graph -> ATIR builder: addNode() validates a node against
+// Framework-neutral graph -> ATIR builder: addNode() validates a node against
 // its declarative OpSpec, builds the op (generic for 1:1 ops, transformer
 // otherwise), applies attr mappings, attaches metadata and registers results.
 // All failure paths report a diagnostic and return failure; nothing aborts.
 class MLIRBuilder {
  public:
   MLIRBuilder(ModuleOp& module)
-      : module_(module), builder_(module.getContext()) {}
+      : builder_(module.getContext()), module_(module) {}
   virtual ~MLIRBuilder() = default;
 
   bool buildFromNodes(const std::vector<NodeInfo>& nodes);
-  static bool isSupportedOp(llvm::StringRef opType);
-  // All declared op specs (drives isSupportedOp); used by tests and tooling.
-  static llvm::ArrayRef<OpSpec> getAllOpSpecs();
 
  protected:
-  // Framework substitution seams. The base implementation resolves against the
-  // TF table and never forces a fallback, so TF behaviour is unchanged; a
-  // subclass (annc-onnx2atir) supplies its own table and fallback decision.
-  virtual const OpSpec* lookupSpec(llvm::StringRef opType) const;
+  // Each frontend resolves op names against its own table.
+  // Return nullptr if no rule exists; addNode() then builds atir.opaque.
+  virtual const OpSpec* lookupSpec(llvm::StringRef opType) const = 0;
+  // Runs before input resolution so frontends can preserve loop backedges.
+  virtual std::optional<mlir::LogicalResult> buildFrontendNode(
+      const NodeInfo& node);
   // Returns true when the node must land in atir.opaque even though a spec
   // could be found, because the frontend could not faithfully normalize it.
   virtual bool shouldLowerToOpaque(const NodeInfo& node) const;
 
+  mlir::FailureOr<mlir::Type> getTensorType(const NodeInfo& node,
+                                            unsigned outIdx);
+  // Resolves a name to a produced value; strips a ":0" output-index suffix.
+  mlir::Value resolveValue(llvm::StringRef name) const;
+  mlir::LogicalResult emitNodeError(const NodeInfo& node,
+                                    const std::string& message);
+
+  static std::string tfAttrValueToString(const NodeInfo::TfAttrValue& value);
+
  private:
   mlir::LogicalResult addNode(const NodeInfo& node);
-  mlir::LogicalResult buildControlFlowMirrorNode(const NodeInfo& node);
   mlir::LogicalResult buildConstantNode(const NodeInfo& node);
-  // Fallback for TF ops with no OpSpec: emit a warning and build an
+  // Fallback for nodes with no OpSpec: emit a warning and build an
   // atir.opaque placeholder that passes inputs/outputs through structurally.
   mlir::LogicalResult buildOpaqueOp(const NodeInfo& node);
   mlir::FailureOr<Operation*> buildGenericOp(const OpSpec& spec,
@@ -99,21 +107,17 @@ class MLIRBuilder {
   mlir::LogicalResult applyAttrMappings(Operation* op, const NodeInfo& node,
                                         const OpSpec& spec);
   void attachMetadata(Operation* op, const NodeInfo& node, const OpSpec& spec);
-  mlir::FailureOr<mlir::Type> getTensorType(const NodeInfo& node,
-                                            unsigned outIdx);
-  // Resolves a name to a produced value; strips a ":0" output-index suffix.
-  mlir::Value resolveValue(llvm::StringRef name) const;
-  mlir::LogicalResult emitNodeError(const NodeInfo& node,
-                                    const std::string& message);
-
   std::vector<Value> addGraphInputs(const std::vector<NodeInfo>& inputNodes);
   std::vector<Value> addGraphOutputs(const std::vector<NodeInfo>& outputNodes);
 
-  ModuleOp module_;
+ protected:
   OpBuilder builder_;
-  func::FuncOp mainFunc_;
   // Output name -> produced SSA value (later nodes resolve inputs by name).
   std::unordered_map<std::string, Value> tensorValues_;
+
+ private:
+  ModuleOp module_;
+  func::FuncOp mainFunc_;
   // Name -> NodeInfo, so handlers can resolve constant inputs by name.
   std::unordered_map<std::string, const NodeInfo*> nodesByName_;
   // Set when a node cannot be built; buildFromNodes reports and stops.

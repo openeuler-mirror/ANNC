@@ -1,7 +1,6 @@
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Dialect-c/Passes.h"
 #include "Conversion/Passes.h"
-#include "Builder/Builder.h"
 #include "AtirModule.h"
 
 namespace py = pybind11;

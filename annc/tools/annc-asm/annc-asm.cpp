@@ -2,7 +2,6 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-#include "Builder/Builder.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Conversion/Passes.h"
 #include "Target/Passes.h"

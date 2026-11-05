@@ -9,7 +9,7 @@ namespace annc::onnx2atir {
 // whether a given op has an ATIR target without duplicating the list.
 const OpSpec* lookupOnnxOpSpec(llvm::StringRef opType);
 
-// MLIRBuilder with the ONNX spec table substituted for the TF one. Node
+// MLIRBuilder with the ONNX-specific spec table. Node
 // validation, op construction, attribute application, metadata and diagnostics
 // are all inherited unchanged; only two seams differ:
 //   * lookupSpec resolves against the ONNX table (ONNX op names collide with
@@ -17,7 +17,7 @@ const OpSpec* lookupOnnxOpSpec(llvm::StringRef opType);
 //   * shouldLowerToOpaque honours the adapter's per-node fallback decision, so
 //     a node the adapter could not faithfully normalize lands in atir.opaque
 //     instead of being silently mistranslated.
-// The TF path keeps the base implementations and is therefore unaffected.
+// TF rules are supplied separately by TfMLIRBuilder.
 class OnnxMLIRBuilder : public MLIRBuilder {
  public:
   using MLIRBuilder::MLIRBuilder;

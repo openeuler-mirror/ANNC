@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "Builder/Builder.h"
 #include "Helper.h"
 #include "node_info_adapter.h"
 #include "tf_frontend.h"
+#include "tf_mlir_builder.h"
 #include "tf_tensor_resolver.h"
 
 #define LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING 1
@@ -115,9 +115,11 @@ int main(int argc, char **argv) {
     return success();
   });
 
-  auto builder = std::make_shared<annc::ANNCBuilder>(&context);
-  auto module = builder->buildModule("main", nodes);
-  if (!module) {
+  ModuleOp module =
+      ModuleOp::create(UnknownLoc::get(&context), StringRef("main"));
+  module->setAttr("module.state", StringAttr::get(&context, "atir"));
+  annc::tf2atir::TfMLIRBuilder builder(module);
+  if (!builder.buildFromNodes(nodes)) {
     llvm::errs() << "Error: Failed to build MLIR module from nodes.\n";
     return 1;
   }

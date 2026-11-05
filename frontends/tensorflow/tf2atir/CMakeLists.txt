@@ -13,6 +13,8 @@ set(ANNC_TF2ATIR_SOURCES
     tf_tensor_resolver.cpp
     tensor_proto_decoder.cpp
     node_info_adapter.cpp
+    tf_mlir_builder.cpp
+    tf_transformers.cpp
     ${PROTO_SRCS}
 )
 

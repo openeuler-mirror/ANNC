@@ -24,6 +24,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 
 namespace annc::onnx2atir {
@@ -779,17 +780,8 @@ TEST(OnnxNodeInfoAdapter, TurnsInitializersIntoConstantsAndOutputsIntoBoundaries
 }
 
 // -------------------------------------------------------------------------
-// Builder: the ONNX table must not shadow the TF table, and the fallback
-// marker must reach atir.opaque.
+// Builder: ONNX rules and fallback markers must reach the intended ATIR ops.
 // -------------------------------------------------------------------------
-
-// Looks up an op in the TF spec table (the engine's own table).
-const OpSpec* lookupTfOpSpec(llvm::StringRef opType) {
-  for (const OpSpec& spec : annc::MLIRBuilder::getAllOpSpecs())
-    for (llvm::StringRef op : spec.tfOps)
-      if (op == opType) return &spec;
-  return nullptr;
-}
 
 void registerTestDialects(DialectRegistry& registry) {
   registry.insert<::mlir::func::FuncDialect, ::atir::AtirDialect,
@@ -814,30 +806,67 @@ void registerTestDialects(DialectRegistry& registry) {
   return found;
 }
 
-TEST(OnnxBuilder, ResolvesOnnxOpsWithoutDisturbingTheTfTable) {
+TEST(OnnxBuilder, ResolvesOnnxOpsFromItsOwnTable) {
   // ONNX `Sum` is a variadic elementwise add; TF `Sum` is a reduce. The whole
   // reason the tables are split is that one name cannot carry both.
   const OpSpec* onnx_sum = lookupOnnxOpSpec("Sum");
   ASSERT_NE(onnx_sum, nullptr);
   EXPECT_EQ(onnx_sum->atirOp, "atir.Add");
 
-  const OpSpec* tf_sum = lookupTfOpSpec("Sum");
-  ASSERT_NE(tf_sum, nullptr);
-  EXPECT_EQ(tf_sum->atirOp, "atir.Sum");
-
-  // Same divergence for Gather, from the other direction: the TF transformer
-  // reads the axis from a third *operand* (TF GatherV2), while ONNX Gather
-  // carries it in the `axis` attribute in every opset. The two rows therefore
-  // cannot share a transformer, and this row admits exactly the two operands
-  // the ONNX schema declares.
+  // ONNX Gather uses the axis attribute and exactly two operands.
   const OpSpec* onnx_gather = lookupOnnxOpSpec("Gather");
-  const OpSpec* tf_gather = lookupTfOpSpec("Gather");
   ASSERT_NE(onnx_gather, nullptr);
-  ASSERT_NE(tf_gather, nullptr);
-  EXPECT_NE(onnx_gather->transformer, tf_gather->transformer);
   EXPECT_EQ(onnx_gather->transformer, onnxTransformGather);
   EXPECT_EQ(onnx_gather->minInputs, 2u);
   EXPECT_EQ(onnx_gather->maxInputs, 2u);
+}
+
+TEST(OnnxBuilder, PreservesAttributeWarningsAndMetadata) {
+  NodeInfo input;
+  input.name = "input";
+  input.isInputNode = true;
+  input.outputs = {{"input", "float32", {2}}};
+  NodeInfo cast;
+  cast.name = "cast";
+  cast.op_type = "Cast";
+  cast.inputs = {"input"};
+  cast.outputs = {{"cast", "int64", {2}}};
+  cast.attrs = {{"to", int64_t{TensorProto::INT64}},
+                {"device", std::string("CPU")},
+                {"review_unknown", int64_t{7}}};
+
+  DialectRegistry registry;
+  registerTestDialects(registry);
+  ::mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+  std::vector<std::string> warnings;
+  ::mlir::ScopedDiagnosticHandler handler(
+      &context, [&](::mlir::Diagnostic& diagnostic) {
+        if (diagnostic.getSeverity() != ::mlir::DiagnosticSeverity::Warning)
+          return ::mlir::failure();
+        warnings.push_back(diagnostic.str());
+        return ::mlir::success();
+      });
+  auto module = ::mlir::ModuleOp::create(::mlir::UnknownLoc::get(&context));
+  OnnxMLIRBuilder builder(module);
+  ASSERT_TRUE(builder.buildFromNodes({input, cast}));
+  EXPECT_EQ(warnings,
+            (std::vector<std::string>{"TF attribute 'review_unknown' of node "
+                                      "'cast' is not mapped to an ATIR "
+                                      "attribute (kept in metadata only)"}));
+
+  auto* castOp = findOp(module, "atir.Cast");
+  ASSERT_NE(castOp, nullptr);
+  ::mlir::OpBuilder attrs(&context);
+  auto expected = attrs.getDictionaryAttr({
+      attrs.getNamedAttr("tf.name", attrs.getStringAttr("cast")),
+      attrs.getNamedAttr("tf.op", attrs.getStringAttr("Cast")),
+      attrs.getNamedAttr("to", attrs.getStringAttr("7")),
+      attrs.getNamedAttr("device", attrs.getStringAttr("CPU")),
+      attrs.getNamedAttr("review_unknown", attrs.getStringAttr("7")),
+  });
+  EXPECT_EQ(castOp->getAttrOfType<::mlir::DictionaryAttr>("metadata"),
+            expected);
 }
 
 TEST(OnnxBuilder, BuildsGatherWithTheTransformerBakedBatchDims) {

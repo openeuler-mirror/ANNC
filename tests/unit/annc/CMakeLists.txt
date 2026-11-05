@@ -9,19 +9,6 @@ target_include_directories(gemm_config_test PRIVATE
 target_link_libraries(gemm_config_test PRIVATE GTest::gtest_main)
 gtest_discover_tests(gemm_config_test TEST_PREFIX "GemmConfig.")
 
-add_executable(op_coverage_test
-    op_coverage_test.cpp
-)
-target_include_directories(op_coverage_test PRIVATE "${PROJECT_SOURCE_DIR}")
-target_link_libraries(op_coverage_test PRIVATE
-    GTest::gtest_main
-    Threads::Threads
-    AtirBuilder
-    AtirDialect
-    MLIRArithDialect
-)
-gtest_discover_tests(op_coverage_test)
-
 add_executable(jit_template_fingerprint_test
     jit_template_fingerprint_test.cpp
 )
