@@ -44,3 +44,8 @@ tmp/
 # build tree may satisfy the dependency with a symlink, and git sees that as a
 # file.
 frontends/onnx/protos/gen_code
+build-stablehlo/
+
+# pb2tfmlir 前端（addons/tensorflow/transform）：LLVM 头快照（来源见其
+# README.txt）不入库；构建产物随 CMake 进入 build/bin。
+addons/tensorflow/transform/third_party/

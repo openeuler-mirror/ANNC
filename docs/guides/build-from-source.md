@@ -98,6 +98,7 @@ ninja && ninja install
 | `ANNC_KDNN_RELEASE_URL` | URL | `https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip` | RELEASE 模式 zip 包下载地址 |
 | `ANNC_KDNN_RELEASE_SHA256` | 字符串 | `61a4b0b55a80ca742b43dde638b7fdd63c7ef36f26f3615e4f1ad008750217a8` | RELEASE 模式 zip 包 SHA256 校验值；留空则跳过校验 |
 | `ANNC_KDNN_LIB_VARIANT` | 字符串 | `sve-threadpool` | RELEASE 模式下库变体，可选 `sve-threadpool`、`sve-omp`、`sve2-threadpool`、`sve2-omp` |
+| `ANNC_ENABLE_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 stablehlo artifact sink 层（v1.9.7 Embedded 模式，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）；TF stablehlo 前端 / stablehlo sink 迁移线的依赖，见下文「StableHLO artifact sink 层」 |
 
 ### GEMM-ASM 完整包
 
@@ -144,6 +145,46 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 `annc-gemm-kernels.tar.gz`。安装时整包复制到
 `<prefix>/<libdir>/annc-gemm-kernels/`；安装后的 ANNC 编译工具通过相对 RPATH
 加载 codegen 库，无需设置运行时包路径环境变量。
+
+### StableHLO artifact sink 层（TF stablehlo 前端依赖）
+
+`ANNC_ENABLE_STABLEHLO=ON` 时进入 stablehlo v1.9.7 的 Embedded 集成：
+stablehlo 以 `EXCLUDE_FROM_ALL` 子目录加入构建，并通过全局属性快照/还原
+使只有被 ANNC 目标显式链接的 stablehlo 库参与编译；默认构建（OFF）完全
+不触碰 stablehlo。该层是 TF stablehlo 前端（pb2stablehlo）与 stablehlo
+sink 转换层的方言依赖，要求外部工具链为 LLVM/MLIR 20.1.8（stablehlo
+v1.9.x 的配套版本）。
+
+依赖获取（不入库，`third_party/*` 已被忽略）：
+
+```shell
+git -C third_party clone --depth 1 --branch v1.9.7 \
+  https://github.com/openxla/stablehlo.git stablehlo
+```
+
+构建与验证（推荐使用独立构建目录，与默认 `build/` 互不干扰；
+`build-stablehlo/` 已被忽略）：
+
+```shell
+export ANNC_LLVM_BIN=/home/crf/dev/annc/llvm20/bin
+cmake -S . -B build-stablehlo -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=$(command -v gcc) \
+  -DCMAKE_CXX_COMPILER=$(command -v g++) \
+  -DCMAKE_CXX_FLAGS=-fPIC \
+  -DANNC_ENABLE_STABLEHLO=ON \
+  -DLLVM_DIR=/home/crf/dev/annc/llvm20/lib/cmake/llvm \
+  -DMLIR_DIR=/home/crf/dev/annc/llvm20/lib/cmake/mlir
+cmake --build build-stablehlo --target \
+  "stablehlo/stablehlo/dialect/libStablehloOps.a"
+```
+
+configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
+(v1.9.x embedded)`；ANNC 当前仅消费 stablehlo 方言/变换核心库族
+（如 `libStablehloOps.a`）。stablehlo 自带的 `stablehlo-opt` 等工具会
+连带编译 `conversions/tosa` 等转换，其 TOSA 代码面向 stablehlo v1.9.x
+配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
+目标，不作为验证口径。
 
 ## 验证安装
 

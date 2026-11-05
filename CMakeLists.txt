@@ -24,6 +24,10 @@ option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG
 option(ANNC_ENABLE_TENSORFLOW "Build the TensorFlow frontend tools (annc-tf2atir, annc-converter, annc-tf-pipeline)" ON)
 option(ANNC_ENABLE_TENSORFLOW_ADDON "Build the TensorFlow addons (annc_optimizer, annc_fused_op); requires ANNC_ENABLE_TENSORFLOW" ${ANNC_ENABLE_TENSORFLOW})
 option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protobuf sources" ON)
+# TF 前端重构（stablehlo 产物消费）：stablehlo 方言依赖与 sink 转换层，opt-in。
+# ON 时要求外部 LLVM/MLIR 工具链为 20.1.8（stablehlo v1.9.x 的配套版本）；
+# OFF（默认）时构建路径与历史完全一致，不引入 stablehlo。
+option(ANNC_ENABLE_STABLEHLO "Build the stablehlo artifact sink layer (requires LLVM/MLIR 20.1.8 toolchain and third_party/stablehlo)" OFF)
 # The ONNX Runtime EP plugin is opt-in: it is compiled against an external ORT
 # SDK that the default build neither needs nor downloads.
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
@@ -306,6 +310,44 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
+
+
+# 仅在 ANNC_ENABLE_STABLEHLO=ON 时进入；默认构建不触碰。
+#
+# stablehlo 通过 add_mlir_library 把自己的库登记进 MLIR_DIALECT_LIBS /
+# MLIR_CONVERSION_LIBS 全局属性；而 annc-asm / annc-opt / annc-verify 会
+# get_property 读取这两个全局属性，从而被动拉入整套 stablehlo。在两个全局
+# 属性上做快照/还原，使只有显式链接的 stablehlo target 被构建。
+if(ANNC_ENABLE_STABLEHLO)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/stablehlo/CMakeLists.txt")
+    message(FATAL_ERROR
+      "ANNC_ENABLE_STABLEHLO=ON requires third_party/stablehlo (v1.9.7). "
+      "Fetch it with: git -C third_party clone --depth 1 --branch v1.9.7 "
+      "https://github.com/openxla/stablehlo.git stablehlo")
+  endif()
+  get_property(_annc_mlir_dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
+  get_property(_annc_mlir_conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
+  set(STABLEHLO_BUILD_EMBEDDED ON CACHE BOOL "" FORCE)
+  # stablehlo 的 lit 测试目标无条件 add_dependencies(FileCheck not)；安装树
+  # 工具链没有这两个 target，configure 会因依赖不存在而 generate 失败。用
+  # 安装树的二进制补齐 imported 目标（check-* 仅在显式运行时使用它们）。
+  if(NOT TARGET FileCheck)
+    add_executable(FileCheck IMPORTED GLOBAL)
+    set_target_properties(FileCheck PROPERTIES IMPORTED_LOCATION
+      "${LLVM_TOOLS_BINARY_DIR}/FileCheck")
+  endif()
+  if(NOT TARGET not)
+    add_executable(not IMPORTED GLOBAL)
+    set_target_properties(not PROPERTIES IMPORTED_LOCATION
+      "${LLVM_TOOLS_BINARY_DIR}/not")
+  endif()
+  add_subdirectory(third_party/stablehlo ${CMAKE_BINARY_DIR}/stablehlo EXCLUDE_FROM_ALL)
+  set_property(GLOBAL PROPERTY MLIR_DIALECT_LIBS ${_annc_mlir_dialect_libs})
+  set_property(GLOBAL PROPERTY MLIR_CONVERSION_LIBS ${_annc_mlir_conversion_libs})
+  include_directories(${CMAKE_SOURCE_DIR}/third_party/stablehlo)
+  include_directories(${CMAKE_BINARY_DIR}/stablehlo)
+  message(STATUS "ANNC: stablehlo artifact sink layer enabled (v1.9.x embedded)")
+endif()
 
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
