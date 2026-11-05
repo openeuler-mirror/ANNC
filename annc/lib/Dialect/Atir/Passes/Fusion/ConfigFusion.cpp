@@ -2,7 +2,6 @@
 #include "ConfigFusionSupport.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -18,13 +17,6 @@ namespace atir {
 // 3. Optionally continue with builtin op fusion for pipeline compatibility.
 class AtirConfigFusionPass : public AtirConfigFusionBase<AtirConfigFusionPass> {
 public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    // Config materialization creates !llvm.ptr for annc_execution_v2 entry
-    // points. Registering the dialect here initializes its type storage in the
-    // pass context before the materializer constructs that type.
-    registry.insert<LLVM::LLVMDialect>();
-  }
-
   void runOnOperation() override {
     ModuleOp module = getOperation();
     auto mainFunc = module.lookupSymbol<func::FuncOp>("main");

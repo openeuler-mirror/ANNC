@@ -113,6 +113,19 @@ nlohmann/json 仍由 CMake `FetchContent` 在 configure 时获取到 `third_part
 `libannc_gemm_codegen.so` 及版本链接、`include/`、`cmake/`、
 `manifest.json` 和许可证一同保留。ANNC 默认就地发现并校验整包，
 无需 GEMM-ASM 私有源码，也无需预装系统 SDK。不要分别替换两个库。
+
+ASM 仓库的正式交付物是 `annc-gemm-kernels.tar.gz`。部署到 ANNC 时先清理旧目录，
+再将压缩包直接解压到目标目录：
+
+```shell
+rm -rf third_party/annc-gemm-kernels
+mkdir -p third_party/annc-gemm-kernels
+tar -xzf /path/to/annc-gemm-kernels.tar.gz \
+  -C third_party/annc-gemm-kernels
+```
+
+不要把压缩包本身作为 `ANNC_GEMM_PACKAGE_DIR`；该变量必须指向解压后的 package
+根目录，且其中应直接包含 `manifest.json`、`cmake/`、`include/` 和库文件。
 缺少完整包时仍能构建普通工具，但 GEMM microkernel、prepack 和 epilogue
 请求会在执行时报告缺少 GEMM-ASM 包。若要在构建期提前发现该问题，适合
 CI、发布构建等场景，可传 `-DANNC_REQUIRE_GEMM_PACKAGE=ON`，让 CMake
@@ -122,8 +135,7 @@ configure 阶段在缺少兼容完整包时直接失败；自定义包目录使�
 ANNC 安装会将整包复制到 `<prefix>/<libdir>/annc-gemm-kernels/`，
 编译工具通过相对 RPATH 加载 codegen；基础归档同时保持原有
 `<prefix>/<libdir>/libannc_gemm_microkernels.a` 链接位置。模型执行
-只使用已生成和链接的机器码，不加载 codegen 库。原
-`ANNC_GEMM_ASM_SOURCE_DIR` 已不再使用。版本、元数据与失败边界见
+只使用已生成和链接的机器码，不加载 codegen 库。版本、元数据与失败边界见
 [GEMM codegen 集成契约](../design/gemm-epilogue-codegen.md)。
 
 ## 验证

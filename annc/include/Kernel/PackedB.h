@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "Context/KernelContextUtils.h"
+
 // A read-only description of MLAS-packed B slices.  The owner lives in the EP
 // compute state; kernels only borrow this descriptor for the duration of one
 // call.  `slices` is indexed by the non-matrix batch dimensions in row-major
@@ -19,6 +21,9 @@ struct AnncPackedB {
 
 namespace annc {
 namespace kernels {
+
+inline constexpr const char* kMlasPackedBResource = "annc.mlas.packed_b";
+inline constexpr uint32_t kMlasPackedBVersion = 1;
 
 // Cache the process-level diagnostic switch so batch loops do not repeatedly
 // scan the environment. Kernel debug configuration is read once per process.
@@ -58,6 +63,14 @@ inline bool packedBMatches(const AnncPackedB* packed, const int64_t* shape,
     if (packed->slices[i] == nullptr) return false;
   }
   return true;
+}
+
+// Borrow a prepacked instance resource; never allocate or pack at Compute.
+inline const AnncPackedB* contextPackedB(const KernelContext& context,
+                                         const AnncTensorView& weight) {
+  const auto* packed = static_cast<const AnncPackedB*>(context.getResource(
+      kMlasPackedBResource, kMlasPackedBVersion, sizeof(AnncPackedB)));
+  return packedBMatches(packed, weight.sizes, weight.rank) ? packed : nullptr;
 }
 
 inline const float* packedBSlice(const AnncPackedB* packed, int64_t first,

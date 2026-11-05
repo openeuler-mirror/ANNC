@@ -108,7 +108,7 @@ std::string CacheToolchainFingerprint(annc_ep::CompileDriver* driver) {
   // v2: ORT fusion switches default to disabled. Bump the version so caches
   // produced under the old default-on semantics are not reused.
   // Rebuild artifacts whose context service requirements or layout differs.
-  fingerprint += "\nannc-context-v3-required-pool";
+  fingerprint += "\nannc-context-v3-resources";
   for (const char* name : config_names) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
@@ -321,7 +321,7 @@ std::optional<annc_ep::Site> TranslatedSite(const annc_ep::Site& site,
 // ---------------------------------------------------------------------------
 struct ComputeState {
   void (*fn)(void*, void*, void*) = nullptr;  // resolved once in CreateState
-  // Context-ABI sites (annc_execution_v2): the raw kernel entry and the site's
+  // Context-ABI sites (annc_context_v3): the raw kernel entry and the site's
   // contract -- argument ranks/types in kernel call order and the declared
   // output slots the callbacks validate against.
   void* symbol = nullptr;
@@ -352,7 +352,7 @@ struct ComputeState {
 
 // ---------------------------------------------------------------------------
 // Optional per-node timing (ANNC_EP_TIMING=1): splits this implementation's own
-// cost (operand identification, output allocation, packing) from the ANNC
+// cost (operand identification and output allocation) from the ANNC
 // kernel call, so the接入 overhead is a measured number rather than a residual.
 // Counters are atomic: ORT runs the 27 independent fused nodes on intra-op
 // threads.
@@ -475,16 +475,13 @@ bool BuildPackedState(const AnncNodeComputeInfo::PackedPlan& plan,
 #endif
 
 // ---------------------------------------------------------------------------
-// Context-ABI execution (annc_execution_v2 sites)
+// Context-ABI execution (annc_context_v3 sites)
 //
-// The kernel receives the execution context (which carries the ORT thread
-// pool) plus one ranked-memref descriptor per site argument, and allocates its
-// own outputs through the context callbacks. Each argument resolves to the
-// fused-node input whose rank and element type match the contract; distinct
-// argument ranks (enforced at claim time) make that a unique fit, and a
-// second fit for the same argument fails closed instead of picking one. The
-// mapping is cached on the first call (under the
-// state's mutex, because ORT may run the same node concurrently) since the
+// The kernel receives one context pointer containing tensor views, attributes
+// and ORT allocation/thread services. Input and output slots are resolved by
+// tensor name at Compile time. For reports without names, rank/type binding
+// must identify a unique input; ambiguous matches are rejected. This fallback
+// mapping is cached on the first call under the state's mutex because the
 // fused node's input list is fixed for the session's lifetime.
 // ---------------------------------------------------------------------------
 OrtStatus* ResolveContextInputs(ComputeState* state,
@@ -644,6 +641,8 @@ OrtStatus* ComputeContextSite(ComputeState* state,
   return status;
 }
 
+// Packing is optional. Build only from a proven immutable initializer (or
+// its generated effective-weight payload), never from a runtime input.
 OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
                                         OrtNodeComputeContext* /*context*/,
                                         void** compute_state) noexcept {
@@ -658,7 +657,6 @@ OrtStatus* ORT_API_CALL CreateStateImpl(OrtNodeComputeInfo* this_ptr,
   }
   state->context_call.symbol = state->symbol;
   state->abi = info->abi;
-  state->context_call.abi = info->abi;
   state->context_call.i64_attrs = info->context_i64_attrs;
   state->context_call.arg_ranks = info->arg_ranks;
   state->context_call.arg_types = info->arg_types;
@@ -689,7 +687,8 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
 
   // ANNC_EP_NOOP=1 is a measurement aid, not a mode: it keeps ORT's whole
   // plugin-EP path (node dispatch, OrtKernelContext creation, output
-  // allocation) and drops only the ANNC kernel invocation and packing. The
+  // allocation) and drops only the ANNC kernel invocation. Initialization
+  // packing still runs before Compute. The
   // difference against a normal run is this implementation's own cost; what
   // remains is what the EP charges per node.
   static const bool noop = std::getenv("ANNC_EP_NOOP") != nullptr;
@@ -703,7 +702,7 @@ OrtStatus* ORT_API_CALL ComputeImpl(OrtNodeComputeInfo* this_ptr, void* compute_
     return g_api->KernelContext_GetOutput(kernel_context, 0, dims, 3, &out);
   }
 
-  if ((state->abi == "annc_execution_v2" || state->abi == "annc_context_v3")) {
+  if (state->abi == "annc_context_v3") {
     return ComputeContextSite(state, kernel_context);
   }
 
@@ -1220,7 +1219,7 @@ bool BuildPackedBPlan(const OrtGraph* graph, const OrtNode* fused_node,
   if (graph == nullptr || plan == nullptr ||
       (site.pattern != "tensordot_matmul" &&
        site.pattern != "batched_matmul_add") ||
-      site.abi != "annc_execution_v2") {
+      site.abi != "annc_context_v3") {
     return false;
   }
   auto api_ok = [](OrtStatus* status) {
@@ -1432,8 +1431,12 @@ bool BuildPackedState(const AnncNodeComputeInfo::PackedPlan& plan,
             std::begin(packed->descriptor.shape));
   packed->descriptor.slice_count = slices;
   packed->descriptor.slices = packed->slices.data();
+  // Runtime fusion metadata borrows the descriptor; the instance owns it.
+  state->context_call.resources.push_back(
+      {sizeof(AnncResourceView), annc::kernels::kMlasPackedBVersion,
+       annc::kernels::kMlasPackedBResource, &packed->descriptor,
+       sizeof(AnncPackedB)});
   state->packed = std::move(packed);
-  state->context_call.packed_b = &state->packed->descriptor;
   if (g_debug) {
     std::fprintf(stderr,
                  "[annc-ep] packed-B state: rank=%d slices=%zu K=%lld N=%lld bytes=%zu\n",
@@ -1470,7 +1473,7 @@ OrtStatus* ORT_API_CALL CompileImpl(OrtEp* this_ptr, const OrtGraph** graphs,
         info->kernel_name = site->kernelName;
         info->library = ep->kernel_library;
         info->abi = site->abi;
-        if ((site->abi == "annc_execution_v2" || site->abi == "annc_context_v3") &&
+        if (site->abi == "annc_context_v3" &&
             !FillContextContract(*site, graphs[i], fused_nodes[i], info)) {
           // A contract that disagrees with the fused subgraph would run the
           // kernel against the wrong buffers; refuse the node loudly instead.

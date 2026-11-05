@@ -8,17 +8,13 @@
 // ORT's MLAS public header (self-contained: forward declarations only).
 // MLAS_THREADPOOL is a type alias of onnxruntime::concurrency::ThreadPool in
 // this ORT release, so the pool the execution context hands over in
-// native_pool() is the object MlasGemmBatch takes.
+// nativePool("onnxruntime") is the object MlasGemmBatch takes.
 #include "mlas.h"
 #endif
 
-#include "Kernel/ExecutionContextUtils.h"
+#include "Context/KernelContextUtils.h"
 #include "Kernel/PackedB.h"
 #include "Context/RowParallel.h"
-#include "Kernel/KernelStatus.h"
-#include "Kernel/MemRefTypes.h"
-#include "Context/Parallel.h"
-#include "Context/ThreadPool.h"
 
 namespace {
 
@@ -55,13 +51,14 @@ inline void fillBiasRows(float* out, const float* bias, int64_t batches,
   }
 }
 
-inline void addBiasRows(annc::threadpool::AnncThreadPool* thread_pool,
+inline void addBiasRows(const annc::kernels::KernelThreadPool& thread_pool,
                         float* out, const float* bias, int64_t rows,
                         int64_t rowsPerBatch, int64_t n) {
   auto options = annc::threadpool::rowOptions(
       annc::threadpool::cost::elementRow(n, 1, 8, 4), n);
-  ::annc::threadpool::parallel_for(
-      thread_pool, rows, options, [&](int64_t begin, int64_t end) {
+  annc::kernels::Shard(
+      thread_pool.numThreads(), thread_pool, rows, options.cost_per_unit.value_or(0),
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           float* outRow = out + row * n;
           const float* biasRow = bias + (row / rowsPerBatch) * n;
@@ -124,16 +121,14 @@ inline void batchedMatMulAddRow(const float* xRow, const float* wRow,
 //
 // data and W broadcast their leading two dims (size 1 means "reuse batch 0",
 // numpy-style, as ONNX MatMul does); the output batch comes from the bias,
-// which the matcher pinned to the graph's own batch dims.  Rank-4 memrefs are
-// structs of their own (MemRefTypes.h), so this driver wraps the shared row
-// routine rather than the rank-3 one.
-annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef4DF32* data,
-    AnncMemRef4DF32* weight, AnncMemRef4DF32* bias) {
-  if (execution == nullptr || !data || !weight || !bias) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+// which the matcher pinned to the graph's own batch dims. This rank-4 driver
+// shares the row routine with the rank-3 implementation.
+AnncStatusCode batchedMatMulAddRank4Impl(annc::kernels::KernelContext& context) {
+  const auto* data = context.getInput(0);
+  const auto* weight = context.getInput(1);
+  const auto* bias = context.getInput(2);
+  if (!data || !weight || !bias) return context.status();
+  auto thread_pool = context.getThreadPool();
 
   const int64_t d0 = data->sizes[0];
   const int64_t d1 = data->sizes[1];
@@ -146,7 +141,7 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
   const int64_t out1 = bias->sizes[1];
   if (d0 <= 0 || d1 <= 0 || m < 0 || k < 0 || w0 <= 0 || w1 <= 0 || n < 0 ||
       out0 <= 0 || out1 <= 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   // Data/W broadcast to the output batch per dim (size 1 or the full extent);
   // bias must carry the output batch exactly. Re-check here so a
@@ -154,12 +149,12 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
   if ((d0 != 1 && d0 != out0) || (d1 != 1 && d1 != out1) ||
       (w0 != 1 && w0 != out0) || (w1 != 1 && w1 != out1) ||
       weight->sizes[2] != k || bias->sizes[2] != 1 || bias->sizes[3] != n) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   // The kernel indexes all operands as contiguous row-major; a broadcast dim
   // is always indexed at 0, so only the dims the loop strides through are
-  // checked. The host builds the descriptors (ExecutionContextUtils.h ->
-  // makeMemRef).
+  // checked. The host builds the views in
+  // addons/onnxruntime/context/annc_ep_execution.cc (makeMemRef).
   if (data->strides[3] != 1 || data->strides[2] != k ||
       (d1 > 1 && data->strides[1] != m * k) ||
       (d0 > 1 && data->strides[0] != d1 * m * k) ||
@@ -169,31 +164,29 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
       bias->strides[3] != 1 || bias->strides[2] != n ||
       (out1 > 1 && bias->strides[1] != n) ||
       (out0 > 1 && bias->strides[0] != out1 * n)) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   // Allocate in every case -- also when rows is zero -- because the host
   // checks that the call allocated every declared output slot.
-  auto output = annc::kernels::execution::allocateOutput4DF32(
-      execution, /*slot=*/0, out0, out1, m, n, ANNC_ALLOCATION_NONE);
+  auto output = context.allocateOutput<float>(0, {out0, out1, m, n});
   if (!output) {
-    llvm::consumeError(output.takeError());
-    return annc::kernels::KernelStatus::RuntimeError;
+    return ANNC_STATUS_ALLOCATION_FAILED;
   }
   if (output->strides[3] != 1 || output->strides[2] != n ||
       output->strides[1] != m * n || output->strides[0] != out1 * m * n) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   const int64_t rows = out0 * out1 * m;
   if (rows == 0 || n == 0) {
-    return annc::kernels::KernelStatus::Success;
+    return ANNC_STATUS_OK;
   }
 
-  float* out = ANNC_MEMREF_DATA(*output);
-  const float* x = ANNC_MEMREF_DATA(*data);
-  const float* w = ANNC_MEMREF_DATA(*weight);
-  const float* b = ANNC_MEMREF_DATA(*bias);
+  float* out = annc::kernels::contextData<float>(*output);
+  const float* x = annc::kernels::contextData<float>(*data);
+  const float* w = annc::kernels::contextData<float>(*weight);
+  const float* b = annc::kernels::contextData<float>(*bias);
 
 #if defined(ANNC_KERNEL_MLAS)
   // The batch is small by construction (the matcher pins the fused bias to
@@ -201,11 +194,12 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
   // output batch; the scalar path below stays for hosts with no native pool
   // to hand over.  k == 0 is left to the scalar path, whose bias-only result
   // is unambiguous.
-  if (thread_pool != nullptr && k > 0) {
-    if (void* native = thread_pool->native_pool(); native != nullptr) {
+  if (k > 0) {
+    if (void* native = thread_pool.nativePool("onnxruntime"); native != nullptr) {
       const int64_t batchCount = out0 * out1;
       if (batchCount <= kMlasMaxBatch) {
         const bool singleKTile = k <= 128;
+        const auto* packed = annc::kernels::contextPackedB(context, *weight);
         MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
         for (int64_t i = 0; i < out0; ++i) {
           for (int64_t j = 0; j < out1; ++j) {
@@ -217,11 +211,8 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
             MLAS_SGEMM_DATA_PARAMS& p = params[batch];
             p.A = x + ((di * d1 + dj) * m) * k;
             p.lda = static_cast<size_t>(k);
-            const AnncPackedB* packed = annc::packedBOf(execution);
             const float* packed_weight =
-                annc::kernels::packedBMatches(packed, weight->sizes, 4)
-                    ? annc::kernels::packedBSlice(packed, wi, wj)
-                    : nullptr;
+                annc::kernels::packedBSlice(packed, wi, wj);
             p.B = packed_weight != nullptr
                       ? packed_weight
                       : w + (wi * w1 + wj) * k * n;
@@ -243,7 +234,7 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
         runMlasBatch(native, m, n, k, params, batchCount);
         if (!singleKTile) addBiasRows(thread_pool, out, b, rows, m, n);
         logMlasBmm(batchCount, m, n, k);
-        return annc::kernels::KernelStatus::Success;
+        return ANNC_STATUS_OK;
       }
     }
   }
@@ -254,8 +245,9 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
   // kernels' -- small sites keep running serial.
   auto options = annc::threadpool::rowOptions(
       annc::threadpool::cost::dotRow(k, n), /*elements_per_row=*/k * n);
-  ::annc::threadpool::parallel_for(
-      thread_pool, rows, options, [&](int64_t begin, int64_t end) {
+  annc::kernels::Shard(
+      thread_pool.numThreads(), thread_pool, rows, options.cost_per_unit.value_or(0),
+      [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const int64_t t = row % m;
           const int64_t batch = row / m;
@@ -270,7 +262,7 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
                               out + row * n, k, n);
         }
       });
-  return annc::kernels::KernelStatus::Success;
+  return ANNC_STATUS_OK;
 }
 
 // FusedBatchedMatMulAdd, rank-3 form: the ONNX pattern
@@ -293,13 +285,12 @@ annc::kernels::KernelStatus batchedMatMulAddRank4Impl(
 // The epilogue order is the source chain's: accumulate the full k sum first,
 // then add the bias (a different order would change the fp32 rounding versus
 // the unfused graph).
-annc::kernels::KernelStatus batchedMatMulAddImpl(
-    annc::threadpool::AnncThreadPool* thread_pool,
-    const AnncExecutionContext* execution, AnncMemRef3DF32* data,
-    AnncMemRef3DF32* weight, AnncMemRef3DF32* bias) {
-  if (execution == nullptr || !data || !weight || !bias) {
-    return annc::kernels::KernelStatus::InvalidArgument;
-  }
+AnncStatusCode batchedMatMulAddImpl(annc::kernels::KernelContext& context) {
+  const auto* data = context.getInput(0);
+  const auto* weight = context.getInput(1);
+  const auto* bias = context.getInput(2);
+  if (!data || !weight || !bias) return context.status();
+  auto thread_pool = context.getThreadPool();
 
   const int64_t dataBatch = data->sizes[0];
   const int64_t weightBatch = weight->sizes[0];
@@ -308,7 +299,7 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
   const int64_t k = data->sizes[2];
   const int64_t n = weight->sizes[2];
   if (d0 < 0 || dataBatch < 0 || weightBatch < 0 || d1 < 0 || k < 0 || n < 0) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   const int64_t biasBatch = bias->sizes[0];
   // Data/weight batches must broadcast to the output batch; bias must match
@@ -316,62 +307,57 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
   if ((dataBatch != 1 && dataBatch != d0) ||
       (weightBatch != 1 && weightBatch != d0) || biasBatch != d0 ||
       weight->sizes[1] != k || bias->sizes[1] != 1 || bias->sizes[2] != n) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
   // The kernel indexes all operands as contiguous row-major; the host builds
-  // the descriptors that way (Kernel/ExecutionContextUtils.h -> makeMemRef).
+  // the descriptors that way (addons/onnxruntime/context/annc_ep_execution.cc).
   if (data->strides[2] != 1 || data->strides[1] != k ||
       data->strides[0] != d1 * k || weight->strides[2] != 1 ||
       weight->strides[1] != n ||
       bias->strides[2] != 1 || bias->strides[1] != n ||
       bias->strides[0] != n || weight->strides[0] != k * n) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   // Allocate in every case -- also when rows is zero -- because the host
   // checks that the call allocated every declared output slot.
-  auto output = annc::kernels::execution::allocateOutput3DF32(
-      execution, /*slot=*/0, d0, d1, n, ANNC_ALLOCATION_NONE);
+  auto output = context.allocateOutput<float>(0, {d0, d1, n});
   if (!output) {
-    llvm::consumeError(output.takeError());
-    return annc::kernels::KernelStatus::RuntimeError;
+    return ANNC_STATUS_ALLOCATION_FAILED;
   }
   if (output->strides[2] != 1 || output->strides[1] != n ||
       output->strides[0] != d1 * n) {
-    return annc::kernels::KernelStatus::InvalidArgument;
+    return ANNC_STATUS_INVALID_ARGUMENT;
   }
 
   const int64_t rows = d0 * d1;
   if (rows == 0 || n == 0) {
-    return annc::kernels::KernelStatus::Success;
+    return ANNC_STATUS_OK;
   }
 
-  float* out = ANNC_MEMREF_DATA(*output);
-  const float* x = ANNC_MEMREF_DATA(*data);
-  const float* w = ANNC_MEMREF_DATA(*weight);
-  const float* b = ANNC_MEMREF_DATA(*bias);
+  float* out = annc::kernels::contextData<float>(*output);
+  const float* x = annc::kernels::contextData<float>(*data);
+  const float* w = annc::kernels::contextData<float>(*weight);
+  const float* b = annc::kernels::contextData<float>(*bias);
 
 #if defined(ANNC_KERNEL_MLAS)
   // One GEMM per output batch through MLAS (data and weight broadcast their
   // batch dim, so the operand pointers resolve per batch); the scalar path
   // below stays for hosts with no native pool.  k == 0 goes to the scalar
   // path, whose bias-only result is unambiguous.
-  if (thread_pool != nullptr && k > 0) {
-    if (void* native = thread_pool->native_pool(); native != nullptr) {
+  if (k > 0) {
+    if (void* native = thread_pool.nativePool("onnxruntime"); native != nullptr) {
       const int64_t batchCount = d0;
       if (batchCount <= kMlasMaxBatch) {
         const bool singleKTile = k <= 128;
+        const auto* packed = annc::kernels::contextPackedB(context, *weight);
         MLAS_SGEMM_DATA_PARAMS params[kMlasMaxBatch];
         for (int64_t i = 0; i < d0; ++i) {
           MLAS_SGEMM_DATA_PARAMS& p = params[i];
           p.A = x + (dataBatch == 1 ? 0 : i * d1 * k);
           p.lda = static_cast<size_t>(k);
-          const AnncPackedB* packed = annc::packedBOf(execution);
           const float* packed_weight =
-              annc::kernels::packedBMatches(packed, weight->sizes, 3)
-                  ? annc::kernels::packedBSlice(packed,
-                                                weightBatch == 1 ? 0 : i, 0)
-                  : nullptr;
+              annc::kernels::packedBSlice(packed, weightBatch == 1 ? 0 : i, 0);
           p.B = packed_weight != nullptr
                     ? packed_weight
                     : w + (weightBatch == 1 ? 0 : i * k * n);
@@ -392,7 +378,7 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
         runMlasBatch(native, d1, n, k, params, batchCount);
         if (!singleKTile) addBiasRows(thread_pool, out, b, rows, d1, n);
         logMlasBmm(batchCount, d1, n, k);
-        return annc::kernels::KernelStatus::Success;
+        return ANNC_STATUS_OK;
       }
     }
   }
@@ -402,8 +388,8 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
   // kernels', so small sites keep running serial.
   auto options = annc::threadpool::rowOptions(
       annc::threadpool::cost::dotRow(k, n), /*elements_per_row=*/k * n);
-  ::annc::threadpool::parallel_for(
-      thread_pool, rows, options,
+  annc::kernels::Shard(
+      thread_pool.numThreads(), thread_pool, rows, options.cost_per_unit.value_or(0),
       [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
           const int64_t batchIndex = row / d1;
@@ -413,7 +399,7 @@ annc::kernels::KernelStatus batchedMatMulAddImpl(
         }
       });
 
-  return annc::kernels::KernelStatus::Success;
+  return ANNC_STATUS_OK;
 }
 
 }  // namespace

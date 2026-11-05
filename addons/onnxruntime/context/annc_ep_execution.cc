@@ -461,20 +461,8 @@ OnnxExecutionContext::OnnxExecutionContext(
       output_slots_(output_slots),
       allocated_(outputs.size(), false),
       pool_(api, kernel_context) {
-  legacy_.struct_size = sizeof(legacy_);
-  legacy_.abi_version = ANNC_EXECUTION_ABI_VERSION;
-  legacy_.handle = reinterpret_cast<AnncExecutionHandle*>(this);
-  legacy_.thread_pool = reinterpret_cast<AnncThreadPoolHandle*>(&pool_);
-  legacy_.allocate_output = [](AnncExecutionHandle* h, uint32_t slot, AnncTensorDesc* d) {
-    return reinterpret_cast<OnnxExecutionContext*>(h)->AllocateOutputImpl(slot, d, true);
-  };
-  legacy_.allocate_temp = [](AnncExecutionHandle* h, AnncTensorDesc* d) {
-    return reinterpret_cast<OnnxExecutionContext*>(h)->AllocateTempImpl(d);
-  };
-  legacy_.report_error = [](AnncExecutionHandle* h, AnncStatusCode code, const char* msg) {
-    reinterpret_cast<OnnxExecutionContext*>(h)->Fail(code, msg ? msg : "kernel error");
-  };
   output_views_.resize(outputs.size());
+  allocated_output_views_.resize(outputs.size());
   services_ = {sizeof(AnncRuntimeServices),
                ANNC_CONTEXT_ABI_VERSION,
                this,
@@ -542,6 +530,22 @@ bool OnnxExecutionContext::AllOutputsAllocated() const {
                      [](bool allocated) { return allocated; });
 }
 
+bool OnnxExecutionContext::AllOutputsBound() const {
+  for (size_t i = 0; i < output_views_.size(); ++i) {
+    const auto& view = output_views_[i];
+    const auto& allocated = allocated_output_views_[i];
+    if (!allocated_[i] || !(view.flags & ANNC_TENSOR_BOUND) ||
+        (view.flags & ANNC_TENSOR_READ_ONLY) ||
+        view.allocated != allocated.allocated ||
+        view.aligned != allocated.aligned || view.offset != allocated.offset ||
+        view.element_type != allocated.element_type ||
+        view.rank != allocated.rank || view.sizes != allocated.sizes ||
+        view.strides != allocated.strides || view.layout != allocated.layout)
+      return false;
+  }
+  return true;
+}
+
 bool OnnxExecutionContext::BindView(const AnncTensorDesc& request, void* data,
                                     AnncTensorView* result) {
   shapes_.emplace_back();
@@ -577,6 +581,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutput(
     if (code != ANNC_STATUS_OK) return code;
     if (!state.BindView(desc, desc.data, result))
       return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "output stride overflow");
+    state.allocated_output_views_[slot] = *result;
     if (bytes && (desc.flags & ANNC_ALLOCATION_ZERO))
       std::memset(desc.data, 0, bytes);
     return ANNC_STATUS_OK;
@@ -586,7 +591,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutput(
 }
 
 AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
-                                                        AnncTensorDesc* desc, bool legacy) {
+                                                        AnncTensorDesc* desc) {
   if (desc == nullptr || desc->struct_size < sizeof(*desc)) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT, "output description is invalid");
   }
@@ -612,7 +617,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
   // the dims must be non-negative, but the byte count may be zero, and ORT
   // then hands back a tensor whose data pointer can be null. A rank-zero
   // scalar needs no dims pointer and describes one element.
-  if ((legacy || desc->rank) && desc->dims == nullptr) {
+  if (desc->rank && desc->dims == nullptr) {
     return Fail(ANNC_STATUS_INVALID_ARGUMENT,
                 "output slot " + std::to_string(slot) + " has no dimensions");
   }
@@ -676,7 +681,7 @@ AnncStatusCode OnnxExecutionContext::AllocateOutputImpl(uint32_t slot,
     RecordStatus(status);
     return ANNC_STATUS_INTERNAL;
   }
-  if (!legacy && DescribedBytes(desc) && !data)
+  if (DescribedBytes(desc) && !data)
     return Fail(ANNC_STATUS_ALLOCATION_FAILED, "output buffer is null");
   desc->data = data;
   allocated_[slot] = true;
@@ -827,216 +832,9 @@ AnncStatusCode OnnxExecutionContext::Shard(
   return state.Dispatch(total, options, task, task_data);
 }
 
-namespace {
-
-// The EP accepts rank 0..4 kernel arguments (the site contract rejects
-// anything larger). The descriptor is laid out as the MLIR C interface
-// expects: { void* allocated; void* aligned; intptr_t offset;
-//             intptr_t sizes[rank]; intptr_t strides[rank]; }
-constexpr int64_t kMaxRank = 4;
-
-struct MemRefStorage {
-  alignas(16) unsigned char
-      bytes[2 * sizeof(void*) + sizeof(int64_t) * (1 + 2 * kMaxRank)];
-};
-
-void BuildMemRefDescriptor(int64_t rank, const int64_t* dims, void* data,
-                           MemRefStorage* storage) {
-  unsigned char* base = storage->bytes;
-  std::memcpy(base, &data, sizeof(void*));                  // allocated
-  std::memcpy(base + sizeof(void*), &data, sizeof(void*));  // aligned
-  const int64_t offset = 0;
-  std::memcpy(base + 2 * sizeof(void*), &offset, sizeof(offset));
-  int64_t* sizes =
-      reinterpret_cast<int64_t*>(base + 2 * sizeof(void*) + sizeof(int64_t));
-  for (int64_t i = 0; i < rank; ++i) sizes[i] = dims[i];
-  int64_t* strides = sizes + rank;
-  if (rank > 0) {
-    strides[rank - 1] = 1;
-    for (int64_t i = rank - 1; i > 0; --i) strides[i - 1] = strides[i] * sizes[i];
-  }
-}
-
-}  // namespace
-
-OrtStatus* ComputeLegacyContext(const OrtApi* api,
-                              OrtKernelContext* kernel_context,
-                              const ContextCall& request) {
-  const bool timing = TimingEnabled();
-  const auto t_start = timing ? std::chrono::steady_clock::now()
-                              : std::chrono::steady_clock::time_point{};
-  OnnxExecutionContext context(api, kernel_context, request.outputs,
-                               &request.output_slots);
-  context.SetPackedB(request.packed_b);
-
-  std::vector<MemRefStorage> storage(request.arg_indices.size());
-  std::vector<void*> args;
-  args.reserve(request.arg_indices.size() + 1);
-  args.push_back(context.abi());
-
-  for (size_t i = 0; i < request.arg_indices.size(); ++i) {
-    const OrtValue* value = nullptr;
-    if (OrtStatus* status = api->KernelContext_GetInput(
-            kernel_context, static_cast<size_t>(request.arg_indices[i]),
-            &value)) {
-      return status;
-    }
-    ONNXTensorElementDataType ort_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    const int64_t* shape = nullptr;
-    size_t rank = 0;
-    OrtTensorTypeAndShapeInfo* info = nullptr;
-    if (api->GetTensorElementTypeAndShapeDataReference != nullptr) {
-      if (OrtStatus* status = api->GetTensorElementTypeAndShapeDataReference(
-              value, &ort_type, &shape, &rank)) return status;
-    } else {
-      if (OrtStatus* status = api->GetTensorTypeAndShape(value, &info)) return status;
-      if (OrtStatus* status = api->GetDimensionsCount(info, &rank)) {
-        api->ReleaseTensorTypeAndShapeInfo(info);
-        return status;
-      }
-      if (OrtStatus* status = api->GetTensorElementType(info, &ort_type)) {
-        api->ReleaseTensorTypeAndShapeInfo(info);
-        return status;
-      }
-    }
-    if (static_cast<int64_t>(rank) != request.arg_ranks[i] ||
-        rank > static_cast<size_t>(kMaxRank)) {
-      if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
-      return api->CreateStatus(
-          ORT_FAIL, "ANNC EP: kernel argument rank does not match the site");
-    }
-    int64_t dims[kMaxRank] = {0, 0, 0, 0};
-    if (rank > 0) {
-      if (shape != nullptr) {
-        std::copy_n(shape, rank, dims);
-      } else {
-        if (OrtStatus* status = api->GetDimensions(info, dims, rank)) {
-          api->ReleaseTensorTypeAndShapeInfo(info);
-          api->ReleaseStatus(status);  // replaced by the message below
-          return api->CreateStatus(
-              ORT_FAIL, "ANNC EP: cannot read a kernel argument shape");
-        }
-      }
-    }
-    if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
-    AnncElementType element = 0;
-    if (!AnncElementFromOrt(ort_type, &element)) {
-      return api->CreateStatus(
-          ORT_FAIL, "ANNC EP: unsupported kernel argument element type");
-    }
-    if (element != request.arg_types[i]) {
-      return api->CreateStatus(
-          ORT_FAIL,
-          "ANNC EP: kernel argument element type does not match the site");
-    }
-    const void* raw = nullptr;
-    if (OrtStatus* status = api->GetTensorData(value, &raw)) return status;
-    BuildMemRefDescriptor(static_cast<int64_t>(rank), dims,
-                          const_cast<void*>(raw), &storage[i]);
-    args.push_back(storage[i].bytes);
-  }
-
-  const auto t_prepared = timing ? std::chrono::steady_clock::now()
-                                 : std::chrono::steady_clock::time_point{};
-  const std::int32_t status_code = CallContextKernel(request.symbol, args);
-  if (timing) {
-    const auto t_end = std::chrono::steady_clock::now();
-    ContextTimer().Note(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(t_prepared - t_start)
-            .count(),
-        std::chrono::duration_cast<std::chrono::nanoseconds>(t_end - t_prepared)
-            .count());
-  }
-  if (OrtStatus* error = context.TakeError()) return error;
-  if (status_code != 0) {
-    char message[128];
-    std::snprintf(message, sizeof(message),
-                  "ANNC EP: kernel returned status %d", status_code);
-    return api->CreateStatus(ORT_FAIL, message);
-  }
-  if (!context.AllOutputsAllocated()) {
-    return api->CreateStatus(
-        ORT_FAIL, "ANNC EP: kernel did not allocate every declared output");
-  }
-  return nullptr;
-}
-
-std::int32_t CallContextKernel(void* symbol, const std::vector<void*>& args) {
-  switch (args.size()) {
-    case 1:
-      return reinterpret_cast<std::int32_t (*)(void*)>(symbol)(args[0]);
-    case 2:
-      return reinterpret_cast<std::int32_t (*)(void*, void*)>(symbol)(args[0],
-                                                                     args[1]);
-    case 3:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2]);
-    case 4:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*)>(
-          symbol)(args[0], args[1], args[2], args[3]);
-    case 5:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4]);
-    case 6:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5]);
-    case 7:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-    case 8:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*, void*, void*)>(
-          symbol)(args[0], args[1], args[2], args[3], args[4], args[5],
-                  args[6], args[7]);
-    case 9:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*, void*, void*,
-                                               void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8]);
-    case 10:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*, void*, void*,
-                                               void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8], args[9]);
-    case 11:
-      return reinterpret_cast<std::int32_t (*)(void*, void*, void*, void*,
-                                               void*, void*, void*, void*,
-                                               void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8], args[9], args[10]);
-    case 12:
-      return reinterpret_cast<std::int32_t (*)(
-          void*, void*, void*, void*, void*, void*, void*, void*, void*,
-          void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8], args[9], args[10], args[11]);
-    case 13:
-      return reinterpret_cast<std::int32_t (*)(
-          void*, void*, void*, void*, void*, void*, void*, void*, void*,
-          void*, void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8], args[9], args[10], args[11], args[12]);
-    case 14:
-      return reinterpret_cast<std::int32_t (*)(
-          void*, void*, void*, void*, void*, void*, void*, void*, void*,
-          void*, void*, void*, void*, void*)>(symbol)(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          args[7], args[8], args[9], args[10], args[11], args[12], args[13]);
-    default:
-      return -1;
-  }
-}
-
 OrtStatus* ComputeWithContext(const OrtApi* api,
                               OrtKernelContext* kernel_context,
                               const ContextCall& request) {
-  if (request.abi == "annc_execution_v2")
-    return ComputeLegacyContext(api, kernel_context, request);
   const bool timing = TimingEnabled();
   const auto t_start = timing ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
@@ -1056,10 +854,13 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   std::vector<AnncAttributeView> attrs;
   for (const auto& value : request.i64_attrs)
     attrs.push_back({ANNC_ATTRIBUTE_I64, 0, &value, 1});
-  context.kernelAbi()->inputs = inputs.data();
-  context.kernelAbi()->num_inputs = static_cast<uint32_t>(inputs.size());
-  context.kernelAbi()->attrs = attrs.data();
-  context.kernelAbi()->num_attrs = static_cast<uint32_t>(attrs.size());
+  context.abi()->inputs = inputs.data();
+  context.abi()->num_inputs = static_cast<uint32_t>(inputs.size());
+  context.abi()->attrs = attrs.data();
+  context.abi()->num_attrs = static_cast<uint32_t>(attrs.size());
+  context.abi()->resources = request.resources.data();
+  context.abi()->num_resources =
+      static_cast<uint32_t>(request.resources.size());
 
   for (size_t i = 0; i < request.arg_indices.size(); ++i) {
     if (request.arg_indices[i] < 0 ||
@@ -1143,7 +944,7 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   const auto t_prepared = timing ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
   const AnncStatusCode status_code =
-      reinterpret_cast<AnncKernelFn>(request.symbol)(context.kernelAbi());
+      reinterpret_cast<AnncKernelFn>(request.symbol)(context.abi());
   if (timing) {
     const auto t_end = std::chrono::steady_clock::now();
     ContextTimer().Note(
@@ -1162,6 +963,11 @@ OrtStatus* ComputeWithContext(const OrtApi* api,
   if (!context.AllOutputsAllocated()) {
     return api->CreateStatus(
         ORT_FAIL, "ANNC EP: kernel did not allocate every declared output");
+  }
+  if (!context.AllOutputsBound()) {
+    return api->CreateStatus(ORT_FAIL,
+                             "ANNC EP: kernel did not bind every output to its "
+                             "ONNX Runtime allocation");
   }
   return nullptr;
 }

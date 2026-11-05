@@ -383,6 +383,8 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
                                 static_cast<uint32_t>(num_outputs_),
                                 attributes.data(),
                                 static_cast<uint32_t>(attributes.size()),
+                                nullptr,
+                                0,
                                 &services};
     const AnncStatusCode status =
         reinterpret_cast<AnncKernelFn>(kernel_function)(&execution);

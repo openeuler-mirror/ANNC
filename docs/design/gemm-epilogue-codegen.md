@@ -1,6 +1,16 @@
 # GEMM epilogue 二进制 codegen 集成契约
 
-- **状态**：已实现；该契约适用于当前 ANNC 与 GEMM-ASM 二进制包接口。
+| 元数据 | 内容 |
+| --- | --- |
+| 编号 | ANNC-GEMM-CODEGEN-001 |
+| 状态 | 已实现 |
+| 发布日期 | 2026-11-02 |
+| 责任角色 | AArch64 GEMM 后端 / GEMM-ASM 集成维护者 |
+| 源码基线 | `e040f8c` |
+| 关联决策 | [ADR-018](../decisions/decisions.md#adr-018) |
+
+本文记录当前 ANNC 与 GEMM-ASM 二进制包之间的集成契约。包版本、公开头文件、
+manifest、CMake 导入目标或 object/ABI 行为变化时，应同步更新本文。
 
 ## 职责与交付
 
@@ -11,6 +21,7 @@ ANNC 保留既有语义分析、选核、分块、KC 角色、调用参数及 su
 
 一份版本化包位于 `third_party/annc-gemm-kernels/`，包含基础 `.a`、
 编译期 codegen `.so`、公开头文件、CMake 配置、manifest 与许可证。
+ASM 仓库以 `annc-gemm-kernels.tar.gz` 作为交付归档；ANNC 构建前将其解压到该目录。
 CMake 导入 `ANNC::AArch64GemmMicrokernels` / `ANNC::GemmCodegen`，
 校验文件摘要、API 1 和 kernel ABI 1。
 两个库整体升级。缺包可以构建普通工具；实际 epilogue 请求会在执行时明确失败。

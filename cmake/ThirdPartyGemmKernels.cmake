@@ -1,10 +1,3 @@
-# Remove cache entries from the pre-atomic-package interface so an existing
-# build directory cannot retain an independently selectable archive/codegen
-# configuration after reconfiguration.
-unset(ANNC_AARCH64_GEMM_KERNEL_LIBRARY CACHE)
-unset(ANNC_GEMM_KERNELS_PACKAGE_DIR CACHE)
-unset(ANNC_REQUIRE_GEMM_CODEGEN CACHE)
-
 set(ANNC_GEMM_PACKAGE_DIR
     "${CMAKE_SOURCE_DIR}/third_party/annc-gemm-kernels"
     CACHE PATH "Directory containing the complete GEMM-ASM binary package")
