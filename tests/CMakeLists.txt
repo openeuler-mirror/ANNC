@@ -16,6 +16,7 @@ include(GoogleTest)
 # L0: C++ unit tests, grouped by the production subsystem they cover.
 add_subdirectory(unit/annc)
 add_subdirectory(unit/kernels)
+add_subdirectory(unit/tensorflow)
 
 # ONNX frontend unit test: registered only while ANNC_ENABLE_ONNX=ON, which is
 # what defines the annc-onnx2atir target.

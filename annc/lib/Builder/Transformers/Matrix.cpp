@@ -123,44 +123,6 @@ LogicalResult transformSqueeze(const NodeInfo& node, ArrayRef<Type> outs,
   return success();
 }
 
-// atir.Transpose: static permutation from a "perm" attr or the constant input,
-// with the permutation tensor kept as an operand for runtime interpretation.
-LogicalResult transformTranspose(const NodeInfo& node, ArrayRef<Type> outs,
-                                 ArrayRef<Value> ins, OpContext& ctx) {
-  auto& b = ctx.builder();
-  if (ins.empty() || outs.empty())
-    return ctx.emitError(node, "requires at least one input");
-  Location loc = ctx.loc(node.name);
-
-  SmallVector<int64_t> perm;
-  if (auto it = node.attrs.find("perm"); it != node.attrs.end()) {
-    if (auto* vec = std::get_if<std::vector<int64_t>>(&it->second))
-      perm.assign(vec->begin(), vec->end());
-  }
-  if (perm.empty() && node.inputs.size() >= 2) {
-    std::vector<int64_t> decoded;
-    if (const NodeInfo* cnode = ctx.findNode(node.inputs[1]);
-        cnode && decodeIntConstValues(cnode, decoded))
-      perm.assign(decoded.begin(), decoded.end());
-  }
-  if (perm.empty() && !node.outputs.empty()) {
-    int64_t rank = static_cast<int64_t>(node.outputs[0].shape.size());
-    for (int64_t i = rank - 1; i >= 0; --i) perm.push_back(i);
-  }
-  if (perm.empty()) return ctx.emitError(node, "cannot determine permutation");
-
-  SmallVector<Attribute> permAttrs;
-  for (int64_t p : perm) permAttrs.push_back(b.getI64IntegerAttr(p));
-  auto outputType = dyn_cast_or_null<atir::TensorType>(outs[0]);
-  auto outputBuffer = b.create<atir::BufferOp>(loc, outputType);
-  Value permValue = (ins.size() >= 2) ? ins[1] : ins[0];
-  auto op =
-      b.create<atir::TransposeOp>(loc, outs[0], outputBuffer.getResult(),
-                                  ins[0], permValue, b.getArrayAttr(permAttrs));
-  ctx.bindResult(node.outputs[0].name, op.getResult());
-  return success();
-}
-
 // atir.ExpandDims: axis from the upstream SSA value, else from the "axis"
 // attr, else inferred from the input/output shapes.
 LogicalResult transformExpandDims(const NodeInfo& node, ArrayRef<Type> outs,

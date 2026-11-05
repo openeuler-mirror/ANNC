@@ -1,6 +1,6 @@
 // onnx_op_spec_table.inc — declarative ONNX-op -> ATIR-op table.
 //
-// Kept separate from the TF table (annc/lib/Builder/OpSpecTable.inc) because
+// Kept separate from the TF table (frontends/tensorflow/tf2atir/tf_op_spec_table.inc) because
 // the two frameworks disagree about the *same* op names: ONNX `Sum` is a
 // variadic elementwise add while TF `Sum` reduces, and the same op name can
 // carry different operands in the two frameworks (ONNX `Gather` takes its axis

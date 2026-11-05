@@ -2,7 +2,6 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 
-#include "Builder/Builder.h"
 #include "Dialect/Atir/AtirOps.h"
 #include "Dialect/Atir/OpVerify/OpVerify.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

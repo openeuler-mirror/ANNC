@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 
-#include "Builder/Builder.h"
 #include "Helper.h"
 #include "onnx_frontend.h"
 #include "onnx_mlir_builder.h"
@@ -479,10 +478,6 @@ int main(int argc, char** argv) {
     return success();
   });
 
-  // The module is created here rather than through ANNCBuilder, because that
-  // helper instantiates the TF-spec MLIRBuilder directly; the two module-level
-  // attributes below are the ones ANNCBuilder::buildModule sets, plus the
-  // contract version this frontend freezes.
   ModuleOp module = ModuleOp::create(UnknownLoc::get(&context),
                                      StringRef("main"));
   module->setAttr("module.state", StringAttr::get(&context, "atir"));

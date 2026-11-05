@@ -40,9 +40,6 @@ mlir::LogicalResult transformReshape(const NodeInfo&,
 mlir::LogicalResult transformSqueeze(const NodeInfo&,
                                      llvm::ArrayRef<mlir::Type>,
                                      llvm::ArrayRef<mlir::Value>, OpContext&);
-mlir::LogicalResult transformTranspose(const NodeInfo&,
-                                       llvm::ArrayRef<mlir::Type>,
-                                       llvm::ArrayRef<mlir::Value>, OpContext&);
 mlir::LogicalResult transformExpandDims(const NodeInfo&,
                                         llvm::ArrayRef<mlir::Type>,
                                         llvm::ArrayRef<mlir::Value>,
@@ -55,10 +52,6 @@ mlir::LogicalResult transformBroadcast(const NodeInfo&,
 mlir::LogicalResult transformConcatV2(const NodeInfo&,
                                       llvm::ArrayRef<mlir::Type>,
                                       llvm::ArrayRef<mlir::Value>, OpContext&);
-mlir::LogicalResult transformPack(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
-                                  llvm::ArrayRef<mlir::Value>, OpContext&);
-mlir::LogicalResult transformGather(const NodeInfo&, llvm::ArrayRef<mlir::Type>,
-                                    llvm::ArrayRef<mlir::Value>, OpContext&);
 mlir::LogicalResult transformStridedSlice(const NodeInfo&,
                                           llvm::ArrayRef<mlir::Type>,
                                           llvm::ArrayRef<mlir::Value>,
