@@ -67,24 +67,11 @@ LogicalResult validateThreadTiling(Operation *gemm,
   if (gemm->getNumResults() != 0)
     return gemm->emitOpError("requires buffer-semantics GEMM anchors");
 
-  auto lhsType = llvm::dyn_cast<MemRefType>(
-      aarch64::gemm::getGemmInput(gemm, 0).getType());
-  auto rhsType = llvm::dyn_cast<MemRefType>(
-      aarch64::gemm::getGemmInput(gemm, 1).getType());
-  auto outType = llvm::dyn_cast<MemRefType>(
-      aarch64::gemm::getGemmOutput(gemm, 0).getType());
-  if (!lhsType || !rhsType || !outType || lhsType.getRank() != 2 ||
-      rhsType.getRank() != 2 || outType.getRank() != 2 ||
-      !lhsType.hasStaticShape() || !rhsType.hasStaticShape() ||
-      !outType.hasStaticShape()) {
-    return gemm->emitOpError(
-        "requires statically shaped bufferized memref operands");
-  }
-  if (lhsType.getShape() != ArrayRef<int64_t>{plan.m, plan.k} ||
-      rhsType.getShape() != ArrayRef<int64_t>{plan.k, plan.n} ||
-      outType.getShape() != ArrayRef<int64_t>{plan.m, plan.n}) {
+  FailureOr<aarch64::gemm::GemmTileShape> shape =
+      aarch64::gemm::readGemmTileShape(gemm);
+  if (failed(shape)) return failure();
+  if (shape->m != plan.m || shape->n != plan.n || shape->k != plan.k)
     return gemm->emitOpError("has plan dimensions inconsistent with operands");
-  }
   return success();
 }
 
@@ -133,40 +120,20 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
     }
     auto taskGeneric = llvm::cast<linalg::GenericOp>(
         builder.clone(*generic.getOperation(), taskMapping));
-    SmallVector<OpFoldResult> offsets = {mOffset, nOffset, zero};
-    SmallVector<OpFoldResult> sizes = {builder.getIndexAttr(mSize),
-                                       builder.getIndexAttr(nSize),
-                                       builder.getIndexAttr(plan.k)};
-    FailureOr<linalg::GenericOp> tiled = aarch64::gemm::cloneTiledGemmGeneric(
-        builder, taskGeneric, offsets, sizes);
+    FailureOr<linalg::GenericOp> tiled = aarch64::gemm::createTiledGemmGeneric(
+        builder, taskGeneric, mOffset, nOffset, zero, mSize, nSize, plan.k,
+        aarch64::gemm::kThreadTiledStage);
     taskGeneric.erase();
     if (failed(tiled)) return failure();
     (*tiled)->setAttr(aarch64::gemm::kPlanAttrName,
                       getTilePlan(gemm, builder, mSize, nSize));
-    aarch64::gemm::setStage(*tiled, builder, aarch64::gemm::kThreadTiledStage);
     return success();
   }
 
-  SmallVector<OpFoldResult> strides = {builder.getIndexAttr(1),
-                                       builder.getIndexAttr(1)};
-  Value lhsTile = builder.create<memref::SubViewOp>(
-      loc, entry->getArgument(1), SmallVector<OpFoldResult>{mOffset, zero},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(mSize),
-                                builder.getIndexAttr(plan.k)},
-      strides);
-  Value rhsTile = builder.create<memref::SubViewOp>(
-      loc, entry->getArgument(2), SmallVector<OpFoldResult>{zero, nOffset},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(plan.k),
-                                builder.getIndexAttr(nSize)},
-      strides);
-  Value outTile = builder.create<memref::SubViewOp>(
-      loc, entry->getArgument(3), SmallVector<OpFoldResult>{mOffset, nOffset},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(mSize),
-                                builder.getIndexAttr(nSize)},
-      strides);
-  auto tiled = builder.create<linalg::MatmulOp>(
-      loc, ValueRange{lhsTile, rhsTile}, ValueRange{outTile});
-  tiled->setAttrs(gemm->getAttrs());
+  auto tiled = aarch64::gemm::createTiledMatmul(
+      builder, loc, entry->getArgument(1), entry->getArgument(2),
+      entry->getArgument(3), mOffset, nOffset, zero, mSize, nSize, plan.k,
+      gemm->getAttrs());
   tiled->setAttr(aarch64::gemm::kPlanAttrName,
                  getTilePlan(gemm, builder, mSize, nSize));
   aarch64::gemm::setStage(tiled, builder, aarch64::gemm::kThreadTiledStage);
@@ -205,8 +172,10 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   // microkernel rows; the final task of each dimension absorbs the remainder.
   aarch64::gemm::GemmTaskSplit splitM;
   aarch64::gemm::GemmTaskSplit splitN;
-  if (!aarch64::gemm::splitGemmTaskRange(plan.m, plan.tasksM,
-                                         plan.kernelTile.mr, splitM) ||
+  const int64_t rowAlignment = aarch64::gemm::getGemmTaskRowAlignment(
+      aarch64::gemm::GemmKernelStrategyKind::kFixed, plan.kernelTile.mr);
+  if (!aarch64::gemm::splitGemmTaskRange(plan.m, plan.tasksM, rowAlignment,
+                                         splitM) ||
       !aarch64::gemm::splitGemmTaskRange(plan.n, plan.tasksN,
                                          aarch64::gemm::kGemmTaskSplitAlignment,
                                          splitN)) {

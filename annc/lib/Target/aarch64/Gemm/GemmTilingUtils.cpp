@@ -1,5 +1,6 @@
 #include "GemmTilingUtils.h"
 
+#include "GemmPlan.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -127,6 +128,27 @@ mlir::FailureOr<mlir::Value> createProjectedSubview(
 
 }  // namespace
 
+mlir::FailureOr<GemmTileShape> readGemmTileShape(mlir::Operation *op) {
+  auto lhs = llvm::dyn_cast<mlir::MemRefType>(getGemmInput(op, 0).getType());
+  auto rhs = llvm::dyn_cast<mlir::MemRefType>(getGemmInput(op, 1).getType());
+  auto out = llvm::dyn_cast<mlir::MemRefType>(getGemmOutput(op, 0).getType());
+  for (auto type : {lhs, rhs, out}) {
+    if (!type || type.getRank() != 2 || !type.hasStaticShape() ||
+        !type.getElementType().isF32()) {
+      op->emitOpError("requires static rank-2 f32 GEMM memrefs");
+      return mlir::failure();
+    }
+  }
+  GemmTileShape shape{lhs.getDimSize(0), rhs.getDimSize(1), lhs.getDimSize(1)};
+  if (shape.m <= 0 || shape.n <= 0 || shape.k <= 0 ||
+      rhs.getDimSize(0) != shape.k || out.getDimSize(0) != shape.m ||
+      out.getDimSize(1) != shape.n) {
+    op->emitOpError("has inconsistent GEMM tile dimensions");
+    return mlir::failure();
+  }
+  return shape;
+}
+
 void disableLoopUnrolling(mlir::OpBuilder &builder, mlir::scf::ForOp loop) {
   mlir::MLIRContext *context = builder.getContext();
   auto unroll = mlir::LLVM::LoopUnrollAttr::get(
@@ -141,6 +163,33 @@ void disableLoopUnrolling(mlir::OpBuilder &builder, mlir::scf::ForOp loop) {
       /*parallelAccesses=*/{});
   // ControlFlowToLLVM forwards this name into llvm.br's inherent property.
   loop->setAttr("loop_annotation", annotation);
+}
+
+mlir::LogicalResult materializeGemmTileRun(
+    mlir::OpBuilder &builder, mlir::Location loc, const GemmTileRun &run,
+    llvm::function_ref<mlir::LogicalResult(mlir::Value, int64_t)> emitTile) {
+  auto index = [&](int64_t value) {
+    return builder.create<mlir::arith::ConstantIndexOp>(loc, value);
+  };
+  if (run.count == 1) return emitTile(index(run.offset), run.extent);
+  mlir::Value lower = index(run.offset);
+  mlir::Value upper = index(run.offset + run.extent * run.count);
+  mlir::Value step = index(run.extent);
+  auto loop = builder.create<mlir::scf::ForOp>(loc, lower, upper, step);
+  disableLoopUnrolling(builder, loop);
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(loop.getBody());
+  return emitTile(loop.getInductionVar(), run.extent);
+}
+
+mlir::LogicalResult materializeGemmPartition(
+    mlir::OpBuilder &builder, mlir::Location loc,
+    const GemmPartition &partition,
+    llvm::function_ref<mlir::LogicalResult(mlir::Value, int64_t)> emitTile) {
+  for (const auto &run : partition)
+    if (mlir::failed(materializeGemmTileRun(builder, loc, run, emitTile)))
+      return mlir::failure();
+  return mlir::success();
 }
 
 mlir::FailureOr<MemRefBaseAndOffset> getMemRefBaseAndOffset(
@@ -217,6 +266,45 @@ mlir::FailureOr<mlir::linalg::GenericOp> cloneTiledGemmGeneric(
   }
   return llvm::cast<mlir::linalg::GenericOp>(
       builder.clone(*generic.getOperation(), mapping));
+}
+
+mlir::FailureOr<mlir::linalg::GenericOp> createTiledGemmGeneric(
+    mlir::OpBuilder &builder, mlir::linalg::GenericOp generic,
+    mlir::Value mOffset, mlir::Value nOffset, mlir::Value kOffset,
+    int64_t mSize, int64_t nSize, int64_t kSize, mlir::StringRef stage) {
+  llvm::SmallVector<mlir::OpFoldResult> offsets = {mOffset, nOffset, kOffset};
+  llvm::SmallVector<mlir::OpFoldResult> sizes = {builder.getIndexAttr(mSize),
+                                                 builder.getIndexAttr(nSize),
+                                                 builder.getIndexAttr(kSize)};
+  mlir::FailureOr<mlir::linalg::GenericOp> tiled =
+      cloneTiledGemmGeneric(builder, generic, offsets, sizes);
+  if (mlir::failed(tiled)) return mlir::failure();
+  setStage(*tiled, builder, stage);
+  return tiled;
+}
+
+mlir::linalg::MatmulOp createTiledMatmul(
+    mlir::OpBuilder &builder, mlir::Location loc, mlir::Value lhs,
+    mlir::Value rhs, mlir::Value out, mlir::Value mOffset, mlir::Value nOffset,
+    mlir::Value kOffset, int64_t mSize, int64_t nSize, int64_t kSize,
+    llvm::ArrayRef<mlir::NamedAttribute> attributes) {
+  llvm::SmallVector<mlir::OpFoldResult> strides = {builder.getIndexAttr(1),
+                                                   builder.getIndexAttr(1)};
+  auto tile = [&](mlir::Value base, mlir::Value row, mlir::Value column,
+                  int64_t rowSize, int64_t columnSize) {
+    return builder.create<mlir::memref::SubViewOp>(
+        loc, base, llvm::SmallVector<mlir::OpFoldResult>{row, column},
+        llvm::SmallVector<mlir::OpFoldResult>{builder.getIndexAttr(rowSize),
+                                              builder.getIndexAttr(columnSize)},
+        strides);
+  };
+  mlir::Value lhsTile = tile(lhs, mOffset, kOffset, mSize, kSize);
+  mlir::Value rhsTile = tile(rhs, kOffset, nOffset, kSize, nSize);
+  mlir::Value outTile = tile(out, mOffset, nOffset, mSize, nSize);
+  auto matmul = builder.create<mlir::linalg::MatmulOp>(
+      loc, mlir::ValueRange{lhsTile, rhsTile}, mlir::ValueRange{outTile});
+  matmul->setAttrs(attributes);
+  return matmul;
 }
 
 }  // namespace annc::aarch64::gemm

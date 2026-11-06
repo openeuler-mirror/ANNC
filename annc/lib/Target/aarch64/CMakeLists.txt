@@ -21,6 +21,8 @@ set(_gemm_srcs
         Gemm/VerifyGemmSchedule.cpp
         Gemm/Support/GemmThreadPlanner.cpp
         Gemm/Support/GemmConfig.cpp
+        Gemm/Support/GemmMetadata.cpp
+        Gemm/Support/GemmStrategy.cpp
 )
 
 # Only this adapter sees the binary package C ABI. The object exporter can

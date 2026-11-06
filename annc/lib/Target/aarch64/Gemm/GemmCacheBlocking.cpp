@@ -1,40 +1,22 @@
-#include <algorithm>
-
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 
 namespace annc {
 namespace {
 
 using aarch64::gemm::GemmTilingPlan;
 
-LogicalResult validateProblem(Operation *op, const GemmTilingPlan &plan) {
-  auto lhsType =
-      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmInput(op, 0).getType());
-  auto rhsType =
-      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmInput(op, 1).getType());
-  auto outType =
-      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmOutput(op, 0).getType());
-  if (!lhsType || !rhsType || !outType || !lhsType.hasStaticShape() ||
-      !rhsType.hasStaticShape() || !outType.hasStaticShape()) {
-    return op->emitOpError(
-        "requires statically shaped bufferized memref operands");
-  }
-  if (lhsType.getShape() != ArrayRef<int64_t>{plan.m, plan.k} ||
-      rhsType.getShape() != ArrayRef<int64_t>{plan.k, plan.n} ||
-      outType.getShape() != ArrayRef<int64_t>{plan.m, plan.n}) {
+LogicalResult validateProblem(Operation *op, const GemmTilingPlan &plan,
+                              const aarch64::gemm::GemmTileShape &shape) {
+  const bool local =
+      aarch64::gemm::hasStage(op, aarch64::gemm::kThreadTiledStage);
+  if (shape.k != plan.k || shape.m > plan.m || shape.n > plan.n ||
+      (!local && (shape.m != plan.m || shape.n != plan.n)))
     return op->emitOpError("has plan dimensions inconsistent with operands");
-  }
   return success();
-}
-
-Value createIndexConstant(OpBuilder &builder, Location loc, int64_t value) {
-  return builder.create<arith::ConstantIndexOp>(loc, value);
 }
 
 LogicalResult createCacheTile(OpBuilder &builder, Operation *original, Value ic,
@@ -42,146 +24,43 @@ LogicalResult createCacheTile(OpBuilder &builder, Operation *original, Value ic,
                               int64_t nSize, llvm::StringRef kcMode,
                               llvm::StringRef kcRole) {
   Location loc = original->getLoc();
+  auto tagKRun = [&](Operation *tiled) {
+    tiled->setDiscardableAttr(aarch64::gemm::kKcModeAttrName,
+                              builder.getStringAttr(kcMode));
+    tiled->setDiscardableAttr(aarch64::gemm::kKcRoleAttrName,
+                              builder.getStringAttr(kcRole));
+  };
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(original)) {
-    SmallVector<OpFoldResult> offsets = {ic, jc, pc};
-    SmallVector<OpFoldResult> sizes = {builder.getIndexAttr(mSize),
-                                       builder.getIndexAttr(nSize),
-                                       builder.getIndexAttr(kSize)};
-    FailureOr<linalg::GenericOp> tiled =
-        aarch64::gemm::cloneTiledGemmGeneric(builder, generic, offsets, sizes);
+    FailureOr<linalg::GenericOp> tiled = aarch64::gemm::createTiledGemmGeneric(
+        builder, generic, ic, jc, pc, mSize, nSize, kSize,
+        aarch64::gemm::kCacheBlockedStage);
     if (failed(tiled)) return failure();
-    aarch64::gemm::setStage(*tiled, builder, aarch64::gemm::kCacheBlockedStage);
-    (*tiled)->setDiscardableAttr(aarch64::gemm::kKcModeAttrName,
-                                 builder.getStringAttr(kcMode));
-    (*tiled)->setDiscardableAttr(aarch64::gemm::kKcRoleAttrName,
-                                 builder.getStringAttr(kcRole));
+    tagKRun(*tiled);
     return success();
   }
 
   auto matmul = llvm::cast<linalg::MatmulOp>(original);
-  SmallVector<OpFoldResult> strides = {builder.getIndexAttr(1),
-                                       builder.getIndexAttr(1)};
-
-  Value lhsTile = builder.create<memref::SubViewOp>(
-      loc, matmul.getInputs()[0], SmallVector<OpFoldResult>{ic, pc},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(mSize),
-                                builder.getIndexAttr(kSize)},
-      strides);
-  Value rhsTile = builder.create<memref::SubViewOp>(
-      loc, matmul.getInputs()[1], SmallVector<OpFoldResult>{pc, jc},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(kSize),
-                                builder.getIndexAttr(nSize)},
-      strides);
-  Value outTile = builder.create<memref::SubViewOp>(
-      loc, matmul.getOutputs()[0], SmallVector<OpFoldResult>{ic, jc},
-      SmallVector<OpFoldResult>{builder.getIndexAttr(mSize),
-                                builder.getIndexAttr(nSize)},
-      strides);
-
-  auto tiled = builder.create<linalg::MatmulOp>(
-      loc, ValueRange{lhsTile, rhsTile}, ValueRange{outTile});
-  tiled->setAttrs(original->getAttrs());
+  auto tiled = aarch64::gemm::createTiledMatmul(
+      builder, loc, matmul.getInputs()[0], matmul.getInputs()[1],
+      matmul.getOutputs()[0], ic, jc, pc, mSize, nSize, kSize,
+      original->getAttrs());
   aarch64::gemm::setStage(tiled, builder, aarch64::gemm::kCacheBlockedStage);
-  tiled->setDiscardableAttr(aarch64::gemm::kKcModeAttrName,
-                            builder.getStringAttr(kcMode));
-  tiled->setDiscardableAttr(aarch64::gemm::kKcRoleAttrName,
-                            builder.getStringAttr(kcRole));
+  tagKRun(tiled);
   return success();
 }
 
-LogicalResult createJcBlocks(OpBuilder &builder, Operation *original, Value ic,
-                             Value pc, int64_t mSize, int64_t kSize, int64_t n,
-                             int64_t nc, llvm::StringRef kcMode,
-                             llvm::StringRef kcRole) {
-  Location loc = original->getLoc();
-  const int64_t fullN = n / nc * nc;
-  if (fullN > 0) {
-    if (fullN == nc) {
-      if (failed(createCacheTile(builder, original, ic, pc,
-                                 createIndexConstant(builder, loc, 0), mSize,
-                                 kSize, nc, kcMode, kcRole)))
-        return failure();
-    } else {
-      Value zero = createIndexConstant(builder, loc, 0);
-      Value upper = createIndexConstant(builder, loc, fullN);
-      Value step = createIndexConstant(builder, loc, nc);
-      auto jcLoop = builder.create<scf::ForOp>(loc, zero, upper, step);
-      aarch64::gemm::disableLoopUnrolling(builder, jcLoop);
-      OpBuilder::InsertionGuard guard(builder);
-      builder.setInsertionPointToStart(jcLoop.getBody());
-      if (failed(createCacheTile(builder, original, ic, pc,
-                                 jcLoop.getInductionVar(), mSize, kSize, nc,
-                                 kcMode, kcRole)))
-        return failure();
-    }
+llvm::StringRef getKRoleName(aarch64::gemm::GemmKRole role) {
+  switch (role) {
+    case aarch64::gemm::GemmKRole::kSingle:
+      return "single";
+    case aarch64::gemm::GemmKRole::kFirst:
+      return "first";
+    case aarch64::gemm::GemmKRole::kMiddle:
+      return "middle";
+    case aarch64::gemm::GemmKRole::kFinal:
+      return "final";
   }
-  if (fullN != n) {
-    if (failed(createCacheTile(builder, original, ic, pc,
-                               createIndexConstant(builder, loc, fullN), mSize,
-                               kSize, n - fullN, kcMode, kcRole)))
-      return failure();
-  }
-  return success();
-}
-
-LogicalResult createKcBlocks(OpBuilder &builder, Operation *original, Value ic,
-                             int64_t mSize, const GemmTilingPlan &plan) {
-  Location loc = original->getLoc();
-  const bool single = plan.k <= plan.cacheTile.kc;
-  const int64_t firstK = std::min(plan.k, plan.cacheTile.kc);
-  if (failed(createJcBlocks(builder, original, ic,
-                            createIndexConstant(builder, loc, 0), mSize, firstK,
-                            plan.n, plan.cacheTile.nc,
-                            aarch64::gemm::getKcModeName(plan.firstKcMode),
-                            single ? "single" : "first")))
-    return failure();
-
-  const int64_t remainingK = plan.k - firstK;
-  const int64_t fullCount = remainingK / plan.cacheTile.kc;
-  const int64_t tailK = remainingK % plan.cacheTile.kc;
-  const bool hasTail = tailK != 0;
-  const int64_t middleCount =
-      hasTail ? fullCount : (fullCount > 0 ? fullCount - 1 : 0);
-  if (middleCount == 1) {
-    if (failed(createJcBlocks(
-            builder, original, ic, createIndexConstant(builder, loc, firstK),
-            mSize, plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
-            aarch64::gemm::getKcModeName(plan.nextKcMode), "middle")))
-      return failure();
-  } else if (middleCount > 1) {
-    Value lower = createIndexConstant(builder, loc, firstK);
-    Value upper = createIndexConstant(builder, loc,
-                                      firstK + middleCount * plan.cacheTile.kc);
-    Value step = createIndexConstant(builder, loc, plan.cacheTile.kc);
-    auto pcLoop = builder.create<scf::ForOp>(loc, lower, upper, step);
-    aarch64::gemm::disableLoopUnrolling(builder, pcLoop);
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(pcLoop.getBody());
-    if (failed(createJcBlocks(
-            builder, original, ic, pcLoop.getInductionVar(), mSize,
-            plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
-            aarch64::gemm::getKcModeName(plan.nextKcMode), "middle")))
-      return failure();
-  }
-
-  if (hasTail) {
-    if (failed(createJcBlocks(
-            builder, original, ic,
-            createIndexConstant(builder, loc,
-                                firstK + fullCount * plan.cacheTile.kc),
-            mSize, tailK, plan.n, plan.cacheTile.nc,
-            aarch64::gemm::getKcModeName(plan.nextKcMode), "final")))
-      return failure();
-  } else if (fullCount >= 1) {
-    if (failed(createJcBlocks(
-            builder, original, ic,
-            createIndexConstant(builder, loc,
-                                firstK + (fullCount - 1) * plan.cacheTile.kc),
-            mSize, plan.cacheTile.kc, plan.n, plan.cacheTile.nc,
-            aarch64::gemm::getKcModeName(plan.nextKcMode), "final")))
-      return failure();
-  }
-  return success();
+  llvm_unreachable("unknown GEMM K role");
 }
 
 LogicalResult materializeCacheBlocking(Operation *op) {
@@ -189,37 +68,44 @@ LogicalResult materializeCacheBlocking(Operation *op) {
       !aarch64::gemm::hasStage(op, aarch64::gemm::kThreadTiledStage))
     return success();
   FailureOr<GemmTilingPlan> plan = aarch64::gemm::readTilingPlan(op);
-  if (failed(plan) || failed(validateProblem(op, *plan))) return failure();
+  FailureOr<aarch64::gemm::GemmTileShape> shape =
+      aarch64::gemm::readGemmTileShape(op);
+  if (failed(plan) || failed(shape) ||
+      failed(validateProblem(op, *plan, *shape)))
+    return failure();
   if (op->getNumResults() != 0)
     return op->emitOpError("requires buffer-semantics GEMM anchors");
 
   OpBuilder builder(op);
   Location loc = op->getLoc();
-  const int64_t fullM =
-      plan->m / plan->cacheTile.mc * plan->cacheTile.mc;
-  if (fullM == plan->cacheTile.mc) {
-    if (failed(createKcBlocks(builder, op, createIndexConstant(builder, loc, 0),
-                              plan->cacheTile.mc, *plan)))
-      return failure();
-  } else if (fullM > plan->cacheTile.mc) {
-    Value zero = createIndexConstant(builder, loc, 0);
-    Value upper = createIndexConstant(builder, loc, fullM);
-    Value step = createIndexConstant(builder, loc, plan->cacheTile.mc);
-    auto icLoop = builder.create<scf::ForOp>(loc, zero, upper, step);
-    aarch64::gemm::disableLoopUnrolling(builder, icLoop);
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(icLoop.getBody());
-    if (failed(createKcBlocks(builder, op, icLoop.getInductionVar(),
-                              plan->cacheTile.mc, *plan)))
-      return failure();
-  }
-  if (fullM != plan->m) {
-    if (failed(createKcBlocks(builder, op,
-                              createIndexConstant(builder, loc, fullM),
-                              plan->m - fullM, *plan)))
-      return failure();
-  }
-
+  const aarch64::gemm::GemmCacheStrategy strategy{
+      aarch64::gemm::GemmCacheStrategyKind::kFixed, plan->cacheTile};
+  const auto description = aarch64::gemm::describeGemmCache(
+      strategy, shape->m, shape->n, shape->k);
+  auto emitRows = [&](Value ic, int64_t mSize) -> LogicalResult {
+    for (const auto &reduction : description.reduction) {
+      const bool firstRun =
+          reduction.role == aarch64::gemm::GemmKRole::kSingle ||
+          reduction.role == aarch64::gemm::GemmKRole::kFirst;
+      const auto mode = firstRun ? plan->firstKcMode : plan->nextKcMode;
+      const llvm::StringRef role = getKRoleName(reduction.role);
+      auto emitReduction = [&](Value pc, int64_t kSize) -> LogicalResult {
+        auto emitColumns = [&](Value jc, int64_t nSize) {
+          return createCacheTile(builder, op, ic, pc, jc, mSize, kSize, nSize,
+                                 aarch64::gemm::getKcModeName(mode), role);
+        };
+        return aarch64::gemm::materializeGemmPartition(
+            builder, loc, description.columns, emitColumns);
+      };
+      if (failed(aarch64::gemm::materializeGemmTileRun(
+              builder, loc, reduction.tiles, emitReduction)))
+        return failure();
+    }
+    return success();
+  };
+  if (failed(aarch64::gemm::materializeGemmPartition(
+          builder, loc, description.rows, emitRows)))
+    return failure();
   op->erase();
   return success();
 }
