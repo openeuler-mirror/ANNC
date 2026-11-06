@@ -7,15 +7,14 @@
 namespace annc {
 namespace {
 
-using aarch64::gemm::GemmTilingPlan;
-
-LogicalResult validateProblem(Operation *op, const GemmTilingPlan &plan,
-                              const aarch64::gemm::GemmTileShape &shape) {
+LogicalResult validateProblem(Operation *op,
+                              const aarch64::gemm::GemmProblem &problem,
+                              const aarch64::gemm::GemmBlockShape &shape) {
   const bool local =
       aarch64::gemm::hasStage(op, aarch64::gemm::kThreadTiledStage);
-  if (shape.k != plan.k || shape.m > plan.m || shape.n > plan.n ||
-      (!local && (shape.m != plan.m || shape.n != plan.n)))
-    return op->emitOpError("has plan dimensions inconsistent with operands");
+  if (shape.k != problem.k || shape.m > problem.m || shape.n > problem.n ||
+      (!local && (shape.m != problem.m || shape.n != problem.n)))
+    return op->emitOpError("has problem dimensions inconsistent with operands");
   return success();
 }
 
@@ -67,27 +66,30 @@ LogicalResult materializeCacheBlocking(Operation *op) {
   if (op->hasAttr(aarch64::gemm::kStageAttrName) &&
       !aarch64::gemm::hasStage(op, aarch64::gemm::kThreadTiledStage))
     return success();
-  FailureOr<GemmTilingPlan> plan = aarch64::gemm::readTilingPlan(op);
-  FailureOr<aarch64::gemm::GemmTileShape> shape =
-      aarch64::gemm::readGemmTileShape(op);
-  if (failed(plan) || failed(shape) ||
-      failed(validateProblem(op, *plan, *shape)))
+  FailureOr<aarch64::gemm::GemmProblem> problem =
+      aarch64::gemm::readProblem(op);
+  FailureOr<aarch64::gemm::GemmTuningStrategy> strategy =
+      aarch64::gemm::readStrategy(op);
+  FailureOr<aarch64::gemm::GemmBlockShape> shape =
+      aarch64::gemm::readGemmBlockShape(op);
+  if (failed(problem) || failed(strategy) || failed(shape) ||
+      failed(validateProblem(op, *problem, *shape)))
     return failure();
   if (op->getNumResults() != 0)
     return op->emitOpError("requires buffer-semantics GEMM anchors");
 
   OpBuilder builder(op);
   Location loc = op->getLoc();
-  const aarch64::gemm::GemmCacheStrategy strategy{plan->cacheStrategyKind,
-                                                  plan->cacheTile};
-  const auto description = aarch64::gemm::describeGemmCache(
-      strategy, shape->m, shape->n, shape->k);
+  const auto description =
+      aarch64::gemm::getGemmCacheTilingStrategy(strategy->cache.kind)
+          .buildPlan({strategy->cache, *shape});
   auto emitRows = [&](Value ic, int64_t mSize) -> LogicalResult {
     for (const auto &reduction : description.reduction) {
       const bool firstRun =
           reduction.role == aarch64::gemm::GemmKRole::kSingle ||
           reduction.role == aarch64::gemm::GemmKRole::kFirst;
-      const auto mode = firstRun ? plan->firstKcMode : plan->nextKcMode;
+      const auto mode = firstRun ? aarch64::gemm::KcMode::kOverwrite
+                                 : aarch64::gemm::KcMode::kAccumulate;
       const llvm::StringRef role = getKRoleName(reduction.role);
       auto emitReduction = [&](Value pc, int64_t kSize) -> LogicalResult {
         auto emitColumns = [&](Value jc, int64_t nSize) {
@@ -119,7 +121,7 @@ class AArch64GemmCacheBlocking
     SmallVector<Operation *> candidates;
     getOperation().walk([&](Operation *op) {
       if (aarch64::gemm::isGemmAnchor(op) &&
-          op->hasAttr(aarch64::gemm::kPlanAttrName) &&
+          op->hasAttr(aarch64::gemm::kCandidateAttrName) &&
           (!op->hasAttr(aarch64::gemm::kStageAttrName) ||
            aarch64::gemm::hasStage(op, aarch64::gemm::kThreadTiledStage))) {
         candidates.push_back(op);

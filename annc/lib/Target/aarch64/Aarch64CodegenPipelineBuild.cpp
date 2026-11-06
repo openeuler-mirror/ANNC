@@ -49,7 +49,6 @@ namespace annc
         if (enablePrepack)
             passManager.addPass(createAArch64GemmPrepackRhs(
                 packedCPath, jitInputsPath));
-        passManager.addPass(createAArch64FinalizeGemmPlan());
         passManager.addPass(createAArch64GemmThreadTiling());
         passManager.addPass(createAArch64GemmCacheBlocking());
         passManager.addPass(createAArch64GemmKernelTiling());

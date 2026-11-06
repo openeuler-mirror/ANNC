@@ -16,13 +16,7 @@ struct MemRefBaseAndOffset {
   mlir::Value offset;
 };
 
-struct GemmTileShape {
-  int64_t m;
-  int64_t n;
-  int64_t k;
-};
-
-mlir::FailureOr<GemmTileShape> readGemmTileShape(mlir::Operation *op);
+mlir::FailureOr<GemmBlockShape> readGemmBlockShape(mlir::Operation *op);
 
 void disableLoopUnrolling(mlir::OpBuilder &builder, mlir::scf::ForOp loop);
 mlir::LogicalResult materializeGemmTileRun(

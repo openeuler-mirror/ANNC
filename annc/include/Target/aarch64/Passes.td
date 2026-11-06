@@ -56,7 +56,7 @@ def AArch64SelectGemmStrategy
     Option<"enablePrepack", "enable-prepack", "bool", "false",
            "Allow compile-time RHS prepacking">,
     Option<"intraThreadCount", "intra-thread-count", "int64_t", "1",
-           "Number of intra-op threads available to the GEMM plan "
+           "Number of intra-op threads available to GEMM planning "
            "(1 = serial execution)">
   ];
   let dependentDialects = [
@@ -69,16 +69,6 @@ def AArch64GemmThreadPlanning
     : Pass<"aarch64-gemm-thread-planning", "ModuleOp"> {
   let summary = "plan AArch64 GEMM thread topology";
   let constructor = "createAArch64GemmThreadPlanning()";
-  let dependentDialects = [
-    "mlir::linalg::LinalgDialect"
-  ];
-}
-
-/* Freeze a validated target-private candidate as an executable GEMM plan. */
-def AArch64FinalizeGemmPlan
-    : Pass<"aarch64-finalize-gemm-plan", "ModuleOp"> {
-  let summary = "finalize the selected AArch64 GEMM plan";
-  let constructor = "createAArch64FinalizeGemmPlan()";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect"
   ];
@@ -99,7 +89,7 @@ def AArch64GemmThreadTiling
   ];
 }
 
-/* Materialize MC/NC/KC blocking from the resolved target plan. */
+/* Materialize cache blocking from the selected GEMM strategy. */
 def AArch64GemmCacheBlocking
     : Pass<"aarch64-gemm-cache-blocking", "ModuleOp"> {
   let summary = "materialize AArch64 GEMM cache blocking";
@@ -127,7 +117,7 @@ def AArch64GemmKernelTiling
   ];
 }
 
-/* Materialize target-private leaves from the finalized GEMM plan. */
+/* Materialize target-private leaves from selected strategy metadata. */
 def AArch64GemmLeafMaterialization
     : Pass<"aarch64-gemm-leaf-materialization", "ModuleOp"> {
   let summary = "materialize AArch64 GEMM leaf calls";

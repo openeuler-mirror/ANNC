@@ -55,7 +55,7 @@ std::string getUniqueTaskName(ModuleOp module) {
 }
 
 LogicalResult validateThreadTiling(Operation *gemm,
-                                   const aarch64::gemm::GemmTilingPlan &plan) {
+                                   const aarch64::gemm::GemmProblem &problem) {
   if (auto generic = llvm::dyn_cast<linalg::GenericOp>(gemm)) {
     if (failed(aarch64::gemm::validateGemmGeneric(generic))) return failure();
     if (generic.getInputs().size() >
@@ -67,16 +67,17 @@ LogicalResult validateThreadTiling(Operation *gemm,
   if (gemm->getNumResults() != 0)
     return gemm->emitOpError("requires buffer-semantics GEMM anchors");
 
-  FailureOr<aarch64::gemm::GemmTileShape> shape =
-      aarch64::gemm::readGemmTileShape(gemm);
+  FailureOr<aarch64::gemm::GemmBlockShape> shape =
+      aarch64::gemm::readGemmBlockShape(gemm);
   if (failed(shape)) return failure();
-  if (shape->m != plan.m || shape->n != plan.n || shape->k != plan.k)
-    return gemm->emitOpError("has plan dimensions inconsistent with operands");
+  if (shape->m != problem.m || shape->n != problem.n ||
+      shape->k != problem.k)
+    return gemm->emitOpError("has problem dimensions inconsistent with operands");
   return success();
 }
 
 LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
-                               const aarch64::gemm::GemmTilingPlan &plan,
+                               const aarch64::gemm::GemmProblem &problem,
                                Block *entry, Value mOffset, Value nOffset,
                                int64_t mSize, int64_t nSize) {
   Location loc = gemm->getLoc();
@@ -99,7 +100,7 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
     auto taskGeneric = llvm::cast<linalg::GenericOp>(
         builder.clone(*generic.getOperation(), taskMapping));
     FailureOr<linalg::GenericOp> tiled = aarch64::gemm::createTiledGemmGeneric(
-        builder, taskGeneric, mOffset, nOffset, zero, mSize, nSize, plan.k,
+        builder, taskGeneric, mOffset, nOffset, zero, mSize, nSize, problem.k,
         aarch64::gemm::kThreadTiledStage);
     taskGeneric.erase();
     if (failed(tiled)) return failure();
@@ -108,14 +109,15 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
 
   auto tiled = aarch64::gemm::createTiledMatmul(
       builder, loc, entry->getArgument(1), entry->getArgument(2),
-      entry->getArgument(3), mOffset, nOffset, zero, mSize, nSize, plan.k,
+      entry->getArgument(3), mOffset, nOffset, zero, mSize, nSize, problem.k,
       gemm->getAttrs());
   aarch64::gemm::setStage(tiled, builder, aarch64::gemm::kThreadTiledStage);
   return success();
 }
 
 LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
-                               const aarch64::gemm::GemmTilingPlan &plan,
+                               const aarch64::gemm::GemmProblem &problem,
+                               const aarch64::gemm::GemmCandidate &candidate,
                                FunctionType taskType, func::FuncOp &task) {
   OpBuilder moduleBuilder(module.getContext());
   moduleBuilder.setInsertionPointToEnd(module.getBody());
@@ -130,11 +132,11 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   Type index = builder.getIndexType();
   Value taskId =
       builder.create<arith::IndexCastOp>(loc, index, entry->getArgument(0));
-  Value tasksM = builder.create<arith::ConstantIndexOp>(loc, plan.tasksM);
-  Value tasksN = builder.create<arith::ConstantIndexOp>(loc, plan.tasksN);
+  Value tasksM = builder.create<arith::ConstantIndexOp>(loc, candidate.tasksM);
+  Value tasksN = builder.create<arith::ConstantIndexOp>(loc, candidate.tasksN);
   Value mTask;
   Value nTask;
-  if (plan.shardByColumns) {
+  if (candidate.shardByColumns) {
     mTask = builder.create<arith::RemSIOp>(loc, taskId, tasksM);
     nTask = builder.create<arith::DivSIOp>(loc, taskId, tasksM);
   } else {
@@ -147,11 +149,13 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   // microkernel rows; the final task of each dimension absorbs the remainder.
   aarch64::gemm::GemmTaskSplit splitM;
   aarch64::gemm::GemmTaskSplit splitN;
-  const int64_t rowAlignment = aarch64::gemm::getGemmTaskRowAlignment(
-      plan.kernelStrategyKind, plan.kernelTile.mr);
-  if (!aarch64::gemm::splitGemmTaskRange(plan.m, plan.tasksM, rowAlignment,
+  const auto &kernelStrategy = candidate.strategy.kernel;
+  const int64_t rowAlignment =
+      aarch64::gemm::getGemmKernelTilingStrategy(kernelStrategy.kind)
+          .getTaskRowAlignment(kernelStrategy);
+  if (!aarch64::gemm::splitGemmTaskRange(problem.m, candidate.tasksM, rowAlignment,
                                          splitM) ||
-      !aarch64::gemm::splitGemmTaskRange(plan.n, plan.tasksN,
+      !aarch64::gemm::splitGemmTaskRange(problem.n, candidate.tasksN,
                                          aarch64::gemm::kGemmTaskSplitAlignment,
                                          splitN)) {
     return gemm->emitOpError(
@@ -170,8 +174,8 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
 
   Value mOffset, mIsLast;
   Value nOffset, nIsLast;
-  makeRange(mTask, plan.tasksM, splitM.base, mOffset, mIsLast);
-  makeRange(nTask, plan.tasksN, splitN.base, nOffset, nIsLast);
+  makeRange(mTask, candidate.tasksM, splitM.base, mOffset, mIsLast);
+  makeRange(nTask, candidate.tasksN, splitN.base, nOffset, nIsLast);
 
   const int64_t mBase = splitM.base;
   const int64_t nBase = splitN.base;
@@ -180,21 +184,21 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   auto emitNVariants = [&](OpBuilder &nestedBuilder, int64_t staticMSize,
                            Value nestedMOffset) -> LogicalResult {
     if (nTail == nBase)
-      return createThreadTile(nestedBuilder, gemm, plan, entry, nestedMOffset,
+      return createThreadTile(nestedBuilder, gemm, problem, entry, nestedMOffset,
                               nOffset, staticMSize, nBase);
     auto nIf = nestedBuilder.create<scf::IfOp>(loc, nIsLast,
                                                /*withElseRegion=*/true);
     {
       OpBuilder thenBuilder =
           OpBuilder::atBlockBegin(&nIf.getThenRegion().front());
-      if (failed(createThreadTile(thenBuilder, gemm, plan, entry, nestedMOffset,
+      if (failed(createThreadTile(thenBuilder, gemm, problem, entry, nestedMOffset,
                                   nOffset, staticMSize, nTail)))
         return failure();
     }
     {
       OpBuilder elseBuilder =
           OpBuilder::atBlockBegin(&nIf.getElseRegion().front());
-      if (failed(createThreadTile(elseBuilder, gemm, plan, entry, nestedMOffset,
+      if (failed(createThreadTile(elseBuilder, gemm, problem, entry, nestedMOffset,
                                   nOffset, staticMSize, nBase)))
         return failure();
     }
@@ -224,16 +228,18 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
 }
 
 LogicalResult materializeThreadTiling(Operation *gemm) {
-  FailureOr<aarch64::gemm::GemmTilingPlan> plan =
-      aarch64::gemm::readTilingPlan(gemm);
-  if (failed(plan)) return failure();
-  if (failed(validateThreadTiling(gemm, *plan))) return failure();
+  FailureOr<aarch64::gemm::GemmProblem> problem =
+      aarch64::gemm::readProblem(gemm);
+  FailureOr<aarch64::gemm::GemmCandidate> candidate =
+      aarch64::gemm::readCandidate(gemm);
+  if (failed(problem) || failed(candidate)) return failure();
+  if (failed(validateThreadTiling(gemm, *problem))) return failure();
 
-  // A finalized adaptive plan may select one thread even when the deployment
+  // Thread planning may select one thread even when the deployment
   // budget is larger. Keep that path entirely serial: cache blocking can
   // consume the original full GEMM once it is marked thread-tiled, while an
   // outlined one-item dispatcher only adds context and thread-pool overhead.
-  if (plan->threadCount == 1) {
+  if (candidate->threadCount == 1) {
     OpBuilder builder(gemm);
     aarch64::gemm::setStage(gemm, builder, aarch64::gemm::kThreadTiledStage);
     return success();
@@ -257,7 +263,7 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
                       unrankedF32MemRef);
   FunctionType taskType = builder.getFunctionType(taskInputs, {});
   func::FuncOp task;
-  if (failed(createThreadTask(module, gemm, *plan, taskType, task)))
+  if (failed(createThreadTask(module, gemm, *problem, *candidate, taskType, task)))
     return failure();
   func::FuncOp dispatcher =
       getOrCreateGemmParallelForDeclaration(module, taskType,
@@ -269,7 +275,7 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
       "value", FlatSymbolRefAttr::get(module.getContext(), task.getName()));
   Value taskReference = builder.create(state)->getResult(0);
   Value workCount = builder.create<arith::ConstantIntOp>(
-      loc, plan->tasksM * plan->tasksN, 64);
+      loc, candidate->tasksM * candidate->tasksN, 64);
   Value lhs = builder.create<memref::CastOp>(
       loc, dynamicF32MemRef, aarch64::gemm::getGemmInput(gemm, 0));
   Value rhs = builder.create<memref::CastOp>(
@@ -303,7 +309,7 @@ class AArch64GemmThreadTiling
     SmallVector<Operation *> candidates;
     getOperation().walk([&](Operation *op) {
       if (aarch64::gemm::isGemmAnchor(op) &&
-          op->hasAttr(aarch64::gemm::kPlanAttrName) &&
+          op->hasAttr(aarch64::gemm::kCandidateAttrName) &&
           !op->hasAttr(aarch64::gemm::kStageAttrName)) {
         candidates.push_back(op);
       }

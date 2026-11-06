@@ -3,6 +3,8 @@
 #include <limits>
 
 #include "../GemmPlan.h"
+#include "../GemmPacking.h"
+#include "GemmStrategyConfig.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -50,22 +52,6 @@ mlir::DictionaryAttr lookup(mlir::Operation *op, llvm::StringRef tableName,
   return result;
 }
 
-mlir::DictionaryAttr planDictionary(mlir::Operation *op) {
-  if (auto legacy = op->getAttrOfType<mlir::DictionaryAttr>(kPlanAttrName))
-    return legacy;
-  auto plan = lookup(op, kPlansAttrName,
-                     op->getAttrOfType<mlir::StringAttr>(kPlanAttrName));
-  if (!plan) return {};
-  auto strategy =
-      lookup(op, kStrategiesAttrName, plan.getAs<mlir::StringAttr>("strategy"));
-  if (!strategy) return {};
-  mlir::NamedAttrList merged(strategy);
-  for (auto attr : plan)
-    if (attr.getName() != "strategy")
-      merged.set(attr.getName(), attr.getValue());
-  return merged.getDictionary(op->getContext());
-}
-
 std::optional<GemmExecutionKind> parseExecutionKindName(llvm::StringRef name) {
   if (name == "gemm") return GemmExecutionKind::kGemm;
   if (name == "matrix-vector") return GemmExecutionKind::kMatrixVector;
@@ -77,13 +63,6 @@ std::optional<RhsPacking> parseRhsPackingName(llvm::StringRef name) {
   if (name == "direct") return RhsPacking::kDirect;
   if (name == "packed") return RhsPacking::kPacked;
   if (name == "prepacked") return RhsPacking::kPrepacked;
-  return std::nullopt;
-}
-
-std::optional<RhsPackSource> parseRhsPackSourceName(llvm::StringRef name) {
-  if (name == "none") return RhsPackSource::kNone;
-  if (name == "generated") return RhsPackSource::kGenerated;
-  if (name == "prepacked") return RhsPackSource::kPrepacked;
   return std::nullopt;
 }
 
@@ -154,9 +133,8 @@ mlir::FailureOr<GemmDataType> parseDataType(mlir::Operation *op,
 
 mlir::FailureOr<GemmCacheStrategyKind> parseCacheStrategy(
     mlir::Operation *op, mlir::DictionaryAttr dictionary,
-    llvm::StringRef stateName, bool allowLegacyFixed = false) {
+    llvm::StringRef stateName) {
   auto value = dictionary.getAs<mlir::StringAttr>("cache_strategy");
-  if (!value && allowLegacyFixed) return GemmCacheStrategyKind::kFixed;
   if (!value) {
     op->emitOpError() << "requires string field cache_strategy in "
                       << stateName;
@@ -171,9 +149,8 @@ mlir::FailureOr<GemmCacheStrategyKind> parseCacheStrategy(
 
 mlir::FailureOr<GemmKernelStrategyKind> parseKernelStrategy(
     mlir::Operation *op, mlir::DictionaryAttr dictionary,
-    llvm::StringRef stateName, bool allowLegacyFixed = false) {
+    llvm::StringRef stateName) {
   auto value = dictionary.getAs<mlir::StringAttr>("kernel_strategy");
-  if (!value && allowLegacyFixed) return GemmKernelStrategyKind::kFixed;
   if (!value) {
     op->emitOpError() << "requires string field kernel_strategy in "
                       << stateName;
@@ -231,18 +208,11 @@ mlir::FailureOr<GemmProblem> readProblem(mlir::Operation *op) {
 mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
     mlir::Operation *op, mlir::DictionaryAttr candidate) {
   if (!candidate) return mlir::failure();
-  static constexpr llvm::StringLiteral fields[] = {
-      "version", "mc", "nc", "kc", "mr", "panel_lanes"};
-  llvm::SmallVector<int64_t> values;
-  values.reserve(std::size(fields));
-  for (llvm::StringRef field : fields) {
-    mlir::FailureOr<int64_t> value = getPositiveI64(op, candidate, field);
-    if (mlir::failed(value)) return mlir::failure();
-    values.push_back(*value);
-  }
-  if (values[0] != kPlanVersion) {
+  auto version = getPositiveI64(op, candidate, "version");
+  if (mlir::failed(version)) return mlir::failure();
+  if (*version != kCandidateVersion) {
     op->emitOpError() << "requires " << kCandidateAttrName
-                      << ".version = " << kPlanVersion;
+                      << ".version = " << kCandidateVersion;
     return mlir::failure();
   }
   auto target = parseTarget(op, candidate, kCandidateAttrName);
@@ -259,14 +229,18 @@ mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
       getGemmKernelABI(*target, *isa, *dataType, *executionKind);
   if (mlir::failed(requireString(op, candidate, "kernel_family", abi.family)))
     return mlir::failure();
-  GemmKernelTile kernelTile{values[4], values[5]};
-  if (kernelTile.mr > abi.maxMr || kernelTile.panelLanes > abi.maxPanelLanes ||
-      mlir::failed(getGemmNr(kernelTile, abi.vectorLengthBytes, *dataType,
-                             *executionKind)) ||
-      (*executionKind != GemmExecutionKind::kGemm &&
-       (kernelTile.mr != abi.maxMr ||
-        kernelTile.panelLanes != abi.maxPanelLanes ||
-        *isa != GemmIsa::kNeon))) {
+  auto cacheParameters = candidate.getAs<mlir::DictionaryAttr>("cache_parameters");
+  auto kernelParameters = candidate.getAs<mlir::DictionaryAttr>("kernel_parameters");
+  if (!cacheParameters || !kernelParameters) {
+    op->emitOpError("requires strategy-specific parameter dictionaries");
+    return mlir::failure();
+  }
+  auto cache = decodeCacheStrategyParameters(op, *cacheStrategy, cacheParameters);
+  auto kernel = decodeKernelStrategyParameters(op, *kernelStrategy, kernelParameters);
+  if (mlir::failed(cache) || mlir::failed(kernel)) return mlir::failure();
+  if (!getGemmKernelTilingStrategy(kernel->kind)
+           .isValidForExecution(*kernel, *executionKind, *isa, *dataType,
+                                abi)) {
     op->emitOpError("has a tuning strategy unsupported by the kernel ABI");
     return mlir::failure();
   }
@@ -284,13 +258,19 @@ mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
     op->emitOpError("non-GEMM execution requires direct RHS");
     return mlir::failure();
   }
+  if (rhsPacking == RhsPacking::kPrepacked &&
+      !isRhsPrepackSupported(*cacheStrategy, *kernelStrategy)) {
+    op->emitOpError(
+        "prepacked RHS currently requires fixed cache and kernel strategies");
+    return mlir::failure();
+  }
   return GemmTuningStrategy{
       *target,
       *isa,
       *dataType,
       *executionKind,
-      GemmCacheStrategy{*cacheStrategy, {values[1], values[2], values[3]}},
-      GemmKernelStrategy{*kernelStrategy, kernelTile},
+      *cache,
+      *kernel,
       rhsPacking};
 }
 
@@ -376,180 +356,60 @@ mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op) {
                        shardByColumns};
 }
 
-mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op) {
-  auto plan = planDictionary(op);
-  if (!plan) {
-    op->emitOpError() << "requires " << kPlanAttrName;
+mlir::FailureOr<GemmExecutionContext> readExecutionContext(
+    mlir::Operation *op) {
+  auto problem = readProblem(op);
+  auto strategy = readStrategy(op);
+  if (mlir::failed(problem) || mlir::failed(strategy))
     return mlir::failure();
-  }
 
-  static constexpr llvm::StringLiteral fields[] = {
-      "version", "m",  "n",  "k",  "lda", "ldb", "ldc",
-      "mc",      "nc", "kc", "mr", "panel_lanes",
-      "vector_length_bytes", "thread_count"};
-  llvm::SmallVector<int64_t> values;
-  values.reserve(std::size(fields));
-  for (llvm::StringRef field : fields) {
-    mlir::FailureOr<int64_t> value = getPositiveI64(op, plan, field);
-    if (mlir::failed(value)) return mlir::failure();
-    values.push_back(*value);
-  }
-
-  for (llvm::StringRef field :
-       {llvm::StringRef("tasks_m"), llvm::StringRef("tasks_n")}) {
-    mlir::FailureOr<int64_t> value = getPositiveI64(op, plan, field);
-    if (mlir::failed(value)) return mlir::failure();
-    values.push_back(*value);
-  }
-
-  const bool legacyPlan =
-      op->getAttrOfType<mlir::DictionaryAttr>(kPlanAttrName) != nullptr;
-  const bool supportsLegacyPlan = legacyPlan && values[0] == 1;
-  if (values[0] != kPlanVersion && !supportsLegacyPlan) {
-    op->emitOpError() << "requires " << kPlanAttrName
-                      << ".version = " << kPlanVersion;
-    return mlir::failure();
-  }
-  if (mlir::failed(requireString(op, plan, "macro_order", "mkn")) ||
-      mlir::failed(requireString(op, plan, "first_kc_mode", "overwrite")) ||
-      mlir::failed(requireString(op, plan, "next_kc_mode", "accumulate")) ||
-      mlir::failed(requireString(op, plan, "thread_partition", "static-2d"))) {
-    return mlir::failure();
-  }
-  auto shard = plan.getAs<mlir::StringAttr>("shard_direction");
-  const bool shardByColumns = shard && shard.getValue() == "columns";
-  if (!shard || (!shardByColumns && shard.getValue() != "rows") ||
-      values[14] > values[1] || values[15] > values[2] ||
-      values[14] > std::numeric_limits<int64_t>::max() / values[15] ||
-      values[14] * values[15] != values[13]) {
-    op->emitOpError("has an inconsistent finalized task topology");
-    return mlir::failure();
-  }
-  mlir::FailureOr<GemmExecutionKind> executionKind =
-      parseExecutionKind(op, plan, kPlanAttrName);
-  if (mlir::failed(executionKind)) return mlir::failure();
-  auto rhsPackingValue = plan.getAs<mlir::StringAttr>(kRhsPackingAttrName);
-  if (!rhsPackingValue) {
-    op->emitOpError() << "requires string field " << kRhsPackingAttrName
-                      << " in " << kPlanAttrName;
-    return mlir::failure();
-  }
-  RhsPacking rhsPacking = RhsPacking::kPacked;
-  if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackingAttrName)) {
-    auto parsed = parseRhsPackingName(value.getValue());
-    if (!parsed) {
-      op->emitOpError() << "has unsupported rhs_packing " << value.getValue();
+  GemmExecutionContext context{*problem, *strategy};
+  if (context.strategy.rhsPacking == RhsPacking::kPrepacked) {
+    auto binding = op->getAttrOfType<mlir::DictionaryAttr>(kPrepackedRhsAttrName);
+    if (!binding) {
+      op->emitOpError("prepacked RHS requires a valid data binding");
       return mlir::failure();
     }
-    rhsPacking = *parsed;
-  }
-  RhsPackSource rhsPackSource = rhsPacking == RhsPacking::kPacked
-                                    ? RhsPackSource::kGenerated
-                                    : rhsPacking == RhsPacking::kPrepacked
-                                          ? RhsPackSource::kPrepacked
-                                          : RhsPackSource::kNone;
-  if (auto value = plan.getAs<mlir::StringAttr>(kRhsPackSourceAttrName)) {
-    auto parsed = parseRhsPackSourceName(value.getValue());
-    if (!parsed) {
-      op->emitOpError() << "has unsupported rhs_pack_source "
-                        << value.getValue();
-      return mlir::failure();
-    }
-    rhsPackSource = *parsed;
-  }
-  const bool sourceMatches =
-      (rhsPacking == RhsPacking::kDirect &&
-       rhsPackSource == RhsPackSource::kNone) ||
-      (rhsPacking == RhsPacking::kPacked &&
-       rhsPackSource == RhsPackSource::kGenerated) ||
-      (rhsPacking == RhsPacking::kPrepacked &&
-       rhsPackSource == RhsPackSource::kPrepacked);
-  if (!sourceMatches ||
-      (executionKind != GemmExecutionKind::kGemm &&
-       rhsPacking != RhsPacking::kDirect)) {
-    op->emitOpError("has an invalid execution/RHS representation combination");
-    return mlir::failure();
-  }
-  mlir::FailureOr<GemmDataType> dataType =
-      parseDataType(op, plan, kPlanAttrName);
-  if (mlir::failed(dataType)) return mlir::failure();
-  mlir::FailureOr<GemmCacheStrategyKind> cacheStrategy =
-      parseCacheStrategy(op, plan, kPlanAttrName, supportsLegacyPlan);
-  mlir::FailureOr<GemmKernelStrategyKind> kernelStrategy =
-      parseKernelStrategy(op, plan, kPlanAttrName, supportsLegacyPlan);
-  if (mlir::failed(cacheStrategy) || mlir::failed(kernelStrategy))
-    return mlir::failure();
-  GemmKernelTile kernelTile{values[10], values[11]};
-  if (mlir::failed(
-          getGemmNr(kernelTile, values[12], *dataType, *executionKind))) {
-    op->emitOpError("has an invalid GEMM kernel tile shape");
-    return mlir::failure();
-  }
-
-  return GemmTilingPlan{
-      values[0],          values[1],
-      values[2],          values[3],
-      values[4],          values[5],
-      values[6],          *cacheStrategy,
-      GemmCacheTile{values[7], values[8], values[9]}, *kernelStrategy,
-      kernelTile,         *dataType,
-      values[12],         values[13],
-      values[14],         values[15],
-      shardByColumns,
-      KcMode::kOverwrite, KcMode::kAccumulate,
-      *executionKind,     rhsPacking,
-      rhsPackSource};
-}
-
-mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op) {
-  mlir::FailureOr<GemmTilingPlan> tiling = readTilingPlan(op);
-  if (mlir::failed(tiling)) return mlir::failure();
-  auto plan = planDictionary(op);
-  mlir::FailureOr<GemmTarget> target =
-      parseTarget(op, plan, kPlanAttrName);
-  mlir::FailureOr<GemmIsa> isa = parseIsa(op, plan, kPlanAttrName);
-  if (mlir::failed(target) || mlir::failed(isa)) return mlir::failure();
-  const GemmKernelABI &abi = getGemmKernelABI(
-      *target, *isa, tiling->dataType, tiling->executionKind);
-  if (tiling->vectorLengthBytes != abi.vectorLengthBytes ||
-      tiling->kernelTile.mr > abi.maxMr ||
-      tiling->kernelTile.panelLanes > abi.maxPanelLanes) {
-    op->emitOpError("has a plan unsupported by the selected kernel ABI");
-    return mlir::failure();
-  }
-  if (mlir::failed(requireString(op, plan, "kernel_family", abi.family)))
-    return mlir::failure();
-  std::string prepackedSymbol;
-  int64_t prepackedElements = 0;
-  if (tiling->rhsPacking == RhsPacking::kPrepacked) {
-    auto symbol = plan.getAs<mlir::StringAttr>("rhs_data_symbol");
-    auto elements = plan.getAs<mlir::IntegerAttr>("rhs_data_elements");
+    auto symbol = binding.getAs<mlir::StringAttr>("data_symbol");
+    auto elements = binding.getAs<mlir::IntegerAttr>("data_elements");
     if (!symbol || symbol.getValue().empty() || !elements ||
         elements.getInt() <= 0) {
-      op->emitOpError(
-          "prepacked RHS requires rhs_data_symbol and rhs_data_elements");
+      op->emitOpError("prepacked RHS requires a valid data binding");
       return mlir::failure();
     }
-    prepackedSymbol = symbol.getValue().str();
-    prepackedElements = elements.getInt();
+    if (!isRhsPrepackSupported(context.strategy.cache.kind,
+                               context.strategy.kernel.kind)) {
+      op->emitOpError(
+          "prepacked RHS currently requires fixed cache and kernel strategies");
+      return mlir::failure();
+    }
+    const auto &cache = getFixedCacheParameters(context.strategy.cache);
+    int64_t expectedElements = 0;
+    const GemmKernelABI &abi = getGemmKernelABI(context.strategy);
+    for (const auto &block : partitionCache2D(
+             problem->k, problem->n, cache.kc, cache.nc))
+      expectedElements +=
+          getGemmPackedBElements(abi, block.kSize, block.nSize);
+    const std::pair<llvm::StringRef, int64_t> fields[] = {
+        {"version", kPrepackedRhsVersion},
+        {"k", problem->k},
+        {"n", problem->n},
+        {"kc", cache.kc},
+        {"nc", cache.nc},
+        {"data_elements", expectedElements}};
+    for (const auto &[name, expected] : fields) {
+      auto value = binding.getAs<mlir::IntegerAttr>(name);
+      if (!value || value.getInt() != expected) {
+        op->emitOpError() << "prepacked RHS binding field " << name
+                          << " does not match the selected strategy";
+        return mlir::failure();
+      }
+    }
+    context.prepackedRhsSymbol = symbol.getValue().str();
+    context.prepackedRhsElements = elements.getInt();
+    context.prepackedRhsFromInput = binding.get("input") != nullptr;
   }
-  if (tiling->executionKind == GemmExecutionKind::kMatrixVector &&
-      (tiling->kernelTile.mr != 4 || tiling->kernelTile.panelLanes != 1 ||
-       *isa != GemmIsa::kNeon)) {
-    op->emitOpError("has an invalid matrix-vector kernel tile or ISA");
-    return mlir::failure();
-  }
-  if (tiling->executionKind == GemmExecutionKind::kVectorMatrix &&
-      (tiling->m != 1 || tiling->kernelTile.mr != 1 ||
-       tiling->kernelTile.panelLanes != 4 || *isa != GemmIsa::kNeon)) {
-    op->emitOpError(
-        "has an invalid vector-matrix problem, kernel tile, or ISA");
-    return mlir::failure();
-  }
-  GemmPlan result{*tiling, *target, *isa, std::move(prepackedSymbol),
-                  prepackedElements};
-  result.prepackedRhsFromInput = plan.get("rhs_data_input") != nullptr;
-  return result;
+  return context;
 }
 
 mlir::FailureOr<GemmTuningStrategy> readStrategy(mlir::Operation *op) {
@@ -558,22 +418,6 @@ mlir::FailureOr<GemmTuningStrategy> readStrategy(mlir::Operation *op) {
     if (auto candidate =
             op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName))
       reference = candidate.getAs<mlir::StringAttr>("strategy");
-    else if (auto plan = op->getAttrOfType<mlir::StringAttr>(kPlanAttrName)) {
-      auto entry = lookup(op, kPlansAttrName, plan);
-      if (entry) reference = entry.getAs<mlir::StringAttr>("strategy");
-    }
-  }
-  if (!reference && op->getAttrOfType<mlir::DictionaryAttr>(kPlanAttrName)) {
-    auto plan = readPlan(op);
-    if (mlir::failed(plan)) return mlir::failure();
-    return GemmTuningStrategy{
-        plan->target,
-        plan->isa,
-        plan->dataType,
-        plan->executionKind,
-        {plan->cacheStrategyKind, plan->cacheTile},
-        {plan->kernelStrategyKind, plan->kernelTile},
-        plan->rhsPacking};
   }
   auto strategy = lookup(op, kStrategiesAttrName, reference);
   if (!strategy) return mlir::failure();
@@ -602,7 +446,7 @@ void writeThreadPlanningInput(mlir::Operation *op,
   const auto &strategy = input.strategy;
   const auto &abi = getGemmKernelABI(strategy);
   auto strategyAttr = builder.getDictionaryAttr(
-      {builder.getNamedAttr("version", builder.getI64IntegerAttr(kPlanVersion)),
+      {builder.getNamedAttr("version", builder.getI64IntegerAttr(kCandidateVersion)),
        builder.getNamedAttr(
            "target_arch",
            builder.getStringAttr(getGemmTargetName(strategy.target))),
@@ -618,17 +462,10 @@ void writeThreadPlanningInput(mlir::Operation *op,
                             builder.getStringAttr(getGemmKernelStrategyName(
                                 strategy.kernel.kind))),
        builder.getNamedAttr("kernel_family", builder.getStringAttr(abi.family)),
-       builder.getNamedAttr("mc",
-                            builder.getI64IntegerAttr(strategy.cache.tile.mc)),
-       builder.getNamedAttr("nc",
-                            builder.getI64IntegerAttr(strategy.cache.tile.nc)),
-       builder.getNamedAttr("kc",
-                            builder.getI64IntegerAttr(strategy.cache.tile.kc)),
-       builder.getNamedAttr("mr",
-                            builder.getI64IntegerAttr(strategy.kernel.tile.mr)),
-       builder.getNamedAttr(
-           "panel_lanes",
-           builder.getI64IntegerAttr(strategy.kernel.tile.panelLanes)),
+       builder.getNamedAttr("cache_parameters",
+                            encodeCacheStrategyParameters(builder, strategy.cache)),
+       builder.getNamedAttr("kernel_parameters",
+                            encodeKernelStrategyParameters(builder, strategy.kernel)),
        builder.getNamedAttr("execution_kind",
                             builder.getStringAttr(getGemmExecutionKindName(
                                 strategy.executionKind))),
@@ -663,7 +500,7 @@ void writeThreadPlanningInput(mlir::Operation *op,
   op->setAttr(kCandidateAttrName,
               builder.getDictionaryAttr(
                   {builder.getNamedAttr(
-                       "version", builder.getI64IntegerAttr(kPlanVersion)),
+                       "version", builder.getI64IntegerAttr(kCandidateVersion)),
                    builder.getNamedAttr("planning_state",
                                         builder.getStringAttr("input")),
                    builder.getNamedAttr("strategy", strategyRef),
@@ -700,7 +537,7 @@ void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing) {
   mlir::Builder builder(op->getContext());
   const auto &abi = getGemmKernelABI(*strategy);
   auto strategyAttr = builder.getDictionaryAttr(
-      {builder.getNamedAttr("version", builder.getI64IntegerAttr(kPlanVersion)),
+      {builder.getNamedAttr("version", builder.getI64IntegerAttr(kCandidateVersion)),
        builder.getNamedAttr(
            "target_arch",
            builder.getStringAttr(getGemmTargetName(strategy->target))),
@@ -716,17 +553,10 @@ void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing) {
                             builder.getStringAttr(getGemmKernelStrategyName(
                                 strategy->kernel.kind))),
        builder.getNamedAttr("kernel_family", builder.getStringAttr(abi.family)),
-       builder.getNamedAttr("mc",
-                            builder.getI64IntegerAttr(strategy->cache.tile.mc)),
-       builder.getNamedAttr("nc",
-                            builder.getI64IntegerAttr(strategy->cache.tile.nc)),
-       builder.getNamedAttr("kc",
-                            builder.getI64IntegerAttr(strategy->cache.tile.kc)),
-       builder.getNamedAttr(
-           "mr", builder.getI64IntegerAttr(strategy->kernel.tile.mr)),
-       builder.getNamedAttr(
-           "panel_lanes",
-           builder.getI64IntegerAttr(strategy->kernel.tile.panelLanes)),
+       builder.getNamedAttr("cache_parameters",
+                            encodeCacheStrategyParameters(builder, strategy->cache)),
+       builder.getNamedAttr("kernel_parameters",
+                            encodeKernelStrategyParameters(builder, strategy->kernel)),
        builder.getNamedAttr("execution_kind",
                             builder.getStringAttr(getGemmExecutionKindName(
                                 strategy->executionKind))),
@@ -743,25 +573,6 @@ void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing) {
   op->setAttr(kCandidateAttrName, attrs.getDictionary(op->getContext()));
 }
 
-void writePlan(mlir::Operation *op, mlir::DictionaryAttr plan) {
-  mlir::NamedAttrList planEntry(plan);
-  if (auto candidate =
-          op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName))
-    if (auto strategy = candidate.get("strategy"))
-      planEntry.set("strategy", strategy);
-  for (llvm::StringRef field :
-       {"target_arch", "isa", "data_type", "kernel_family", "execution_kind",
-        "mc", "nc", "kc", "mr", "panel_lanes", "rhs_packing"})
-    planEntry.erase(field);
-  auto reference = intern(metadataOwner(op), kPlansAttrName, "p",
-                          planEntry.getDictionary(op->getContext()));
-  op->setAttr(kPlanAttrName, reference);
-  op->removeAttr(kProblemAttrName);
-  op->removeAttr(kCandidateAttrName);
-  op->removeAttr(kPrepackedRhsAttrName);
-  op->removeAttr(kRhsNameAttrName);
-}
-
 void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest) {
   if (auto reference = source->getAttr(kStrategyAttrName)) {
     dest->setAttr(kStrategyAttrName, reference);
@@ -773,13 +584,6 @@ void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest) {
       dest->setAttr(kStrategyAttrName, reference);
     return;
   }
-  auto planRef = source->getAttrOfType<mlir::StringAttr>(kPlanAttrName);
-  auto plan = planRef
-                  ? lookup(source, kPlansAttrName, planRef)
-                  : source->getAttrOfType<mlir::DictionaryAttr>(kPlanAttrName);
-  if (plan)
-    if (auto reference = plan.get("strategy"))
-      dest->setAttr(kStrategyAttrName, reference);
 }
 
 void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination) {
@@ -787,8 +591,7 @@ void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination) {
   auto *destinationOwner = metadataOwner(destination);
   if (!sourceOwner || !destinationOwner || sourceOwner == destinationOwner)
     return;
-  for (llvm::StringRef name :
-       {kStrategiesAttrName, kCostModelsAttrName, kPlansAttrName})
+  for (llvm::StringRef name : {kStrategiesAttrName, kCostModelsAttrName})
     if (auto attr = sourceOwner->getAttr(name))
       destinationOwner->setAttr(name, attr);
 }
@@ -801,14 +604,13 @@ mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,
   mlir::Builder builder(op->getContext());
   mlir::NamedAttrList contract;
   contract.append("version", builder.getI64IntegerAttr(kPrepackedRhsVersion));
-  if (auto candidate =
-          op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName)) {
-    auto strategy = lookup(op, kStrategiesAttrName,
-                           candidate.getAs<mlir::StringAttr>("strategy"));
-    if (auto nc = strategy.getAs<mlir::IntegerAttr>("nc"))
-      contract.append("nc", nc);
-    if (auto kc = strategy.getAs<mlir::IntegerAttr>("kc"))
-      contract.append("kc", kc);
+  auto strategy = readStrategy(op);
+  if (mlir::succeeded(strategy)) {
+    if (strategy->cache.kind == GemmCacheStrategyKind::kFixed) {
+      const auto &tile = getFixedCacheParameters(strategy->cache);
+      contract.append("nc", builder.getI64IntegerAttr(tile.nc));
+      contract.append("kc", builder.getI64IntegerAttr(tile.kc));
+    }
   }
   contract.append("k", builder.getI64IntegerAttr(k));
   contract.append("n", builder.getI64IntegerAttr(n));
@@ -819,14 +621,13 @@ mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,
 }
 
 void pruneGemmMetadata(mlir::Operation *owner) {
-  llvm::StringSet<> plans, strategies, costs;
+  llvm::StringSet<> strategies, costs;
   auto retain = [](llvm::StringSet<> &ids, mlir::Attribute attr) {
     if (auto reference = llvm::dyn_cast_or_null<mlir::StringAttr>(attr))
       ids.insert(reference.getValue());
   };
   owner->walk([&](mlir::Operation *op) {
     if (metadataOwner(op) != owner) return;
-    retain(plans, op->getAttr(kPlanAttrName));
     retain(strategies, op->getAttr(kStrategyAttrName));
     if (auto candidate =
             op->getAttrOfType<mlir::DictionaryAttr>(kCandidateAttrName)) {
@@ -834,14 +635,8 @@ void pruneGemmMetadata(mlir::Operation *owner) {
       retain(costs, candidate.get("cost_model"));
     }
   });
-  if (auto table = owner->getAttrOfType<mlir::DictionaryAttr>(kPlansAttrName))
-    for (auto entry : table)
-      if (plans.contains(entry.getName().getValue()))
-        if (auto plan = llvm::dyn_cast<mlir::DictionaryAttr>(entry.getValue()))
-          retain(strategies, plan.get("strategy"));
   for (auto [name, live] :
-       {std::pair<llvm::StringRef, llvm::StringSet<> *>{kPlansAttrName, &plans},
-        {kStrategiesAttrName, &strategies},
+       {std::pair<llvm::StringRef, llvm::StringSet<> *>{kStrategiesAttrName, &strategies},
         {kCostModelsAttrName, &costs}}) {
     auto table = owner->getAttrOfType<mlir::DictionaryAttr>(name);
     if (!table) continue;

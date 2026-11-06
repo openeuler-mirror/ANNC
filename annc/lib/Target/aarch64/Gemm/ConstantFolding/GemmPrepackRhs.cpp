@@ -39,7 +39,7 @@ std::vector<float> packGemmLayout(
   const GemmKernelABI &abi = getGemmKernelABI(
       config.target, config.isa, config.dataType, GemmExecutionKind::kGemm);
   const std::vector<CacheBlock2D> blocks =
-      partitionCache2D(k, n, config.cache.tile.kc, config.cache.tile.nc);
+      partitionCache2D(k, n, getFixedCacheParameters(config.cache).kc, getFixedCacheParameters(config.cache).nc);
   int64_t total = 0;
   for (const CacheBlock2D &block : blocks)
     total += getGemmPackedBElements(abi, block.kSize, block.nSize);
@@ -85,7 +85,7 @@ llvm::Error writePackedDataFile(
 }
 
 // The contract records the candidate fields that determine the packed-B
-// layout; aarch64-finalize-gemm-plan rejects a plan whose candidate drifted.
+// layout; the binding is checked against the selected fixed strategy before use.
 DictionaryAttr buildPrepackedContract(
     OpBuilder &builder, const aarch64::gemm::GemmTuningConfig &tuning,
     int64_t k, int64_t n, llvm::StringRef dataSymbol, size_t dataElements) {
@@ -94,8 +94,8 @@ DictionaryAttr buildPrepackedContract(
   contract.append("version", builder.getI64IntegerAttr(kPrepackedRhsVersion));
   contract.append("k", builder.getI64IntegerAttr(k));
   contract.append("n", builder.getI64IntegerAttr(n));
-  contract.append("nc", builder.getI64IntegerAttr(tuning.cache.tile.nc));
-  contract.append("kc", builder.getI64IntegerAttr(tuning.cache.tile.kc));
+  contract.append("nc", builder.getI64IntegerAttr(getFixedCacheParameters(tuning.cache).nc));
+  contract.append("kc", builder.getI64IntegerAttr(getFixedCacheParameters(tuning.cache).kc));
   contract.append("data_symbol", builder.getStringAttr(dataSymbol));
   contract.append("data_elements", builder.getI64IntegerAttr(
                                        static_cast<int64_t>(dataElements)));

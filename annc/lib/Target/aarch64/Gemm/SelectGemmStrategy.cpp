@@ -20,29 +20,51 @@ LogicalResult selectGemmStrategy(
     Operation *op, int64_t intraThreadCount,
     const aarch64::gemm::GemmTuningConfig &config, bool enablePrepack) {
   if (!op->hasAttr(aarch64::gemm::kProblemAttrName)) return success();
-  if (op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
-      op->hasAttr(aarch64::gemm::kPlanAttrName)) {
-    return op->emitOpError("already has a GEMM candidate or finalized plan");
+  if (op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
+    return op->emitOpError("already has a GEMM candidate");
   }
   FailureOr<aarch64::gemm::GemmProblem> problem =
       aarch64::gemm::readProblem(op);
   if (failed(problem)) return failure();
 
-  auto selection = aarch64::gemm::selectGemmPath(
-      config.isa, problem->m, problem->n, problem->k, enablePrepack,
-      op->hasAttr(aarch64::gemm::kRhsNameAttrName));
+  const auto selectPath = [&](bool allowSpecialized) {
+    return aarch64::gemm::selectGemmPath(
+        config.isa, problem->m, problem->n, problem->k, enablePrepack,
+        op->hasAttr(aarch64::gemm::kRhsNameAttrName), allowSpecialized);
+  };
+  const auto &kernelPolicy =
+      aarch64::gemm::getGemmKernelTilingStrategy(config.kernel.kind);
+  const auto configureKernel = [&](aarch64::gemm::GemmExecutionKind kind)
+      -> std::optional<aarch64::gemm::GemmKernelStrategy> {
+    const auto &abi = aarch64::gemm::getGemmKernelABI(
+        config.target, config.isa, config.dataType, kind);
+    auto kernel = kernelPolicy.configureForExecution(config.kernel, kind,
+                                                     config.isa, abi);
+    if (!kernel || !kernelPolicy.isValidForExecution(
+                       *kernel, kind, config.isa, config.dataType, abi))
+      return std::nullopt;
+    return kernel;
+  };
+  auto selection = selectPath(true);
   if (op->hasAttr(atir::kGemmEpilogueAttr) &&
       selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm &&
       (selection.executionKind !=
            aarch64::gemm::GemmExecutionKind::kMatrixVector ||
-       !epilogueMatvecEnabled())) {
+       !epilogueMatvecEnabled()))
     selection.executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
+  auto kernel = configureKernel(selection.executionKind);
+  if (!kernel &&
+      selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm) {
+    selection = selectPath(false);
+    kernel = configureKernel(selection.executionKind);
   }
-  aarch64::gemm::GemmKernelTile kernelTile = config.kernel.tile;
-  if (selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm) {
-    const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
-        config.target, config.isa, config.dataType, selection.executionKind);
-    kernelTile = {abi.maxMr, abi.maxPanelLanes};
+  if (!kernel)
+    return op->emitOpError("has a tuning strategy unsupported by the kernel ABI");
+  if (selection.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked &&
+      !aarch64::gemm::isRhsPrepackSupported(config.cache.kind,
+                                           kernel->kind)) {
+    return op->emitOpError(
+        "prepacked RHS currently requires fixed cache and kernel strategies");
   }
   aarch64::gemm::writeThreadPlanningInput(op,
                                           {{config.target,
@@ -50,7 +72,7 @@ LogicalResult selectGemmStrategy(
                                             config.dataType,
                                             selection.executionKind,
                                             config.cache,
-                                            {config.kernel.kind, kernelTile},
+                                            *kernel,
                                             selection.rhsPacking},
                                            config.costModel,
                                            intraThreadCount});

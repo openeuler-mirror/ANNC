@@ -31,7 +31,6 @@ std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(
     llvm::StringRef configPath, bool enablePrepack, int64_t intraThreadCount);
 std::unique_ptr<mlir::Pass> createAArch64GemmThreadPlanning();
-std::unique_ptr<mlir::Pass> createAArch64FinalizeGemmPlan();
 std::unique_ptr<mlir::Pass> createAArch64GemmThreadTiling();
 std::unique_ptr<mlir::Pass> createAArch64GemmCacheBlocking();
 std::unique_ptr<mlir::Pass> createAArch64GemmKernelTiling();
