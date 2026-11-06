@@ -167,6 +167,14 @@ target_include_directories(gemm_thread_planner_test PRIVATE
 )
 target_link_libraries(gemm_thread_planner_test PRIVATE AArch64Codegen)
 
+annc_add_kernel_gtest(gemm_tiling_strategy_test
+    gemm_tiling_strategy_test.cpp
+)
+target_include_directories(gemm_tiling_strategy_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/annc/lib/Target/aarch64/Gemm"
+)
+target_link_libraries(gemm_tiling_strategy_test PRIVATE AArch64Codegen)
+
 annc_add_kernel_gtest(builtin_shared_spec_test
     builtin_shared_spec_test.cpp
     "${ANNC_BUILTIN_KERNEL_WRAPPERS_GEN}"
