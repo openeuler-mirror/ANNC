@@ -1,4 +1,5 @@
 #include "GemmPlan.h"
+#include "GemmPacking.h"
 #include "Target/aarch64/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
@@ -35,15 +36,12 @@ LogicalResult appendPrepackedPlanFields(
   const auto &abi = aarch64::gemm::getGemmKernelABI(
       strategy.target, strategy.isa, strategy.dataType,
       strategy.executionKind);
-  // Recompute the packed-B size from the candidate geometry; the SVE panel
-  // width rounds each N block up to the vector length.
-  const int64_t panel =
-      strategy.isa == aarch64::gemm::GemmIsa::kSve ? abi.vectorLengthBytes : 4;
   int64_t expectedElements = 0;
   for (const auto &block : aarch64::gemm::partitionCache2D(
-           problem.k, problem.n, strategy.cacheTile.kc, strategy.cacheTile.nc))
+           problem.k, problem.n, strategy.cache.tile.kc,
+           strategy.cache.tile.nc))
     expectedElements +=
-        block.kSize * ((block.nSize + panel - 1) / panel) * panel;
+        aarch64::gemm::getGemmPackedBElements(abi, block.kSize, block.nSize);
 
   // Every contract field that influences the packed-B layout must match the
   // candidate exactly; a drift means the prepacked data is unusable.  The
@@ -52,8 +50,8 @@ LogicalResult appendPrepackedPlanFields(
       {"version", aarch64::gemm::kPrepackedRhsVersion},
       {"k", problem.k},
       {"n", problem.n},
-      {"nc", strategy.cacheTile.nc},
-      {"kc", strategy.cacheTile.kc},
+      {"nc", strategy.cache.tile.nc},
+      {"kc", strategy.cache.tile.kc},
       {"data_elements", expectedElements}};
   for (const auto &field : i64Fields) {
     auto value = contract.getAs<IntegerAttr>(field.first);
@@ -89,8 +87,7 @@ LogicalResult finalizeGemmPlan(Operation *op) {
       aarch64::gemm::readCandidate(op);
   if (failed(problem) || failed(candidate)) return failure();
   const aarch64::gemm::GemmTuningStrategy &strategy = candidate->strategy;
-  if (strategy.maxThreadCount < candidate->threadCount ||
-      candidate->tasksM > problem->m || candidate->tasksN > problem->n) {
+  if (candidate->tasksM > problem->m || candidate->tasksN > problem->n) {
     return op->emitOpError("has an invalid AArch64 GEMM candidate task grid");
   }
   const int64_t workItems = candidate->tasksM * candidate->tasksN;
@@ -122,11 +119,11 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendI64(plan, builder, "lda", problem->lda);
   appendI64(plan, builder, "ldb", problem->ldb);
   appendI64(plan, builder, "ldc", problem->ldc);
-  appendI64(plan, builder, "mc", strategy.cacheTile.mc);
-  appendI64(plan, builder, "nc", strategy.cacheTile.nc);
-  appendI64(plan, builder, "kc", strategy.cacheTile.kc);
-  appendI64(plan, builder, "mr", strategy.kernelTile.mr);
-  appendI64(plan, builder, "panel_lanes", strategy.kernelTile.panelLanes);
+  appendI64(plan, builder, "mc", strategy.cache.tile.mc);
+  appendI64(plan, builder, "nc", strategy.cache.tile.nc);
+  appendI64(plan, builder, "kc", strategy.cache.tile.kc);
+  appendI64(plan, builder, "mr", strategy.kernel.tile.mr);
+  appendI64(plan, builder, "panel_lanes", strategy.kernel.tile.panelLanes);
   appendString(plan, builder, "macro_order", "mkn");
   appendString(plan, builder, "micro_order", "mn");
   switch (strategy.rhsPacking) {
@@ -159,10 +156,7 @@ LogicalResult finalizeGemmPlan(Operation *op) {
   appendString(plan, builder, "thread_partition", "static-2d");
   appendString(plan, builder, "first_kc_mode", "overwrite");
   appendString(plan, builder, "next_kc_mode", "accumulate");
-  op->setDiscardableAttr(aarch64::gemm::kPlanAttrName,
-                         plan.getDictionary(op->getContext()));
-  op->removeDiscardableAttr(aarch64::gemm::kProblemAttrName);
-  op->removeDiscardableAttr(aarch64::gemm::kCandidateAttrName);
+  aarch64::gemm::writePlan(op, plan.getDictionary(op->getContext()));
   return success();
 }
 
@@ -179,7 +173,10 @@ class AArch64FinalizeGemmPlan
       return failed(finalizeGemmPlan(op)) ? WalkResult::interrupt()
                                           : WalkResult::advance();
     });
-    if (result.wasInterrupted()) signalPassFailure();
+    if (result.wasInterrupted())
+      signalPassFailure();
+    else
+      aarch64::gemm::pruneGemmMetadata(getOperation());
   }
 };
 

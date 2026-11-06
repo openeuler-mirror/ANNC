@@ -21,6 +21,13 @@ inline constexpr llvm::StringLiteral kProblemAttrName =
 inline constexpr llvm::StringLiteral kCandidateAttrName =
     "annc.aarch64.gemm_candidate";
 inline constexpr llvm::StringLiteral kPlanAttrName = "annc.aarch64.gemm_plan";
+inline constexpr llvm::StringLiteral kStrategyAttrName =
+    "annc.aarch64.gemm_strategy";
+inline constexpr llvm::StringLiteral kStrategiesAttrName =
+    "annc.aarch64.gemm_strategies";
+inline constexpr llvm::StringLiteral kCostModelsAttrName =
+    "annc.aarch64.gemm_cost_models";
+inline constexpr llvm::StringLiteral kPlansAttrName = "annc.aarch64.gemm_plans";
 inline constexpr llvm::StringLiteral kStageAttrName = "annc.aarch64.gemm_stage";
 inline constexpr llvm::StringLiteral kKcModeAttrName = "annc.aarch64.kc_mode";
 inline constexpr llvm::StringLiteral kAsmSymbolAttrName =
@@ -101,9 +108,10 @@ inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
 
 // The external tuning JSON schema version is independent from the serialized
 // internal GEMM plan version below.
-inline constexpr int64_t kTuningConfigVersion = 2;
-inline constexpr int64_t kPlanVersion = 1;
-inline constexpr int64_t kPrepackedRhsVersion = 1;
+inline constexpr int64_t kTuningConfigVersion = 3;
+inline constexpr int64_t kProblemVersion = 1;
+inline constexpr int64_t kPlanVersion = 4;
+inline constexpr int64_t kPrepackedRhsVersion = 2;
 // Constant RHS matrices below this K*N threshold stay on the direct path.
 inline constexpr int64_t kMinPrepackedRhsElements = 300;
 // Problems up to this many FMAs keep the RHS in its original row-major layout
@@ -130,8 +138,8 @@ struct GemmTuningConfig {
   GemmTarget target;
   GemmIsa isa;
   GemmDataType dataType;
-  GemmCacheTile cacheTile;
-  GemmKernelTile kernelTile;
+  GemmCacheStrategy cache;
+  GemmKernelStrategy kernel;
   // Execution tiles remain the user configuration. The worker planner consumes
   // these exact values; it does not derive an independent cache-blocking plan.
   GemmThreadPlannerCostModel costModel;
@@ -144,6 +152,8 @@ struct GemmKernelABI {
   int64_t maxPanelLanes;
   // Number of vector registers consumed by one fixed-count K iteration.
   int64_t kVectorUnroll;
+  // Number of vector-length-wide streams stored in one packed-B panel.
+  int64_t packedBStreams;
 };
 
 struct GemmDataTypeInfo {
@@ -185,28 +195,29 @@ enum class RhsPacking { kDirect, kPacked, kPrepacked };
 enum class KcMode { kOverwrite, kAccumulate };
 enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
-// The tuning strategy serialized on a GEMM candidate: the kernel environment
-// (target, ISA, data type, execution kind), the L2 cache-blocking tile
-// (mc/nc/kc), the register-level kernel tile (mr/panel_lanes), the thread
-// budget, and the RHS layout choice. SelectGemmStrategy writes it from the
-// external tuning config; every later planning stage re-reads and
-// re-validates it against the kernel ABI. Objective problem inputs (M/N/K and
-// leading dimensions) live in GemmProblem instead.
+// Reusable tuning choices. The problem, thread budget, and cost model remain
+// separate inputs to planning.
 struct GemmTuningStrategy {
   GemmTarget target;
   GemmIsa isa;
   GemmDataType dataType;
   GemmExecutionKind executionKind;
-  GemmCacheTile cacheTile;
-  GemmKernelTile kernelTile;
-  int64_t maxThreadCount;
+  GemmCacheStrategy cache;
+  GemmKernelStrategy kernel;
   RhsPacking rhsPacking;
 };
 
-// A tuning strategy plus the planner cost model, before thread planning.
-struct GemmPlanningPolicy {
+inline const GemmKernelABI &getGemmKernelABI(
+    const GemmTuningStrategy &strategy) {
+  return getGemmKernelABI(strategy.target, strategy.isa, strategy.dataType,
+                          strategy.executionKind);
+}
+
+// Inputs to thread planning: selected tuning, cost model, and thread budget.
+struct GemmThreadPlanningInput {
   GemmTuningStrategy strategy;
   GemmThreadPlannerCostModel costModel;
+  int64_t maxThreadCount;
 };
 
 // A tuning strategy plus the planned static task topology, after thread
@@ -227,7 +238,9 @@ struct GemmTilingPlan {
   int64_t lda;
   int64_t ldb;
   int64_t ldc;
+  GemmCacheStrategyKind cacheStrategyKind;
   GemmCacheTile cacheTile;
+  GemmKernelStrategyKind kernelStrategyKind;
   GemmKernelTile kernelTile;
   GemmDataType dataType;
   int64_t vectorLengthBytes;
@@ -247,19 +260,37 @@ struct GemmPlan : GemmTilingPlan {
   GemmIsa isa;
   std::string prepackedRhsSymbol;
   int64_t prepackedRhsElements = 0;
+  bool prepackedRhsFromInput = false;
 };
 
 bool isGemmAnchor(mlir::Operation *op);
 mlir::Value getGemmInput(mlir::Operation *op, unsigned index);
 mlir::Value getGemmOutput(mlir::Operation *op, unsigned index);
 mlir::FailureOr<GemmProblem> readProblem(mlir::Operation *op);
-// Reads and validates the strategy fields shared by every planning stage.
+mlir::FailureOr<GemmTuningStrategy> readStrategy(mlir::Operation *op);
 mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
     mlir::Operation *op, mlir::DictionaryAttr candidate);
-mlir::FailureOr<GemmPlanningPolicy> readPlanningPolicy(mlir::Operation *op);
+mlir::FailureOr<GemmThreadPlanningInput> readThreadPlanningInput(
+    mlir::Operation *op);
 mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op);
 mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op);
 mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op);
+void writeProblem(mlir::Operation *op, const GemmProblem &problem);
+void writeThreadPlanningInput(mlir::Operation *op,
+                              const GemmThreadPlanningInput &input);
+void writeCandidate(mlir::Operation *op,
+                    const GemmThreadPlanningResult &result);
+void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing);
+void writePlan(mlir::Operation *op, mlir::DictionaryAttr plan);
+void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest);
+void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination);
+mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,
+                                               int64_t n,
+                                               llvm::StringRef symbol,
+                                               int64_t elements,
+                                               bool fromInput = false);
+void pruneGemmMetadata(mlir::Operation *owner);
+void pruneGemmMetadata(mlir::ModuleOp module);
 llvm::StringRef getGemmTargetName(GemmTarget target);
 llvm::StringRef getGemmIsaName(GemmIsa isa);
 llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind);

@@ -4,6 +4,7 @@
 #include <set>
 
 #include "../GemmPlan.h"
+#include "../GemmPacking.h"
 #include "Kernel/PackedRhs.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -82,11 +83,7 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
           type.getLayout().isIdentity() && type.getElementType().isF32() &&
           inputs.count(argument.getArgNumber());
       if (!eligible) {
-        NamedAttrList attrs(
-            op->getAttrOfType<DictionaryAttr>(kCandidateAttrName));
-        attrs.set("rhs_packing", builder.getStringAttr("packed"));
-        op->setAttr(kCandidateAttrName,
-                    attrs.getDictionary(module.getContext()));
+        setCandidateRhsPacking(op, RhsPacking::kPacked);
         return;
       }
       const auto& strategy = candidate->strategy;
@@ -98,10 +95,10 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
           argument.getArgNumber(),
           type.getShape()[0],
           type.getShape()[1],
-          strategy.cacheTile.kc,
-          strategy.cacheTile.nc,
+          strategy.cache.tile.kc,
+          strategy.cache.tile.nc,
           strategy.isa == GemmIsa::kSve ? 1 : 0,
-          strategy.isa == GemmIsa::kSve ? abi.vectorLengthBytes : 4,
+          getGemmPackedBAlignment(abi),
           0,
           64};
       if (s.k <= 0 || s.n <= 0 || s.k > INT32_MAX || s.n > INT32_MAX) {
@@ -124,19 +121,22 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
       auto blocks = partitionCache2D(s.k, s.n, s.kc, s.nc);
       for (const auto& b : blocks) {
         const int64_t width = ((b.nSize + s.panel - 1) / s.panel) * s.panel;
+        const int64_t elements = getGemmPackedBElements(abi, b.kSize, b.nSize);
         if (b.kSize >
             (std::numeric_limits<int64_t>::max() - s.elements) / width) {
           op->emitError("JIT packed RHS size overflow");
           failedPack = true;
           return;
         }
-        if (s.isa && annc_aarch64_sve_packed_b_elements_f32(b.kSize, b.nSize) !=
-                         b.kSize * width) {
+        if (elements != b.kSize * width ||
+            (s.isa && annc_aarch64_sve_packed_b_elements_f32(b.kSize,
+                                                              b.nSize) !=
+                          elements)) {
           op->emitError("JIT packed RHS SVE sizing does not match target");
           failedPack = true;
           return;
         }
-        s.elements += b.kSize * width;
+        s.elements += elements;
       }
       if (uint64_t(s.elements) >
           std::numeric_limits<size_t>::max() / sizeof(float)) {
@@ -156,17 +156,9 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
         offset += b.kSize * ((b.nSize + s.panel - 1) / s.panel) * s.panel;
       }
       out << "}\n";
-      NamedAttrList contract;
-      contract.set("version", builder.getI64IntegerAttr(kPrepackedRhsVersion));
-      contract.set("k", builder.getI64IntegerAttr(s.k));
-      contract.set("n", builder.getI64IntegerAttr(s.n));
-      contract.set("kc", builder.getI64IntegerAttr(s.kc));
-      contract.set("nc", builder.getI64IntegerAttr(s.nc));
-      contract.set("data_elements", builder.getI64IntegerAttr(s.elements));
-      contract.set("data_symbol", builder.getStringAttr(symbol));
-      contract.set("input", builder.getUnitAttr());
       op->setAttr(kPrepackedRhsAttrName,
-                  contract.getDictionary(module.getContext()));
+                  encodePrepackedRhsBinding(op, s.k, s.n, symbol, s.elements,
+                                            /*fromInput=*/true));
       specs.push_back(s);
     });
   });

@@ -13,8 +13,7 @@
 // CHECK: arith.divsi
 // CHECK: arith.remsi
 // CHECK: linalg.matmul
-// CHECK-SAME: full_n = 64 : i64
-// CHECK-SAME: n = 16 : i64
+// CHECK-SAME: n = 64 : i64
 // CHECK-SAME: annc.aarch64.gemm_stage = "kernel_tiled"
 // CHECK: return
 

@@ -75,28 +75,6 @@ LogicalResult validateThreadTiling(Operation *gemm,
   return success();
 }
 
-DictionaryAttr getTilePlan(Operation *gemm, OpBuilder &builder, int64_t mSize,
-                           int64_t nSize) {
-  auto originalPlan =
-      gemm->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName);
-  NamedAttrList tilePlan(originalPlan);
-  // M/N are local task dimensions. Leading dimensions remain those of the
-  // original matrices because all subviews retain the original row strides.
-  tilePlan.set("m", builder.getI64IntegerAttr(mSize));
-  tilePlan.set("n", builder.getI64IntegerAttr(nSize));
-  // Prepacked-RHS leaf materialization indexes packed data laid out over the
-  // whole problem, so task-local GEMMs keep the problem-level N available.
-  if (auto fullN = originalPlan.get("n")) tilePlan.set("full_n", fullN);
-  tilePlan.set("thread_count", builder.getI64IntegerAttr(1));
-  tilePlan.set("tasks_m", builder.getI64IntegerAttr(1));
-  tilePlan.set("tasks_n", builder.getI64IntegerAttr(1));
-  // The outer dispatcher is already materialized; every nested GEMM stays
-  // single-task.
-  tilePlan.set("shard_direction", builder.getStringAttr("rows"));
-  tilePlan.set("thread_partition", builder.getStringAttr("static-2d"));
-  return tilePlan.getDictionary(gemm->getContext());
-}
-
 LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
                                const aarch64::gemm::GemmTilingPlan &plan,
                                Block *entry, Value mOffset, Value nOffset,
@@ -125,8 +103,6 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
         aarch64::gemm::kThreadTiledStage);
     taskGeneric.erase();
     if (failed(tiled)) return failure();
-    (*tiled)->setAttr(aarch64::gemm::kPlanAttrName,
-                      getTilePlan(gemm, builder, mSize, nSize));
     return success();
   }
 
@@ -134,8 +110,6 @@ LogicalResult createThreadTile(OpBuilder &builder, Operation *gemm,
       builder, loc, entry->getArgument(1), entry->getArgument(2),
       entry->getArgument(3), mOffset, nOffset, zero, mSize, nSize, plan.k,
       gemm->getAttrs());
-  tiled->setAttr(aarch64::gemm::kPlanAttrName,
-                 getTilePlan(gemm, builder, mSize, nSize));
   aarch64::gemm::setStage(tiled, builder, aarch64::gemm::kThreadTiledStage);
   return success();
 }
@@ -148,6 +122,7 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   task = moduleBuilder.create<func::FuncOp>(
       gemm->getLoc(), getUniqueTaskName(module), taskType);
   task.setPrivate();
+  aarch64::gemm::copyGemmMetadata(gemm, task);
   Block *entry = task.addEntryBlock();
 
   OpBuilder builder(entry, entry->begin());
@@ -173,7 +148,7 @@ LogicalResult createThreadTask(ModuleOp module, Operation *gemm,
   aarch64::gemm::GemmTaskSplit splitM;
   aarch64::gemm::GemmTaskSplit splitN;
   const int64_t rowAlignment = aarch64::gemm::getGemmTaskRowAlignment(
-      aarch64::gemm::GemmKernelStrategyKind::kFixed, plan.kernelTile.mr);
+      plan.kernelStrategyKind, plan.kernelTile.mr);
   if (!aarch64::gemm::splitGemmTaskRange(plan.m, plan.tasksM, rowAlignment,
                                          splitM) ||
       !aarch64::gemm::splitGemmTaskRange(plan.n, plan.tasksN,
@@ -339,6 +314,7 @@ class AArch64GemmThreadTiling
         return;
       }
     }
+    aarch64::gemm::pruneGemmMetadata(getOperation());
   }
 };
 

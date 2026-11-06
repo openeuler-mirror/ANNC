@@ -28,10 +28,6 @@ LogicalResult selectGemmStrategy(
       aarch64::gemm::readProblem(op);
   if (failed(problem)) return failure();
 
-  Builder builder(op->getContext());
-  NamedAttrList candidate;
-  candidate.append("version",
-                   builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
   auto selection = aarch64::gemm::selectGemmPath(
       config.isa, problem->m, problem->n, problem->k, enablePrepack,
       op->hasAttr(aarch64::gemm::kRhsNameAttrName));
@@ -42,65 +38,22 @@ LogicalResult selectGemmStrategy(
        !epilogueMatvecEnabled())) {
     selection.executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
   }
-  const auto executionKind = selection.executionKind;
-  const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
-      config.target, config.isa, config.dataType, executionKind);
-  candidate.append(
-      "target_arch",
-      builder.getStringAttr(aarch64::gemm::getGemmTargetName(config.target)));
-  candidate.append(
-      "isa", builder.getStringAttr(aarch64::gemm::getGemmIsaName(config.isa)));
-  candidate.append("data_type",
-                   builder.getStringAttr(
-                       aarch64::gemm::getGemmDataTypeName(config.dataType)));
-  candidate.append("kernel_family", builder.getStringAttr(abi.family));
-  candidate.append("planning_state", builder.getStringAttr("policy"));
-  candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
-  candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
-  candidate.append("kc", builder.getI64IntegerAttr(config.cacheTile.kc));
-  aarch64::gemm::GemmKernelTile kernelTile = config.kernelTile;
-  if (executionKind == aarch64::gemm::GemmExecutionKind::kMatrixVector)
-    kernelTile = {4, 1};
-  else if (executionKind == aarch64::gemm::GemmExecutionKind::kVectorMatrix)
-    kernelTile = {1, 4};
-  candidate.append("mr", builder.getI64IntegerAttr(kernelTile.mr));
-  candidate.append("panel_lanes",
-                   builder.getI64IntegerAttr(kernelTile.panelLanes));
-  candidate.append(
-      "load_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.load_cycles_per_byte));
-  candidate.append(
-      "store_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.store_cycles_per_byte));
-  candidate.append(
-      "compute_cycle_scale",
-      builder.getF64FloatAttr(config.costModel.compute_cycle_scale));
-  candidate.append(
-      "gemv_compute_cycle_scale",
-      builder.getF64FloatAttr(config.costModel.gemv_compute_cycle_scale));
-  candidate.append(
-      "microkernel_call_cycles",
-      builder.getF64FloatAttr(config.costModel.microkernel_call_cycles));
-  candidate.append(
-      "pack_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.pack_cycles_per_byte));
-  candidate.append("pack_call_cycles",
-                   builder.getF64FloatAttr(config.costModel.pack_call_cycles));
-  candidate.append("max_thread_count",
-                   builder.getI64IntegerAttr(intraThreadCount));
-  candidate.append("thread_partition", builder.getStringAttr("static-2d"));
-  candidate.append(
-      aarch64::gemm::kExecutionKindAttrName,
-      builder.getStringAttr(
-          aarch64::gemm::getGemmExecutionKindName(executionKind)));
-  const char* rhsPackingName =
-      selection.rhsPacking == aarch64::gemm::RhsPacking::kDirect   ? "direct"
-      : selection.rhsPacking == aarch64::gemm::RhsPacking::kPacked ? "packed"
-                                                                   : "prepacked";
-  candidate.append(aarch64::gemm::kRhsPackingAttrName,
-                   builder.getStringAttr(rhsPackingName));
-  op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
-                         candidate.getDictionary(op->getContext()));
+  aarch64::gemm::GemmKernelTile kernelTile = config.kernel.tile;
+  if (selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm) {
+    const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
+        config.target, config.isa, config.dataType, selection.executionKind);
+    kernelTile = {abi.maxMr, abi.maxPanelLanes};
+  }
+  aarch64::gemm::writeThreadPlanningInput(op,
+                                          {{config.target,
+                                            config.isa,
+                                            config.dataType,
+                                            selection.executionKind,
+                                            config.cache,
+                                            {config.kernel.kind, kernelTile},
+                                            selection.rhsPacking},
+                                           config.costModel,
+                                           intraThreadCount});
   return success();
 }
 

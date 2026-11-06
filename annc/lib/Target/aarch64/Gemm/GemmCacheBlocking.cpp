@@ -78,8 +78,8 @@ LogicalResult materializeCacheBlocking(Operation *op) {
 
   OpBuilder builder(op);
   Location loc = op->getLoc();
-  const aarch64::gemm::GemmCacheStrategy strategy{
-      aarch64::gemm::GemmCacheStrategyKind::kFixed, plan->cacheTile};
+  const aarch64::gemm::GemmCacheStrategy strategy{plan->cacheStrategyKind,
+                                                  plan->cacheTile};
   const auto description = aarch64::gemm::describeGemmCache(
       strategy, shape->m, shape->n, shape->k);
   auto emitRows = [&](Value ic, int64_t mSize) -> LogicalResult {

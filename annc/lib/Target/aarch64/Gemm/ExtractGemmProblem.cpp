@@ -53,12 +53,7 @@ FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
   }
 
   return aarch64::gemm::GemmProblem{
-      aarch64::gemm::kPlanVersion, m, n, k, k, n, n};
-}
-
-void appendI64(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
-               int64_t value) {
-  attrs.append(name, builder.getI64IntegerAttr(value));
+      aarch64::gemm::kProblemVersion, m, n, k, k, n, n};
 }
 
 LogicalResult extractGemmProblem(Operation *op) {
@@ -86,17 +81,7 @@ LogicalResult extractGemmProblem(Operation *op) {
     return op->emitOpError(
         "AArch64 GEMM does not support transposed output");
 
-  Builder builder(op->getContext());
-  NamedAttrList problemAttrs;
-  appendI64(problemAttrs, builder, "version", problem->version);
-  appendI64(problemAttrs, builder, "m", problem->m);
-  appendI64(problemAttrs, builder, "n", problem->n);
-  appendI64(problemAttrs, builder, "k", problem->k);
-  appendI64(problemAttrs, builder, "lda", problem->lda);
-  appendI64(problemAttrs, builder, "ldb", problem->ldb);
-  appendI64(problemAttrs, builder, "ldc", problem->ldc);
-  op->setDiscardableAttr(aarch64::gemm::kProblemAttrName,
-                         problemAttrs.getDictionary(op->getContext()));
+  aarch64::gemm::writeProblem(op, *problem);
   return success();
 }
 
