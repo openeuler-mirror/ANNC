@@ -12,6 +12,11 @@
 //   guarded by StablehloSink's orphan defense: every emitted atir.* name must
 //   exist in the dialect registry. Full decision and cost log:
 //   schema-evolution.md (batches 4 and 5).
+//
+// Value domain: every op here operates on builtin tensors (ranked/unranked).
+// `!atir.tensor` is the V1 domain and is rejected by `AnyTensor` by design —
+// the sink keeps V2 values builtin end-to-end. String tensors are builtin
+// tensors whose element type is `!atir.string`; V2 carries no `encoding`.
 //===----------------------------------------------------------------------===//
 #ifndef ATIR_OPS_V2_TD
 #define ATIR_OPS_V2_TD
@@ -74,7 +79,7 @@ def Atir_StringToNumberV2Op : Atir_Op<"string_to_number_v2",
   let description = [{
     Converts each string element of `input` to a numeric value. The output
     element type is fixed by the frontend (TF `out_type` attribute); the op
-    itself only requires the input to be a string tensor (encoding="string").
+    itself only requires a builtin tensor with `!atir.string` element type.
   }];
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyTensor:$result);
@@ -186,24 +191,6 @@ def Atir_SparseFillEmptyRowsV2Op : Atir_Op<"sparse_fill_empty_rows_v2"> {
   );
 }
 
-def Atir_VarHandleV2Op : Atir_Op<"var_handle_op_v2", [NoMemoryEffect]> {
-  // dtype: capability (C)
-  let summary = "Returns a handle to a variable resource";
-  let description = [{
-    Creates a handle to a variable resource. The handle can be used with
-    ReadVariableOp and AssignVariableOp to read from and write to the variable.
-  }];
-  let arguments = (ins
-    StrAttr:$container,
-    StrAttr:$shared_name,
-    TypeAttr:$dtype,
-    I64ArrayAttr:$shape
-  );
-  // Results are pending resource-domain landing: the handle will be declared
-  // as `Atir_Resource` once the read/assign consumers are migrated. Until
-  // then, emissions to this op fall back to the unsupported carrier (the
-  // local verify rejects the arity mismatch).
-}
 
 def Atir_ResourceGatherV2Op : Atir_Op<"resource_gather_v2"> {
   // dtype: capability (C)
