@@ -54,8 +54,7 @@ LogicalResult materializeKernelTiling(Operation *op) {
   OpBuilder builder(op);
   Location loc = op->getLoc();
   const auto description = aarch64::gemm::describeGemmKernel(
-      aarch64::gemm::GemmKernelStrategyKind::kFixed, plan->kernelTile.mr, *nr,
-      shape->m, shape->n);
+      plan->kernelStrategyKind, plan->kernelTile.mr, *nr, shape->m, shape->n);
   for (const auto &region : description) {
     const bool rowsFirst =
         region.order == aarch64::gemm::GemmKernelOrder::kRowsFirst;

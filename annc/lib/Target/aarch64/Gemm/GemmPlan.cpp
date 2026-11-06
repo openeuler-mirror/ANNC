@@ -12,12 +12,12 @@ const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
                                       GemmExecutionKind executionKind) {
   (void)target;
   (void)dataType;
-  static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 1};
-  static const GemmKernelABI sve{"annc-sve-f32-v1", 32, 6, 4, 0};
+  static const GemmKernelABI neon{"annc-neon-f32-v1", 16, 6, 4, 1, 1};
+  static const GemmKernelABI sve{"annc-sve-f32-v1", 32, 6, 4, 0, 4};
   static const GemmKernelABI matrixVector{"annc-neon-matvec-f32-v1", 16, 4,
-                                           1, 4};
+                                           1, 4, 1};
   static const GemmKernelABI vectorMatrix{"annc-neon-vecmat-f32-v1", 16, 1,
-                                          4, 2};
+                                          4, 2, 1};
   if (executionKind == GemmExecutionKind::kMatrixVector &&
       isa == GemmIsa::kNeon)
     return matrixVector;

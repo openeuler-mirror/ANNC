@@ -2,12 +2,22 @@
 #define ANNC_LIB_TARGET_AARCH64_GEMM_GEMMSTRATEGY_H
 
 #include <cstdint>
+#include <optional>
 #include <vector>
+
+#include "llvm/ADT/StringRef.h"
 
 namespace annc::aarch64::gemm {
 
 enum class GemmCacheStrategyKind { kFixed };
 enum class GemmKernelStrategyKind { kFixed };
+
+llvm::StringRef getGemmCacheStrategyName(GemmCacheStrategyKind kind);
+llvm::StringRef getGemmKernelStrategyName(GemmKernelStrategyKind kind);
+std::optional<GemmCacheStrategyKind> parseGemmCacheStrategyName(
+    llvm::StringRef name);
+std::optional<GemmKernelStrategyKind> parseGemmKernelStrategyName(
+    llvm::StringRef name);
 
 struct GemmCacheTile {
   int64_t mc;

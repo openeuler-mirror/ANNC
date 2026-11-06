@@ -1,5 +1,6 @@
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "GemmMicrokernelSelection.h"
+#include "GemmPacking.h"
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
@@ -35,29 +36,31 @@ func::FuncOp getOrCreateLeafDeclaration(ModuleOp module, StringRef name,
 
 using WorkspaceMap = llvm::DenseMap<Operation *, Value>;
 
-int64_t packedBElements(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n) {
-  // SVE prepacked layout sizing is defined by the microkernel archive. The
-  // pass validates this optional weak symbol before entering this helper.
-  return isa == aarch64::gemm::GemmIsa::kSve
-             ? annc_aarch64_sve_packed_b_elements_f32(k, n)
-             : k * ((n + 3) / 4) * 4;
+int64_t packedBElements(const aarch64::gemm::GemmPlan &plan, int64_t k,
+                        int64_t n) {
+  // The caller checks the optional archive sizing helper before materializing
+  // SVE prepacked data; offsets follow the layout declared by the kernel ABI.
+  const auto &abi = aarch64::gemm::getGemmKernelABI(
+      plan.target, plan.isa, plan.dataType, plan.executionKind);
+  return aarch64::gemm::getGemmPackedBElements(abi, k, n);
 }
 
 // Elements covered by the first `count` column blocks of one KC row.
-int64_t columnPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
+int64_t columnPrefix(const aarch64::gemm::GemmPlan &plan, int64_t k,
+                     int64_t n,
                      int64_t nc, int64_t count) {
   int64_t total = 0;
   for (int64_t jc = 0; jc < count; ++jc)
-    total += packedBElements(isa, k, std::min(nc, n - jc * nc));
+    total += packedBElements(plan, k, std::min(nc, n - jc * nc));
   return total;
 }
 
 // Elements before the pcIndex-th KC row of the whole packed RHS.
-int64_t rowPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
+int64_t rowPrefix(const aarch64::gemm::GemmPlan &plan, int64_t k, int64_t n,
                   const aarch64::gemm::GemmCacheTile &tile, int64_t pcIndex) {
   int64_t total = 0;
   for (int64_t pc = 0; pc < pcIndex; ++pc)
-    total += columnPrefix(isa, std::min(tile.kc, k - pc * tile.kc), n,
+    total += columnPrefix(plan, std::min(tile.kc, k - pc * tile.kc), n,
                           tile.nc, (n + tile.nc - 1) / tile.nc);
   return total;
 }
@@ -245,6 +248,7 @@ void copyScheduleAttrs(Operation *source, func::CallOp target,
     if (Attribute attr = source->getAttr(name))
       target->setDiscardableAttr(name, attr);
   }
+  aarch64::gemm::copyStrategyReference(source, target);
   aarch64::gemm::setStage(target, builder, aarch64::gemm::kPackedStage);
 }
 
@@ -323,14 +327,14 @@ Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
     int64_t rowWidth = 0;
     for (int64_t c = 0; c < nCols; ++c) {
       const int64_t blockN = std::min(nc, fullN - c * nc);
-      rowWidth += packedBElements(plan.isa, kr, blockN);
+      rowWidth += packedBElements(plan, kr, blockN);
     }
     addContribution(rowIndex, r, rowWidth);
   }
   // Columns before JC inside the current K row.
   for (int64_t c = 0; c < nCols; ++c) {
     const int64_t blockN = std::min(nc, fullN - c * nc);
-    addContribution(colIndex, c, packedBElements(plan.isa, kSize, blockN));
+    addContribution(colIndex, c, packedBElements(plan, kSize, blockN));
   }
   return offset;
 }
@@ -395,12 +399,7 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
 
   // Thread-task plans carry a tile-local N; recover the problem-level N that
   // shapes the packed data blocks.
-  int64_t fullN = plan.n;
-  if (auto planDict =
-          op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName)) {
-    if (auto fullNAttr = planDict.getAs<IntegerAttr>("full_n"))
-      fullN = fullNAttr.getInt();
-  }
+  const int64_t fullN = plan.n;
 
   // packed offset = cache-block prefix (pc row + block column) + panel offset.
   Value offset;
@@ -408,9 +407,9 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
   auto columnConstant = blockColumn.getDefiningOp<arith::ConstantIndexOp>();
   if (pcConstant && columnConstant) {
     offset = microBuilder.create<arith::ConstantIndexOp>(
-        loc, rowPrefix(plan.isa, plan.k, fullN, plan.cacheTile,
+        loc, rowPrefix(plan, plan.k, fullN, plan.cacheTile,
                        pcConstant.value() / plan.cacheTile.kc) +
-                 columnPrefix(plan.isa, *kSize, fullN, plan.cacheTile.nc,
+                 columnPrefix(plan, *kSize, fullN, plan.cacheTile.nc,
                               columnConstant.value() / plan.cacheTile.nc));
   } else {
     offset = materializePrepackedCacheOffset(microBuilder, loc, plan, fullN,
@@ -447,9 +446,7 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
         loc, offset, microBuilder.create<arith::AddIOp>(loc, groupOffset, lane));
   }
 
-  auto planDict =
-      op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName);
-  if (planDict.get("rhs_data_input")) {
+  if (plan.prepackedRhsFromInput) {
     Value root = rhsBlock;
     while (auto subview = root.getDefiningOp<memref::SubViewOp>())
       root = subview.getSource();

@@ -35,6 +35,15 @@ llvm::Expected<double> getConfigF64(const nlohmann::json &object,
   return value;
 }
 
+llvm::Expected<std::string> getConfigString(const nlohmann::json &object,
+                                            llvm::StringRef path,
+                                            llvm::StringRef name) {
+  auto it = object.find(name.str());
+  if (it == object.end() || !it->is_string())
+    return configError(path, ("requires string field " + name).str());
+  return it->get<std::string>();
+}
+
 llvm::Expected<nlohmann::json> getConfigObject(const nlohmann::json &object,
                                                llvm::StringRef path,
                                                llvm::StringRef name) {
@@ -105,7 +114,7 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
     if (!config.is_object()) return configError(path, "root must be an object");
     const int64_t version = config.value("version", 0);
     if (version != kTuningConfigVersion)
-      return configError(path, "requires version = 2");
+      return configError(path, "requires version = 3");
     auto target = parseConfigTarget(config, path);
     auto isa = parseConfigIsa(config, path);
     auto dataType = parseConfigDataType(config, path);
@@ -119,15 +128,32 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
       return error;
     }
 
-    auto cache = getConfigObject(config, path, "cache_tile");
-    auto kernel = getConfigObject(config, path, "kernel_tile");
+    auto cache = getConfigObject(config, path, "cache");
+    auto kernel = getConfigObject(config, path, "kernel");
     if (!cache || !kernel)
       return llvm::joinErrors(cache.takeError(), kernel.takeError());
-    auto mc = getConfigI64(*cache, path, "mc");
-    auto nc = getConfigI64(*cache, path, "nc");
-    auto kc = getConfigI64(*cache, path, "kc");
-    auto mr = getConfigI64(*kernel, path, "mr");
-    auto panelLanes = getConfigI64(*kernel, path, "panel_lanes");
+    auto cacheName = getConfigString(*cache, path, "strategy");
+    auto kernelName = getConfigString(*kernel, path, "strategy");
+    if (!cacheName || !kernelName)
+      return llvm::joinErrors(cacheName.takeError(), kernelName.takeError());
+    auto cacheKind = parseGemmCacheStrategyName(*cacheName);
+    auto kernelKind = parseGemmKernelStrategyName(*kernelName);
+    if (!cacheKind)
+      return configError(path, "has unsupported cache strategy " + *cacheName);
+    if (!kernelKind)
+      return configError(path,
+                         "has unsupported kernel strategy " + *kernelName);
+
+    auto cacheParams = getConfigObject(*cache, path, *cacheName);
+    auto kernelParams = getConfigObject(*kernel, path, *kernelName);
+    if (!cacheParams || !kernelParams)
+      return llvm::joinErrors(cacheParams.takeError(),
+                              kernelParams.takeError());
+    auto mc = getConfigI64(*cacheParams, path, "mc");
+    auto nc = getConfigI64(*cacheParams, path, "nc");
+    auto kc = getConfigI64(*cacheParams, path, "kc");
+    auto mr = getConfigI64(*kernelParams, path, "mr");
+    auto panelLanes = getConfigI64(*kernelParams, path, "panel_lanes");
     if (!mc || !nc || !kc || !mr || !panelLanes) {
       llvm::Error error = llvm::Error::success();
       for (auto *value : {&mc, &nc, &kc, &mr, &panelLanes})
@@ -153,8 +179,8 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
         *target,
         *isa,
         *dataType,
-        GemmCacheTile{*mc, *nc, *kc},
-        GemmKernelTile{*mr, *panelLanes},
+        GemmCacheStrategy{*cacheKind, {*mc, *nc, *kc}},
+        GemmKernelStrategy{*kernelKind, {*mr, *panelLanes}},
         GemmThreadPlannerCostModel{*load, *store, *compute, *gemvCompute,
                                    *microkernelCall, *packBytes, *packCall}};
   } catch (const std::exception &error) {

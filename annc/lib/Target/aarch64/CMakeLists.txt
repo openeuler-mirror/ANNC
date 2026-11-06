@@ -22,6 +22,7 @@ set(_gemm_srcs
         Gemm/Support/GemmThreadPlanner.cpp
         Gemm/Support/GemmConfig.cpp
         Gemm/Support/GemmMetadata.cpp
+        Gemm/Support/GemmPacking.cpp
         Gemm/Support/GemmStrategy.cpp
 )
 

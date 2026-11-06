@@ -2,7 +2,37 @@
 
 #include <cassert>
 
+#include "llvm/Support/ErrorHandling.h"
+
 namespace annc::aarch64::gemm {
+
+llvm::StringRef getGemmCacheStrategyName(GemmCacheStrategyKind kind) {
+  switch (kind) {
+    case GemmCacheStrategyKind::kFixed:
+      return "fixed";
+  }
+  llvm_unreachable("unknown GEMM cache strategy");
+}
+
+llvm::StringRef getGemmKernelStrategyName(GemmKernelStrategyKind kind) {
+  switch (kind) {
+    case GemmKernelStrategyKind::kFixed:
+      return "fixed";
+  }
+  llvm_unreachable("unknown GEMM kernel strategy");
+}
+
+std::optional<GemmCacheStrategyKind> parseGemmCacheStrategyName(
+    llvm::StringRef name) {
+  if (name == "fixed") return GemmCacheStrategyKind::kFixed;
+  return std::nullopt;
+}
+
+std::optional<GemmKernelStrategyKind> parseGemmKernelStrategyName(
+    llvm::StringRef name) {
+  if (name == "fixed") return GemmKernelStrategyKind::kFixed;
+  return std::nullopt;
+}
 
 GemmPartition describeFixedPartition(int64_t extent, int64_t blockSize) {
   assert(extent > 0 && blockSize > 0);

@@ -13,7 +13,7 @@
 // CHECK-SAME: annc.aarch64.gemm_stage = "thread_tiled"
 // CHECK: return
 // CACHE: annc.aarch64.gemm_plan = {
-// CACHE-SAME: thread_count = 1 : i64
+// CACHE-SAME: thread_count = 4 : i64
 // CACHE-SAME: thread_partition = "static-2d"
 // CACHE: annc.aarch64.gemm_stage = "cache_blocked"
 func.func @threaded_gemm(
