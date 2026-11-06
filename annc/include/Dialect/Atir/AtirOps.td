@@ -72,12 +72,10 @@ def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
     convert it into the standard operations with `--graph-plugin` or 
     `--grouping-plugin` is highly recommend. 
   }];
-  // Widened to AnyRankedTensor for the V2 sink path: residue boundaries may
-  // carry builtin tensors that are not yet !atir.tensor.
-  let arguments = (ins Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$inputs,
+  let arguments = (ins Variadic<Atir_Tensor>:$inputs,
                        StrAttr:$opType,
                        OptionalAttr<DictionaryAttr>:$metadata);
-  let results = (outs Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$output);
+  let results = (outs Variadic<Atir_Tensor>:$output);
   let assemblyFormat = [{
     ( `(` $inputs^ `)` )?
     attr-dict `:` functional-type(operands, results)
