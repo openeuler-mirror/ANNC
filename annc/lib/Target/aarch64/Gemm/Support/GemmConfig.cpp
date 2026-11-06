@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "../GemmPlan.h"
+#include "GemmStrategyConfig.h"
 
 namespace annc::aarch64::gemm {
 namespace {
@@ -12,15 +13,6 @@ llvm::Error configError(llvm::StringRef path, llvm::StringRef message) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                  "invalid GEMM tuning config '%s': %s",
                                  path.str().c_str(), message.str().c_str());
-}
-
-llvm::Expected<int64_t> getConfigI64(const nlohmann::json &object,
-                                     llvm::StringRef path,
-                                     llvm::StringRef name) {
-  auto it = object.find(name.str());
-  if (it == object.end() || !it->is_number_integer() || it->get<int64_t>() <= 0)
-    return configError(path, ("requires positive integer field " + name).str());
-  return it->get<int64_t>();
 }
 
 llvm::Expected<double> getConfigF64(const nlohmann::json &object,
@@ -113,6 +105,13 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
     input >> config;
     if (!config.is_object()) return configError(path, "root must be an object");
     const int64_t version = config.value("version", 0);
+    if (version == 2 && config.contains("cache_tile"))
+      return configError(
+          path,
+          "version 2 tuning config is no longer supported; migrate to "
+          "version 3 by replacing cache_tile with cache.strategy = \"fixed\" "
+          "and cache.fixed, and kernel_tile with kernel.strategy = \"fixed\" "
+          "and kernel.fixed; see docs/design/gemm/aarch64-gemm-codegen.md");
     if (version != kTuningConfigVersion)
       return configError(path, "requires version = 3");
     auto target = parseConfigTarget(config, path);
@@ -136,31 +135,18 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
     auto kernelName = getConfigString(*kernel, path, "strategy");
     if (!cacheName || !kernelName)
       return llvm::joinErrors(cacheName.takeError(), kernelName.takeError());
-    auto cacheKind = parseGemmCacheStrategyName(*cacheName);
-    auto kernelKind = parseGemmKernelStrategyName(*kernelName);
-    if (!cacheKind)
-      return configError(path, "has unsupported cache strategy " + *cacheName);
-    if (!kernelKind)
-      return configError(path,
-                         "has unsupported kernel strategy " + *kernelName);
-
     auto cacheParams = getConfigObject(*cache, path, *cacheName);
     auto kernelParams = getConfigObject(*kernel, path, *kernelName);
     if (!cacheParams || !kernelParams)
       return llvm::joinErrors(cacheParams.takeError(),
                               kernelParams.takeError());
-    auto mc = getConfigI64(*cacheParams, path, "mc");
-    auto nc = getConfigI64(*cacheParams, path, "nc");
-    auto kc = getConfigI64(*cacheParams, path, "kc");
-    auto mr = getConfigI64(*kernelParams, path, "mr");
-    auto panelLanes = getConfigI64(*kernelParams, path, "panel_lanes");
-    if (!mc || !nc || !kc || !mr || !panelLanes) {
-      llvm::Error error = llvm::Error::success();
-      for (auto *value : {&mc, &nc, &kc, &mr, &panelLanes})
-        if (!*value)
-          error = llvm::joinErrors(std::move(error), value->takeError());
-      return error;
-    }
+    auto cacheStrategy =
+        parseGemmCacheStrategyConfig(*cacheName, *cacheParams, path);
+    auto kernelStrategy =
+        parseGemmKernelStrategyConfig(*kernelName, *kernelParams, path);
+    if (!cacheStrategy || !kernelStrategy)
+      return llvm::joinErrors(cacheStrategy.takeError(),
+                              kernelStrategy.takeError());
     auto costModel = getConfigObject(config, path, "cost_model");
     if (!costModel) return costModel.takeError();
     auto load = getConfigF64(*costModel, path, "load_cycles_per_byte");
@@ -179,8 +165,8 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
         *target,
         *isa,
         *dataType,
-        GemmCacheStrategy{*cacheKind, {*mc, *nc, *kc}},
-        GemmKernelStrategy{*kernelKind, {*mr, *panelLanes}},
+        *cacheStrategy,
+        *kernelStrategy,
         GemmThreadPlannerCostModel{*load, *store, *compute, *gemvCompute,
                                    *microkernelCall, *packBytes, *packCall}};
   } catch (const std::exception &error) {

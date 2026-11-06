@@ -128,7 +128,7 @@ mlir::FailureOr<mlir::Value> createProjectedSubview(
 
 }  // namespace
 
-mlir::FailureOr<GemmTileShape> readGemmTileShape(mlir::Operation *op) {
+mlir::FailureOr<GemmBlockShape> readGemmBlockShape(mlir::Operation *op) {
   auto lhs = llvm::dyn_cast<mlir::MemRefType>(getGemmInput(op, 0).getType());
   auto rhs = llvm::dyn_cast<mlir::MemRefType>(getGemmInput(op, 1).getType());
   auto out = llvm::dyn_cast<mlir::MemRefType>(getGemmOutput(op, 0).getType());
@@ -139,7 +139,7 @@ mlir::FailureOr<GemmTileShape> readGemmTileShape(mlir::Operation *op) {
       return mlir::failure();
     }
   }
-  GemmTileShape shape{lhs.getDimSize(0), rhs.getDimSize(1), lhs.getDimSize(1)};
+  GemmBlockShape shape{lhs.getDimSize(0), rhs.getDimSize(1), lhs.getDimSize(1)};
   if (shape.m <= 0 || shape.n <= 0 || shape.k <= 0 ||
       rhs.getDimSize(0) != shape.k || out.getDimSize(0) != shape.m ||
       out.getDimSize(1) != shape.n) {

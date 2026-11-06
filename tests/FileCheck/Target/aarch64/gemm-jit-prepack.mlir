@@ -1,5 +1,5 @@
 // RUN: echo '[1]' > %t.json
-// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json enable-prepack=true intra-thread-count=8' -aarch64-gemm-thread-planning -aarch64-gemm-prepack-rhs='jit-inputs=%t.json packed-c=%t.c' -aarch64-finalize-gemm-plan -aarch64-gemm-thread-tiling -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization | FileCheck %s
+// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json enable-prepack=true intra-thread-count=8' -aarch64-gemm-thread-planning -aarch64-gemm-prepack-rhs='jit-inputs=%t.json packed-c=%t.c' -aarch64-gemm-thread-tiling -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization | FileCheck %s
 // RUN: FileCheck %s --check-prefix=PACK < %t.c
 
 // RUN: echo '[1,1]' > %t.bad.json

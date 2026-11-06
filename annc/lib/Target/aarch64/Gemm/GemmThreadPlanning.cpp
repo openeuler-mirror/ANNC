@@ -21,11 +21,21 @@ LogicalResult planGemmThreads(Operation *op) {
   if (failed(problem) || failed(policy)) return failure();
 
   const aarch64::gemm::GemmTuningStrategy &strategy = policy->strategy;
+  // Keep this capability gate in sync with new strategy kinds. The current
+  // tuning-config parser registers only fixed strategies; this fallback
+  // handles metadata from future strategies until they provide planner inputs.
+  if (!aarch64::gemm::isThreadPlanningSupported(strategy.cache.kind,
+                                                strategy.kernel.kind)) {
+    op->emitWarning("GEMM thread planning supports only fixed cache and "
+                    "kernel strategies; falling back to one thread");
+    aarch64::gemm::writeCandidate(op, GemmThreadPlanningResult{1, 1, 1, false});
+    return success();
+  }
   const aarch64::gemm::GemmKernelABI &abi =
       aarch64::gemm::getGemmKernelABI(strategy);
-  FailureOr<int64_t> nr =
-      aarch64::gemm::getGemmNr(strategy.kernel.tile, abi.vectorLengthBytes,
-                               strategy.dataType, strategy.executionKind);
+  FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
+      getFixedKernelParameters(strategy.kernel).panelLanes,
+      abi.vectorLengthBytes, strategy.dataType, strategy.executionKind);
   if (failed(nr))
     return op->emitOpError("cannot derive NR for GEMM thread planning");
   const aarch64::gemm::GemmDataTypeInfo &dataType =
@@ -43,7 +53,7 @@ LogicalResult planGemmThreads(Operation *op) {
       problem->n,
       problem->k,
       policy->maxThreadCount,
-      strategy.kernel.tile.mr,
+      getFixedKernelParameters(strategy.kernel).mr,
       *nr,
       packetSize,
       rhsMemoryAlignment,
@@ -55,7 +65,7 @@ LogicalResult planGemmThreads(Operation *op) {
       dataType.rhsBytes,
       dataType.outputBytes,
       policy->costModel,
-      strategy.cache.tile};
+      getFixedCacheParameters(strategy.cache)};
   GemmThreadPlanningResult result;
   std::string error;
   if (!aarch64::gemm::planGemmThreads(plannerConfig, result, error))

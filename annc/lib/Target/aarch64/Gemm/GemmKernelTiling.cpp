@@ -8,8 +8,6 @@
 namespace annc {
 namespace {
 
-using aarch64::gemm::GemmTilingPlan;
-
 Value createIndexConstant(OpBuilder &builder, Location loc, int64_t value) {
   return builder.create<arith::ConstantIndexOp>(loc, value);
 }
@@ -36,40 +34,42 @@ LogicalResult createKernelTile(OpBuilder &builder, Operation *original,
 }
 
 LogicalResult materializeKernelTiling(Operation *op) {
-  FailureOr<GemmTilingPlan> plan = aarch64::gemm::readTilingPlan(op);
-  if (failed(plan)) return failure();
-  FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
-      plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
-      plan->executionKind);
-  if (failed(nr)) return op->emitOpError("has an invalid kernel N tile");
+  FailureOr<aarch64::gemm::GemmTuningStrategy> strategy =
+      aarch64::gemm::readStrategy(op);
+  if (failed(strategy)) return failure();
   if (!aarch64::gemm::hasStage(op, aarch64::gemm::kCacheBlockedStage))
     return op->emitOpError("requires a cache-blocked GEMM");
   if (op->getNumResults() != 0)
     return op->emitOpError("requires buffer-semantics GEMM anchors");
 
-  FailureOr<aarch64::gemm::GemmTileShape> shape =
-      aarch64::gemm::readGemmTileShape(op);
+  FailureOr<aarch64::gemm::GemmBlockShape> shape =
+      aarch64::gemm::readGemmBlockShape(op);
   if (failed(shape)) return failure();
 
   OpBuilder builder(op);
   Location loc = op->getLoc();
-  const auto description = aarch64::gemm::describeGemmKernel(
-      plan->kernelStrategyKind, plan->kernelTile.mr, *nr, shape->m, shape->n);
-  for (const auto &region : description) {
+  const auto &kernelStrategy = strategy->kernel;
+  const auto tilingPlan =
+      aarch64::gemm::getGemmKernelTilingStrategy(kernelStrategy.kind)
+          .buildPlan({kernelStrategy, *shape,
+                      {aarch64::gemm::getGemmKernelABI(*strategy).vectorLengthBytes,
+                       strategy->dataType, strategy->executionKind}});
+  for (const auto &group : tilingPlan.groups) {
     const bool rowsFirst =
-        region.order == aarch64::gemm::GemmKernelOrder::kRowsFirst;
-    auto emitOuter = [&](Value outer, int64_t outerSize) {
-      auto emitInner = [&](Value inner, int64_t innerSize) {
-        return createKernelTile(builder, op, rowsFirst ? outer : inner,
-                                rowsFirst ? inner : outer,
-                                rowsFirst ? outerSize : innerSize,
-                                rowsFirst ? innerSize : outerSize, shape->k);
-      };
+        group.order == aarch64::gemm::GemmKernelOrder::kRowsFirst;
+    auto emitOuter = [&](Value outerOffset, int64_t outerSize) {
       return aarch64::gemm::materializeGemmPartition(
-          builder, loc, rowsFirst ? region.columns : region.rows, emitInner);
+          builder, loc, group.inner,
+          [&](Value innerOffset, int64_t innerSize) {
+            return createKernelTile(
+                builder, op, rowsFirst ? outerOffset : innerOffset,
+                rowsFirst ? innerOffset : outerOffset,
+                rowsFirst ? outerSize : innerSize,
+                rowsFirst ? innerSize : outerSize, shape->k);
+          });
     };
-    if (failed(aarch64::gemm::materializeGemmPartition(
-            builder, loc, rowsFirst ? region.rows : region.columns, emitOuter)))
+    if (failed(aarch64::gemm::materializeGemmTileRun(
+            builder, loc, group.outer, emitOuter)))
       return failure();
   }
   op->erase();

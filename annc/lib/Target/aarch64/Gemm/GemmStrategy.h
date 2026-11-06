@@ -3,11 +3,17 @@
 
 #include <cstdint>
 #include <optional>
+#include <variant>
 #include <vector>
 
 #include "llvm/ADT/StringRef.h"
 
 namespace annc::aarch64::gemm {
+
+enum class GemmDataType;
+enum class GemmExecutionKind;
+enum class GemmIsa;
+struct GemmKernelABI;
 
 enum class GemmCacheStrategyKind { kFixed };
 enum class GemmKernelStrategyKind { kFixed };
@@ -18,27 +24,47 @@ std::optional<GemmCacheStrategyKind> parseGemmCacheStrategyName(
     llvm::StringRef name);
 std::optional<GemmKernelStrategyKind> parseGemmKernelStrategyName(
     llvm::StringRef name);
+bool isRhsPrepackSupported(GemmCacheStrategyKind cacheStrategy,
+                           GemmKernelStrategyKind kernelStrategy);
+bool isThreadPlanningSupported(GemmCacheStrategyKind cacheStrategy,
+                               GemmKernelStrategyKind kernelStrategy);
 
-struct GemmCacheTile {
+struct GemmBlockShape {
+  int64_t m;
+  int64_t n;
+  int64_t k;
+};
+
+struct FixedCacheParameters {
   int64_t mc;
   int64_t nc;
   int64_t kc;
 };
 
-struct GemmKernelTile {
+struct FixedKernelParameters {
   int64_t mr;
   int64_t panelLanes;
 };
 
 struct GemmCacheStrategy {
   GemmCacheStrategyKind kind;
-  GemmCacheTile tile;
+  std::variant<FixedCacheParameters> parameters;
 };
 
 struct GemmKernelStrategy {
   GemmKernelStrategyKind kind;
-  GemmKernelTile tile;
+  std::variant<FixedKernelParameters> parameters;
 };
+
+inline const FixedCacheParameters &getFixedCacheParameters(
+    const GemmCacheStrategy &strategy) {
+  return std::get<FixedCacheParameters>(strategy.parameters);
+}
+
+inline const FixedKernelParameters &getFixedKernelParameters(
+    const GemmKernelStrategy &strategy) {
+  return std::get<FixedKernelParameters>(strategy.parameters);
+}
 
 // A run describes adjacent equal-size tiles without expanding them.
 struct GemmTileRun {
@@ -48,7 +74,7 @@ struct GemmTileRun {
 };
 
 using GemmPartition = std::vector<GemmTileRun>;
-GemmPartition describeFixedPartition(int64_t extent, int64_t blockSize);
+GemmPartition describeUniformPartition(int64_t extent, int64_t blockSize);
 
 enum class GemmKRole { kSingle, kFirst, kMiddle, kFinal };
 
@@ -60,29 +86,71 @@ struct GemmKRun {
   }
 };
 
-struct GemmCacheDescription {
+struct GemmCacheTilingPlan {
   GemmPartition rows;
   std::vector<GemmKRun> reduction;
   GemmPartition columns;
 };
 
-GemmCacheDescription describeGemmCache(const GemmCacheStrategy &strategy,
-                                       int64_t m, int64_t n, int64_t k);
+struct GemmCacheTilingRequest {
+  GemmCacheStrategy strategy;
+  GemmBlockShape inputBlock;
+};
 
 enum class GemmKernelOrder { kRowsFirst, kColumnsFirst };
 
-// Each region has its own row decomposition. Columns-first regions can use
-// different M partitions for different N panels without changing the pass.
-struct GemmKernelRegion {
-  GemmKernelOrder order;
-  GemmPartition rows;
-  GemmPartition columns;
+struct GemmKernelTargetInfo {
+  int64_t vectorLengthBytes;
+  GemmDataType dataType;
+  GemmExecutionKind executionKind;
 };
 
-std::vector<GemmKernelRegion> describeGemmKernel(GemmKernelStrategyKind kind,
-                                                 int64_t mr, int64_t nr,
-                                                 int64_t m, int64_t n);
-int64_t getGemmTaskRowAlignment(GemmKernelStrategyKind kind, int64_t mr);
+// One outer tile run owns an ordered sequence of inner tile runs.
+struct GemmKernelTileGroup {
+  GemmKernelOrder order;
+  GemmTileRun outer;
+  GemmPartition inner;
+};
+
+struct GemmKernelTilingPlan {
+  std::vector<GemmKernelTileGroup> groups;
+};
+
+struct GemmKernelTilingRequest {
+  GemmKernelStrategy strategy;
+  GemmBlockShape inputBlock;
+  GemmKernelTargetInfo targetInfo;
+};
+
+// Cache and kernel tiling are independent policy dimensions with different
+// request/plan types, so each exposes its own stage-specific interface.
+class GemmCacheTilingStrategy {
+ public:
+  virtual ~GemmCacheTilingStrategy() = default;
+  virtual GemmCacheTilingPlan buildPlan(
+      const GemmCacheTilingRequest &request) const = 0;
+};
+
+class GemmKernelTilingStrategy {
+ public:
+  virtual ~GemmKernelTilingStrategy() = default;
+  virtual std::optional<GemmKernelStrategy> configureForExecution(
+      const GemmKernelStrategy &strategy, GemmExecutionKind executionKind,
+      GemmIsa isa, const GemmKernelABI &abi) const = 0;
+  virtual bool isValidForExecution(const GemmKernelStrategy &strategy,
+                                   GemmExecutionKind executionKind,
+                                   GemmIsa isa, GemmDataType dataType,
+                                   const GemmKernelABI &abi) const = 0;
+  virtual GemmKernelTilingPlan buildPlan(
+      const GemmKernelTilingRequest &request) const = 0;
+  virtual int64_t getTaskRowAlignment(
+      const GemmKernelStrategy &strategy) const = 0;
+};
+
+const GemmCacheTilingStrategy &
+getGemmCacheTilingStrategy(GemmCacheStrategyKind kind);
+const GemmKernelTilingStrategy &
+getGemmKernelTilingStrategy(GemmKernelStrategyKind kind);
 
 }  // namespace annc::aarch64::gemm
 

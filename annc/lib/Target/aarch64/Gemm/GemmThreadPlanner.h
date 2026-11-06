@@ -49,7 +49,7 @@ struct GemmThreadPlannerConfig {
   std::int64_t rhs_scalar_bytes;
   std::int64_t output_scalar_bytes;
   GemmThreadPlannerCostModel cost_model;
-  GemmCacheTile cache_tile{1, 1, 1};
+  FixedCacheParameters cache_tile{1, 1, 1};
 };
 
 struct GemmThreadPlanningResult {

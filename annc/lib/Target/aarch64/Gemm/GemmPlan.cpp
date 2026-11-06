@@ -47,19 +47,19 @@ const GemmDataTypeInfo &getGemmDataTypeInfo(GemmDataType dataType) {
   return f32;
 }
 
-llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
+llvm::FailureOr<int64_t> getGemmNr(int64_t panelLanes,
                                    int64_t vectorLengthBytes,
                                    GemmDataType dataType,
                                    GemmExecutionKind executionKind) {
   const int64_t elementBytes = dataType == GemmDataType::kF32 ? 4 : 0;
   if (elementBytes == 0 || vectorLengthBytes <= 0 ||
-      vectorLengthBytes % elementBytes != 0 || kernelTile.panelLanes <= 0)
+      vectorLengthBytes % elementBytes != 0 || panelLanes <= 0)
     return mlir::failure();
   if (executionKind == GemmExecutionKind::kMatrixVector) {
-    if (kernelTile.panelLanes != 1) return mlir::failure();
+    if (panelLanes != 1) return mlir::failure();
     return int64_t{1};
   }
-  return kernelTile.panelLanes * (vectorLengthBytes / elementBytes);
+  return panelLanes * (vectorLengthBytes / elementBytes);
 }
 
 bool isGemmAnchor(mlir::Operation *op) {
@@ -111,12 +111,13 @@ llvm::StringRef getGemmExecutionKindName(GemmExecutionKind kind) {
 
 GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
                                  int64_t k, bool enablePrepack,
-                                 bool hasPrepackableRhs) {
+                                 bool hasPrepackableRhs,
+                                 bool allowSpecializedExecution) {
   if (m * n * k <= kRowMajorOperationLimit)
     return {GemmExecutionKind::kGemm, RhsPacking::kDirect};
-  if (isa == GemmIsa::kNeon && n == 1)
+  if (allowSpecializedExecution && isa == GemmIsa::kNeon && n == 1)
     return {GemmExecutionKind::kMatrixVector, RhsPacking::kDirect};
-  if (isa == GemmIsa::kNeon && m == 1)
+  if (allowSpecializedExecution && isa == GemmIsa::kNeon && m == 1)
     return {GemmExecutionKind::kVectorMatrix, RhsPacking::kDirect};
   if (enablePrepack && hasPrepackableRhs &&
       k * n >= kMinPrepackedRhsElements)

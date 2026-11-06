@@ -7,7 +7,6 @@ set(_gemm_srcs
         Gemm/ExtractGemmProblem.cpp
         Gemm/SelectGemmStrategy.cpp
         Gemm/GemmThreadPlanning.cpp
-        Gemm/FinalizeGemmPlan.cpp
         Gemm/GemmThreadTiling.cpp
         Gemm/GemmTilingUtils.cpp
         Gemm/GemmCacheBlocking.cpp
@@ -22,6 +21,7 @@ set(_gemm_srcs
         Gemm/Support/GemmThreadPlanner.cpp
         Gemm/Support/GemmConfig.cpp
         Gemm/Support/GemmMetadata.cpp
+        Gemm/Support/GemmStrategyConfig.cpp
         Gemm/Support/GemmPacking.cpp
         Gemm/Support/GemmStrategy.cpp
 )

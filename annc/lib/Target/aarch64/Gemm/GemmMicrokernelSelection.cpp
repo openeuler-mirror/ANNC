@@ -27,19 +27,21 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
   FailureOr<int64_t> n = getDimension(call, kMicrokernelNAttrName);
   FailureOr<int64_t> k = getDimension(call, kMicrokernelKAttrName);
   if (failed(m) || failed(n) || failed(k)) return failure();
-  FailureOr<GemmPlan> plan = readPlan(call);
-  if (failed(plan)) return failure();
-  if (plan->vectorLengthBytes <= 0 ||
-      plan->vectorLengthBytes > std::numeric_limits<uint32_t>::max())
+  FailureOr<GemmTuningStrategy> strategy = readStrategy(call);
+  if (failed(strategy)) return failure();
+  const GemmKernelABI &abi = getGemmKernelABI(*strategy);
+  if (abi.vectorLengthBytes <= 0 ||
+      abi.vectorLengthBytes > std::numeric_limits<uint32_t>::max())
     return call.emitOpError("has an invalid codegen vector length");
   const bool rowMajor =
-      usesLdbAbi(getGemmLeafKind(plan->executionKind, plan->rhsPacking));
+      usesLdbAbi(getGemmLeafKind(strategy->executionKind, strategy->rhsPacking));
   if (rowMajor != isRowMajorMicrokernelLeaf(call.getCallee()))
-    return call.emitOpError("microkernel leaf does not match the GEMM plan");
-  FailureOr<int64_t> nr = getGemmNr(plan->kernelTile, plan->vectorLengthBytes,
-                                    plan->dataType, plan->executionKind);
-  if (failed(nr) || *m > plan->kernelTile.mr || *n > *nr)
-    return call.emitOpError("has a microtile outside the static kernel family");
+    return call.emitOpError("microkernel leaf does not match the selected strategy");
+  FailureOr<int64_t> maxNr = getGemmNr(
+      abi.maxPanelLanes, abi.vectorLengthBytes, strategy->dataType,
+      strategy->executionKind);
+  if (failed(maxNr) || *m > abi.maxMr || *n > *maxNr)
+    return call.emitOpError("has a microtile outside the supported kernel ABI");
   auto mode = call->getAttrOfType<StringAttr>(kKcModeAttrName);
   if (!mode ||
       (mode.getValue() != "overwrite" && mode.getValue() != "accumulate"))
@@ -50,7 +52,7 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
   kernel.m = *m;
   kernel.n = *n;
   kernel.k = *k;
-  kernel.vectorLengthBytes = plan->vectorLengthBytes;
+  kernel.vectorLengthBytes = abi.vectorLengthBytes;
   kernel.accumulate = mode.getValue() == "accumulate";
   auto role = call->getAttrOfType<StringAttr>(kKcRoleAttrName);
   if (role && role.getValue() != "single" && role.getValue() != "final" &&
@@ -59,10 +61,10 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
 
   StringRef prefix =
       rowMajor ? "annc_aarch64_sve_kernel_rm_mr" : "annc_aarch64_sve_kernel_mr";
-  if (plan->isa == GemmIsa::kSve) {
-    const int64_t lanes = plan->vectorLengthBytes / sizeof(float);
+  if (strategy->isa == GemmIsa::kSve) {
+    const int64_t lanes = abi.vectorLengthBytes / sizeof(float);
     const int64_t groups = (*n + lanes - 1) / lanes;
-    if (groups < 1 || groups > plan->kernelTile.panelLanes)
+    if (groups < 1 || groups > abi.maxPanelLanes)
       return call.emitOpError("has an invalid SVE N-vector group count");
     result.symbol =
         (llvm::Twine(prefix) + llvm::Twine(*m) + "_n" + llvm::Twine(groups) +
@@ -73,9 +75,7 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
     return result;
   }
 
-  const GemmKernelABI &abi = getGemmKernelABI(
-      plan->target, plan->isa, plan->dataType, plan->executionKind);
-  FailureOr<int64_t> unroll = getGemmKScalarUnroll(abi, plan->dataType);
+  FailureOr<int64_t> unroll = getGemmKScalarUnroll(abi, strategy->dataType);
   if (failed(unroll))
     return call.emitOpError("requires a valid NEON kernel ABI vector K unroll");
   const int64_t groups = *k / *unroll;
@@ -83,8 +83,8 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
   const std::string kVariant =
       groups == 0 ? (llvm::Twine("k") + llvm::Twine(residue)).str()
                   : (llvm::Twine("kg_r") + llvm::Twine(residue)).str();
-  if (plan->executionKind == GemmExecutionKind::kMatrixVector) {
-    if (*n != 1 || *m > 4 || abi.kVectorUnroll != 4)
+  if (strategy->executionKind == GemmExecutionKind::kMatrixVector) {
+    if (*n != 1 || abi.kVectorUnroll != 4)
       return call.emitOpError("has an invalid matrix-vector microtile");
     result.symbol =
         (llvm::Twine("annc_aarch64_neon_matvec_mr") + llvm::Twine(*m) + "_" +
@@ -93,8 +93,8 @@ FailureOr<FinalMicrokernelSelection> selectFinalMicrokernel(func::CallOp call) {
     kernel.family = codegen::Family::NeonMatvec;
     return result;
   }
-  if (plan->executionKind == GemmExecutionKind::kVectorMatrix) {
-    if (!rowMajor || *m != 1 || *n > 16 || abi.kVectorUnroll != 2)
+  if (strategy->executionKind == GemmExecutionKind::kVectorMatrix) {
+    if (!rowMajor || *m != 1 || abi.kVectorUnroll != 2)
       return call.emitOpError("has an invalid vector-matrix microtile");
     result.symbol =
         (llvm::Twine("annc_aarch64_neon_vecmat_n") + llvm::Twine(*n) + "_" +

@@ -1,14 +1,14 @@
-// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan | FileCheck %s --check-prefix=PLAN
-// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling | FileCheck %s --check-prefix=TILING
-// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-finalize-gemm-plan -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization -aarch64-gemm-microkernel-lowering -aarch64-gemm-abi-lowering -aarch64-verify-gemm-schedule | FileCheck %s --check-prefix=LOWERED
+// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning | FileCheck %s --check-prefix=PLAN
+// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling | FileCheck %s --check-prefix=TILING
+// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy="config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json" -aarch64-gemm-thread-planning -aarch64-gemm-cache-blocking -aarch64-gemm-kernel-tiling -aarch64-gemm-leaf-materialization -aarch64-gemm-microkernel-lowering -aarch64-gemm-abi-lowering -aarch64-verify-gemm-schedule | FileCheck %s --check-prefix=LOWERED
 
 // PLAN-LABEL: func.func @matvec
-// PLAN-SAME: annc.aarch64.gemm_plans = {p0 = {
+// PLAN-SAME: annc.aarch64.gemm_strategies = {s0 = {
 // PLAN-SAME: execution_kind = "matrix-vector"
 // PLAN-SAME: kernel_family = "annc-neon-matvec-f32-v1"
 // PLAN-SAME: rhs_packing = "direct"
 // PLAN: linalg.matmul
-// PLAN-SAME: annc.aarch64.gemm_plan = "p0"
+// PLAN-SAME: annc.aarch64.gemm_candidate = {
 
 // TILING-NOT: memref.alloca
 // TILING: linalg.matmul

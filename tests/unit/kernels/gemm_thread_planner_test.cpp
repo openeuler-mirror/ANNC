@@ -12,7 +12,7 @@
 
 namespace {
 
-using annc::aarch64::gemm::GemmCacheTile;
+using annc::aarch64::gemm::FixedCacheParameters;
 using annc::aarch64::gemm::GemmThreadPlannerConfig;
 using annc::aarch64::gemm::GemmThreadPlannerCostModel;
 using annc::aarch64::gemm::GemmThreadPlanningResult;
@@ -37,7 +37,7 @@ GemmThreadPlannerConfig makeConfig(std::int64_t m, std::int64_t n, std::int64_t 
       4,
       4,
       GemmThreadPlannerCostModel{0.171875, 0.171875, 1.0, 1.0, 1.0, 0.34375, 1.0},
-      GemmCacheTile{12, 16, 8}};
+      FixedCacheParameters{12, 16, 8}};
 }
 
 GemmThreadPlannerConfig makeSveConfig(std::int64_t m, std::int64_t n, std::int64_t k,
@@ -54,7 +54,7 @@ GemmThreadPlannerConfig makeAnalyticalConfig(std::int64_t m, std::int64_t n,
   GemmThreadPlannerConfig config = makeConfig(m, n, k, maxThreads);
   config.microkernel_m = 6;
   config.microkernel_n = 32;
-  config.cache_tile = GemmCacheTile{72, 128, 256};
+  config.cache_tile = FixedCacheParameters{72, 128, 256};
   return config;
 }
 

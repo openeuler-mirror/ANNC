@@ -58,8 +58,7 @@ FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
 
 LogicalResult extractGemmProblem(Operation *op) {
   if (op->hasAttr(aarch64::gemm::kProblemAttrName) ||
-      op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
-      op->hasAttr(aarch64::gemm::kPlanAttrName)) {
+      op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
     return op->emitOpError("already has AArch64 GEMM planning state");
   }
 

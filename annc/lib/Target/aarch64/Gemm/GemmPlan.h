@@ -20,14 +20,12 @@ inline constexpr llvm::StringLiteral kProblemAttrName =
     "annc.aarch64.gemm_problem";
 inline constexpr llvm::StringLiteral kCandidateAttrName =
     "annc.aarch64.gemm_candidate";
-inline constexpr llvm::StringLiteral kPlanAttrName = "annc.aarch64.gemm_plan";
 inline constexpr llvm::StringLiteral kStrategyAttrName =
     "annc.aarch64.gemm_strategy";
 inline constexpr llvm::StringLiteral kStrategiesAttrName =
     "annc.aarch64.gemm_strategies";
 inline constexpr llvm::StringLiteral kCostModelsAttrName =
     "annc.aarch64.gemm_cost_models";
-inline constexpr llvm::StringLiteral kPlansAttrName = "annc.aarch64.gemm_plans";
 inline constexpr llvm::StringLiteral kStageAttrName = "annc.aarch64.gemm_stage";
 inline constexpr llvm::StringLiteral kKcModeAttrName = "annc.aarch64.kc_mode";
 inline constexpr llvm::StringLiteral kAsmSymbolAttrName =
@@ -48,8 +46,6 @@ inline constexpr llvm::StringLiteral kMicrokernelKAttrName =
 inline constexpr llvm::StringLiteral kExecutionKindAttrName =
     "execution_kind";
 inline constexpr llvm::StringLiteral kRhsPackingAttrName = "rhs_packing";
-inline constexpr llvm::StringLiteral kRhsPackSourceAttrName =
-    "rhs_pack_source";
 inline constexpr llvm::StringLiteral kPrepackedRhsAttrName =
     "annc.aarch64.prepacked_rhs";
 inline constexpr llvm::StringLiteral kRhsNameAttrName =
@@ -106,11 +102,11 @@ inline constexpr llvm::StringLiteral kSvePackedBElementsAsmSymbol =
 inline constexpr llvm::StringLiteral kSvePackedBOffsetAsmSymbol =
     "annc_aarch64_sve_packed_b_offset_f32";
 
-// The external tuning JSON schema version is independent from the serialized
-// internal GEMM plan version below.
+// The external tuning JSON schema version is independent from the in-IR
+// candidate and problem metadata versions below.
 inline constexpr int64_t kTuningConfigVersion = 3;
 inline constexpr int64_t kProblemVersion = 1;
-inline constexpr int64_t kPlanVersion = 4;
+inline constexpr int64_t kCandidateVersion = 4;
 inline constexpr int64_t kPrepackedRhsVersion = 2;
 // Constant RHS matrices below this K*N threshold stay on the direct path.
 inline constexpr int64_t kMinPrepackedRhsElements = 300;
@@ -174,7 +170,7 @@ std::optional<GemmTarget> parseGemmTargetName(llvm::StringRef name);
 std::optional<GemmIsa> parseGemmIsaName(llvm::StringRef name);
 std::optional<GemmDataType> parseGemmDataTypeName(llvm::StringRef name);
 llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path);
-llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
+llvm::FailureOr<int64_t> getGemmNr(int64_t panelLanes,
                                    int64_t vectorLengthBytes,
                                    GemmDataType dataType,
                                    GemmExecutionKind executionKind);
@@ -193,7 +189,6 @@ struct GemmProblem {
 // Whether the RHS is read in its original layout or materialized by pack_b.
 enum class RhsPacking { kDirect, kPacked, kPrepacked };
 enum class KcMode { kOverwrite, kAccumulate };
-enum class RhsPackSource { kNone, kGenerated, kPrepacked };
 
 // Reusable tuning choices. The problem, thread budget, and cost model remain
 // separate inputs to planning.
@@ -230,34 +225,9 @@ struct GemmCandidate {
   bool shardByColumns;
 };
 
-struct GemmTilingPlan {
-  int64_t version;
-  int64_t m;
-  int64_t n;
-  int64_t k;
-  int64_t lda;
-  int64_t ldb;
-  int64_t ldc;
-  GemmCacheStrategyKind cacheStrategyKind;
-  GemmCacheTile cacheTile;
-  GemmKernelStrategyKind kernelStrategyKind;
-  GemmKernelTile kernelTile;
-  GemmDataType dataType;
-  int64_t vectorLengthBytes;
-  int64_t threadCount;
-  int64_t tasksM;
-  int64_t tasksN;
-  bool shardByColumns;
-  KcMode firstKcMode;
-  KcMode nextKcMode;
-  GemmExecutionKind executionKind;
-  RhsPacking rhsPacking;
-  RhsPackSource rhsPackSource;
-};
-
-struct GemmPlan : GemmTilingPlan {
-  GemmTarget target;
-  GemmIsa isa;
+struct GemmExecutionContext {
+  GemmProblem problem;
+  GemmTuningStrategy strategy;
   std::string prepackedRhsSymbol;
   int64_t prepackedRhsElements = 0;
   bool prepackedRhsFromInput = false;
@@ -273,15 +243,14 @@ mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
 mlir::FailureOr<GemmThreadPlanningInput> readThreadPlanningInput(
     mlir::Operation *op);
 mlir::FailureOr<GemmCandidate> readCandidate(mlir::Operation *op);
-mlir::FailureOr<GemmTilingPlan> readTilingPlan(mlir::Operation *op);
-mlir::FailureOr<GemmPlan> readPlan(mlir::Operation *op);
+mlir::FailureOr<GemmExecutionContext> readExecutionContext(
+    mlir::Operation *op);
 void writeProblem(mlir::Operation *op, const GemmProblem &problem);
 void writeThreadPlanningInput(mlir::Operation *op,
                               const GemmThreadPlanningInput &input);
 void writeCandidate(mlir::Operation *op,
                     const GemmThreadPlanningResult &result);
 void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing);
-void writePlan(mlir::Operation *op, mlir::DictionaryAttr plan);
 void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest);
 void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination);
 mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,
@@ -302,9 +271,10 @@ struct GemmPathSelection {
 
 GemmPathSelection selectGemmPath(GemmIsa isa, int64_t m, int64_t n,
                                  int64_t k, bool enablePrepack,
-                                 bool hasPrepackableRhs);
+                                 bool hasPrepackableRhs,
+                                 bool allowSpecializedExecution);
 
-// The microkernel leaf family selected for a plan, corresponding one-to-one
+// The microkernel leaf family selected for a strategy, corresponding one-to-one
 // with selectGemmPath: the matrix-vector (N==1) and vector-matrix (M==1)
 // leaves, the row-major small-shape GEMM leaf, and the packed GEMM leaf.
 // The argument signature follows: kMatvec and kPacked use seven index
