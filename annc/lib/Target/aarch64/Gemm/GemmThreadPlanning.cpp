@@ -1,18 +1,18 @@
 #include <string>
 
 #include "GemmPlan.h"
-#include "GemmPlanner.h"
+#include "GemmThreadPlanner.h"
 #include "Target/aarch64/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 namespace annc {
 namespace {
 
-using aarch64::gemm::GemmPlannerCacheTile;
-using aarch64::gemm::GemmPlannerConfig;
+using aarch64::gemm::GemmCacheTile;
 using aarch64::gemm::GemmPlanningPolicy;
-using aarch64::gemm::GemmPlanningResult;
 using aarch64::gemm::GemmProblem;
+using aarch64::gemm::GemmThreadPlannerConfig;
+using aarch64::gemm::GemmThreadPlanningResult;
 
 LogicalResult planGemmThreads(Operation *op) {
   FailureOr<GemmProblem> problem = aarch64::gemm::readProblem(op);
@@ -41,7 +41,7 @@ LogicalResult planGemmThreads(Operation *op) {
                                                    : packetSize;
   const bool packRhs =
       strategy.rhsPacking == aarch64::gemm::RhsPacking::kPacked;
-  GemmPlannerConfig plannerConfig{
+  GemmThreadPlannerConfig plannerConfig{
       problem->m,
       problem->n,
       problem->k,
@@ -51,16 +51,18 @@ LogicalResult planGemmThreads(Operation *op) {
       packetSize,
       rhsMemoryAlignment,
       packRhs,
-      strategy.executionKind != aarch64::gemm::GemmExecutionKind::kGemm,
+      // Only MatVec vectorizes K. VecMat vectorizes output columns, like
+      // ordinary GEMM, so only MatrixVector uses the reduction cost model.
+      strategy.executionKind == aarch64::gemm::GemmExecutionKind::kMatrixVector,
       dataType.lhsBytes,
       dataType.rhsBytes,
       dataType.outputBytes,
       policy->costModel,
-      GemmPlannerCacheTile{strategy.cacheTile.mc, strategy.cacheTile.nc,
-                           strategy.cacheTile.kc}};
-  GemmPlanningResult result;
+      GemmCacheTile{strategy.cacheTile.mc, strategy.cacheTile.nc,
+                    strategy.cacheTile.kc}};
+  GemmThreadPlanningResult result;
   std::string error;
-  if (!aarch64::gemm::planGemm(plannerConfig, result, error))
+  if (!aarch64::gemm::planGemmThreads(plannerConfig, result, error))
     return op->emitOpError() << "cannot compute AArch64 GEMM plan: " << error;
 
   Builder builder(op->getContext());

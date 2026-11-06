@@ -25,7 +25,7 @@ std::unique_ptr<mlir::Pass> createKPGemmOneShotBufferize();
 std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs();
 std::unique_ptr<mlir::Pass> createAArch64GemmPrepackRhs(
     llvm::StringRef packedCPath, llvm::StringRef jitInputsPath = {});
-std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan();
+std::unique_ptr<mlir::Pass> createAArch64ExtractGemmProblem();
 std::unique_ptr<mlir::Pass> createAArch64AtirGemmEpilogueCommit();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy();
 std::unique_ptr<mlir::Pass> createAArch64SelectGemmStrategy(

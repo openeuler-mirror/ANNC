@@ -1,5 +1,5 @@
 // RUN: echo '[1]' > %t.json
-// RUN: annc-asm %s -aarch64-resolve-gemm-plan -aarch64-select-gemm-strategy='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json enable-prepack=true' -aarch64-gemm-thread-planning -aarch64-gemm-prepack-rhs='jit-inputs=%t.json packed-c=%t.c' -aarch64-finalize-gemm-plan | FileCheck %s
+// RUN: annc-asm %s -aarch64-extract-gemm-problem -aarch64-select-gemm-strategy='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json enable-prepack=true' -aarch64-gemm-thread-planning -aarch64-gemm-prepack-rhs='jit-inputs=%t.json packed-c=%t.c' -aarch64-finalize-gemm-plan | FileCheck %s
 // RUN: FileCheck %s --check-prefix=PACK < %t.c
 
 // CHECK-LABEL: func.func @shared_input(
