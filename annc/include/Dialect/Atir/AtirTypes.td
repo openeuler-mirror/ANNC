@@ -262,8 +262,8 @@ def Atir_String : Atir_TypeDef<"String", "string"> {
     numeric kernel ever sees it.
 
     This is the explicit spelling of the legacy `complex<f32>` +
-    `encoding = "string"` convention; the sink's type compat layer recognises
-    both carriers on input so old IR keeps working.
+    `encoding = "string"` convention. The sink's type compat layer currently
+    recognises only `!tf_type.string` on input.
   }];
 }
 
