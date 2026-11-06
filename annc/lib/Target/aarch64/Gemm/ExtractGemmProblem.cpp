@@ -30,7 +30,7 @@ FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
       llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmOutput(op, 0).getType());
   if (!lhsType || !rhsType || !outType) {
     op->emitOpError(
-        "aarch64-resolve-gemm-plan requires bufferized memref operands");
+        "aarch64-extract-gemm-problem requires bufferized memref operands");
     return failure();
   }
   if (failed(validateMemRef(op, lhsType, "lhs")) ||
@@ -61,7 +61,7 @@ void appendI64(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
   attrs.append(name, builder.getI64IntegerAttr(value));
 }
 
-LogicalResult resolveGemmProblem(Operation *op) {
+LogicalResult extractGemmProblem(Operation *op) {
   if (op->hasAttr(aarch64::gemm::kProblemAttrName) ||
       op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
       op->hasAttr(aarch64::gemm::kPlanAttrName)) {
@@ -100,15 +100,15 @@ LogicalResult resolveGemmProblem(Operation *op) {
   return success();
 }
 
-class AArch64ResolveGemmPlan
-    : public AArch64ResolveGemmPlanBase<AArch64ResolveGemmPlan> {
+class AArch64ExtractGemmProblem
+    : public AArch64ExtractGemmProblemBase<AArch64ExtractGemmProblem> {
  public:
   using Base::Base;
 
   void runOnOperation() override {
     WalkResult result = getOperation().walk([](Operation *op) -> WalkResult {
       if (!aarch64::gemm::isGemmAnchor(op)) return WalkResult::advance();
-      return failed(resolveGemmProblem(op)) ? WalkResult::interrupt()
+      return failed(extractGemmProblem(op)) ? WalkResult::interrupt()
                                             : WalkResult::advance();
     });
     if (result.wasInterrupted()) signalPassFailure();
@@ -117,8 +117,8 @@ class AArch64ResolveGemmPlan
 
 }  // namespace
 
-std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan() {
-  return std::make_unique<AArch64ResolveGemmPlan>();
+std::unique_ptr<mlir::Pass> createAArch64ExtractGemmProblem() {
+  return std::make_unique<AArch64ExtractGemmProblem>();
 }
 
 }  // namespace annc

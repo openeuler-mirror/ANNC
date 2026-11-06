@@ -1,4 +1,4 @@
-#include "../GemmPlanner.h"
+#include "../GemmThreadPlanner.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,7 +58,7 @@ void forEachBlockShape(std::int64_t dimension, std::int64_t block,
   if (tail > 0) callback(tail, std::int64_t{1});
 }
 
-bool validateConfig(const GemmPlannerConfig &config, std::string &error) {
+bool validateConfig(const GemmThreadPlannerConfig &config, std::string &error) {
   if (config.m <= 0 || config.n <= 0 || config.k <= 0 ||
       config.max_threads <= 0 || config.microkernel_m <= 0 ||
       config.microkernel_n <= 0 || config.packet_size <= 0 ||
@@ -76,7 +76,7 @@ bool validateConfig(const GemmPlannerConfig &config, std::string &error) {
     error = "microkernel N must be a multiple of the packet size";
     return false;
   }
-  const GemmPlannerCostModel &cost = config.cost_model;
+  const GemmThreadPlannerCostModel &cost = config.cost_model;
   const auto isFinitePositive = [](double value) {
     return std::isfinite(value) && value > 0.0;
   };
@@ -95,7 +95,7 @@ bool validateConfig(const GemmPlannerConfig &config, std::string &error) {
 
 // Cache and task boundaries restart kernel tiling. Account for each local N
 // tail instead of padding the complete task only once.
-long double nVectorGroups(const GemmPlannerConfig &config, std::int64_t n) {
+long double nVectorGroups(const GemmThreadPlannerConfig &config, std::int64_t n) {
   const std::int64_t fullTiles = n / config.microkernel_n;
   const std::int64_t tail = n % config.microkernel_n;
   const std::int64_t groupsPerTile = config.microkernel_n / config.packet_size;
@@ -107,13 +107,13 @@ long double nVectorGroups(const GemmPlannerConfig &config, std::int64_t n) {
               : static_cast<long double>(ceilDiv(tail, config.packet_size)));
 }
 
-std::int64_t kernelRhsElements(const GemmPlannerConfig &config,
+std::int64_t kernelRhsElements(const GemmThreadPlannerConfig &config,
                                std::int64_t n) {
   if (!config.needs_runtime_pack) return n;
   return alignUp(n, config.rhs_memory_alignment);
 }
 
-long double gemmCacheBlockCycles(const GemmPlannerConfig &config,
+long double gemmCacheBlockCycles(const GemmThreadPlannerConfig &config,
                                  std::int64_t m, std::int64_t n, std::int64_t k,
                                  bool accumulate) {
   long double compute = 0.0L;
@@ -153,7 +153,7 @@ long double gemmCacheBlockCycles(const GemmPlannerConfig &config,
          leafCalls * config.cost_model.microkernel_call_cycles;
 }
 
-long double gemvCacheBlockCycles(const GemmPlannerConfig &config,
+long double gemvCacheBlockCycles(const GemmThreadPlannerConfig &config,
                                  std::int64_t m, std::int64_t n, std::int64_t k,
                                  bool accumulate) {
   // GEMV-AB executes four NEON vectors (16 f32 values) per grouped K loop.
@@ -185,7 +185,7 @@ long double gemvCacheBlockCycles(const GemmPlannerConfig &config,
          microM * config.cost_model.microkernel_call_cycles;
 }
 
-long double packCycles(const GemmPlannerConfig &config, std::int64_t n,
+long double packCycles(const GemmThreadPlannerConfig &config, std::int64_t n,
                        std::int64_t k) {
   if (!config.needs_runtime_pack) return 0.0L;
   const long double sourceBytes =
@@ -197,7 +197,7 @@ long double packCycles(const GemmPlannerConfig &config, std::int64_t n,
          config.cost_model.pack_call_cycles;
 }
 
-long double taskCycles(const GemmPlannerConfig &config, std::int64_t m,
+long double taskCycles(const GemmThreadPlannerConfig &config, std::int64_t m,
                        std::int64_t n) {
   long double total = 0.0L;
   forEachBlockShape(
@@ -230,7 +230,7 @@ long double taskCycles(const GemmPlannerConfig &config, std::int64_t m,
   return total;
 }
 
-StaticTaskGrid evaluateStaticTaskGrid(const GemmPlannerConfig &config,
+StaticTaskGrid evaluateStaticTaskGrid(const GemmThreadPlannerConfig &config,
                                       std::int64_t tasksM,
                                       std::int64_t tasksN) {
   if (tasksM <= 0 || tasksN <= 0) return {};
@@ -258,7 +258,7 @@ StaticTaskGrid evaluateStaticTaskGrid(const GemmPlannerConfig &config,
   return StaticTaskGrid{tasksM, tasksN, workItems, slowest + dispatch, true};
 }
 
-StaticTaskGrid selectTaskGrid(const GemmPlannerConfig &config) {
+StaticTaskGrid selectTaskGrid(const GemmThreadPlannerConfig &config) {
   StaticTaskGrid best = evaluateStaticTaskGrid(config, 1, 1);
   const std::int64_t taskLimit = config.max_threads;
   // A dimension hosts aligned tasks only while it provides at least one full
@@ -286,7 +286,7 @@ StaticTaskGrid selectTaskGrid(const GemmPlannerConfig &config) {
   return best;
 }
 
-bool linearizeByColumns(const GemmPlannerConfig &config,
+bool linearizeByColumns(const GemmThreadPlannerConfig &config,
                         const StaticTaskGrid &grid) {
   if (grid.tasks_n == 1) return false;
   if (grid.tasks_m == 1) return true;
@@ -302,7 +302,7 @@ bool linearizeByColumns(const GemmPlannerConfig &config,
 
 }  // namespace
 
-bool planGemm(const GemmPlannerConfig &config, GemmPlanningResult &result,
+bool planGemmThreads(const GemmThreadPlannerConfig &config, GemmThreadPlanningResult &result,
               std::string &error) {
   if (!validateConfig(config, error)) return false;
   const StaticTaskGrid selected = selectTaskGrid(config);
@@ -310,7 +310,7 @@ bool planGemm(const GemmPlannerConfig &config, GemmPlanningResult &result,
     error = "cannot construct a static GEMM task grid";
     return false;
   }
-  result = GemmPlanningResult{selected.task_count, selected.tasks_m,
+  result = GemmThreadPlanningResult{selected.task_count, selected.tasks_m,
                               selected.tasks_n,
                               linearizeByColumns(config, selected)};
   return true;

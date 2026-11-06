@@ -40,7 +40,7 @@ namespace annc
         passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
-        passManager.addPass(createAArch64ResolveGemmPlan());
+        passManager.addPass(createAArch64ExtractGemmProblem());
         const bool enablePrepack = !packedCPath.empty();
         passManager.addPass(createAArch64SelectGemmStrategy(configPath,
                                                            enablePrepack,

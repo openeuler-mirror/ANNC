@@ -2,9 +2,10 @@
 #define ANNC_LIB_TARGET_AARCH64_GEMM_GEMMPLAN_H
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
-#include "GemmPlanner.h"
+#include "GemmThreadPlanner.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -113,12 +114,6 @@ enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
 enum class GemmExecutionKind { kGemm, kMatrixVector, kVectorMatrix };
 
-struct GemmCacheTile {
-  int64_t mc;
-  int64_t nc;
-  int64_t kc;
-};
-
 struct GemmKernelTile {
   int64_t mr;
   int64_t panelLanes;
@@ -143,7 +138,7 @@ struct GemmTuningConfig {
   GemmKernelTile kernelTile;
   // Execution tiles remain the user configuration. The worker planner consumes
   // these exact values; it does not derive an independent cache-blocking plan.
-  GemmPlannerCostModel costModel;
+  GemmThreadPlannerCostModel costModel;
 };
 
 struct GemmKernelABI {
@@ -167,6 +162,11 @@ const GemmKernelABI &getGemmKernelABI(GemmTarget target, GemmIsa isa,
 llvm::FailureOr<int64_t> getGemmKScalarUnroll(const GemmKernelABI &abi,
                                               GemmDataType dataType);
 const GemmDataTypeInfo &getGemmDataTypeInfo(GemmDataType dataType);
+// Shared spelling of the tuning-config enum names. Both the external JSON
+// loader and the in-IR metadata codec use these.
+std::optional<GemmTarget> parseGemmTargetName(llvm::StringRef name);
+std::optional<GemmIsa> parseGemmIsaName(llvm::StringRef name);
+std::optional<GemmDataType> parseGemmDataTypeName(llvm::StringRef name);
 llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path);
 llvm::FailureOr<int64_t> getGemmNr(const GemmKernelTile &kernelTile,
                                    int64_t vectorLengthBytes,
@@ -210,7 +210,7 @@ struct GemmTuningStrategy {
 // A tuning strategy plus the planner cost model, before thread planning.
 struct GemmPlanningPolicy {
   GemmTuningStrategy strategy;
-  GemmPlannerCostModel costModel;
+  GemmThreadPlannerCostModel costModel;
 };
 
 // A tuning strategy plus the planned static task topology, after thread

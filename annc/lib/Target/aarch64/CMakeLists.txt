@@ -4,7 +4,7 @@ set(_gemm_srcs
         Gemm/GemmPlan.cpp
         Gemm/ConstantFolding/GemmPrepackRhs.cpp
         Gemm/ConstantFolding/JitPrepack.cpp
-        Gemm/ResolveGemmPlan.cpp
+        Gemm/ExtractGemmProblem.cpp
         Gemm/SelectGemmStrategy.cpp
         Gemm/GemmThreadPlanning.cpp
         Gemm/FinalizeGemmPlan.cpp
@@ -19,7 +19,8 @@ set(_gemm_srcs
         Gemm/GemmEpilogueLowering.cpp
         Gemm/Epilogue/AtirGemmEpilogueCommit.cpp
         Gemm/VerifyGemmSchedule.cpp
-        Gemm/Support/GemmPlanner.cpp
+        Gemm/Support/GemmThreadPlanner.cpp
+        Gemm/Support/GemmConfig.cpp
 )
 
 # Only this adapter sees the binary package C ABI. The object exporter can

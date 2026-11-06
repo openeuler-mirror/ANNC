@@ -27,11 +27,11 @@ def AArch64GemmPrepackRhs
   ];
 }
 
-/* Normalize an eligible AArch64 GEMM problem before target tuning. */
-def AArch64ResolveGemmPlan
-    : Pass<"aarch64-resolve-gemm-plan", "ModuleOp"> {
-  let summary = "resolve an eligible AArch64 GEMM problem";
-  let constructor = "createAArch64ResolveGemmPlan()";
+/* Extract a validated GEMM problem before target tuning. */
+def AArch64ExtractGemmProblem
+    : Pass<"aarch64-extract-gemm-problem", "ModuleOp"> {
+  let summary = "extract static AArch64 GEMM dimensions and layout";
+  let constructor = "createAArch64ExtractGemmProblem()";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect"
