@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 
+#include "GemmStrategy.h"
 #include "GemmThreadPlanner.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
@@ -113,11 +114,6 @@ enum class GemmTarget { kHip12, kHip09, kKp920b, kKp950 };
 enum class GemmIsa { kNeon, kSve };
 enum class GemmDataType { kF32 };
 enum class GemmExecutionKind { kGemm, kMatrixVector, kVectorMatrix };
-
-struct GemmKernelTile {
-  int64_t mr;
-  int64_t panelLanes;
-};
 
 // One (KC, NC) cache block of the pc-jc ordered RHS partition.
 struct CacheBlock2D {
