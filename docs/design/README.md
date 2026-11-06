@@ -11,6 +11,7 @@
 | TensorFlow JIT 代码与预打包权重分离实现契约 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
 | TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
+| StableHLO sink 层（组件 LLD） | [tf-stablehlo-frontend/sink-layer.md](tf-stablehlo-frontend/sink-layer.md) |
 | ANNC 异构图切分优化器（待评审） | [annc-partition/overview.md](annc-partition/overview.md) |
 
 ## 约定
