@@ -11,6 +11,7 @@ include "Dialect/Atir/Interfaces/Interpret.td"
 include "Dialect/Atir/AtirEnums.td"
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/BuiltinAttributes.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -1785,5 +1786,31 @@ def Atir_PowOp : Atir_Op<"Pow", Interfaces> {
     $output `,` $lhs `,` $rhs attr-dict `:` type($output) `,` type($lhs) `,` type($rhs) `->` type($result)
   }];
 }
+
+def Atir_UnsupportedOp : Atir_Op<"unsupported"> {
+  let summary = "registered fallback carrier for an unmappable frontend residue op";
+  let description = [{
+    Carries unmappable source ops losslessly through ATIR: 
+    `opType` stores the source op name, 
+    `metadata` preserves source attrs verbatim, 
+    operands/results keep converted types. 
+    `reason` classifies each residue op — `unknown_op` (no mapping), 
+    `unrank_blocked` (rank unknown; retry once rank facts exist), 
+    or `spec_mismatch` (shape/arity contract rejected the build). 
+    `detail` holds a human-readable evidence snippet.
+  }];
+  let arguments = (ins StrAttr:$opType,
+                       OptionalAttr<Builtin_DictionaryAttr>:$metadata,
+                       DefaultValuedAttr<StrAttr, "\"\"">:$reason,
+                       DefaultValuedAttr<StrAttr, "\"\"">:$detail,
+                       Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+// V2 ops (no output-buffer operand, builtin tensors) used by the stablehlo
+// fusion path; every op above stays frozen.
+include "Dialect/Atir/AtirOpsV2.td"
 
 #endif  // ATIR_OPS_TD
