@@ -15,7 +15,7 @@ class AArch64VerifyGemmSchedule
     bool invalid = false;
     getOperation().walk([&](Operation *op) {
       if (aarch64::gemm::isGemmAnchor(op) &&
-          op->hasAttr(aarch64::gemm::kPlanAttrName)) {
+          op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
         op->emitOpError("was not consumed by GEMM lowering");
         invalid = true;
       }

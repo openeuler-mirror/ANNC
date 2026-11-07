@@ -8,21 +8,21 @@
 #include <utility>
 #include <vector>
 
-#include "GemmPlanner.h"
+#include "GemmThreadPlanner.h"
 
 namespace {
 
-using annc::aarch64::gemm::GemmPlannerCacheTile;
-using annc::aarch64::gemm::GemmPlannerConfig;
-using annc::aarch64::gemm::GemmPlannerCostModel;
-using annc::aarch64::gemm::GemmPlanningResult;
+using annc::aarch64::gemm::FixedCacheParameters;
+using annc::aarch64::gemm::GemmThreadPlannerConfig;
+using annc::aarch64::gemm::GemmThreadPlannerCostModel;
+using annc::aarch64::gemm::GemmThreadPlanningResult;
 using annc::aarch64::gemm::GemmTaskSplit;
 using annc::aarch64::gemm::kGemmTaskSplitAlignment;
 using annc::aarch64::gemm::splitGemmTaskRange;
 
-GemmPlannerConfig makeConfig(std::int64_t m, std::int64_t n, std::int64_t k,
+GemmThreadPlannerConfig makeConfig(std::int64_t m, std::int64_t n, std::int64_t k,
                              std::int64_t maxThreads) {
-  return GemmPlannerConfig{
+  return GemmThreadPlannerConfig{
       m,
       n,
       k,
@@ -36,37 +36,37 @@ GemmPlannerConfig makeConfig(std::int64_t m, std::int64_t n, std::int64_t k,
       4,
       4,
       4,
-      GemmPlannerCostModel{0.171875, 0.171875, 1.0, 1.0, 1.0, 0.34375, 1.0},
-      GemmPlannerCacheTile{12, 16, 8}};
+      GemmThreadPlannerCostModel{0.171875, 0.171875, 1.0, 1.0, 1.0, 0.34375, 1.0},
+      FixedCacheParameters{12, 16, 8}};
 }
 
-GemmPlannerConfig makeSveConfig(std::int64_t m, std::int64_t n, std::int64_t k,
+GemmThreadPlannerConfig makeSveConfig(std::int64_t m, std::int64_t n, std::int64_t k,
                                 std::int64_t maxThreads) {
-  GemmPlannerConfig config = makeConfig(m, n, k, maxThreads);
+  GemmThreadPlannerConfig config = makeConfig(m, n, k, maxThreads);
   config.microkernel_m = 6;
   config.microkernel_n = 32;
   return config;
 }
 
-GemmPlannerConfig makeAnalyticalConfig(std::int64_t m, std::int64_t n,
+GemmThreadPlannerConfig makeAnalyticalConfig(std::int64_t m, std::int64_t n,
                                        std::int64_t k,
                                        std::int64_t maxThreads) {
-  GemmPlannerConfig config = makeConfig(m, n, k, maxThreads);
+  GemmThreadPlannerConfig config = makeConfig(m, n, k, maxThreads);
   config.microkernel_m = 6;
   config.microkernel_n = 32;
-  config.cache_tile = GemmPlannerCacheTile{72, 128, 256};
+  config.cache_tile = FixedCacheParameters{72, 128, 256};
   return config;
 }
 
-GemmPlanningResult plan(const GemmPlannerConfig &config) {
-  GemmPlanningResult result;
+GemmThreadPlanningResult plan(const GemmThreadPlannerConfig &config) {
+  GemmThreadPlanningResult result;
   std::string error;
-  EXPECT_TRUE(annc::aarch64::gemm::planGemm(config, result, error)) << error;
+  EXPECT_TRUE(annc::aarch64::gemm::planGemmThreads(config, result, error)) << error;
   return result;
 }
 
-void expectAlignedGrid(const GemmPlannerConfig &config,
-                       const GemmPlanningResult &result) {
+void expectAlignedGrid(const GemmThreadPlannerConfig &config,
+                       const GemmThreadPlanningResult &result) {
   EXPECT_GT(result.tasks_m, 0);
   EXPECT_GT(result.tasks_n, 0);
   EXPECT_EQ(result.tasks_m * result.tasks_n, result.thread_count);
@@ -155,7 +155,7 @@ void expectAlignedPartition(std::int64_t m, std::int64_t n, std::int64_t tasksM,
                         << " shardByColumns=" << shardByColumns;
 }
 
-TEST(GemmPlannerTest, SplitGemmTaskRangeTruncatesBaseDownAndFattensTail) {
+TEST(GemmThreadPlannerTest, SplitGemmTaskRangeTruncatesBaseDownAndFattensTail) {
   GemmTaskSplit split;
   // 100 / 3 = 33 truncates down to 32; the final task absorbs the remaining
   // 36 columns and never shrinks below the aligned base.
@@ -181,14 +181,14 @@ TEST(GemmPlannerTest, SplitGemmTaskRangeTruncatesBaseDownAndFattensTail) {
   EXPECT_FALSE(splitGemmTaskRange(8, 2, 0, split));
 }
 
-TEST(GemmPlannerTest, MatrixVectorUsesRowShardedGrid) {
-  GemmPlannerConfig config = makeSveConfig(4096, 1, 256, 8);
+TEST(GemmThreadPlannerTest, MatrixVectorUsesRowShardedGrid) {
+  GemmThreadPlannerConfig config = makeSveConfig(4096, 1, 256, 8);
   config.needs_runtime_pack = false;
   config.vectorize_reduction = true;
   config.packet_size = 4;
   config.microkernel_m = 4;
   config.microkernel_n = 1;
-  const GemmPlanningResult result = plan(config);
+  const GemmThreadPlanningResult result = plan(config);
 
   expectAlignedGrid(config, result);
   EXPECT_GT(result.thread_count, 1);
@@ -197,9 +197,9 @@ TEST(GemmPlannerTest, MatrixVectorUsesRowShardedGrid) {
   EXPECT_FALSE(result.shard_by_columns);
 }
 
-TEST(GemmPlannerTest, NarrowProblemsUseTheCoreShardHeuristic) {
-  const GemmPlanningResult narrow = plan(makeSveConfig(4096, 8, 256, 8));
-  const GemmPlanningResult regular = plan(makeSveConfig(4096, 9, 256, 8));
+TEST(GemmThreadPlannerTest, NarrowProblemsUseTheCoreShardHeuristic) {
+  const GemmThreadPlanningResult narrow = plan(makeSveConfig(4096, 8, 256, 8));
+  const GemmThreadPlanningResult regular = plan(makeSveConfig(4096, 9, 256, 8));
 
   EXPECT_FALSE(narrow.shard_by_columns);
   EXPECT_EQ(narrow.tasks_n, 1);
@@ -207,12 +207,12 @@ TEST(GemmPlannerTest, NarrowProblemsUseTheCoreShardHeuristic) {
   EXPECT_EQ(regular.thread_count, regular.tasks_m * regular.tasks_n);
 }
 
-TEST(GemmPlannerTest, CostSelectedThreadsUseAvailableColumnTasks) {
+TEST(GemmThreadPlannerTest, CostSelectedThreadsUseAvailableColumnTasks) {
   // n = 128 with microkernel N = 32 only hosts four column tasks above one
   // microkernel width (Eigen's pb_max_threads bound), so the planner caps
   // the thread budget at four tasks instead of eight thin ones.
-  GemmPlannerConfig config = makeSveConfig(5, 128, 1024, 8);
-  const GemmPlanningResult result = plan(config);
+  GemmThreadPlannerConfig config = makeSveConfig(5, 128, 1024, 8);
+  const GemmThreadPlanningResult result = plan(config);
 
   expectAlignedGrid(config, result);
   EXPECT_EQ(result.thread_count, 4);
@@ -221,7 +221,7 @@ TEST(GemmPlannerTest, CostSelectedThreadsUseAvailableColumnTasks) {
   EXPECT_TRUE(result.shard_by_columns);
 }
 
-TEST(GemmPlannerTest, PlannedGridsPartitionTheirProblemsExactlyOnce) {
+TEST(GemmThreadPlannerTest, PlannedGridsPartitionTheirProblemsExactlyOnce) {
   constexpr std::array<std::array<std::int64_t, 3>, 9> shapes = {{
       {256, 256, 256},
       {5, 128, 1024},
@@ -234,40 +234,40 @@ TEST(GemmPlannerTest, PlannedGridsPartitionTheirProblemsExactlyOnce) {
       {4096, 16, 256},
   }};
   for (const auto &shape : shapes) {
-    const GemmPlannerConfig config =
+    const GemmThreadPlannerConfig config =
         makeSveConfig(shape[0], shape[1], shape[2], 8);
-    const GemmPlanningResult result = plan(config);
+    const GemmThreadPlanningResult result = plan(config);
     expectAlignedGrid(config, result);
     expectAlignedPartition(shape[0], shape[1], result.tasks_m, result.tasks_n,
                            config.microkernel_m, result.shard_by_columns);
   }
 }
 
-TEST(GemmPlannerTest, TfDispatchFormulaKeepsSmallProblemSerial) {
-  const GemmPlanningResult parallel =
+TEST(GemmThreadPlannerTest, TfDispatchFormulaKeepsSmallProblemSerial) {
+  const GemmThreadPlanningResult parallel =
       plan(makeAnalyticalConfig(256, 256, 256, 8));
-  const GemmPlanningResult serial = plan(makeAnalyticalConfig(8, 8, 8, 8));
+  const GemmThreadPlanningResult serial = plan(makeAnalyticalConfig(8, 8, 8, 8));
   EXPECT_EQ(parallel.thread_count, 8);
   EXPECT_EQ(serial.thread_count, 1);
   EXPECT_EQ(serial.tasks_m, 1);
   EXPECT_EQ(serial.tasks_n, 1);
 }
 
-TEST(GemmPlannerTest, PackedRhsShrinksPerTaskPackViaColumnSharding) {
+TEST(GemmThreadPlannerTest, PackedRhsShrinksPerTaskPackViaColumnSharding) {
   // Runtime PackB charges each task for its own N extent. Splitting M keeps
   // every task packing the full output width, while column tasks each pack
   // only their own slice of B, so the packed planner keeps all parallelism in
   // the column direction: (1,8) halves the per-task pack of (2,4).
-  GemmPlannerConfig packed = makeAnalyticalConfig(48, 256, 256, 8);
+  GemmThreadPlannerConfig packed = makeAnalyticalConfig(48, 256, 256, 8);
   packed.cost_model.load_cycles_per_byte = 1.0;
   packed.cost_model.store_cycles_per_byte = 1.0;
   packed.cost_model.compute_cycle_scale = 0.01;
   packed.cost_model.pack_cycles_per_byte = 10.0;
-  const GemmPlanningResult packedPlan = plan(packed);
+  const GemmThreadPlanningResult packedPlan = plan(packed);
 
-  GemmPlannerConfig rowMajor = packed;
+  GemmThreadPlannerConfig rowMajor = packed;
   rowMajor.needs_runtime_pack = false;
-  const GemmPlanningResult rowMajorPlan = plan(rowMajor);
+  const GemmThreadPlanningResult rowMajorPlan = plan(rowMajor);
 
   expectAlignedGrid(packed, packedPlan);
   EXPECT_EQ(packedPlan.tasks_m, 1);
@@ -279,23 +279,23 @@ TEST(GemmPlannerTest, PackedRhsShrinksPerTaskPackViaColumnSharding) {
   EXPECT_EQ(rowMajorPlan.tasks_n, 8);
 }
 
-TEST(GemmPlannerTest, NoPackPathDoesNotChargePackCost) {
-  GemmPlannerConfig baseline = makeAnalyticalConfig(5, 8, 32, 8);
+TEST(GemmThreadPlannerTest, NoPackPathDoesNotChargePackCost) {
+  GemmThreadPlannerConfig baseline = makeAnalyticalConfig(5, 8, 32, 8);
   baseline.needs_runtime_pack = false;
-  const GemmPlanningResult first = plan(baseline);
+  const GemmThreadPlanningResult first = plan(baseline);
 
-  GemmPlannerConfig expensivePackCall = baseline;
+  GemmThreadPlannerConfig expensivePackCall = baseline;
   expensivePackCall.cost_model.pack_cycles_per_byte = 1.0e12;
   expensivePackCall.cost_model.pack_call_cycles = 1.0e12;
-  const GemmPlanningResult second = plan(expensivePackCall);
+  const GemmThreadPlanningResult second = plan(expensivePackCall);
 
   EXPECT_EQ(first.thread_count, second.thread_count);
   EXPECT_EQ(first.tasks_m, second.tasks_m);
   EXPECT_EQ(first.tasks_n, second.tasks_n);
 }
 
-TEST(GemmPlannerTest, GemvComputeCoefficientChangesGrid) {
-  GemmPlannerConfig fastGemv = makeAnalyticalConfig(4096, 1, 256, 8);
+TEST(GemmThreadPlannerTest, GemvComputeCoefficientChangesGrid) {
+  GemmThreadPlannerConfig fastGemv = makeAnalyticalConfig(4096, 1, 256, 8);
   fastGemv.needs_runtime_pack = false;
   fastGemv.vectorize_reduction = true;
   fastGemv.packet_size = 4;
@@ -304,46 +304,46 @@ TEST(GemmPlannerTest, GemvComputeCoefficientChangesGrid) {
   fastGemv.cost_model.load_cycles_per_byte = 0.0001;
   fastGemv.cost_model.store_cycles_per_byte = 0.0001;
   fastGemv.cost_model.gemv_compute_cycle_scale = 0.0001;
-  const GemmPlanningResult fastPlan = plan(fastGemv);
+  const GemmThreadPlanningResult fastPlan = plan(fastGemv);
 
-  GemmPlannerConfig slowGemv = fastGemv;
+  GemmThreadPlannerConfig slowGemv = fastGemv;
   slowGemv.cost_model.gemv_compute_cycle_scale = 100.0;
-  const GemmPlanningResult slowPlan = plan(slowGemv);
+  const GemmThreadPlanningResult slowPlan = plan(slowGemv);
 
   EXPECT_EQ(fastPlan.thread_count, 1);
   EXPECT_GT(slowPlan.thread_count, fastPlan.thread_count);
 }
 
-TEST(GemmPlannerTest, AdditionalKcBlockChargesOutputAccumulation) {
-  GemmPlannerConfig oneKc = makeAnalyticalConfig(5, 64, 5, 2);
+TEST(GemmThreadPlannerTest, AdditionalKcBlockChargesOutputAccumulation) {
+  GemmThreadPlannerConfig oneKc = makeAnalyticalConfig(5, 64, 5, 2);
   oneKc.needs_runtime_pack = false;
   oneKc.cache_tile.kc = 5;
   oneKc.cost_model.load_cycles_per_byte = 10.0;
   oneKc.cost_model.store_cycles_per_byte = 10.0;
   oneKc.cost_model.compute_cycle_scale = 0.001;
   oneKc.cost_model.microkernel_call_cycles = 0.0001;
-  const GemmPlanningResult oneKcPlan = plan(oneKc);
+  const GemmThreadPlanningResult oneKcPlan = plan(oneKc);
 
-  GemmPlannerConfig twoKc = oneKc;
+  GemmThreadPlannerConfig twoKc = oneKc;
   twoKc.cache_tile.kc = 4;
-  const GemmPlanningResult twoKcPlan = plan(twoKc);
+  const GemmThreadPlanningResult twoKcPlan = plan(twoKc);
 
   EXPECT_EQ(oneKcPlan.thread_count, 1);
   EXPECT_GT(twoKcPlan.thread_count, oneKcPlan.thread_count);
 }
 
-TEST(GemmPlannerTest, RejectsNonFiniteCostPolicy) {
-  GemmPlannerConfig config = makeConfig(64, 64, 64, 4);
+TEST(GemmThreadPlannerTest, RejectsNonFiniteCostPolicy) {
+  GemmThreadPlannerConfig config = makeConfig(64, 64, 64, 4);
   config.cost_model.compute_cycle_scale =
       std::numeric_limits<double>::infinity();
-  GemmPlanningResult result;
+  GemmThreadPlanningResult result;
   std::string error;
 
-  EXPECT_FALSE(annc::aarch64::gemm::planGemm(config, result, error));
+  EXPECT_FALSE(annc::aarch64::gemm::planGemmThreads(config, result, error));
   EXPECT_NE(error.find("finite positive"), std::string::npos);
 }
 
-TEST(GemmPlannerTest, ThreadTiledGridCoversEveryOutputExactlyOnce) {
+TEST(GemmThreadPlannerTest, ThreadTiledGridCoversEveryOutputExactlyOnce) {
   // {m, n, tasksM, tasksN, mAlignment}
   constexpr std::array<std::array<std::int64_t, 5>, 5> grids = {{
       {17, 100, 3, 4, 3},   // both M and N leave fat tails

@@ -136,7 +136,7 @@ ANNC 安装会将整包复制到 `<prefix>/<libdir>/annc-gemm-kernels/`，
 编译工具通过相对 RPATH 加载 codegen；基础归档同时保持原有
 `<prefix>/<libdir>/libannc_gemm_microkernels.a` 链接位置。模型执行
 只使用已生成和链接的机器码，不加载 codegen 库。版本、元数据与失败边界见
-[GEMM codegen 集成契约](../design/gemm-epilogue-codegen.md)。
+[GEMM codegen 集成契约](../design/gemm/gemm-epilogue-codegen.md)。
 
 ## 验证
 

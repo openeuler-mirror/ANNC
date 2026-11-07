@@ -225,4 +225,4 @@
 | **交付单位** | GEMM-ASM 以一份版本化二进制依赖包交付，直接放入 ANNC 的 `third_party/annc-gemm-kernels/` 并由构建系统就地导入。包内 codegen 共享库、基础静态归档、公开头文件和 CMake 配置作为整体升级；无需额外系统 SDK 安装或分别匹配组件版本。ANNC 安装时携带所需依赖。 |
 | **后果** | 公开仓库维护公开接口适配与契约测试；私有生成实现留在 GEMM-ASM。融合范围、普通 GEMM ABI 与既有算法均保持不变。 |
 | **备选方案** | 只移 emit 仍依赖源码；返回完整汇编仍暴露汇编交换产物；枚举变体限制按需组合；独立后处理改变内存访问。CLI 可另作工具，首版优先库以支持 lowering 内查询。 |
-| **详细设计** | [GEMM epilogue codegen 集成契约](../design/gemm-epilogue-codegen.md) |
+| **详细设计** | [GEMM epilogue codegen 集成契约](../design/gemm/gemm-epilogue-codegen.md) |

@@ -88,7 +88,8 @@ LogicalResult lowerPackBCall(ModuleOp module, func::CallOp call) {
 }
 
 LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
-  FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(call);
+  FailureOr<aarch64::gemm::GemmTuningStrategy> plan =
+      aarch64::gemm::readStrategy(call);
   if (failed(plan)) return failure();
   const bool isRowMajor = aarch64::gemm::usesLdbAbi(
     aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
@@ -96,7 +97,7 @@ LogicalResult lowerMicrokernelCall(ModuleOp module, func::CallOp call) {
   const bool hasRowMajorCallee =
       aarch64::gemm::isRowMajorMicrokernelLeaf(call.getCallee());
   if (isRowMajor != hasRowMajorCallee)
-    return call.emitOpError("microkernel leaf does not match the GEMM plan");
+    return call.emitOpError("microkernel leaf does not match the selected strategy");
   // Packed leaves have seven index operands; row-major leaves add ldb.
   const int64_t expectedOperands = (isRowMajor ? 11 : 10) + (isFused ? 1 : 0);
   if (call.getNumOperands() != expectedOperands)
@@ -239,6 +240,7 @@ class AArch64GemmABILowering
         declaration.erase();
       }
     }
+    aarch64::gemm::pruneGemmMetadata(module);
   }
 };
 
