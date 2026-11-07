@@ -4,6 +4,17 @@ ANNC 的工具链围绕 ATIR 组织：前端把框架模型转成 ATIR，`annc-o
 
 本文给出各工具的典型用法；参数以 `--help` 为准。
 
+## 异构图切分（仅代码骨架）
+
+`annc-partition` 由薄入口（`annc/tools/annc-partition/annc-partition.cpp`）、选项管理模块 `CliOptions`（LLVM `cl::opt` 声明式选项表，承载参数契约的解析、查询模式与 `--help` 选项区）与任务对象 `PartitionTask` 按阶段顺序组织主流程：参数解释 → 配置读取 → 模型接入 → 候选生成 → 切分规划 → 分区导出 → 校验与发布。公共 Planner/策略/通信与 TF Adapter/Exporter 模块尚未建立，模型接入起的各阶段为任务实现内集中管理的最小类占位，统一返回 `not implemented`。当前正常任务依次通过参数（退出码 `2`）、配置读取（`4`）与框架注册表选择（`3`，当前仅 tensorflow）检查，在模型接入占位处以退出码 `5` 终止；全程不读取模型内容、不创建输出目录，也不生成 SavedModel A/B、Manifest 或 Report。
+
+```shell
+annc-partition --help
+annc-partition --version
+```
+
+因此当前不能把该工具用于真实模型切分；下列其他既有工作流不受骨架接入影响。
+
 ## 端到端 GraphDef 重写
 
 `annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。

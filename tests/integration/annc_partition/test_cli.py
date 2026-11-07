@@ -1,0 +1,152 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _binary():
+    build = Path(os.environ.get("ANNC_BUILD_DIR", ROOT / "build"))
+    binary = build / "bin" / "annc-partition"
+    if not binary.is_file():
+        pytest.skip(f"annc-partition is not built: {binary}")
+    return binary
+
+
+def _run(*args, cwd=None):
+    return subprocess.run(
+        [os.fspath(_binary()), *args], cwd=cwd, text=True,
+        capture_output=True, check=False,
+    )
+
+
+def _task_args(**overrides):
+    args = {
+        "--framework": "tensorflow",
+        "--model": "missing-model",
+        "--partition-config": "partition.json",
+        "--comm-config": "comm.json",
+        "--out-dir": "output",
+    }
+    args.update(overrides)
+    flat = []
+    for flag, value in args.items():
+        flat += [flag, value]
+    return flat
+
+
+@pytest.mark.parametrize("option", ["--help", "-h", "--version"])
+def test_query_modes_run_without_task_inputs(option, tmp_path):
+    result = _run(option, cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "annc-partition" in result.stdout
+    assert "skeleton only" in result.stdout
+    # Capability display comes from the same fixed registry as selection.
+    assert "framework tensorflow" in result.stdout
+    assert "strategy json" in result.stdout
+    assert result.stderr == ""
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_task_rejects_missing_required_arguments(tmp_path):
+    result = _run("--model", "m", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "[annc-partition][argument][E_ARGUMENT]" in result.stderr
+    assert "missing required option: --framework" in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_task_rejects_single_dash_long_option(tmp_path):
+    # Long options must use the double-dash spelling (§5.1); the single-dash
+    # form is an unknown argument, not a value spelling.
+    result = _run("-framework", "tensorflow", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "[annc-partition][argument][E_ARGUMENT]" in result.stderr
+    assert "Unknown command line argument '-framework'" in result.stderr
+
+
+def test_task_rejects_empty_and_missing_required_values(tmp_path):
+    result = _run("--framework", "", "--model", "m", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "empty value for --framework" in result.stderr
+
+    result = _run("--model", "m", "--framework", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "missing value for --framework" in result.stderr
+
+
+def test_task_accepts_equals_form(tmp_path):
+    args = [
+        "--framework=tensorflow", "--model", "missing-model",
+        "--partition-config", "partition.json",
+        "--comm-config", "comm.json", "--out-dir", "output",
+    ]
+    result = _run(*args, cwd=tmp_path)
+    # The equals form parses like the separated form; the task proceeds to
+    # config reading.
+    assert result.returncode == 4
+    assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
+
+
+def test_task_repeated_option_takes_last_value(tmp_path):
+    args = [
+        "--framework", "onnx", "--framework", "tensorflow",
+        "--model", "missing-model",
+        "--partition-config", "partition.json",
+        "--comm-config", "comm.json", "--out-dir", "output",
+    ]
+    result = _run(*args, cwd=tmp_path)
+    # The last --framework occurrence wins, so the task fails at config
+    # reading instead of rejecting the earlier unregistered value.
+    assert result.returncode == 4
+    assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
+
+
+def test_task_fails_at_config_read_when_files_missing(tmp_path):
+    result = _run(*_task_args(), cwd=tmp_path)
+    assert result.returncode == 4
+    assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_task_rejects_unregistered_framework(tmp_path):
+    (tmp_path / "partition.json").write_text(
+        json.dumps({"schema_version": 1, "default_partition": "B", "rules": []})
+    )
+    (tmp_path / "comm.json").write_text(
+        json.dumps({"schema_version": 1, "transport": "in_process"})
+    )
+    result = _run(*_task_args(**{"--framework": "onnx"}), cwd=tmp_path)
+    assert result.returncode == 3
+    assert "[annc-partition][adapter][E_CAPABILITY_UNAVAILABLE]" in result.stderr
+    assert "onnx" in result.stderr
+    assert not (tmp_path / "output").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "comm.json", "partition.json",
+    ]
+
+
+def test_task_reaches_adapter_placeholder_with_minimal_configs(tmp_path):
+    (tmp_path / "partition.json").write_text(
+        json.dumps({"schema_version": 1, "default_partition": "B", "rules": []})
+    )
+    (tmp_path / "comm.json").write_text(
+        json.dumps({"schema_version": 1, "transport": "in_process"})
+    )
+    result = _run(*_task_args(), cwd=tmp_path)
+    assert result.returncode == 5
+    assert "[annc-partition][adapter]" in result.stderr
+    assert "not implemented" in result.stderr
+
+    assert "loaded partition config partition.json" in result.stderr
+    assert "loaded comm config comm.json" in result.stderr
+    assert "loading SavedModel from missing-model" in result.stderr
+
+    assert not (tmp_path / "output").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "comm.json", "partition.json",
+    ]

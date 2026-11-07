@@ -1,11 +1,10 @@
 # ANNC 架构设计文档
 
 > **文档编号**：ANNC-ARCH-001\
-> **文档版本**：v3.8\
-> **发布日期**：2026-10-29\
+> **文档版本**：v3.10\
+> **发布日期**：2026-11-07\
 > **目标受众**：架构评审、产品经理、开发工程师、测试工程师、运维工程师\
-> **文档密级**：公开\
-> **变更说明**：v3.0 按 IPD 文档模板重构，从实现细节导向转为特性需求、场景分析、架构设计、可靠性/安全/非功能质量属性全维度描述；v3.1 总体方案调整为三层架构（ANNC 框架对接层 / ANNC 工具链前端 / ANNC 工具链后端）；v3.2 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节；v3.3 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状；v3.4 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算；v3.5 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline；v3.6 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物；v3.7 同步 upstream !248/!260：KDNN adaptor 构建下 `ANNC_GEMM=1` 新增 AOT `matmul` 分支，ONNX EP 可申报站点随构建配置变化；GEMM 常量折叠要求 TensorFlow 与 AArch64 GEMM 微内核归档；v3.8 将 GEMM epilogue 生成迁入私有二进制 codegen 包，公开后端通过版本化请求与临时 object 接入。
+> **文档密级**：公开
 
 ***
 
@@ -567,6 +566,7 @@ sequenceDiagram
 | `addons/onnxruntime`              | ONNX Runtime EP 插件（运行时编译 + 融合回接）   | ORT：`Env::RegisterExecutionProviderLibrary` + `SessionOptions::AppendExecutionProvider_V2`；导出 `CreateEpFactories` / `ReleaseEpFactory`；支持 `mlir_ciface` 与 `annc_execution_v2` 两种站点契约，后者经执行上下文执行（输出/临时经回调分配、ORT 线程池随上下文传入，ADR-013）；开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭 | ANNC 框架对接层 | 早期  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
 | `annc/tools/annc-fusion-metadata` | 提取 Fusion Metadata            | CLI：`annc-fusion-metadata <fused.mlir> -o metadata.json` | 工具链前端      | 稳定  |
+| `annc/tools/annc-partition` | 异构模型切分 CLI 骨架；薄入口、`CliOptions` 选项表（LLVM `cl::opt`，承载参数契约解析与 `--help`）与 `PartitionTask` 任务对象编排主流程，其他模块为最小类占位，公共 Planner 与 TF Adapter/Exporter 模块尚未建立 | CLI：`annc-partition --help` / `--version`；任务调用在模型接入占位处以退出码 5 终止 | 编排 | 骨架 |
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
 | `annc/tools/annc-asm`             | ATIR lowering                 | CLI：`annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline` | 工具链后端 | 稳定 |
 | `annc/tools/annc`                 | 编译 driver                     | CLI：`annc --shared -o kernel.so`            | 工具链后端      | 稳定  |
@@ -947,9 +947,16 @@ flowchart TB
 
 | 版本   | 发布日期       | 作者      | 变更说明                                         |
 | ---- | ---------- | ------- | -------------------------------------------- |
-| v1.0 | 2026-06-13 | ANNC 团队 | 初始版本，实现细节导向                                  |
-| v2.0 | 2026-06-13 | ANNC 团队 | 基于代码事实重写，强调图切分与算子生成两大系统                      |
-| v3.0 | 2026-06-13 | ANNC 团队 | 按 IPD 文档模板重构，从架构、需求、场景、可靠性、安全、非功能质量属性全维度描述   |
-| v3.1 | 2026-07-09 | ANNC 团队 | 总体方案调整为三层架构：ANNC 框架对接层、ANNC 工具链前端、ANNC 工具链后端 |
-| v3.2 | 2026-07-09 | ANNC 团队 | 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节 |
-| v3.3 | 2026-07-17 | ANNC 团队 | 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等 |
+| v1.0 | 2026-06-13 | 编译小伙 | 初始版本，实现细节导向                                  |
+| v2.0 | 2026-06-13 | 编译小伙 | 基于代码事实重写，强调图切分与算子生成两大系统                      |
+| v3.0 | 2026-06-13 | 编译小伙 | 按 IPD 文档模板重构，从架构、需求、场景、可靠性、安全、非功能质量属性全维度描述   |
+| v3.1 | 2026-07-09 | liyancheng | 总体方案调整为三层架构：ANNC 框架对接层、ANNC 工具链前端、ANNC 工具链后端 |
+| v3.2 | 2026-07-09 | liyancheng | 结合源码核对，修正接口契约（NodeInfo/Fusion Metadata）、Pass 现状、Kernel 优先级等事实性描述，补全模块表与测试/依赖章节 |
+| v3.3 | 2026-07-17 | liyancheng | 结合源码二次核对：默认流水线补全第 6 步 annc-converter；修正 NodeInfo 正向路径角色与两套实现字段差异；移除未落地的设计承诺（Init 配置校验、输入校验、版本嵌入、LoadLibrary INFO 日志）；修正 UC4 spec 机制与 FastCodegen 词汇；澄清 work_dir 清理条件、float32 约束边界与测试现状；补记 KDNN flag、后端辅助 pass、`--backend` 接口漂移等实现现状 |
+| v3.4 | 2026-08-22 | liuchang | 为同步 JIT 增加进程内有界编译缓存，按 canonical ATIR template 和实际 shape 复用进程内产物，template fingerprint 由规范化后的 kernel func 计算 |
+| v3.5 | 2026-10-08 | yuyufeng | 移除未进入 predictor 路径的旧 Pass 与 ATIR→Affine lowering 路径，统一描述现行 Linalg/GEMM pipeline |
+| v3.6 | 2026-10-20 | liyancheng | 同步 ONNX EP 站点现状：`annc_execution_v2` 已有四个可达站点（FTDMM 与三个上下文站点），`matmul` 家族走 JIT 故无 AOT 产物 |
+| v3.7 | 2026-10-20 | liyancheng | 同步 upstream !248/!260：KDNN adaptor 构建下 `ANNC_GEMM=1` 新增 AOT `matmul` 分支，ONNX EP 可申报站点随构建配置变化；GEMM 常量折叠要求 TensorFlow 与 AArch64 GEMM 微内核归档 |
+| v3.8 | 2026-10-31 | liuchang | 将 GEMM epilogue 生成迁入私有二进制 codegen 包，公开后端通过版本化请求与临时 object 接入 |
+| v3.9 | 2026-11-04 | liyancheng | 登记 `annc-partition` CLI 骨架（薄入口与 `PartitionTask` 任务对象，各模块阶段为最小类占位），明确真实切分能力尚未实现 |
+| v3.10 | 2026-11-07 | liyancheng | `annc-partition` 参数解释迁移至 LLVM `cl::opt` 声明式选项表（新增 `CliOptions` 模块），`--help` 选项区与参数严格性由选项表派生 |
