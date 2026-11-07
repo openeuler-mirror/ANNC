@@ -1,45 +1,77 @@
-// annc-partition 任务编排实现。
+// Stage orchestration of one annc-partition task (cli-design.md §7).
 //
-// run() 按设计文档（docs/design/annc-partition/cli-design.md §7）的
-// 阶段顺序推进；模型接入起的阶段为「其他模块主流程占位」一节中的
-// 最小类，落地后该节整体迁出替换，阶段梯子本身保持稳定。
+// The placeholder section below belongs to the future modules: when they
+// land, it moves out wholesale and only the call sites in run() change,
+// while the stage ladder stays the stable contract.
 
 #include "PartitionTask.h"
 
+#include <functional>
 #include <utility>
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace annc_partition {
 
 namespace {
 
-// ---- 其他模块主流程占位（最小类） ----
-// 以下类型与类仅呈现阶段交接关系，不含模块内部设计；真实实现按总体
-// 设计（docs/design/annc-partition/overview.md §3）由各模块提供（TF
-// Adapter/Exporter 落于 frontends/tensorflow/planner/，JSON Pattern
-// 策略与公共规划落于公共 Planner 库），落地后本节整体迁出并替换
-// run() 中的调用点。
+// ---- Placeholders for the future module implementations ----
+// The empty types and stub classes below pin only the stage handoffs and
+// framework selection, not any module-internal design. Real
+// implementations live with their modules (overview.md §3: the TF
+// Adapter/Exporter under frontends/tensorflow/planner/, the JSON-pattern
+// strategy and the shared planner in the common Planner library) and
+// replace this section together with the call sites in run(). Stubs log
+// the handoff data they receive -- so the real implementations keep the
+// log lines in place -- and then fail with "not implemented".
 
-struct ModelHandle {};   // 阶段 4：Adapter 产出的不可变源模型句柄
-struct CandidateSet {};  // 阶段 5：策略产出的候选区域集合
-struct PartitionPlan {}; // 阶段 6：公共规划产出的切分计划
-struct ExportResult {};  // 阶段 7：Exporter 产出的分区导出结果
+struct ModelHandle {};    // Immutable source model handed on by the adapter.
+struct CandidateSet {};   // Candidate regions produced by the strategy.
+struct PartitionPlan {};  // Split plan produced by the shared planner.
+struct ExportResult {};   // Export artifacts produced by the exporter.
 
-// 阶段 4 占位：接入源模型。
-// TODO: TF Adapter 读取 SavedModel 并检查初版 profile（总体设计 §3.2）。
-class TensorFlowAdapter {
+// Framework plug points: orchestration depends only on these interfaces.
+// Each framework provides Adapter and Exporter as one pair selected from
+// the same registry entry, which is what forbids cross-framework mixing
+// (§4.3).
+class ModelAdapter {
 public:
-  llvm::Expected<ModelHandle> load(const TaskOptions &) {
+  virtual ~ModelAdapter() = default;
+  virtual llvm::Expected<ModelHandle> load(const TaskOptions &opts) = 0;
+};
+
+class ModelExporter {
+public:
+  virtual ~ModelExporter() = default;
+  // Exporters write only into the staging directory of the current run and
+  // never see the final output directory, which stays exclusive to the
+  // publish stage (§8/§9).
+  virtual llvm::Expected<ExportResult>
+  exportModel(const ModelHandle &, const PartitionPlan &,
+              const llvm::MemoryBuffer &commConfig,
+              llvm::StringRef stagingDir) = 0;
+};
+
+// TODO: the real TF adapter reads the SavedModel and checks the initial
+// profile (overview.md §3.2).
+class TensorFlowAdapter : public ModelAdapter {
+public:
+  llvm::Expected<ModelHandle> load(const TaskOptions &opts) override {
+    logStage("adapter", llvm::formatv("loading SavedModel from {0}"
+                                      " (signature {1})",
+                                      opts.model, opts.tfSignature));
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "TensorFlowAdapter::load is not"
                                    " implemented");
   }
 };
 
-// 阶段 5 占位：生成候选区域。
-// TODO: JSON Pattern 策略复用提取后的 matcher（总体设计 §3.3）。
+// TODO: implement candidate generation with the extracted match-only
+// matcher and Adapter source mapping (overview.md §3.3).
 class JsonPatternStrategy {
 public:
   llvm::Expected<CandidateSet> generateCandidates(const ModelHandle &) {
@@ -49,36 +81,98 @@ public:
   }
 };
 
-// 阶段 6 占位：形成切分计划。
-// TODO: 公共切分实现完成归属、合法性与边界校验（总体设计 §3.4）。
+// TODO: the shared planner enforces ownership, legality, and boundary
+// checks (overview.md §3.4).
 class PartitionPlanner {
 public:
-  llvm::Expected<PartitionPlan> createPlan(const ModelHandle &,
-                                           const CandidateSet &) {
+  llvm::Expected<PartitionPlan>
+  createPlan(const ModelHandle &, const CandidateSet &,
+             const llvm::MemoryBuffer &partitionConfig,
+             const llvm::MemoryBuffer &commConfig) {
+    logStage("plan",
+             llvm::formatv("planning A/B split (partition config {0} bytes,"
+                           " comm config {1} bytes)",
+                           partitionConfig.getBufferSize(),
+                           commConfig.getBufferSize()));
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "partition planning is not implemented");
   }
 };
 
-// 阶段 7 占位：导出分区模型。
-// TODO: TF Exporter 写出 A/B 与 Manifest 到 staging（总体设计 §3.5，
-// 包布局见设计 §8.1）。
-class TensorFlowExporter {
+// TODO: the real TF exporter writes A/B and the manifest to staging
+// (overview.md §3.5; package layout in §8.1).
+class TensorFlowExporter : public ModelExporter {
 public:
-  llvm::Expected<ExportResult> exportModel(const ModelHandle &,
-                                           const PartitionPlan &) {
+  llvm::Expected<ExportResult>
+  exportModel(const ModelHandle &, const PartitionPlan &,
+              const llvm::MemoryBuffer &,
+              llvm::StringRef stagingDir) override {
+    logStage("export",
+             llvm::formatv("exporting A/B and manifest to staging {0}",
+                           stagingDir));
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "TensorFlowExporter::exportModel is"
                                    " not implemented");
   }
 };
 
+// The Adapter and Exporter of one framework, selected as a unit.
+struct FrameworkImpl {
+  std::unique_ptr<ModelAdapter> adapter;
+  std::unique_ptr<ModelExporter> exporter;
+};
+
+// The fixed build-time capability registry (§4.3) in its minimal form: the
+// single source that drives selection, --help, and --version. Entries
+// flagged skeleton are registered placeholders, not yet functional; an
+// unregistered name is a capability failure (exit 3, §10.2), not an
+// argument error.
+struct FrameworkEntry {
+  llvm::StringRef name;
+  bool skeleton;
+  std::function<std::unique_ptr<ModelAdapter>()> makeAdapter;
+  std::function<std::unique_ptr<ModelExporter>()> makeExporter;
+};
+
+const FrameworkEntry kFrameworks[] = {
+    {"tensorflow", true,
+     [] { return std::make_unique<TensorFlowAdapter>(); },
+     [] { return std::make_unique<TensorFlowExporter>(); }},
+};
+
+template <typename Entries> std::string joinedNames(const Entries &entries) {
+  std::string out;
+  for (const auto &entry : entries) {
+    if (!out.empty())
+      out += ", ";
+    out += entry.name.str();
+  }
+  return out;
+}
+
+llvm::Expected<FrameworkImpl> createFrameworkImpl(const TaskOptions &opts) {
+  for (const auto &entry : kFrameworks)
+    if (entry.name == opts.framework)
+      return FrameworkImpl{entry.makeAdapter(), entry.makeExporter()};
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "no registered framework implementation for '" + opts.framework +
+          "' (registered: " + joinedNames(kFrameworks) + ")");
+}
+
 }  // namespace
+
+std::vector<CapabilityDesc> registeredCapabilities() {
+  std::vector<CapabilityDesc> out;
+  for (const auto &entry : kFrameworks)
+    out.push_back({"framework", entry.name, entry.skeleton});
+  return out;
+}
 
 PartitionTask::PartitionTask(TaskOptions taskOptions)
     : options(std::move(taskOptions)) {}
 
-void logStage(llvm::StringRef stage, llvm::StringRef message) {
+void logStage(llvm::StringRef stage, const llvm::Twine &message) {
   llvm::errs() << "[annc-partition][" << stage << "] " << message << "\n";
 }
 
@@ -88,18 +182,9 @@ int reportFailure(const TaskFailure &failure) {
   return static_cast<int>(failure.exitCode);
 }
 
-std::optional<TaskFailure> PartitionTask::checkCapability() {
-  if (options.framework != "tensorflow" || options.strategy != "json")
-    return TaskFailure{
-        "capability", "E_CAPABILITY_UNAVAILABLE",
-        "unsupported framework/strategy combination; skeleton registers"
-        " tensorflow+json+in_process only",
-        ExitCode::Capability};
-  return std::nullopt;
-}
-
 std::optional<TaskFailure> PartitionTask::loadConfigs() {
-  // TODO: 严格 schema 解析（设计 §5.3/§5.4），失败映射退出码 2。
+  // TODO: strict schema parsing per §5.3/§5.4; schema violations then map
+  // to exit class 2, while unreadable files stay in class 4 (§10.2).
   auto partitionFile = llvm::MemoryBuffer::getFile(options.partitionConfig);
   if (!partitionFile)
     return TaskFailure{"config", "E_CONFIG_UNREADABLE",
@@ -107,6 +192,9 @@ std::optional<TaskFailure> PartitionTask::loadConfigs() {
                            options.partitionConfig,
                        ExitCode::Io};
   partitionConfig = std::move(partitionFile.get());
+  logStage("config", llvm::formatv("loaded partition config {0} ({1} bytes)",
+                                   options.partitionConfig,
+                                   partitionConfig->getBufferSize()));
   auto commFile = llvm::MemoryBuffer::getFile(options.commConfig);
   if (!commFile)
     return TaskFailure{"config", "E_CONFIG_UNREADABLE",
@@ -114,59 +202,64 @@ std::optional<TaskFailure> PartitionTask::loadConfigs() {
                            options.commConfig,
                        ExitCode::Io};
   commConfig = std::move(commFile.get());
+  logStage("config", llvm::formatv("loaded comm config {0} ({1} bytes)",
+                                   options.commConfig,
+                                   commConfig->getBufferSize()));
   return std::nullopt;
 }
 
-int PartitionTask::run() {
-  // 阶段 2：能力检查。
-  if (auto failure = checkCapability())
-    return reportFailure(*failure);
-  logStage("capability", "tensorflow+json+in_process selected");
+std::string PartitionTask::stagingDir() const {
+  // Staging is a sibling of the final output directory in its parent (§9);
+  // exclusive creation and the unique isolation suffix belong to the
+  // directory transaction.
+  llvm::SmallString<128> parent(options.outDir);
+  std::string name(llvm::sys::path::filename(parent));
+  llvm::sys::path::remove_filename(parent);
+  llvm::sys::path::append(parent, "." + name + ".annc-staging");
+  return std::string(parent);
+}
 
-  // 阶段 3：读取两份配置文件，原文保留待后续模块消费。
+std::optional<TaskFailure> PartitionTask::run() {
   if (auto failure = loadConfigs())
-    return reportFailure(*failure);
-  logStage("config",
-           "loaded partition and comm config files (schema parsing TODO)");
+    return failure;
 
-  // 阶段 4：接入源模型（其他模块占位）。
-  TensorFlowAdapter adapter;
-  auto model = adapter.load(options);
+  auto frameworkImpl = createFrameworkImpl(options);
+  if (!frameworkImpl)
+    return TaskFailure{"adapter", "E_CAPABILITY_UNAVAILABLE",
+                       llvm::toString(frameworkImpl.takeError()),
+                       ExitCode::Capability};
+  auto model = frameworkImpl->adapter->load(options);
   if (!model)
-    return reportFailure({"adapter", "E_ANALYSIS",
-                          llvm::toString(model.takeError()),
-                          ExitCode::Analysis});
-  logStage("adapter", "source model loaded");
+    return TaskFailure{"adapter", "E_ANALYSIS",
+                       llvm::toString(model.takeError()),
+                       ExitCode::Analysis};
 
-  // 阶段 5：候选生成（其他模块占位）。
   JsonPatternStrategy strategy;
   auto candidates = strategy.generateCandidates(*model);
   if (!candidates)
-    return reportFailure({"strategy", "E_ANALYSIS",
-                          llvm::toString(candidates.takeError()),
-                          ExitCode::Analysis});
-  logStage("strategy", "candidate regions generated");
+    return TaskFailure{"strategy", "E_ANALYSIS",
+                       llvm::toString(candidates.takeError()),
+                       ExitCode::Analysis};
 
-  // 阶段 6：形成切分计划（其他模块占位）。
   PartitionPlanner planner;
-  auto plan = planner.createPlan(*model, *candidates);
+  auto plan = planner.createPlan(*model, *candidates, *partitionConfig,
+                                 *commConfig);
   if (!plan)
-    return reportFailure(
-        {"plan", "E_PLAN", llvm::toString(plan.takeError()), ExitCode::Plan});
-  logStage("plan", "partition plan created");
+    return TaskFailure{"plan", "E_PLAN", llvm::toString(plan.takeError()),
+                       ExitCode::Plan};
 
-  // 阶段 7：导出分区模型（其他模块占位）。
-  TensorFlowExporter exporter;
-  auto exportResult = exporter.exportModel(*model, *plan);
+  auto exportResult = frameworkImpl->exporter->exportModel(
+      *model, *plan, *commConfig, stagingDir());
   if (!exportResult)
-    return reportFailure({"export", "E_EXPORT",
-                          llvm::toString(exportResult.takeError()),
-                          ExitCode::Export});
-  logStage("export", "partition models exported");
+    return TaskFailure{"export", "E_EXPORT",
+                       llvm::toString(exportResult.takeError()),
+                       ExitCode::Export};
 
-  // 阶段 8-10：产物校验、Report 汇总与目录事务发布（设计 §8/§9）。
-  // TODO: 校验汇总、原子发布；当前流程不会执行到此处。
-  return static_cast<int>(ExitCode::Success);
+  // The stages after export -- artifact validation, report assembly, and
+  // atomic publish (§8/§9) -- have no code yet and are unreachable until
+  // the placeholders above become real.
+  // TODO: validation summary and atomic publish.
+  return std::nullopt;
 }
 
 }  // namespace annc_partition

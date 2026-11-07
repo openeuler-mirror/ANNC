@@ -1,33 +1,39 @@
 #ifndef ANNC_PARTITION_TASK_H
 #define ANNC_PARTITION_TASK_H
 
-// annc-partition 的任务公共契约：一次离线切分任务的选项、退出分类、
-// 失败信息与任务编排对象。入口（annc-partition.cpp）完成查询模式与
-// 参数解释后，把任务交给 PartitionTask 按设计文档
-// （docs/design/annc-partition/cli-design.md §7）的阶段顺序推进。
+// Shared task contract of annc-partition: task-wide options, the exit-code
+// classification, the failure record, the capability registry, and the task
+// object walking the stage ladder of docs/design/annc-partition/cli-design.md
+// §7. The CLI entry keeps the query modes, argument interpretation, and the
+// final failure output with exit-code mapping; everything from config
+// loading onward belongs to the task.
 
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 namespace annc_partition {
 
-// 退出码分类依据设计文档 §10.2；8（产物校验）、9（发布）、70（内部
-// 错误）与 130/143（取消）保留，随对应阶段实现补充。
+// Exit-code classification of §10.2. Codes 8 (artifact validation), 9
+// (publish), 70 (internal error), and 130/143 (cancellation) stay reserved
+// until the corresponding stages exist.
 enum class ExitCode : int {
   Success = 0,
-  Argument = 2,   // 参数或配置契约错误
-  Capability = 3, // 能力不可用
-  Io = 4,         // 提交前输入输出错误
-  Analysis = 5,   // 模型接入或分析失败
-  Plan = 6,       // 规划失败
-  Export = 7,     // 模型导出失败
+  Argument = 2,
+  Capability = 3,
+  Io = 4,
+  Analysis = 5,
+  Plan = 6,
+  Export = 7,
 };
 
-// 任务选项：参数解释阶段产出，贯穿全部后续阶段的公共关键信息。
+// Task-wide options produced by argument interpretation and consumed by
+// every later stage.
 struct TaskOptions {
   std::string framework;
   std::string model;
@@ -41,8 +47,9 @@ struct TaskOptions {
   bool verbose = false;
 };
 
-// 一次任务失败的公共信息：阶段、稳定错误标识、原因与退出分类。
-// 首次失败决定主退出分类，后续清理告警不覆盖根因（设计 §10.1）。
+// One task failure. The first failure fixes the root cause: later cleanup
+// warnings must not overwrite the recorded stage, identifier, or exit
+// class (§10.1).
 struct TaskFailure {
   std::string stage;
   std::string code;
@@ -50,35 +57,68 @@ struct TaskFailure {
   ExitCode exitCode = ExitCode::Success;
 };
 
-// 按诊断契约输出一条阶段进度日志到 stderr（设计 §10.1 的阶段诊断
-// 格式），入口与任务共用。
-void logStage(llvm::StringRef stage, llvm::StringRef message);
+// One entry of the fixed capability registry of this build: the kind
+// ("framework" or "strategy"), the registered name, and whether the linked
+// implementation is still a skeleton placeholder. The registry is the
+// single source for capability selection and for the capability display of
+// --help/--version (§4.3).
+struct CapabilityDesc {
+  llvm::StringRef kind;
+  llvm::StringRef name;
+  bool skeleton;
+};
 
-// 按诊断契约输出一次失败并返回对应进程退出码；入口的参数阶段与
-// 任务的各阶段共用同一失败格式（设计 §10.1）。
+// Returns the capabilities registered in this build, framework entries
+// first. Entries flagged skeleton are registered placeholders, not yet
+// usable for real partitioning.
+std::vector<CapabilityDesc> registeredCapabilities();
+
+// Emits one stage progress line to stderr under the diagnostics contract of
+// §10.1; shared by the entry's argument stage and the task stages.
+void logStage(llvm::StringRef stage, const llvm::Twine &message);
+
+// Reports a failure in the shared §10.1 format and returns the mapped
+// process exit code. The entry owns this call for both argument-stage and
+// task failures, so every failure prints identically.
 int reportFailure(const TaskFailure &failure);
 
-// 一次离线切分任务（设计 §7）。
+// One offline partitioning task (§7).
 //
-// 按阶段顺序编排：能力检查 → 配置读取 → 模型接入 → 候选生成 →
-// 切分规划 → 分区导出 → 校验汇总 → 目录发布；当前模型接入起的阶段
-// 为其他模块的最小类占位，统一返回 not implemented，流程在首个占位
-// 调用（模型接入）处终止。任务持有选项与已加载的配置原文（设计
-// §5.3，待策略/规划/导出模块消费）；失败保留首次根因。scratch/
-// staging 的清理责任随目录事务实现（设计 §9）落在本对象的析构路径。
+// Design commitments:
+//  - Frameworks provide Adapter and Exporter as one pair and are selected
+//    from the same registry entry, which is what forbids cross-framework
+//    mixing (§4.3); only tensorflow is registered so far.
+//  - Config files stay raw buffers: the task checks readability only, while
+//    schemas and semantics belong to the downstream modules (§5.3).
+//  - Stages from model loading onward are placeholders owned by the future
+//    modules; each fails with "not implemented", so the pipeline stops at
+//    the first one.
+//  - Exporters receive only the staging directory of the current run; the
+//    final output directory is exclusive to the publish stage (§8/§9).
+//  - scratch/staging cleanup is part of the directory-transaction work (§9)
+//    and will attach to this object's destruction path.
 class PartitionTask {
 public:
   explicit PartitionTask(TaskOptions options);
 
-  // 推进各阶段并返回进程退出码；占位阶段在模型接入处以退出码 5 终止。
-  int run();
+  // Runs the stage ladder and returns the first failure, or nullopt on
+  // success; printing the failure and mapping the exit code belong to the
+  // entry. Placeholder stages stop the pipeline at model loading, in exit
+  // class Analysis. Placeholder errors flatten to strings at this boundary;
+  // real modules are expected to return categorized errors so that, e.g.,
+  // a disk error during export still classifies as I/O (§10.2).
+  std::optional<TaskFailure> run();
 
 private:
-  // 阶段 2：能力检查。骨架期静态注册 tensorflow+json+in_process。
-  std::optional<TaskFailure> checkCapability();
-
-  // 阶段 3：读取分区与通信配置，原文保留待后续模块消费。
+  // Loads both config files as raw text; schema parsing belongs to the
+  // downstream modules (§5.3).
   std::optional<TaskFailure> loadConfigs();
+
+  // The staging directory of this run: a sibling of the final output
+  // directory in its parent (§9). Exporters see this path only; the final
+  // output directory stays exclusive to the publish stage.
+  // TODO: exclusive creation and the unique isolation suffix (§9).
+  std::string stagingDir() const;
 
   TaskOptions options;
   std::unique_ptr<llvm::MemoryBuffer> partitionConfig;

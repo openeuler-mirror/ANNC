@@ -6,7 +6,7 @@ ANNC 的工具链围绕 ATIR 组织：前端把框架模型转成 ATIR，`annc-o
 
 ## 异构图切分（仅代码骨架）
 
-`annc-partition` 由薄入口（`annc/tools/annc-partition/annc-partition.cpp`）与任务对象 `PartitionTask` 按阶段顺序组织主流程：参数解释 → 能力检查 → 配置读取 → 模型接入 → 候选生成 → 切分规划 → 分区导出 → 校验与发布。公共 Planner/策略/通信与 TF Adapter/Exporter 模块尚未建立，模型接入起的各阶段为任务实现内集中管理的最小类占位，统一返回 `not implemented`。当前正常任务会通过参数（退出码 `2`）、能力（`3`）与配置读取（`4`）检查，在模型接入占位处以退出码 `5` 终止；全程不读取模型内容、不创建输出目录，也不生成 SavedModel A/B、Manifest 或 Report。
+`annc-partition` 由薄入口（`annc/tools/annc-partition/annc-partition.cpp`）与任务对象 `PartitionTask` 按阶段顺序组织主流程：参数解释 → 配置读取 → 模型接入 → 候选生成 → 切分规划 → 分区导出 → 校验与发布。公共 Planner/策略/通信与 TF Adapter/Exporter 模块尚未建立，模型接入起的各阶段为任务实现内集中管理的最小类占位，统一返回 `not implemented`。当前正常任务依次通过参数（退出码 `2`）、配置读取（`4`）与框架注册表选择（`3`，当前仅 tensorflow）检查，在模型接入占位处以退出码 `5` 终止；全程不读取模型内容、不创建输出目录，也不生成 SavedModel A/B、Manifest 或 Report。
 
 ```shell
 annc-partition --help
