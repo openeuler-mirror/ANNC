@@ -117,7 +117,7 @@ def generated_module(
     diagnostics = []
     if prefix_cases:
         options += " intra-thread-count=4"
-        diagnostics = ["--mlir-print-ir-after=aarch64-finalize-gemm-plan"]
+        diagnostics = ["--mlir-print-ir-after=aarch64-gemm-thread-planning"]
     result = run([build / "bin/annc-asm", fused,
                   f"--annc-aarch64-gemm-pipeline={options}", *diagnostics,
                   "-o", lowered], env)
@@ -199,7 +199,7 @@ def test_shared_pipeline_direct_and_prefix_numerics(tools, tmp_path, isa):
     lowered = generated_module(tools, tmp_path, isa=isa, prefix_cases=True)
     text = lowered.read_text()
     planned = (tmp_path / "planned.mlir").read_text()
-    # Assert only public plan attributes; the normalized request is opaque.
+    # Assert the selected strategy attributes before tiling.
     for name, packing in (("single_tail_add_relu", "packed"),
                           ("single_add", "direct")):
         function = planned.split(f"func.func @{name}(", 1)[1].split("func.func @", 1)[0]

@@ -1,5 +1,6 @@
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "GemmMicrokernelSelection.h"
+#include "GemmPacking.h"
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
 #include "Target/aarch64/Passes.h"
@@ -33,58 +34,59 @@ func::FuncOp getOrCreateLeafDeclaration(ModuleOp module, StringRef name,
   return declaration;
 }
 
-using WorkspaceMap = llvm::DenseMap<Operation *, Value>;
-
-int64_t packedBElements(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n) {
-  // SVE prepacked layout sizing is defined by the microkernel archive. The
-  // pass validates this optional weak symbol before entering this helper.
-  return isa == aarch64::gemm::GemmIsa::kSve
-             ? annc_aarch64_sve_packed_b_elements_f32(k, n)
-             : k * ((n + 3) / 4) * 4;
+int64_t packedBElements(const aarch64::gemm::GemmExecutionContext &context, int64_t k,
+                        int64_t n) {
+  // The caller checks the optional archive sizing helper before materializing
+  // SVE prepacked data; offsets follow the layout declared by the kernel ABI.
+  const auto &abi = aarch64::gemm::getGemmKernelABI(
+      context.strategy.target, context.strategy.isa, context.strategy.dataType,
+      context.strategy.executionKind);
+  return aarch64::gemm::getGemmPackedBElements(abi, k, n);
 }
 
 // Elements covered by the first `count` column blocks of one KC row.
-int64_t columnPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
+int64_t columnPrefix(const aarch64::gemm::GemmExecutionContext &context, int64_t k,
+                     int64_t n,
                      int64_t nc, int64_t count) {
   int64_t total = 0;
   for (int64_t jc = 0; jc < count; ++jc)
-    total += packedBElements(isa, k, std::min(nc, n - jc * nc));
+    total += packedBElements(context, k, std::min(nc, n - jc * nc));
   return total;
 }
 
 // Elements before the pcIndex-th KC row of the whole packed RHS.
-int64_t rowPrefix(aarch64::gemm::GemmIsa isa, int64_t k, int64_t n,
-                  const aarch64::gemm::GemmCacheTile &tile, int64_t pcIndex) {
+int64_t rowPrefix(const aarch64::gemm::GemmExecutionContext &context, int64_t k, int64_t n,
+                  const aarch64::gemm::FixedCacheParameters &tile, int64_t pcIndex) {
   int64_t total = 0;
   for (int64_t pc = 0; pc < pcIndex; ++pc)
-    total += columnPrefix(isa, std::min(tile.kc, k - pc * tile.kc), n,
+    total += columnPrefix(context, std::min(tile.kc, k - pc * tile.kc), n,
                           tile.nc, (n + tile.nc - 1) / tile.nc);
   return total;
 }
 
 FailureOr<Value> getPrepackedRhsGlobal(ModuleOp module, Operation *op,
-                                       const aarch64::gemm::GemmPlan &plan,
+                                       const aarch64::gemm::GemmExecutionContext &context,
                                        OpBuilder &builder, Location loc) {
-  if (plan.prepackedRhsSymbol.empty() || plan.prepackedRhsElements <= 0)
+  if (context.prepackedRhsSymbol.empty() || context.prepackedRhsElements <= 0)
     return op->emitOpError("has no valid prepacked RHS global reference");
   MemRefType type =
-      MemRefType::get({plan.prepackedRhsElements}, builder.getF32Type());
-  Operation *existing = module.lookupSymbol(plan.prepackedRhsSymbol);
+      MemRefType::get({context.prepackedRhsElements}, builder.getF32Type());
+  Operation *existing = module.lookupSymbol(context.prepackedRhsSymbol);
   if (existing) {
     auto global = llvm::dyn_cast<memref::GlobalOp>(existing);
     if (!global || global.getType() != type || !global.isExternal())
       return op->emitOpError()
-             << "prepacked RHS symbol '" << plan.prepackedRhsSymbol
+             << "prepacked RHS symbol '" << context.prepackedRhsSymbol
              << "' conflicts with an incompatible module symbol";
   } else {
     OpBuilder moduleBuilder(module.getContext());
     moduleBuilder.setInsertionPointToStart(module.getBody());
     moduleBuilder.create<memref::GlobalOp>(
-        loc, plan.prepackedRhsSymbol, StringAttr(), type, Attribute(), false,
+        loc, context.prepackedRhsSymbol, StringAttr(), type, Attribute(), false,
         builder.getI64IntegerAttr(64));
   }
   return builder.create<memref::GetGlobalOp>(loc, type,
-                                             plan.prepackedRhsSymbol)
+                                             context.prepackedRhsSymbol)
       .getResult();
 }
 
@@ -106,34 +108,41 @@ Value callSvePackedBHelper(ModuleOp module, OpBuilder &builder, Location loc,
       .getResult(0);
 }
 
-Value getOrCreateWorkspace(ModuleOp module, Operation *op,
-                           const aarch64::gemm::GemmPlan &plan,
-                           WorkspaceMap &workspaces) {
+struct WorkspaceRequirement {
+  int64_t maxK = 0;
+  int64_t maxN = 0;
+  int64_t maxElements = 0;
+};
+
+using WorkspaceMap = llvm::DenseMap<Operation *, Value>;
+using WorkspaceRequirements =
+    llvm::DenseMap<Operation *, WorkspaceRequirement>;
+
+Value getOrCreatePackedBWorkspace(
+    ModuleOp module, Operation *op,
+    const aarch64::gemm::GemmExecutionContext &context,
+    const WorkspaceRequirements &requirements, WorkspaceMap &workspaces) {
   func::FuncOp function = op->getParentOfType<func::FuncOp>();
   Operation *functionOp = function.getOperation();
   if (auto existing = workspaces.find(functionOp); existing != workspaces.end())
     return existing->second;
-
+  const auto &size = requirements.find(functionOp)->second;
   OpBuilder builder(function.getContext());
   builder.setInsertionPointToStart(&function.front());
   MemRefType type;
   ValueRange dynamicSizes;
-  if (plan.isa == aarch64::gemm::GemmIsa::kSve) {
-    Value k = builder.create<arith::ConstantIndexOp>(op->getLoc(),
-                                                      plan.cacheTile.kc);
-    Value n = builder.create<arith::ConstantIndexOp>(op->getLoc(),
-                                                      plan.cacheTile.nc);
+  if (context.strategy.isa == aarch64::gemm::GemmIsa::kSve) {
+    Value k = builder.create<arith::ConstantIndexOp>(op->getLoc(), size.maxK);
+    Value n = builder.create<arith::ConstantIndexOp>(op->getLoc(), size.maxN);
     Value elements =
         callSvePackedBHelper(module, builder, op->getLoc(),
                              aarch64::gemm::kSvePackedBElementsAsmSymbol, k, n);
     type = MemRefType::get({ShapedType::kDynamic}, builder.getF32Type());
     dynamicSizes = ValueRange{elements};
   } else {
-    type = MemRefType::get({plan.cacheTile.kc * plan.cacheTile.nc},
-                           builder.getF32Type());
+    type = MemRefType::get({size.maxElements}, builder.getF32Type());
   }
-  auto alloca =
-      builder.create<memref::AllocaOp>(op->getLoc(), type, dynamicSizes);
+  auto alloca = builder.create<memref::AllocaOp>(op->getLoc(), type, dynamicSizes);
   alloca->setAttr("alignment", builder.getI64IntegerAttr(64));
   workspaces.try_emplace(functionOp, alloca);
   return alloca;
@@ -239,12 +248,12 @@ bool isStaticZero(OpFoldResult value) {
 void copyScheduleAttrs(Operation *source, func::CallOp target,
                        OpBuilder &builder) {
   for (StringRef name :
-       {aarch64::gemm::kPlanAttrName, aarch64::gemm::kKcModeAttrName,
-        aarch64::gemm::kKcRoleAttrName,
+       {aarch64::gemm::kKcModeAttrName, aarch64::gemm::kKcRoleAttrName,
         atir::kGemmEpilogueAttr}) {
     if (Attribute attr = source->getAttr(name))
       target->setDiscardableAttr(name, attr);
   }
+  aarch64::gemm::copyStrategyReference(source, target);
   aarch64::gemm::setStage(target, builder, aarch64::gemm::kPackedStage);
 }
 
@@ -296,12 +305,13 @@ using PackedBBlockMap = llvm::DenseMap<Value, PackedBWorkspace>;
 
 // Materialize the (PC, JC) offset for the pc-major / jc-minor packed RHS.
 Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
-                                      const aarch64::gemm::GemmPlan &plan,
+                                      const aarch64::gemm::GemmExecutionContext &context,
                                       int64_t fullN, int64_t kSize, Value pc,
                                       Value jc) {
-  const int64_t kc = plan.cacheTile.kc;
-  const int64_t nc = plan.cacheTile.nc;
-  const int64_t kRows = (plan.k + kc - 1) / kc;
+  const auto &tile = aarch64::gemm::getFixedCacheParameters(context.strategy.cache);
+  const int64_t kc = tile.kc;
+  const int64_t nc = tile.nc;
+  const int64_t kRows = (context.problem.k + kc - 1) / kc;
   const int64_t nCols = (fullN + nc - 1) / nc;
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value rowIndex = builder.create<arith::DivUIOp>(
@@ -319,18 +329,18 @@ Value materializePrepackedCacheOffset(OpBuilder &builder, Location loc,
   };
   // Full rows before the current K row cover every N column.
   for (int64_t r = 0; r < kRows; ++r) {
-    const int64_t kr = std::min(kc, plan.k - r * kc);
+    const int64_t kr = std::min(kc, context.problem.k - r * kc);
     int64_t rowWidth = 0;
     for (int64_t c = 0; c < nCols; ++c) {
       const int64_t blockN = std::min(nc, fullN - c * nc);
-      rowWidth += packedBElements(plan.isa, kr, blockN);
+      rowWidth += packedBElements(context, kr, blockN);
     }
     addContribution(rowIndex, r, rowWidth);
   }
   // Columns before JC inside the current K row.
   for (int64_t c = 0; c < nCols; ++c) {
     const int64_t blockN = std::min(nc, fullN - c * nc);
-    addContribution(colIndex, c, packedBElements(plan.isa, kSize, blockN));
+    addContribution(colIndex, c, packedBElements(context, kSize, blockN));
   }
   return offset;
 }
@@ -369,9 +379,10 @@ FailureOr<std::pair<Value, Value>> absoluteBlockBase(Operation *op,
 }
 
 FailureOr<PackedBBlock> materializePrepackedBBlock(
-    ModuleOp module, Operation *op, const aarch64::gemm::GemmPlan &plan,
+    ModuleOp module, Operation *op, const aarch64::gemm::GemmExecutionContext &context,
     OpBuilder &builder, Value rhsBlock, Value jr) {
-  if (plan.isa == aarch64::gemm::GemmIsa::kSve &&
+  const auto &tile = aarch64::gemm::getFixedCacheParameters(context.strategy.cache);
+  if (context.strategy.isa == aarch64::gemm::GemmIsa::kSve &&
       !annc_aarch64_sve_packed_b_elements_f32) {
     return op->emitOpError(
         "SVE prepacked RHS requires the AArch64 GEMM microkernel archive");
@@ -393,14 +404,9 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
   Value pc = base->first;
   Value blockColumn = base->second;
 
-  // Thread-task plans carry a tile-local N; recover the problem-level N that
+  // Thread tasks carry a tile-local N; recover the problem-level N that
   // shapes the packed data blocks.
-  int64_t fullN = plan.n;
-  if (auto planDict =
-          op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName)) {
-    if (auto fullNAttr = planDict.getAs<IntegerAttr>("full_n"))
-      fullN = fullNAttr.getInt();
-  }
+  const int64_t fullN = context.problem.n;
 
   // packed offset = cache-block prefix (pc row + block column) + panel offset.
   Value offset;
@@ -408,20 +414,20 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
   auto columnConstant = blockColumn.getDefiningOp<arith::ConstantIndexOp>();
   if (pcConstant && columnConstant) {
     offset = microBuilder.create<arith::ConstantIndexOp>(
-        loc, rowPrefix(plan.isa, plan.k, fullN, plan.cacheTile,
-                       pcConstant.value() / plan.cacheTile.kc) +
-                 columnPrefix(plan.isa, *kSize, fullN, plan.cacheTile.nc,
-                              columnConstant.value() / plan.cacheTile.nc));
+        loc, rowPrefix(context, context.problem.k, fullN, tile,
+                       pcConstant.value() / tile.kc) +
+                 columnPrefix(context, *kSize, fullN, tile.nc,
+                              columnConstant.value() / tile.nc));
   } else {
-    offset = materializePrepackedCacheOffset(microBuilder, loc, plan, fullN,
+    offset = materializePrepackedCacheOffset(microBuilder, loc, context, fullN,
                                              *kSize, pc, blockColumn);
   }
   // Panel numbering restarts at each NC-aligned packed block, so a task tile
   // starting mid-block must rebase JR into that block's column space.
   Value panelColumn = jr;
-  if (!columnConstant || columnConstant.value() % plan.cacheTile.nc != 0) {
+  if (!columnConstant || columnConstant.value() % tile.nc != 0) {
     Value ncValue = microBuilder.create<arith::ConstantIndexOp>(
-        loc, plan.cacheTile.nc);
+        loc, tile.nc);
     Value blockStart = microBuilder.create<arith::MulIOp>(
         loc, microBuilder.create<arith::DivUIOp>(loc, blockColumn, ncValue),
         ncValue);
@@ -429,7 +435,7 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
         loc, microBuilder.create<arith::SubIOp>(loc, blockColumn, blockStart),
         jr);
   }
-  if (plan.isa == aarch64::gemm::GemmIsa::kSve) {
+  if (context.strategy.isa == aarch64::gemm::GemmIsa::kSve) {
     Value blockK = microBuilder.create<arith::ConstantIndexOp>(loc, *kSize);
     Value panel = callSvePackedBHelper(
         module, microBuilder, loc, aarch64::gemm::kSvePackedBOffsetAsmSymbol,
@@ -447,9 +453,7 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
         loc, offset, microBuilder.create<arith::AddIOp>(loc, groupOffset, lane));
   }
 
-  auto planDict =
-      op->getAttrOfType<DictionaryAttr>(aarch64::gemm::kPlanAttrName);
-  if (planDict.get("rhs_data_input")) {
+  if (context.prepackedRhsFromInput) {
     Value root = rhsBlock;
     while (auto subview = root.getDefiningOp<memref::SubViewOp>())
       root = subview.getSource();
@@ -460,7 +464,7 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
         offset};
   }
   FailureOr<Value> global =
-      getPrepackedRhsGlobal(module, op, plan, microBuilder, loc);
+      getPrepackedRhsGlobal(module, op, context, microBuilder, loc);
   if (failed(global)) return failure();
   return PackedBBlock{
       aarch64::gemm::castToUnrankedF32MemRef(microBuilder, loc, *global),
@@ -468,8 +472,9 @@ FailureOr<PackedBBlock> materializePrepackedBBlock(
 }
 
 FailureOr<PackedBBlock> materializePackedBBlock(
-    ModuleOp module, Operation *op, const aarch64::gemm::GemmPlan &plan,
-    WorkspaceMap &workspaces, PackedBBlockMap &packedBlocks) {
+    ModuleOp module, Operation *op, const aarch64::gemm::GemmExecutionContext &context,
+    const WorkspaceRequirements &requirements, WorkspaceMap &workspaces,
+    PackedBBlockMap &packedBlocks) {
   Value rhsInput = aarch64::gemm::getGemmInput(op, 1);
   auto rhsTile = rhsInput.getDefiningOp<memref::SubViewOp>();
 
@@ -499,8 +504,8 @@ FailureOr<PackedBBlock> materializePackedBBlock(
         return PackedBBlock{existing->second.base, packedOffset};
       }
 
-      if (plan.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
-        return materializePrepackedBBlock(module, op, plan, microBuilder,
+      if (context.strategy.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
+        return materializePrepackedBBlock(module, op, context, microBuilder,
                                           rhsBlock, jr);
 
       OpBuilder packBuilder(hoistPoint);
@@ -512,18 +517,19 @@ FailureOr<PackedBBlock> materializePackedBBlock(
             "(PC, JC) RHS subviews");
       }
 
-      Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
       FailureOr<int64_t> staticK = getStaticDimension(rhsBlock, 0);
       FailureOr<int64_t> staticN = getStaticDimension(rhsBlock, 1);
       if (failed(staticK) || failed(staticN))
         return op->emitOpError("requires statically shaped RHS cache blocks");
+      Value workspace = getOrCreatePackedBWorkspace(
+          module, op, context, requirements, workspaces);
       Value kSize = packBuilder.create<arith::ConstantIndexOp>(loc, *staticK);
       Value nSize = packBuilder.create<arith::ConstantIndexOp>(loc, *staticN);
       Value ldbValue =
-          packBuilder.create<arith::ConstantIndexOp>(loc, plan.ldb);
+          packBuilder.create<arith::ConstantIndexOp>(loc, context.problem.ldb);
       Value packedBase = materializePackCall(
           module, packBuilder, loc, rhs->base, rhs->offset, workspace, kSize,
-          nSize, ldbValue, plan.target, plan.isa);
+          nSize, ldbValue, context.strategy.target, context.strategy.isa);
       packedBlocks.try_emplace(rhsBlock, PackedBWorkspace{packedBase, kSize});
       Value packedOffset = getPackedBPanelOffset(microBuilder, loc, jr, kSize);
       return PackedBBlock{packedBase, packedOffset};
@@ -540,30 +546,34 @@ FailureOr<PackedBBlock> materializePackedBBlock(
     return op->emitOpError(
         "requires identity-layout bases with statically strided RHS subviews");
   }
-  if (plan.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
+  if (context.strategy.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
     return op->emitOpError(
         "prepacked RHS requires cache-blocked GEMM structure");
-  Value workspace = getOrCreateWorkspace(module, op, plan, workspaces);
   FailureOr<int64_t> staticK = getStaticDimension(rhsInput, 0);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);
   if (failed(staticK) || failed(staticN)) {
     return op->emitOpError("requires statically shaped RHS microtiles");
   }
+  Value workspace = getOrCreatePackedBWorkspace(
+      module, op, context, requirements, workspaces);
   Value kSize = builder.create<arith::ConstantIndexOp>(loc, *staticK);
   Value nSize = builder.create<arith::ConstantIndexOp>(loc, *staticN);
-  Value ldbValue = builder.create<arith::ConstantIndexOp>(loc, plan.ldb);
+  Value ldbValue = builder.create<arith::ConstantIndexOp>(loc, context.problem.ldb);
   Value packedBase = materializePackCall(module, builder, loc, rhs->base,
                                          rhs->offset, workspace, kSize, nSize,
-                                         ldbValue, plan.target, plan.isa);
+                                         ldbValue, context.strategy.target,
+                                         context.strategy.isa);
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   return PackedBBlock{packedBase, zero};
 }
 
 LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
+                                   const WorkspaceRequirements &requirements,
                                    WorkspaceMap &workspaces,
                                    PackedBBlockMap &packedBlocks) {
-  FailureOr<aarch64::gemm::GemmPlan> plan = aarch64::gemm::readPlan(op);
-  if (failed(plan) || failed(aarch64::gemm::requireStage(
+  FailureOr<aarch64::gemm::GemmExecutionContext> context =
+      aarch64::gemm::readExecutionContext(op);
+  if (failed(context) || failed(aarch64::gemm::requireStage(
                           op, aarch64::gemm::kKernelTiledStage))) {
     return failure();
   }
@@ -582,12 +592,13 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   }
 
   const bool isDirectRhs =
-      plan->rhsPacking == aarch64::gemm::RhsPacking::kDirect;
+      context->strategy.rhsPacking == aarch64::gemm::RhsPacking::kDirect;
   const bool usesLdbAbi = aarch64::gemm::usesLdbAbi(
-    aarch64::gemm::getGemmLeafKind(plan->executionKind, plan->rhsPacking));
+    aarch64::gemm::getGemmLeafKind(context->strategy.executionKind,
+                                   context->strategy.rhsPacking));
   const bool scalarK =
       usesLdbAbi &&
-      plan->executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
+      context->strategy.executionKind == aarch64::gemm::GemmExecutionKind::kGemm;
   Value rhsBase;
   Value rhsOffset;
   if (isDirectRhs) {
@@ -601,7 +612,8 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
     rhsOffset = rhs->offset;
   } else {
     FailureOr<PackedBBlock> packed =
-        materializePackedBBlock(module, op, *plan, workspaces, packedBlocks);
+        materializePackedBBlock(module, op, *context, requirements, workspaces,
+                                packedBlocks);
     if (failed(packed)) return failure();
     rhsBase = packed->base;
     rhsOffset = packed->offset;
@@ -610,17 +622,11 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
   FailureOr<int64_t> staticM = getStaticDimension(lhsInput, 0);
   FailureOr<int64_t> staticK = getStaticDimension(lhsInput, 1);
   FailureOr<int64_t> staticN = getStaticDimension(rhsInput, 1);
-  FailureOr<int64_t> nr = aarch64::gemm::getGemmNr(
-      plan->kernelTile, plan->vectorLengthBytes, plan->dataType,
-      plan->executionKind);
   if (failed(staticM) || failed(staticK) || failed(staticN) || *staticM < 1 ||
-      *staticM > plan->kernelTile.mr) {
+      *staticK < 1 || *staticN < 1) {
     return op->emitOpError(
-        "requires static M/K microtiles within the selected kernel family");
+        "requires positive static M/N/K microtile dimensions");
   }
-  if (failed(nr) || *staticN < 1 || *staticN > *nr)
-    return op->emitOpError(
-        "requires static N microtiles within the selected kernel family");
 
   Value lhsBase =
       aarch64::gemm::castToUnrankedF32MemRef(builder, loc, lhs->base);
@@ -629,20 +635,18 @@ LogicalResult materializeLeafCalls(ModuleOp module, Operation *op,
 
   const bool hasCarrier = hasEpilogue(op);
 
-  Value lda = builder.create<arith::ConstantIndexOp>(loc, plan->lda);
-  Value ldb = builder.create<arith::ConstantIndexOp>(loc, plan->ldb);
-  Value ldc = builder.create<arith::ConstantIndexOp>(loc, plan->ldc);
+  Value lda = builder.create<arith::ConstantIndexOp>(loc, context->problem.lda);
+  Value ldb = builder.create<arith::ConstantIndexOp>(loc, context->problem.ldb);
+  Value ldc = builder.create<arith::ConstantIndexOp>(loc, context->problem.ldc);
   Value kSize = builder.create<arith::ConstantIndexOp>(loc, *staticK);
   Value familyArgument;
-  if (plan->isa == aarch64::gemm::GemmIsa::kSve) {
+  if (context->strategy.isa == aarch64::gemm::GemmIsa::kSve) {
     familyArgument = builder.create<arith::ConstantIndexOp>(loc, *staticN);
   } else {
     const aarch64::gemm::GemmKernelABI &abi =
-        aarch64::gemm::getGemmKernelABI(plan->target, plan->isa,
-                                        plan->dataType,
-                                        plan->executionKind);
+        aarch64::gemm::getGemmKernelABI(context->strategy);
     FailureOr<int64_t> kScalarUnroll =
-        aarch64::gemm::getGemmKScalarUnroll(abi, plan->dataType);
+        aarch64::gemm::getGemmKScalarUnroll(abi, context->strategy.dataType);
     if (failed(kScalarUnroll))
       return op->emitOpError(
           "requires a valid NEON kernel ABI vector K unroll");
@@ -732,10 +736,39 @@ class AArch64GemmLeafMaterialization
         candidates.push_back(op);
       }
     });
+    WorkspaceRequirements requirements;
+    for (Operation *op : candidates) {
+      FailureOr<aarch64::gemm::GemmExecutionContext> context =
+          aarch64::gemm::readExecutionContext(op);
+      if (failed(context)) {
+        signalPassFailure();
+        return;
+      }
+      if (context->strategy.rhsPacking == aarch64::gemm::RhsPacking::kDirect ||
+          context->strategy.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked)
+        continue;
+      Value rhs = aarch64::gemm::getGemmInput(op, 1);
+      if (auto tile = rhs.getDefiningOp<memref::SubViewOp>())
+        rhs = tile.getSource();
+      FailureOr<int64_t> k = getStaticDimension(rhs, 0);
+      FailureOr<int64_t> n = getStaticDimension(rhs, 1);
+      if (failed(k) || failed(n)) {
+        op->emitOpError("requires statically shaped packed RHS blocks");
+        signalPassFailure();
+        return;
+      }
+      auto &size = requirements[op->getParentOfType<func::FuncOp>()];
+      size.maxK = std::max(size.maxK, *k);
+      size.maxN = std::max(size.maxN, *n);
+      const auto &abi = aarch64::gemm::getGemmKernelABI(context->strategy);
+      size.maxElements = aarch64::gemm::updateGemmPackedBWorkspaceElements(
+          size.maxElements, abi, *k, *n);
+    }
     WorkspaceMap workspaces;
     PackedBBlockMap packedBlocks;
     for (Operation *op : candidates) {
-      if (failed(materializeLeafCalls(module, op, workspaces, packedBlocks))) {
+      if (failed(materializeLeafCalls(module, op, requirements, workspaces,
+                                      packedBlocks))) {
         signalPassFailure();
         return;
       }
