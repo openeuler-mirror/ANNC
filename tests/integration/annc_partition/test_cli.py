@@ -56,18 +56,28 @@ def test_task_rejects_missing_required_arguments(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_task_rejects_unsupported_capability(tmp_path):
-    result = _run(*_task_args(**{"--framework": "onnx"}), cwd=tmp_path)
-    assert result.returncode == 3
-    assert "[annc-partition][capability][E_CAPABILITY_UNAVAILABLE]" in result.stderr
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_task_fails_at_config_read_when_files_missing(tmp_path):
     result = _run(*_task_args(), cwd=tmp_path)
     assert result.returncode == 4
     assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def test_task_rejects_unregistered_framework(tmp_path):
+    (tmp_path / "partition.json").write_text(
+        json.dumps({"schema_version": 1, "default_partition": "B", "rules": []})
+    )
+    (tmp_path / "comm.json").write_text(
+        json.dumps({"schema_version": 1, "transport": "in_process"})
+    )
+    result = _run(*_task_args(**{"--framework": "onnx"}), cwd=tmp_path)
+    assert result.returncode == 3
+    assert "[annc-partition][adapter][E_CAPABILITY_UNAVAILABLE]" in result.stderr
+    assert "onnx" in result.stderr
+    assert not (tmp_path / "output").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "comm.json", "partition.json",
+    ]
 
 
 def test_task_reaches_adapter_placeholder_with_minimal_configs(tmp_path):
@@ -81,7 +91,11 @@ def test_task_reaches_adapter_placeholder_with_minimal_configs(tmp_path):
     assert result.returncode == 5
     assert "[annc-partition][adapter]" in result.stderr
     assert "not implemented" in result.stderr
-    # 骨架流程在模型接入占位处终止：不创建输出目录，无其他产物。
+
+    assert "loaded partition config partition.json" in result.stderr
+    assert "loaded comm config comm.json" in result.stderr
+    assert "loading SavedModel from missing-model" in result.stderr
+
     assert not (tmp_path / "output").exists()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "comm.json", "partition.json",

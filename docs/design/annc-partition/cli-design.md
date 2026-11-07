@@ -32,7 +32,7 @@
 
 | 核对对象 | 源码基线中的事实 | 本设计的处理方式 |
 | --- | --- | --- |
-| 工具注册 | 已注册 `annc-partition`（`annc/tools/annc-partition/`，薄入口 `annc-partition.cpp` 与任务编排 `PartitionTask.h/.cpp`）；主流程（极简参数解释、静态能力组合、配置读取）由入口与任务对象承载，模型接入起的各阶段为任务实现内集中管理的最小类占位，公共 Planner/通信与 TF Adapter/Exporter 模块尚未建立 | 查询入口与阶段编排已落地；模块实现、严格参数契约、目录事务与能力注册仍待实现 |
+| 工具注册 | 已注册 `annc-partition`（`annc/tools/annc-partition/`，薄入口 `annc-partition.cpp` 与任务编排 `PartitionTask.h/.cpp`）；主流程（极简参数解释、配置读取、框架注册选择）由入口与任务对象承载，模型接入起的各阶段为任务实现内以框架抽象接口组织的最小类占位（当前仅注册 tensorflow 占位实现），公共 Planner/通信与 TF Adapter/Exporter 模块尚未建立 | 查询入口与阶段编排已落地；模块实现、严格参数契约与目录事务仍待实现，能力注册以骨架期固定注册表先行（仅 tensorflow） |
 | 命令行基础设施 | [metadata 工具](../../../annc/tools/annc-fusion-metadata/annc-fusion-metadata.cpp) 已使用 LLVM `InitLLVM`、`cl::opt` 和诊断输出 | 复用既有 LLVM 支持能力，不引入新的参数解析依赖 |
 | 内部日志 | [日志支持](../../../annc/include/Support/Log.h) 以 `ANNC_LOG_LEVEL` 为唯一内部级别控制入口，默认 `error` | 内部开发日志复用该机制；用户诊断和任务进度与内部日志分开，不受其静默设置影响 |
 | TF 模型读取 | [TF Loader](../../../frontends/tensorflow/tf2atir/tf_frontend.cpp) 可读取 SavedModel，但只检查 MetaGraph 非空，固定选择第一个 MetaGraph 与 `serving_default` | 严格单 MetaGraph、指定 Signature 和冻结模型检查由拟新增 TF Adapter 承担；Loader 需受控提取或扩展 |
@@ -40,7 +40,7 @@
 | Pattern 匹配 | [配置融合实现](../../../annc/lib/Dialect/Atir/Passes/Fusion/ConfigFusion.cpp) 每轮物化一次匹配并重扫 IR；[内部定义](../../../annc/lib/Dialect/Atir/Passes/Fusion/ConfigFusionSupport.h) 同时包含匹配与融合字段 | match-only 接口及稳定枚举能力仍需解耦，不直接运行融合 Pass 代替候选生成 |
 | 现有 pipeline | [TF pipeline](../../../frontends/tensorflow/tf-pipeline/annc-tf-pipeline.cpp) 与 [ONNX pipeline](../../../frontends/onnx/onnx-pipeline/annc-onnx-pipeline.cpp) 面向融合及 kernel 编译 | 借鉴任务选项和诊断组织；分区编译优化按 HLD 0.14 为可选阶段，启用时由 Exporter 按分区复用其能力，调用形式随导出详设确定，CLI 编排主干仍不依赖其业务流水线，也不推定其已提供模型包事务 |
 | 目录发布先例 | [ORT 编译缓存](../../../addons/onnxruntime/annc_ep_compile.cc) 已采用工作目录、校验及目录重命名，但含删除旧缓存和完成标记语义 | 仅借鉴先校验后发布的顺序，不链接 EP，也不复制删除目标目录的行为 |
-| 测试组织 | [测试说明](../../../tests/README.md) 规定生产目录与测试目录分离；`tests/integration/annc_partition/` 已有 7 个 CLI 集成用例（查询、参数/能力/配置失败、模型接入占位），无 CTest 套件 | CLI 集成冒烟已落地；发布故障注入与宿主测试为拟新增资产 |
+| 测试组织 | [测试说明](../../../tests/README.md) 规定生产目录与测试目录分离；`tests/integration/annc_partition/` 已有 7 个 CLI 集成用例（查询、参数/配置失败、未注册框架拒绝、模型接入占位），无 CTest 套件 | CLI 集成冒烟已落地；发布故障注入与宿主测试为拟新增资产 |
 
 ### 1.3 范围、约束与非目标
 
@@ -247,7 +247,7 @@ stateDiagram-v2
 
 取消是在提交前各阶段出口检查的控制事件，其结果进入失败清理路径。状态不是磁盘上的可恢复任务协议；进程重启后不从中间状态续跑。
 
-骨架现状：参数解释、能力检查与配置读取已实现（对应 `Parsed`/`Prechecked` 的前置检查）并通过集成测试；模型接入起的阶段为占位，任务在进入 `Loaded` 之前以退出码 `5` 终止。完整状态机为各模块就绪后的目标。
+骨架现状：参数解释与配置读取已实现（对应 `Parsed` 至 `Prechecked` 的配置读取部分）并通过集成测试；框架能力选择以固定注册表的最小形态落在模型接入入口——Adapter/Exporter 按抽象接口成对选择，当前仅注册 tensorflow，未注册框架以退出码 `3` 拒绝；模型接入起的阶段为占位，任务在进入 `Loaded` 之前以退出码 `5` 终止。完整状态机为各模块就绪后的目标。
 
 ### 7.2 主要交互
 
@@ -582,4 +582,4 @@ matcher 解耦、前端库化及公共能力调整还须按实际改动运行 `b
 
 | 版本 | 日期 | 修改人 | 修订说明 |
 | --- | --- | --- | --- |
-| 0.1 | 2026-11-06 | liyancheng | 初稿：给出源码事实与差距、需求/验收追踪、参数契约、任务状态、诊断与目录原子发布方案，并同步 HLD 0.14 的可选分区编译优化阶段（退出码 7、包布局与运行依赖）；当前交付为入口骨架——薄入口 `annc-partition.cpp` 承担查询模式与参数解释，`PartitionTask.h/.cpp` 以任务对象承载公共关键信息（选项、退出分类、失败信息、配置原文），其他模块为任务实现内集中管理的最小类占位；参数/能力/配置读取已实现，模型接入起为占位（退出码 0/2/3/4/5 已由集成测试覆盖），对未详设模块仅陈述现状与责任边界：分区配置与通信配置的 schema 移交语义拥有模块的详细设计承载（列入 §14.3 联合冻结项），第 6 章内部接口与生命周期标记为待细化 |
+| 0.1 | 2026-11-06 | liyancheng | 初稿：给出源码事实与差距、需求/验收追踪、参数契约、任务状态、诊断与目录原子发布方案，并同步 HLD 0.14 的可选分区编译优化阶段（退出码 7、包布局与运行依赖）；当前交付为入口骨架——薄入口 `annc-partition.cpp` 承担查询模式与参数解释，`PartitionTask.h/.cpp` 以任务对象承载公共关键信息（选项、退出分类、失败信息、配置原文），其他模块为任务实现内集中管理的最小类占位；参数/配置读取与框架实现选择（Adapter/Exporter 抽象成对提供、固定注册表当前仅 tensorflow）已实现，模型接入起为占位（退出码 0/2/3/4/5 已由集成测试覆盖），对未详设模块仅陈述现状与责任边界：分区配置与通信配置的 schema 移交语义拥有模块的详细设计承载（列入 §14.3 联合冻结项），第 6 章内部接口与生命周期标记为待细化 |

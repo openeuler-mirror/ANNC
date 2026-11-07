@@ -1,16 +1,16 @@
-// ANNC 异构图切分优化器 CLI 入口。
+// CLI entry of the ANNC heterogeneous graph partitioner.
 //
-// 入口承担查询模式（--help/--version，无任务副作用）与参数解释
-// （设计文档 docs/design/annc-partition/cli-design.md §5.1），随后把
-// 任务交给 PartitionTask 按阶段顺序编排（§7）：能力检查 → 配置读取 →
-// 模型接入 → 候选生成 → 切分规划 → 分区导出 → 校验汇总 → 目录发布。
-// 模型接入起的阶段为其他模块的最小类占位，统一返回 not implemented，
-// 流程在首个占位调用（模型接入）处终止。
+// The entry owns the query modes and argument interpretation
+// (docs/design/annc-partition/cli-design.md §5.1) and the final failure
+// output with exit-code mapping; the stage ladder of §7 belongs to
+// PartitionTask, which owns everything from config loading onward and
+// returns its first failure as a structured record.
 
 #include <string>
 #include <vector>
 
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -21,8 +21,9 @@ namespace {
 using annc_partition::ExitCode;
 using annc_partition::TaskOptions;
 
-// 极简参数解释：单值选项按 "--flag value" 匹配，布尔选项无值。
-// TODO: 按设计 §5.1 补齐重复参数、别名重复与空值拒绝。
+// Intentionally minimal: single-value and boolean options only.
+// TODO: enforce the rest of the argument contract of §5.1 (reject repeated
+// options, duplicate aliases, and empty values).
 llvm::Expected<TaskOptions>
 parseTaskOptions(const std::vector<std::string> &args) {
   TaskOptions options;
@@ -87,15 +88,17 @@ parseTaskOptions(const std::vector<std::string> &args) {
   return std::move(options);
 }
 
-// TODO: 按设计 §5.3/§5.4 实现严格 schema 解析后，帮助文本同步默认值与能力表。
+// The help text must mirror the capabilities this build actually registered
+// (§4.3) and keep the shown defaults in sync once strict schema parsing
+// (§5.3/§5.4) lands.
 void printHelp() {
   llvm::outs()
-      << "Usage: annc-partition --framework tensorflow --model DIR"
+      << "Usage: annc-partition --framework FRAMEWORK --model DIR"
          " --partition-config FILE --comm-config FILE --out-dir DIR"
          " [options]\n"
          "\n"
-         "Stages: argument -> capability -> config -> adapter -> strategy ->"
-         " plan -> export -> validate -> publish\n"
+         "Stages: argument -> config -> adapter -> strategy -> plan ->"
+         " export -> validate -> publish\n"
          "The pipeline is a skeleton: stages after config are module"
          " placeholders returning \"not implemented\".\n"
          "\n"
@@ -108,17 +111,22 @@ void printHelp() {
          "  --help, -h\n"
          "  --version\n"
          "\n"
-         "Registered capabilities:\n"
-         "  tensorflow+json+in_process: skeleton only\n"
-         "\n"
+         "Registered capabilities:\n";
+  for (const auto &cap : annc_partition::registeredCapabilities())
+    llvm::outs() << "  " << cap.kind << " " << cap.name
+                 << (cap.skeleton ? ": skeleton only" : ": available") << "\n";
+  llvm::outs()
+      << "\n"
          "Exit classes reserved by the design: 0, 2, 3, 4, 5, 6, 7, 8, 9, 70,"
          " 130, 143.\n";
 }
 
 void printVersion() {
   llvm::outs() << "annc-partition " << ANNC_PARTITION_VERSION
-               << "\nsource revision: " << ANNC_SOURCE_REVISION
-               << "\ntensorflow+json+in_process: skeleton only\n";
+               << "\nsource revision: " << ANNC_SOURCE_REVISION << "\n";
+  for (const auto &cap : annc_partition::registeredCapabilities())
+    llvm::outs() << cap.kind << " " << cap.name
+                 << (cap.skeleton ? ": skeleton only" : ": available") << "\n";
 }
 
 }  // namespace
@@ -127,7 +135,8 @@ int main(int argc, char **argv) {
   llvm::InitLLVM init(argc, argv);
   std::vector<std::string> args(argv + 1, argv + argc);
 
-  // 查询模式：无任务副作用。
+  // Query modes are honored regardless of the validity of the remaining
+  // arguments and never touch task state (§10.2 exit class 0).
   for (const std::string &arg : args) {
     if (arg == "--help" || arg == "-h") {
       printHelp();
@@ -139,15 +148,18 @@ int main(int argc, char **argv) {
     }
   }
 
-  // 阶段 1：参数解释。
   auto options = parseTaskOptions(args);
   if (!options)
     return annc_partition::reportFailure(
         {"argument", "E_ARGUMENT", llvm::toString(options.takeError()),
          ExitCode::Argument});
-  annc_partition::logStage("argument", "task options parsed");
+  annc_partition::logStage(
+      "argument",
+      llvm::formatv("task options parsed (framework {0}, strategy {1})",
+                    options->framework, options->strategy));
 
-  // 阶段 2-10：任务编排。
   annc_partition::PartitionTask task(std::move(*options));
-  return task.run();
+  if (auto failure = task.run())
+    return annc_partition::reportFailure(*failure);
+  return static_cast<int>(ExitCode::Success);
 }

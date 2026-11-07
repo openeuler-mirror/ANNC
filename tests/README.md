@@ -31,7 +31,7 @@ tests/
 │   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
 ├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
 ├── integration/
-│   ├── annc_partition/     # annc-partition 查询与骨架能力诊断 pytest
+│   ├── annc_partition/     # annc-partition 查询与骨架阶段诊断 pytest
 │   ├── cmake/              # CMake 模块契约（KDNN import 能力）pytest
 │   ├── fusion/             # config fusion 集成 pytest
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
