@@ -45,6 +45,9 @@ def test_query_modes_run_without_task_inputs(option, tmp_path):
     assert result.returncode == 0, result.stderr
     assert "annc-partition" in result.stdout
     assert "skeleton only" in result.stdout
+    # Capability display comes from the same fixed registry as selection.
+    assert "framework tensorflow" in result.stdout
+    assert "strategy json" in result.stdout
     assert result.stderr == ""
     assert list(tmp_path.iterdir()) == []
 
@@ -53,7 +56,54 @@ def test_task_rejects_missing_required_arguments(tmp_path):
     result = _run("--model", "m", cwd=tmp_path)
     assert result.returncode == 2
     assert "[annc-partition][argument][E_ARGUMENT]" in result.stderr
+    assert "missing required option: --framework" in result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def test_task_rejects_single_dash_long_option(tmp_path):
+    # Long options must use the double-dash spelling (§5.1); the single-dash
+    # form is an unknown argument, not a value spelling.
+    result = _run("-framework", "tensorflow", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "[annc-partition][argument][E_ARGUMENT]" in result.stderr
+    assert "Unknown command line argument '-framework'" in result.stderr
+
+
+def test_task_rejects_empty_and_missing_required_values(tmp_path):
+    result = _run("--framework", "", "--model", "m", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "empty value for --framework" in result.stderr
+
+    result = _run("--model", "m", "--framework", cwd=tmp_path)
+    assert result.returncode == 2
+    assert "missing value for --framework" in result.stderr
+
+
+def test_task_accepts_equals_form(tmp_path):
+    args = [
+        "--framework=tensorflow", "--model", "missing-model",
+        "--partition-config", "partition.json",
+        "--comm-config", "comm.json", "--out-dir", "output",
+    ]
+    result = _run(*args, cwd=tmp_path)
+    # The equals form parses like the separated form; the task proceeds to
+    # config reading.
+    assert result.returncode == 4
+    assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
+
+
+def test_task_repeated_option_takes_last_value(tmp_path):
+    args = [
+        "--framework", "onnx", "--framework", "tensorflow",
+        "--model", "missing-model",
+        "--partition-config", "partition.json",
+        "--comm-config", "comm.json", "--out-dir", "output",
+    ]
+    result = _run(*args, cwd=tmp_path)
+    # The last --framework occurrence wins, so the task fails at config
+    # reading instead of rejecting the earlier unregistered value.
+    assert result.returncode == 4
+    assert "[annc-partition][config][E_CONFIG_UNREADABLE]" in result.stderr
 
 
 def test_task_fails_at_config_read_when_files_missing(tmp_path):

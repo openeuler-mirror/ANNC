@@ -4,9 +4,10 @@
 // Shared task contract of annc-partition: task-wide options, the exit-code
 // classification, the failure record, the capability registry, and the task
 // object walking the stage ladder of docs/design/annc-partition/cli-design.md
-// §7. The CLI entry keeps the query modes, argument interpretation, and the
-// final failure output with exit-code mapping; everything from config
-// loading onward belongs to the task.
+// §7. The CliOptions module owns the query modes and the §5.1 option table
+// behind argument interpretation, and the CLI entry keeps only the final
+// failure output with exit-code mapping; everything from config loading
+// onward belongs to the task.
 
 #include <memory>
 #include <optional>
