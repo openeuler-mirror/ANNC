@@ -31,6 +31,7 @@ tests/
 │   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
 ├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
 ├── integration/
+│   ├── annc_partition/     # annc-partition 查询与骨架阶段诊断 pytest
 │   ├── cmake/              # CMake 模块契约（KDNN import 能力）pytest
 │   ├── fusion/             # config fusion 集成 pytest
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
@@ -110,6 +111,7 @@ bash tests/FileCheck/run.sh
 | `unit/ort_ep/annc_ep_compile_test.cpp` | L0 | EP 编译/缓存签名 |
 | `unit/ort_ep/annc_ep_execution_test.cpp` | L0 | EP 执行上下文错误记账（fake OrtApi） |
 | `FileCheck/**/*.mlir` | L1 | pass/IR 行为 |
+| `integration/annc_partition/test_cli.py` | L2 | 切分 CLI 查询、任务各阶段失败（参数/能力/配置/模型接入占位）及无副作用 |
 | `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
 | `integration/cmake/test_kdnn_build.py` | L2 | `cmake/ThirdPartyKDNN.cmake` import 能力探测 |
 | `integration/cmake/test_gemm_microkernel_availability.py` | L2 | 微内核归档有/无两种构建下的工具启动、普通 lowering 与预打包能力诊断（用 `ANNC_BUILD_DIR` 选择构建） |
