@@ -21,7 +21,7 @@ namespace {
 
 // ---- Placeholders for the future module implementations ----
 // The empty types and stub classes below pin only the stage handoffs and
-// framework selection, not any module-internal design. Real
+// framework/strategy selection, not any module-internal design. Real
 // implementations live with their modules (overview.md §3: the TF
 // Adapter/Exporter under frontends/tensorflow/planner/, the JSON-pattern
 // strategy and the shared planner in the common Planner library) and
@@ -70,14 +70,62 @@ public:
   }
 };
 
-// TODO: implement candidate generation with the extracted match-only
-// matcher and Adapter source mapping (overview.md §3.3).
-class JsonPatternStrategy {
+// The template fixes the strategy handoff without prescribing analysis
+// inputs: JSON patterns, heuristics, and cost-guided strategies prepare
+// different inputs but all produce the same source-mapped candidates.
+class PartitionStrategy {
 public:
-  llvm::Expected<CandidateSet> generateCandidates(const ModelHandle &) {
+  virtual ~PartitionStrategy() = default;
+
+  llvm::Expected<CandidateSet>
+  generateCandidates(const ModelHandle &model,
+                     const llvm::MemoryBuffer &partitionConfig) {
+    if (llvm::Error e = prepareAnalysis(model, partitionConfig))
+      return std::move(e);
+    auto candidates = collectCandidates(model, partitionConfig);
+    if (!candidates)
+      return candidates.takeError();
+    if (llvm::Error e = validateCandidates(model, *candidates))
+      return std::move(e);
+    return candidates;
+  }
+
+protected:
+  virtual llvm::Error
+  prepareAnalysis(const ModelHandle &model,
+                  const llvm::MemoryBuffer &partitionConfig) = 0;
+  virtual llvm::Expected<CandidateSet>
+  collectCandidates(const ModelHandle &model,
+                    const llvm::MemoryBuffer &partitionConfig) = 0;
+  virtual llvm::Error
+  validateCandidates(const ModelHandle &model,
+                     const CandidateSet &candidates) = 0;
+};
+
+// TODO: implement the template steps with the extracted match-only matcher
+// and Adapter source mapping (overview.md §3.3).
+class JsonPatternStrategy final : public PartitionStrategy {
+protected:
+  llvm::Error prepareAnalysis(const ModelHandle &,
+                              const llvm::MemoryBuffer &) override {
+    return llvm::Error::success();
+  }
+
+  llvm::Expected<CandidateSet>
+  collectCandidates(const ModelHandle &,
+                    const llvm::MemoryBuffer &partitionConfig) override {
+    logStage("strategy",
+             llvm::formatv("matching JSON patterns from partition config"
+                           " ({0} bytes)",
+                           partitionConfig.getBufferSize()));
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "candidate generation is not"
                                    " implemented");
+  }
+
+  llvm::Error validateCandidates(const ModelHandle &,
+                                 const CandidateSet &) override {
+    return llvm::Error::success();
   }
 };
 
@@ -134,10 +182,20 @@ struct FrameworkEntry {
   std::function<std::unique_ptr<ModelExporter>()> makeExporter;
 };
 
+struct StrategyEntry {
+  llvm::StringRef name;
+  bool skeleton;
+  std::function<std::unique_ptr<PartitionStrategy>()> makeStrategy;
+};
+
 const FrameworkEntry kFrameworks[] = {
     {"tensorflow", true,
      [] { return std::make_unique<TensorFlowAdapter>(); },
      [] { return std::make_unique<TensorFlowExporter>(); }},
+};
+
+const StrategyEntry kStrategies[] = {
+    {"json", true, [] { return std::make_unique<JsonPatternStrategy>(); }},
 };
 
 template <typename Entries> std::string joinedNames(const Entries &entries) {
@@ -148,6 +206,17 @@ template <typename Entries> std::string joinedNames(const Entries &entries) {
     out += entry.name.str();
   }
   return out;
+}
+
+llvm::Expected<std::unique_ptr<PartitionStrategy>>
+createStrategy(const TaskOptions &opts) {
+  for (const auto &entry : kStrategies)
+    if (entry.name == opts.strategy)
+      return entry.makeStrategy();
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "no registered partition strategy for '" + opts.strategy +
+          "' (registered: " + joinedNames(kStrategies) + ")");
 }
 
 llvm::Expected<FrameworkImpl> createFrameworkImpl(const TaskOptions &opts) {
@@ -166,6 +235,8 @@ std::vector<CapabilityDesc> registeredCapabilities() {
   std::vector<CapabilityDesc> out;
   for (const auto &entry : kFrameworks)
     out.push_back({"framework", entry.name, entry.skeleton});
+  for (const auto &entry : kStrategies)
+    out.push_back({"strategy", entry.name, entry.skeleton});
   return out;
 }
 
@@ -228,14 +299,19 @@ std::optional<TaskFailure> PartitionTask::run() {
     return TaskFailure{"adapter", "E_CAPABILITY_UNAVAILABLE",
                        llvm::toString(frameworkImpl.takeError()),
                        ExitCode::Capability};
+  auto strategy = createStrategy(options);
+  if (!strategy)
+    return TaskFailure{"strategy", "E_CAPABILITY_UNAVAILABLE",
+                       llvm::toString(strategy.takeError()),
+                       ExitCode::Capability};
+
   auto model = frameworkImpl->adapter->load(options);
   if (!model)
     return TaskFailure{"adapter", "E_ANALYSIS",
                        llvm::toString(model.takeError()),
                        ExitCode::Analysis};
 
-  JsonPatternStrategy strategy;
-  auto candidates = strategy.generateCandidates(*model);
+  auto candidates = (*strategy)->generateCandidates(*model, *partitionConfig);
   if (!candidates)
     return TaskFailure{"strategy", "E_ANALYSIS",
                        llvm::toString(candidates.takeError()),

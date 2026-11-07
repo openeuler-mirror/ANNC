@@ -11,6 +11,7 @@ endif()
 
 add_executable(annc-partition
   annc-partition.cpp
+  CliOptions.cpp
   PartitionTask.cpp
 )
 target_link_libraries(annc-partition PRIVATE

@@ -3,14 +3,14 @@
 | 文档控制项 | 内容 |
 | --- | --- |
 | 文档编号 | ANNC-TFSPLIT-CLI-LLD-001 |
-| 版本与日期 | 0.1，2026-11-06 |
-| 文档状态 | 初稿，待评审；CLI 入口骨架已落地（薄入口与任务对象 `PartitionTask`，其他模块为任务实现内集中管理的最小类占位），各业务模块尚未建立且未详设，涉及它们的内容仅陈述现状与责任边界 |
+| 版本与日期 | 0.2，2026-11-07 |
+| 文档状态 | 初稿，待评审；CLI 入口骨架已落地（薄入口、选项管理模块 `CliOptions` 与任务对象 `PartitionTask`，其他模块为任务实现内集中管理的最小类占位），各业务模块尚未建立且未详设，涉及它们的内容仅陈述现状与责任边界 |
 | 责任人 | liyancheng |
 | 目标读者 | 产品与项目负责人、架构师、模块开发、测试及交付人员 |
 | 上位设计 | [异构图切分优化器总体设计](overview.md)，ANNC-TFSPLIT-HLD-001，0.14，待评审 |
-| 源码基线 | 本提交（`annc-partition` 骨架：薄入口与 `PartitionTask.h/.cpp`，与本文同批交付，基线核对见 §1.2） |
+| 源码基线 | 本提交（`annc-partition` 骨架：薄入口 `annc-partition.cpp`、选项管理 `CliOptions.h/.cpp` 与任务编排 `PartitionTask.h/.cpp`，基线核对见 §1.2） |
 | 设计范围 | `annc-partition` 的输入解释、能力选择、阶段编排、诊断汇总、产物校验协调与原子发布 |
-| 交付边界 | 本文保持设计契约；当前代码交付为 CLI 入口骨架（薄入口 `annc-partition.cpp` 与任务编排 `PartitionTask.h/.cpp`）与集成冒烟测试，不包含真实切分或运行验收结论 |
+| 交付边界 | 本文保持设计契约；当前代码交付为 CLI 入口骨架（薄入口 `annc-partition.cpp`、选项管理 `CliOptions.h/.cpp` 与任务编排 `PartitionTask.h/.cpp`）与集成冒烟测试，不包含真实切分或运行验收结论 |
 
 ## 摘要
 
@@ -32,7 +32,7 @@
 
 | 核对对象 | 源码基线中的事实 | 本设计的处理方式 |
 | --- | --- | --- |
-| 工具注册 | 已注册 `annc-partition`（`annc/tools/annc-partition/`，薄入口 `annc-partition.cpp` 与任务编排 `PartitionTask.h/.cpp`）；主流程（极简参数解释、配置读取、框架注册选择）由入口与任务对象承载，模型接入起的各阶段为任务实现内以框架抽象接口组织的最小类占位（当前仅注册 tensorflow 占位实现），公共 Planner/通信与 TF Adapter/Exporter 模块尚未建立 | 查询入口与阶段编排已落地；模块实现、严格参数契约与目录事务仍待实现，能力注册以骨架期固定注册表先行（仅 tensorflow） |
+| 工具注册 | 已注册 `annc-partition`（`annc/tools/annc-partition/`，薄入口 `annc-partition.cpp` 与任务编排 `PartitionTask.h/.cpp`）；主流程（极简参数解释、配置读取、框架与策略注册选择）由入口与任务对象承载，模型接入起的各阶段为任务实现内以框架和策略抽象接口组织的最小类占位（当前仅注册 tensorflow 与 json 占位实现），公共 Planner/通信与 TF Adapter/Exporter 模块尚未建立 | 查询入口与阶段编排已落地；模块实现、严格参数契约与目录事务仍待实现，能力注册以骨架期固定注册表先行（仅 tensorflow 与 json） |
 | 命令行基础设施 | [metadata 工具](../../../annc/tools/annc-fusion-metadata/annc-fusion-metadata.cpp) 已使用 LLVM `InitLLVM`、`cl::opt` 和诊断输出 | 复用既有 LLVM 支持能力，不引入新的参数解析依赖 |
 | 内部日志 | [日志支持](../../../annc/include/Support/Log.h) 以 `ANNC_LOG_LEVEL` 为唯一内部级别控制入口，默认 `error` | 内部开发日志复用该机制；用户诊断和任务进度与内部日志分开，不受其静默设置影响 |
 | TF 模型读取 | [TF Loader](../../../frontends/tensorflow/tf2atir/tf_frontend.cpp) 可读取 SavedModel，但只检查 MetaGraph 非空，固定选择第一个 MetaGraph 与 `serving_default` | 严格单 MetaGraph、指定 Signature 和冻结模型检查由拟新增 TF Adapter 承担；Loader 需受控提取或扩展 |
@@ -40,7 +40,7 @@
 | Pattern 匹配 | [配置融合实现](../../../annc/lib/Dialect/Atir/Passes/Fusion/ConfigFusion.cpp) 每轮物化一次匹配并重扫 IR；[内部定义](../../../annc/lib/Dialect/Atir/Passes/Fusion/ConfigFusionSupport.h) 同时包含匹配与融合字段 | match-only 接口及稳定枚举能力仍需解耦，不直接运行融合 Pass 代替候选生成 |
 | 现有 pipeline | [TF pipeline](../../../frontends/tensorflow/tf-pipeline/annc-tf-pipeline.cpp) 与 [ONNX pipeline](../../../frontends/onnx/onnx-pipeline/annc-onnx-pipeline.cpp) 面向融合及 kernel 编译 | 借鉴任务选项和诊断组织；分区编译优化按 HLD 0.14 为可选阶段，启用时由 Exporter 按分区复用其能力，调用形式随导出详设确定，CLI 编排主干仍不依赖其业务流水线，也不推定其已提供模型包事务 |
 | 目录发布先例 | [ORT 编译缓存](../../../addons/onnxruntime/annc_ep_compile.cc) 已采用工作目录、校验及目录重命名，但含删除旧缓存和完成标记语义 | 仅借鉴先校验后发布的顺序，不链接 EP，也不复制删除目标目录的行为 |
-| 测试组织 | [测试说明](../../../tests/README.md) 规定生产目录与测试目录分离；`tests/integration/annc_partition/` 已有 7 个 CLI 集成用例（查询、参数/配置失败、未注册框架拒绝、模型接入占位），无 CTest 套件 | CLI 集成冒烟已落地；发布故障注入与宿主测试为拟新增资产 |
+| 测试组织 | [测试说明](../../../tests/README.md) 规定生产目录与测试目录分离；`tests/integration/annc_partition/` 已有 11 个 CLI 集成用例（查询、参数/配置失败、未注册框架与策略拒绝、模型接入占位），无 CTest 套件 | CLI 集成冒烟已落地；发布故障注入与宿主测试为拟新增资产 |
 
 ### 1.3 范围、约束与非目标
 
@@ -153,7 +153,7 @@ flowchart TB
 
 ### 5.1 命令形式与参数
 
-命令已在骨架中落地极简解析：必填检查与未知参数拒绝已实现；重复参数、别名重复与空值拒绝未实现，当前为手工解析循环，严格化时按 §1.2 约定迁移到 LLVM `cl::opt` 或等价设施。完整参数契约如下：
+参数解释已按 §1.2 约定迁移到 LLVM `cl::opt`：选项以 `annc/tools/annc-partition/CliOptions.cpp` 中的声明式选项表为唯一来源（名称、值语法、默认值与帮助文案），解析、严格性与 `--help` 的选项区均由该表派生；查询模式与 `TaskOptions` 组装同属该模块，入口仅保留查询分发、失败输出与退出码映射。已实现的严格性：必填检查、必填选项空值拒绝、未知参数与位置参数拒绝、单横线长选项拒绝（`LongOptionsUseDoubleDash`）、查询模式不受其余参数有效性影响；`--opt=value` 写法随 cl 一并被接受。已确认的取舍：重复的单值参数与别名重复按 LLVM cl 语义取最后一次生效，不作为错误；必填性与末位缺值在解析前后由本工具检查，以保证诊断进入 §10.1 统一格式并收敛为退出码 `2`。完整参数契约如下：
 
 ```shell
 annc-partition \
@@ -177,10 +177,10 @@ annc-partition \
 | `--work-dir` | 已存在的工作根目录，默认输出父目录 | 可选 | 仅作为本次独立 scratch 子目录的父目录；不直接向该根目录写中间文件 |
 | `--keep-temps` | 布尔，`false` | 可选 | 成功保留 scratch；失败保留 scratch 与未提交 staging，均以临时位置告知 |
 | `--verbose`、`-v` | 布尔，`false` | 可选 | 增加阶段与路径摘要，不输出权重或完整模型 |
-| `--help`、`-h` | 查询模式 | 可选 | 展示用法、默认值、支持组合和退出分类，不创建任务对象 |
+| `--help`、`-h` | 查询模式 | 可选 | 展示用法、默认值和支持组合，不创建任务对象 |
 | `--version` | 查询模式 | 可选 | 展示工具版本、源码版本及实际注册能力，不读取模型和配置 |
 
-不接受位置参数、未知参数、重复的单值参数或重复布尔参数；同一参数的别名也视为重复。除显式别名外不增加下划线、旧工具参数等隐式兼容拼写。正常调用的 stdout 仅输出一行最终目录绝对路径，且发生在提交之后；阶段日志、警告及错误均写 stderr。脚本以退出码和包内 JSON 作为判断依据，不解析日志文案。
+不接受位置参数与未知参数；长选项必须使用双横线拼写（单横线长选项视为未知参数）。重复给出的单值参数或布尔参数（含经别名重复）按 LLVM cl 语义取最后一次生效，不作为错误；除显式别名（`-v`、`-h`）外不增加下划线、旧工具参数等隐式兼容拼写，`--opt=value` 写法被接受。正常调用的 stdout 仅输出一行最终目录绝对路径，且发生在提交之后；阶段日志、警告及错误均写 stderr。脚本以退出码和包内 JSON 作为判断依据，不解析日志文案。
 
 查询模式不要求任务参数；常规任务中的路径和配置不得由环境变量暗中覆盖。初版不新增业务环境变量，`ANNC_GEMM`、`ANNC_KERNEL_LIB_PATH` 等融合或后端变量不改变切分语义。工具自身依赖的标准动态库搜索环境仍按安装规范处理。
 
@@ -247,7 +247,7 @@ stateDiagram-v2
 
 取消是在提交前各阶段出口检查的控制事件，其结果进入失败清理路径。状态不是磁盘上的可恢复任务协议；进程重启后不从中间状态续跑。
 
-骨架现状：参数解释与配置读取已实现（对应 `Parsed` 至 `Prechecked` 的配置读取部分）并通过集成测试；框架能力选择以固定注册表的最小形态落在模型接入入口——Adapter/Exporter 按抽象接口成对选择，当前仅注册 tensorflow，未注册框架以退出码 `3` 拒绝；模型接入起的阶段为占位，任务在进入 `Loaded` 之前以退出码 `5` 终止。完整状态机为各模块就绪后的目标。
+骨架现状：参数解释与配置读取已实现（对应 `Parsed` 至 `Prechecked` 的配置读取部分）并通过集成测试；框架与策略能力选择均采用固定注册表的最小形态，Adapter/Exporter 按抽象接口成对选择，当前仅注册 tensorflow 框架与 json 策略，未注册组合在模型加载前以退出码 `3` 拒绝。阶段 4 骨架由 `PartitionStrategy` 模板方法固定分析准备、候选收集与候选校验步骤，JSON Pattern 以子类实现接入，后续策略沿用同一抽象；模型接入起的业务阶段仍为占位，已注册任务在进入 `Loaded` 之前以退出码 `5` 终止。完整状态机为各模块就绪后的目标。
 
 ### 7.2 主要交互
 
@@ -455,7 +455,7 @@ JSON 策略及来源恢复完成后，可以释放不再被结果引用的分析
 | `tests/integration/annc_partition/` | CLI 参数、配置及包契约 | 拟新增，驱动实际构建二进制 |
 | `tests/e2e/annc_partition/` | 真实宿主与通信联合验收 | 拟新增，依赖受信构建的通信库与 TF 环境 |
 
-现状：仅 `annc/tools/annc-partition/`（薄入口、`PartitionTask` 任务对象与 CMake）与 `tests/integration/annc_partition/` 已建立，其他模块的最小类占位集中于任务实现内；其余落点均未建立，模块落地时按本表迁移。
+现状：仅 `annc/tools/annc-partition/`（薄入口、`CliOptions` 选项管理（LLVM `cl::opt` 声明式选项表，承载 §5.1 参数契约的解析、查询模式与 `--help` 选项区）、`PartitionTask` 任务对象与 CMake）与 `tests/integration/annc_partition/` 已建立，其他模块的最小类占位集中于任务实现内；其余落点均未建立，模块落地时按本表迁移。
 
 根构建目前先进入 `annc/`，后进入 `frontends/`。实现时应在 `annc/tools/` 声明通用入口目标，在框架前端目标定义完成后条件链接并注册成对实现，或采用等价的两阶段 CMake 组织；不得为链接顺序问题将 TF 源码复制进 main。公共入口只链接其直接所需的 LLVM/JSON、Planner 与已构建框架库，通信运行时核心保持独立。
 
@@ -582,4 +582,5 @@ matcher 解耦、前端库化及公共能力调整还须按实际改动运行 `b
 
 | 版本 | 日期 | 修改人 | 修订说明 |
 | --- | --- | --- | --- |
-| 0.1 | 2026-11-06 | liyancheng | 初稿：给出源码事实与差距、需求/验收追踪、参数契约、任务状态、诊断与目录原子发布方案，并同步 HLD 0.14 的可选分区编译优化阶段（退出码 7、包布局与运行依赖）；当前交付为入口骨架——薄入口 `annc-partition.cpp` 承担查询模式与参数解释，`PartitionTask.h/.cpp` 以任务对象承载公共关键信息（选项、退出分类、失败信息、配置原文），其他模块为任务实现内集中管理的最小类占位；参数/配置读取与框架实现选择（Adapter/Exporter 抽象成对提供、固定注册表当前仅 tensorflow）已实现，模型接入起为占位（退出码 0/2/3/4/5 已由集成测试覆盖），对未详设模块仅陈述现状与责任边界：分区配置与通信配置的 schema 移交语义拥有模块的详细设计承载（列入 §14.3 联合冻结项），第 6 章内部接口与生命周期标记为待细化 |
+| 0.1 | 2026-11-06 | liyancheng | 初稿：给出源码事实与差距、需求/验收追踪、参数契约、任务状态、诊断与目录原子发布方案；交付为 CLI 入口骨架。 |
+| 0.2 | 2026-11-07 | liyancheng | 参数解释迁移至 LLVM `cl::opt` 声明式选项表（新增 `CliOptions`），`--help` 选项区由选项表派生；同步修订 §5.1、§12.1 与集成测试。 |
