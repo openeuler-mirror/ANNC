@@ -100,6 +100,8 @@ ninja && ninja install
 | `ANNC_KDNN_LIB_VARIANT` | 字符串 | `sve-threadpool` | RELEASE 模式下库变体，可选 `sve-threadpool`、`sve-omp`、`sve2-threadpool`、`sve2-omp` |
 | `ANNC_ENABLE_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 stablehlo artifact sink 层（v1.9.7 Embedded 模式，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）；TF stablehlo 前端 / stablehlo sink 迁移线的依赖，见下文「StableHLO artifact sink 层」 |
 
+所有框架组合都会构建通用 `annc-partition` 查询入口。当前该目标仅提供占位流程（各阶段返回 `not implemented`），不注册真实 TF 切分能力，也不改变既有前端、addon 或后端开关。
+
 ### GEMM-ASM 完整包
 
 `ANNC_GEMM_PACKAGE_DIR` 指定完整 GEMM-ASM 包，默认路径为
