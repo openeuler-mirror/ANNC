@@ -2,7 +2,7 @@
 
 - 状态：组件层已实现（批 2）；pass 驱动与工具随后批（见「批次计划」）
 - 源码基线：`annc/{include,lib}/Conversion/StablehloToAtir/`（根 = 框架无关层，`tf/` = TF 适配层）
-- 触发条件：仅 `ANNC_ENABLE_STABLEHLO=ON` 编译，默认构建零影响
+- 触发条件：仅 `ANNC_ENABLE_TF2ATIR_V2=ON` 编译，默认构建零影响
 
 ## 链路位置
 

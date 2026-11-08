@@ -63,7 +63,7 @@ gtest_discover_tests(ciface_dispatch_test
 )
 
 # Sink component contracts (stablehlo layer only).
-if(ANNC_ENABLE_STABLEHLO)
+if(ANNC_ENABLE_TF2ATIR_V2)
     add_executable(stablehlo_sink_component_test stablehlo_sink_component_test.cpp)
     target_include_directories(stablehlo_sink_component_test PRIVATE
         "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")
