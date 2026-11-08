@@ -1,22 +1,10 @@
 //===----------------------------------------------------------------------===//
 // ATIR V2 — complement dialect (only ops stablehlo cannot express)
 //
-// Admission rule (2026-11-02 decision, supersedes the A1/A2 layering; batch 5
-// added the view domain):
-//   Only capability domains stablehlo cannot express: string-specific /
-//   resource / sparse / top_k (no primitive and no decomposition in this
-//   pipeline) / constant_v2 (string constant carrier) / view domain
-//   (get_dim/set_dim/encode_string/decode_string, carried across annc.*
-//   boundaries). Ops stablehlo can express never enter this file — instances
-//   fall back to the atir.unsupported partition semantics. The emit side is
-//   guarded by StablehloSink's orphan defense: every emitted atir.* name must
-//   exist in the dialect registry. Full decision and cost log:
-//   schema-evolution.md (batches 4 and 5).
-//
-// Value domain: every op here operates on builtin tensors (ranked/unranked).
-// `!atir.tensor` is the V1 domain and is rejected by `AnyTensor` by design —
-// the sink keeps V2 values builtin end-to-end. String tensors are builtin
-// tensors whose element type is `!atir.string`; V2 carries no `encoding`.
+// Admission rule: only capability domains stablehlo cannot express (string /
+// resource / sparse / top_k / constant_v2 / view); expressible ops fall back
+// to atir.unsupported. Values are builtin tensors (`AnyTensor`); strings use
+// `!atir.string` elements. Decision log: schema-evolution.md.
 //===----------------------------------------------------------------------===//
 #ifndef ATIR_OPS_V2_TD
 #define ATIR_OPS_V2_TD
@@ -38,10 +26,11 @@ def Atir_ResourceVariableV2Op : Atir_Op<"resource_variable_v2"> {
 
 def Atir_ConstantV2Op : Atir_Op<"constant_v2"> {
   let summary = "declare or define a constant";
-  let description = [{}];
+  let description = [{Declares a symbol; DT_STRING payloads ride on `values`.}];
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    OptionalAttr<StrAttr>:$sym_visibility
+    OptionalAttr<StrAttr>:$sym_visibility,
+    OptionalAttr<ArrayAttr>:$values
   );
   let results = (outs AnyTensor:$data);
 }
@@ -74,7 +63,6 @@ def Atir_StringToHashBucketFastV2Op : Atir_Op<"string_to_hash_bucket_fast_v2",
 
 def Atir_StringToNumberV2Op : Atir_Op<"string_to_number_v2",
     [SameOperandsAndResultShape]> {
-  // dtype: string-only (D)
   let summary = "Convert each string in the input tensor to a numeric value.";
   let description = [{
     Converts each string element of `input` to a numeric value. The output
@@ -87,7 +75,6 @@ def Atir_StringToNumberV2Op : Atir_Op<"string_to_number_v2",
 
 def Atir_StaticRegexReplaceV2Op : Atir_Op<"static_regex_replace_v2",
     [SameOperandsAndResultShape]> {
-  // dtype: string-only (D)
   let summary = "Replaces matches of a regular expression in each string.";
   let description = [{
     Replaces matches of `pattern` in each string element of `input` with
@@ -105,7 +92,6 @@ def Atir_StaticRegexReplaceV2Op : Atir_Op<"static_regex_replace_v2",
 }
 
 def Atir_StringSplitV2Op : Atir_Op<"string_split_v2"> {
-  // dtype: string-only (D)
   let summary = "Split a string tensor by a delimiter into a SparseTensor.";
   let description = [{
     Splits each string element of `input` by the scalar string `delimiter`
@@ -179,21 +165,19 @@ def Atir_SparseFillEmptyRowsV2Op : Atir_Op<"sparse_fill_empty_rows_v2"> {
     - emptyRowIndicator: Boolean vector indicating which rows were empty
     - reverseIndexMap: Maps input indices to output indices for backprop
   }];
-  let arguments = (ins AnyTensor:$indices,      // [N, rank] int64
-    AnyTensor:$values,                          // [N] any type T
-    AnyTensor:$denseShape,                      // [rank] int64
-    AnyTensor:$defaultValue);                   // scalar of type T
+  let arguments = (ins AnyTensor:$indices,// [N, rank] int64
+    AnyTensor:$values,// [N] any type T
+    AnyTensor:$denseShape,// [rank] int64
+    AnyTensor:$defaultValue);            // scalar of type T
   let results = (outs
-    AnyTensor:$outputIndices,                   // [N_full, rank] int64
-    AnyTensor:$outputValues,                    // [N_full] same type as values
-    AnyTensor:$emptyRowIndicator,               // [dense_shape[0]] bool
-    AnyTensor:$reverseIndexMap                  // [N] int64
+    AnyTensor:$outputIndices, AnyTensor:$outputValues,
+    AnyTensor:$emptyRowIndicator, AnyTensor:$reverseIndexMap
   );
+  // Shapes: [N_full, rank] i64 / [N_full] T / [dense[0]] bool / [N] i64.
 }
 
 
 def Atir_ResourceGatherV2Op : Atir_Op<"resource_gather_v2"> {
-  // dtype: capability (C)
   let summary = "Gather elements from resource handle by indices";
   let description = [{
     Gathers data from a resource according to given indices.
@@ -345,7 +329,6 @@ def Atir_SetDimV2Op : Atir_Op<"set_dim_v2"> {
 }
 
 def Atir_EncodeStringV2Op : Atir_Op<"encode_string_v2"> {
-  // dtype: string-only (D)
   let summary = "encode string elements into fixed-width self-describing i8 rows";
   let description = [{
     Encodes each string element of `input` into one fixed-width byte row
@@ -359,7 +342,6 @@ def Atir_EncodeStringV2Op : Atir_Op<"encode_string_v2"> {
 }
 
 def Atir_DecodeStringV2Op : Atir_Op<"decode_string_v2"> {
-  // dtype: string-only (D)
   let summary = "decode fixed-width i8 rows back into string elements";
   let description = [{
     Inverse of `encode_string_v2`: reads each row's i32 length prefix,
@@ -370,5 +352,6 @@ def Atir_DecodeStringV2Op : Atir_Op<"decode_string_v2"> {
   let arguments = (ins AnyTensor:$rows);
   let results = (outs AnyTensor:$result);
 }
+
 
 #endif  // ATIR_OPS_V2_TD

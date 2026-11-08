@@ -1,8 +1,6 @@
-// V2OpMatcher — convention-driven residue -> atir.*_v2 matcher. The provider
-// map is the only source of truth (a new V2 op needs an ODS definition and a
-// map entry); absence falls back to `atir.unsupported`. emitV2Op assembles
-// attributes per ODS-declared name, preserves unconsumed attributes, verifies
-// locally and erases on mismatch (fallback carrier).
+// V2OpMatcher — convention-driven residue -> atir.*_v2 matcher (frontend
+// agnostic): pure map lookup (absent -> fallback), ODS-name-driven assembly
+// (alias -> exact -> case-normalized), preservation, verify, erase-on-mismatch.
 #ifndef ANNC_CONVERSION_STABLEHLOTOATIR_V2OPMATCHER_H
 #define ANNC_CONVERSION_STABLEHLOTOATIR_V2OPMATCHER_H
 
@@ -25,8 +23,7 @@ class MLIRContext;
 
 namespace annc {
 
-// Source-name override for one ODS-declared target attribute, e.g.
-//   {"transposeA", {"adj_x", "adjoint_a"}}
+// Source-name override for one ODS-declared attribute (e.g. adj_x -> x).
 struct V2AttrAlias {
   llvm::StringRef declared;                  // target's ODS attr name
   llvm::ArrayRef<llvm::StringRef> sources;   // candidate source names, in order
@@ -39,7 +36,7 @@ std::optional<mlir::RegisteredOperationName> resolveV2Target(
 
 // Emits `target`; appends results on success, erases and fails on mismatch.
 mlir::LogicalResult emitV2Op(
-    mlir::ConversionPatternRewriter& rewriter, mlir::Location loc,
+    mlir::RewriterBase& rewriter, mlir::Location loc,
     mlir::RegisteredOperationName target, mlir::ValueRange operands,
     mlir::ArrayRef<mlir::Type> resultTypes, mlir::DictionaryAttr source,
     llvm::ArrayRef<V2AttrAlias> attrAliases,

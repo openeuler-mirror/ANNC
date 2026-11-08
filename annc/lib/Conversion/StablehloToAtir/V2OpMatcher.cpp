@@ -15,19 +15,30 @@ using namespace mlir;
 namespace annc {
 namespace {
 
-// Parses the ODS verifier arity message ("expected N operands, but found M").
-static bool parseOperandArity(const std::string& message, int& expected) {
+// Parses the ODS verifier arity diagnostics; a miss only disables the
+// sentinel repair (locked by a component test).
+static bool parseOperandArity(const std::string& message, int& expected,
+                              int& found) {
   const llvm::StringRef kNeed = "expected ";
   size_t pos = message.find(kNeed);
   if (pos == std::string::npos) return false;
-  pos += kNeed.size();
-  size_t end = pos;
-  while (end < message.size() && llvm::isDigit(message[end])) ++end;
-  if (end == pos) return false;
-  expected = 0;
-  for (size_t i = pos; i < end; ++i)
-    expected = expected * 10 + (message[i] - '0');
-  return true;
+  llvm::StringRef rest =
+      llvm::StringRef(message).drop_front(pos + kNeed.size());
+  size_t digits = 0;
+  while (digits < rest.size() && llvm::isDigit(rest[digits])) ++digits;
+  if (!llvm::to_integer(rest.take_front(digits), expected)) return false;
+  rest = rest.drop_front(digits);
+  if (!rest.consume_front(" operands, but found ")) return false;
+  digits = 0;
+  while (digits < rest.size() && llvm::isDigit(rest[digits])) ++digits;
+  return llvm::to_integer(rest.take_front(digits), found);
+}
+
+// Fill only the inferable num_segments; filling others (TopK's k) changes semantics.
+static bool allowsSentinelFill(RegisteredOperationName target) {
+  llvm::StringRef name = target.getIdentifier();
+  return name == "atir.sparse_segment_mean_v2" ||
+         name == "atir.sparse_segment_sum_v2";
 }
 
 // Sentinel element type: the last operand must be a ranked integer tensor.
@@ -37,7 +48,6 @@ static Type sentinelElemType(Value operand) {
   return dyn_cast<IntegerType>(shaped.getElementType());
 }
 
-// camelCase -> snake_case ("TopKV2" -> "top_k_v2"), mirroring AtirOpsV2.td.
 std::string camelToSnake(llvm::StringRef name) {
   std::string out;
   for (char c : name) {
@@ -66,7 +76,7 @@ std::string snakeToCamel(llvm::StringRef name) {
 std::optional<RegisteredOperationName> resolveV2Target(
     MLIRContext* ctx, llvm::StringRef sourceOpType,
     llvm::ArrayRef<std::pair<llvm::StringRef, llvm::StringRef>> opAliases) {
-  // Pure table lookup; an absent entry yields nullopt (fallback carrier).
+  // Pure table lookup; absent entries yield nullopt (fallback carrier).
   for (const auto& [from, to] : opAliases) {
     if (from == sourceOpType)
       return RegisteredOperationName::lookup("atir." + to.str(), ctx);
@@ -75,7 +85,7 @@ std::optional<RegisteredOperationName> resolveV2Target(
 }
 
 LogicalResult emitV2Op(
-    ConversionPatternRewriter& rewriter, Location loc,
+    RewriterBase& rewriter, Location loc,
     RegisteredOperationName target, ValueRange operands,
     ArrayRef<Type> resultTypes, DictionaryAttr source,
     llvm::ArrayRef<V2AttrAlias> attrAliases,
@@ -83,10 +93,8 @@ LogicalResult emitV2Op(
     llvm::SmallVectorImpl<Value>& results) {
   MLIRContext* ctx = rewriter.getContext();
 
-  // 1. Declared attribute assembly (contract levels 1-3).
   SmallVector<NamedAttribute> declared;
   llvm::DenseSet<llvm::StringRef> consumed;
-  // Emitted names: duplicate NamedAttribute names would trip DictionaryAttr.
   llvm::DenseSet<llvm::StringRef> emitted;
   for (StringAttr name : target.getAttributeNames()) {
     llvm::SmallVector<llvm::StringRef, 4> candidates;
@@ -103,8 +111,7 @@ LogicalResult emitV2Op(
       std::optional<NamedAttribute> found = source.getNamed(candidate);
       if (!found) continue;
       Attribute value = found->getValue();
-      // V2 unifies integer attrs on I64Attr; BoolAttr must keep its type
-      // (ODS setters re-cast to BoolAttr and drop mismatches).
+      // Unify integers on i64; BoolAttr must keep its type (ODS setters re-cast).
       if (auto intValue = dyn_cast<IntegerAttr>(value)) {
         if (!isa<BoolAttr>(value))
           value = IntegerAttr::get(IntegerType::get(ctx, 64),
@@ -117,7 +124,7 @@ LogicalResult emitV2Op(
     }
   }
 
-  // 2. Contract-recovered attributes lose to assembled declared attributes.
+  // 2. Contract-recovered attributes lose to assembled declared ones.
   for (NamedAttribute attr : derived)
     if (emitted.insert(attr.getName().getValue()).second)
       declared.push_back(attr);
@@ -139,9 +146,6 @@ LogicalResult emitV2Op(
   state.addAttributes(preserved);
   Operation* created = rewriter.create(state);
 
-  // 4. Local verify. On an arity mismatch, fill one missing trailing integer
-  // operand with scalar 0 (the atir sentinel for inferred values, e.g.
-  // num_segments <= 0); anything else falls back to the carrier.
   std::string verifyError;
   auto runVerify = [&](Operation* op) {
     verifyError.clear();
@@ -155,10 +159,12 @@ LogicalResult emitV2Op(
   };
 
   if (failed(runVerify(created))) {
-    int expected = 0;
+    int expected = 0, found = 0;
     const bool oneShort =
-        parseOperandArity(verifyError, expected) &&
-        expected == static_cast<int>(operands.size()) + 1 && !operands.empty();
+        parseOperandArity(verifyError, expected, found) &&
+        expected == static_cast<int>(operands.size()) + 1 &&
+        found == static_cast<int>(operands.size()) && !operands.empty() &&
+        allowsSentinelFill(target);
     const bool sentinelFillable =
         oneShort && sentinelElemType(operands.back());
     if (sentinelFillable) {
@@ -173,8 +179,11 @@ LogicalResult emitV2Op(
       retry.addAttributes(declared);
       retry.addAttributes(preserved);
       created = rewriter.create(retry);
+    } else if (operands.size() >= 2 && operands.size() % 2 == 0) {
+      int32_t half = static_cast<int32_t>(operands.size() / 2);
+      created->setAttr("operandSegmentSizes",
+                       rewriter.getDenseI32ArrayAttr({half, half}));
     }
-    // Multi-variadic targets would need a segment repair; none exist yet.
     if (failed(runVerify(created))) {
       rewriter.eraseOp(created);
       return failure();
