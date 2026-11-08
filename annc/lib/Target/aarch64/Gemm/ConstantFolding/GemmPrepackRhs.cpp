@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../GemmPlan.h"
+#include "../GemmPacking.h"
 #include "JitPrepack.h"
 #include "Support/CheckpointReader.h"
 #include "Target/aarch64/Passes.h"
@@ -26,7 +27,6 @@ namespace {
 extern "C" {
 void annc_aarch64_sve_packb_f32(const float *rhs, float *packed, int32_t kSize,
                                 int32_t nSize, int32_t ldb);
-int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k, int64_t n);
 void annc_aarch64_neon_packb_f32(const float *rhs, float *packed, int32_t kSize,
                                  int32_t nSize, int32_t ldb);
 }
@@ -36,15 +36,13 @@ std::vector<float> packGemmLayout(
     const aarch64::gemm::GemmTuningConfig &config) {
   using namespace aarch64::gemm;
   const bool isSve = config.isa == GemmIsa::kSve;
-  auto elements = [&](int64_t kSize, int64_t nSize) {
-    return isSve ? annc_aarch64_sve_packed_b_elements_f32(kSize, nSize)
-                 : kSize * ((nSize + 3) / 4) * 4;
-  };
+  const GemmKernelABI &abi = getGemmKernelABI(
+      config.target, config.isa, config.dataType, GemmExecutionKind::kGemm);
   const std::vector<CacheBlock2D> blocks =
-      partitionCache2D(k, n, config.cacheTile.kc, config.cacheTile.nc);
+      partitionCache2D(k, n, getFixedCacheParameters(config.cache).kc, getFixedCacheParameters(config.cache).nc);
   int64_t total = 0;
   for (const CacheBlock2D &block : blocks)
-    total += elements(block.kSize, block.nSize);
+    total += getGemmPackedBElements(abi, block.kSize, block.nSize);
   std::vector<float> packed(total, 0.0f);
   int64_t offset = 0;
   for (const CacheBlock2D &block : blocks) {
@@ -58,7 +56,7 @@ std::vector<float> packGemmLayout(
     else
       annc_aarch64_neon_packb_f32(source, packed.data() + offset, kSize, nSize,
                                   ldb);
-    offset += elements(block.kSize, block.nSize);
+    offset += getGemmPackedBElements(abi, block.kSize, block.nSize);
   }
   return packed;
 }
@@ -87,7 +85,7 @@ llvm::Error writePackedDataFile(
 }
 
 // The contract records the candidate fields that determine the packed-B
-// layout; aarch64-finalize-gemm-plan rejects a plan whose candidate drifted.
+// layout; the binding is checked against the selected fixed strategy before use.
 DictionaryAttr buildPrepackedContract(
     OpBuilder &builder, const aarch64::gemm::GemmTuningConfig &tuning,
     int64_t k, int64_t n, llvm::StringRef dataSymbol, size_t dataElements) {
@@ -96,8 +94,8 @@ DictionaryAttr buildPrepackedContract(
   contract.append("version", builder.getI64IntegerAttr(kPrepackedRhsVersion));
   contract.append("k", builder.getI64IntegerAttr(k));
   contract.append("n", builder.getI64IntegerAttr(n));
-  contract.append("nc", builder.getI64IntegerAttr(tuning.cacheTile.nc));
-  contract.append("kc", builder.getI64IntegerAttr(tuning.cacheTile.kc));
+  contract.append("nc", builder.getI64IntegerAttr(getFixedCacheParameters(tuning.cache).nc));
+  contract.append("kc", builder.getI64IntegerAttr(getFixedCacheParameters(tuning.cache).kc));
   contract.append("data_symbol", builder.getStringAttr(dataSymbol));
   contract.append("data_elements", builder.getI64IntegerAttr(
                                        static_cast<int64_t>(dataElements)));
@@ -186,8 +184,8 @@ struct AArch64GemmPrepackRhsPass
         std::memcpy(rhsData.data(), rawData.data(), rawData.size());
         const aarch64::gemm::GemmTuningConfig tuning{
             candidate->strategy.target, candidate->strategy.isa,
-            candidate->strategy.dataType, candidate->strategy.cacheTile,
-            candidate->strategy.kernelTile};
+            candidate->strategy.dataType, candidate->strategy.cache,
+            candidate->strategy.kernel};
         std::vector<float> packed =
             packGemmLayout(rhsData.data(), k, n, tuning);
         if (packed.empty()) continue;

@@ -33,7 +33,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 |------|------|--------|------|
 | `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空（全部启用） | 全局 allowlist；非空时仅改写列出的类型 |
 | `ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 denylist；始终优先于 allowlist |
-| `ANNC_GEMM_CONFIG` | JSON 文件路径 | 空 | AArch64 GEMM 调优配置；AOT 与 JIT 的 GEMM pipeline 均要求提供 |
+| `ANNC_GEMM_CONFIG` | JSON 文件路径 | 空 | AArch64 GEMM 调优配置；AOT 与 JIT 的 GEMM pipeline 均要求提供。使用 JSON v3，`cache.strategy` 与 `kernel.strategy` 分别选择策略，从同级同名对象读取参数；当前支持 `fixed`，未知策略报错。字段示例见 [GEMM codegen 设计](../design/gemm/aarch64-gemm-codegen.md#策略与规划数据) |
 
 环境变量是默认策略。`--atir-fast-codegen=enable-custom-ops=...` 非空时覆盖环境 allowlist；命令行和环境的 denylist 会合并。allowlist 与 denylist 都为空时，**所有已注册的自定义算子类型都可改写**；GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 构建中注册（`MatMulAddReluWithAddOutput` 例外，无条件注册），因此默认构建里对这些类型的 allowlist 设置多数不产生效果；KDNN 构建中还需加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），否则 KDNN-only 的 GEMM kernel 不会被选中。
 

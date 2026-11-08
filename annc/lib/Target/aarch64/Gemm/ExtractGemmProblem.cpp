@@ -30,7 +30,7 @@ FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
       llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmOutput(op, 0).getType());
   if (!lhsType || !rhsType || !outType) {
     op->emitOpError(
-        "aarch64-resolve-gemm-plan requires bufferized memref operands");
+        "aarch64-extract-gemm-problem requires bufferized memref operands");
     return failure();
   }
   if (failed(validateMemRef(op, lhsType, "lhs")) ||
@@ -53,18 +53,12 @@ FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
   }
 
   return aarch64::gemm::GemmProblem{
-      aarch64::gemm::kPlanVersion, m, n, k, k, n, n};
+      aarch64::gemm::kProblemVersion, m, n, k, k, n, n};
 }
 
-void appendI64(NamedAttrList &attrs, Builder &builder, llvm::StringRef name,
-               int64_t value) {
-  attrs.append(name, builder.getI64IntegerAttr(value));
-}
-
-LogicalResult resolveGemmProblem(Operation *op) {
+LogicalResult extractGemmProblem(Operation *op) {
   if (op->hasAttr(aarch64::gemm::kProblemAttrName) ||
-      op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
-      op->hasAttr(aarch64::gemm::kPlanAttrName)) {
+      op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
     return op->emitOpError("already has AArch64 GEMM planning state");
   }
 
@@ -86,29 +80,19 @@ LogicalResult resolveGemmProblem(Operation *op) {
     return op->emitOpError(
         "AArch64 GEMM does not support transposed output");
 
-  Builder builder(op->getContext());
-  NamedAttrList problemAttrs;
-  appendI64(problemAttrs, builder, "version", problem->version);
-  appendI64(problemAttrs, builder, "m", problem->m);
-  appendI64(problemAttrs, builder, "n", problem->n);
-  appendI64(problemAttrs, builder, "k", problem->k);
-  appendI64(problemAttrs, builder, "lda", problem->lda);
-  appendI64(problemAttrs, builder, "ldb", problem->ldb);
-  appendI64(problemAttrs, builder, "ldc", problem->ldc);
-  op->setDiscardableAttr(aarch64::gemm::kProblemAttrName,
-                         problemAttrs.getDictionary(op->getContext()));
+  aarch64::gemm::writeProblem(op, *problem);
   return success();
 }
 
-class AArch64ResolveGemmPlan
-    : public AArch64ResolveGemmPlanBase<AArch64ResolveGemmPlan> {
+class AArch64ExtractGemmProblem
+    : public AArch64ExtractGemmProblemBase<AArch64ExtractGemmProblem> {
  public:
   using Base::Base;
 
   void runOnOperation() override {
     WalkResult result = getOperation().walk([](Operation *op) -> WalkResult {
       if (!aarch64::gemm::isGemmAnchor(op)) return WalkResult::advance();
-      return failed(resolveGemmProblem(op)) ? WalkResult::interrupt()
+      return failed(extractGemmProblem(op)) ? WalkResult::interrupt()
                                             : WalkResult::advance();
     });
     if (result.wasInterrupted()) signalPassFailure();
@@ -117,8 +101,8 @@ class AArch64ResolveGemmPlan
 
 }  // namespace
 
-std::unique_ptr<mlir::Pass> createAArch64ResolveGemmPlan() {
-  return std::make_unique<AArch64ResolveGemmPlan>();
+std::unique_ptr<mlir::Pass> createAArch64ExtractGemmProblem() {
+  return std::make_unique<AArch64ExtractGemmProblem>();
 }
 
 }  // namespace annc
