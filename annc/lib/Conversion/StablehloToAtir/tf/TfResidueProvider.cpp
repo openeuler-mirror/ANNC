@@ -1,14 +1,10 @@
-// TF frontend adapter for the residue sink (V2 emission): three residue forms
-// (F1 unregistered `tf.*`, F2 stablehlo.custom_call, F3 declared
-// `call_target_name`) and the TF -> atir.*_v2 op map. Construction is
-// convention-driven (V2OpMatcher.h); string elements are `!atir.string`.
-#include "Conversion/StablehloToAtir/ResidueProvider.h"
-
-#include "mlir/IR/Verifier.h"
-
+// TF frontend adapter: two live residue forms (F1 stablehlo.custom_call, F2
+// ops declaring `call_target_name` — the renamed `annc.residue` carrier) map
+// to buffer-less `atir.*_v2` ops; strings are `!atir.string`.
 #include <string>
 #include <utility>
 
+#include "Conversion/StablehloToAtir/ResidueProvider.h"
 #include "Conversion/StablehloToAtir/StablehloSink.h"
 #include "Conversion/StablehloToAtir/V2OpMatcher.h"
 #include "Dialect/Atir/AtirOps.h"
@@ -27,12 +23,11 @@ namespace annc {
 namespace {
 
 enum class ResidueForm {
-  TfGenericOp,          // F1: unregistered generic `tf.*` op
-  StablehloCustomCall,  // F2: `stablehlo.custom_call` wrapper
-  DeclaredOp,           // F3: other unregistered op + call_target_name
+  StablehloCustomCall,  // F1: `stablehlo.custom_call` wrapper
+  DeclaredOp,           // F2: unregistered + call_target_name — the renamed
 };
 
-// Recursive JSON -> Attribute translation; a failed element abandons the container.
+// Recursive JSON -> Attribute translation; failure abandons the container.
 Attribute jsonToAttr(MLIRContext* ctx, const nlohmann::json& value) {
   if (value.is_boolean()) return BoolAttr::get(ctx, value.get<bool>());
   if (value.is_number_integer())
@@ -61,8 +56,7 @@ Attribute jsonToAttr(MLIRContext* ctx, const nlohmann::json& value) {
   return Attribute();
 }
 
-// Decodes an F2 backend_config JSON into typed attributes; absent/invalid
-// payloads yield an empty dict, undecodable leaves are skipped.
+// Decodes an F1 backend_config; invalid payloads yield {}, bad leaves skip.
 DictionaryAttr decodeBackendConfig(MLIRContext* ctx, StringAttr json) {
   auto parsed = nlohmann::json::parse(json.str(), /*cb=*/nullptr,
                                       /*allow_exceptions=*/false);
@@ -92,26 +86,18 @@ std::optional<ResidueView> residueViewOf(Operation* op, ResidueForm form) {
   const bool registered = op->getName().isRegistered();
   llvm::StringRef name = op->getName().getStringRef();
   switch (form) {
-    case ResidueForm::TfGenericOp: {
-      if (registered || !name.starts_with("tf.")) return std::nullopt;
-      DictionaryAttr attrs = op->getAttrDictionary();
-      llvm::StringRef declared = declaredTfOpName(attrs);
-      return ResidueView{
-          stripTfQualifier(declared.empty() ? name : declared).str(), attrs};
-    }
     case ResidueForm::StablehloCustomCall: {
       auto customCall = dyn_cast<stablehlo::CustomCallOp>(op);
       if (!customCall) return std::nullopt;
       DictionaryAttr semantic = op->getAttrDictionary();
       if (auto config = customCall.getBackendConfig()) {
-        if (auto dict = dyn_cast<DictionaryAttr>(*config)) {
+        if (auto dict = dyn_cast<DictionaryAttr>(*config))
           semantic = dict;
-        } else if (auto str = dyn_cast<StringAttr>(*config); !str.empty()) {
+        else if (auto str = dyn_cast<StringAttr>(*config); !str.empty())
           semantic = decodeBackendConfig(op->getContext(), str);
-        }
       }
-      return ResidueView{
-          stripTfQualifier(customCall.getCallTargetName()).str(), semantic};
+      return ResidueView{stripTfQualifier(customCall.getCallTargetName()).str(),
+                         semantic};
     }
     case ResidueForm::DeclaredOp: {
       if (registered || name.starts_with("tf.")) return std::nullopt;
@@ -127,7 +113,6 @@ std::optional<ResidueView> residueViewOf(Operation* op, ResidueForm form) {
 
 bool isTfResidue(Operation* op) {
   llvm::StringRef name = op->getName().getStringRef();
-  if (!op->getName().isRegistered() && name.starts_with("tf.")) return true;
   if (isa<stablehlo::CustomCallOp>(op)) return true;
   if (!op->getName().isRegistered() && !name.starts_with("tf.") &&
       !declaredTfOpName(op->getAttrDictionary()).empty())
@@ -135,8 +120,8 @@ bool isTfResidue(Operation* op) {
   return false;
 }
 
-// TF-op -> atir-v2 mnemonic map: the only mapping contract; absent ops fall
-// back to `atir.unsupported` (unknown_op). Complement-only targets.
+// TF-op -> atir-v2 mnemonic map: the single mapping contract (complement-only,
+// stablehlo-unexpressible targets); absent ops fall back to unsupported.
 constexpr std::pair<llvm::StringRef, llvm::StringRef> kOpMap[] = {
     // View carriers keep the `annc.` prefix (stripTfQualifier strips `tf.` only).
     {"annc.getDim", "get_dim_v2"},
@@ -154,17 +139,15 @@ constexpr std::pair<llvm::StringRef, llvm::StringRef> kOpMap[] = {
     {"StringSplit", "string_split_v2"},
     {"StringToHashBucketFast", "string_to_hash_bucket_fast_v2"},
     {"StringToNumber", "string_to_number_v2"},
-    {"TopK", "top_k_v2"},
-    {"TopKV2", "top_k_v2"},
-    {"Variable", "variable_v2"},
-    {"VariableV2", "variable_v2"},
+    {"TopK", "top_k_v2"}, {"TopKV2", "top_k_v2"},
+    {"Variable", "variable_v2"}, {"VariableV2", "variable_v2"},
 };
+
 class TfResidueProvider final : public ResidueProvider {
  public:
   bool isResidue(Operation* op) const override { return isTfResidue(op); }
 
-  bool hasMapping(const ResidueView& view,
-                  MLIRContext* ctx) const override {
+  bool hasMapping(const ResidueView& view, MLIRContext* ctx) const override {
     if (view.opType == "Const") return true;
     return resolveV2Target(ctx, view.opType, kOpMap).has_value();
   }
@@ -183,15 +166,40 @@ class TfResidueProvider final : public ResidueProvider {
     return {};
   }
 
-  LogicalResult emitMapped(ConversionPatternRewriter& rewriter, Operation* op,
-                           const ResidueView& view, ArrayRef<Value> operands,
-                           ArrayRef<Type> resultTypes,
-                           llvm::SmallVectorImpl<Value>& results) const override {
+  LogicalResult emitConstant(
+      ConversionPatternRewriter& rewriter, Operation* op,
+      const ResidueView& view, ArrayRef<Type> resultTypes,
+      llvm::SmallVectorImpl<Value>& results) const override {
+    if (view.opType != "Const") return failure();  // DT_STRING only
+    auto value = view.sourceAttrs.getAs<DenseElementsAttr>("value");
+    auto resultTy = dyn_cast_or_null<RankedTensorType>(
+        resultTypes.empty() ? Type() : resultTypes[0]);
+    if (!value || !tfcompat::isTfStringType(value.getElementType()) ||
+        !resultTy || !isa<atir::StringType>(resultTy.getElementType()))
+      return failure();
+    SmallVector<Attribute> strings;
+    for (llvm::StringRef s : value.getValues<llvm::StringRef>())
+      strings.push_back(rewriter.getStringAttr(s));
+    std::string name = getLocName(op);
+    if (name.empty()) name = ("const_" + llvm::Twine(constOrdinal_++)).str();
+    OperationState state(op->getLoc(), "atir.constant_v2");  // via `values`
+    state.addTypes(resultTy);
+    state.addAttribute("sym_name", rewriter.getStringAttr(name));
+    state.addAttribute("values", ArrayAttr::get(rewriter.getContext(), strings));
+    results.push_back(rewriter.create(state)->getResult(0));
+    return success();
+  }
+
+  LogicalResult emitMapped(
+      ConversionPatternRewriter& rewriter, Operation* op,
+      const ResidueView& view, ArrayRef<Value> operands,
+      ArrayRef<Type> resultTypes,
+      llvm::SmallVectorImpl<Value>& results) const override {
+    // Constants take the emitConstant path.
     if (view.opType == "Const") return failure();
     std::optional<RegisteredOperationName> target =
         resolveV2Target(rewriter.getContext(), view.opType, kOpMap);
     if (!target) return failure();
-
     SmallVector<NamedAttribute> derived;
     buildDerived(op, view, *target, resultTypes, derived);
     return emitV2Op(rewriter, op->getLoc(), *target, operands, resultTypes,
@@ -199,24 +207,20 @@ class TfResidueProvider final : public ResidueProvider {
   }
 
  private:
-  static constexpr ResidueForm kForms[] = {
-      ResidueForm::TfGenericOp, ResidueForm::StablehloCustomCall,
-      ResidueForm::DeclaredOp};
+  static constexpr ResidueForm kForms[] = {ResidueForm::StablehloCustomCall,
+                                           ResidueForm::DeclaredOp};
 
   static bool declares(RegisteredOperationName target, llvm::StringRef name) {
     return llvm::is_contained(target.getAttributeNames(),
                               StringAttr::get(target.getContext(), name));
   }
 
-  // Contract-recovered attributes: fired only when the target declares the
-  // attribute and the residue carries none.
   void buildDerived(Operation* op, const ResidueView& view,
-                    RegisteredOperationName target,
-                    ArrayRef<Type> resultTypes,
+                    RegisteredOperationName target, ArrayRef<Type> resultTypes,
                     llvm::SmallVectorImpl<NamedAttribute>& derived) const {
     MLIRContext* ctx = op->getContext();
 
-    // Symbol ops need a sym_name the source op does not carry; derive one.
+    // Symbol ops need a sym_name the source op does not carry.
     if (declares(target, "sym_name") && !view.sourceAttrs.get("sym_name")) {
       std::string name = getLocName(op);
       if (name.empty()) name = ("v2_" + llvm::Twine(symOrdinal_++)).str();
@@ -225,13 +229,11 @@ class TfResidueProvider final : public ResidueProvider {
     }
   }
 
-  mutable int symOrdinal_ = 0;
+  mutable int constOrdinal_ = 0, symOrdinal_ = 0;
 };
-
 }  // namespace
 
 std::unique_ptr<ResidueProvider> createTfResidueProvider() {
   return std::make_unique<TfResidueProvider>();
 }
-
 }  // namespace annc

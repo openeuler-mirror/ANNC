@@ -22,25 +22,22 @@ class MLIRContext;
 namespace annc {
 
 // A frontend residue in a frontend-agnostic view (`opType` without dialect
-// prefix; `sourceAttrs` = declared attrs, F2: decoded backend_config).
+// prefix; `sourceAttrs` = declared attrs, F1: decoded backend_config).
 struct ResidueView {
   std::string opType;
   mlir::DictionaryAttr sourceAttrs;
 };
 
-// Frontend adaptation seam: the sink owns the driver, fallback carrier and
-// stats; a provider owns recognition, the op table and emission.
+// Adaptation seam: sink = frontend-agnostic (driver, fallback, bridge, stats);
+// provider = frontend-specific. New frontend = implement this interface.
 class ResidueProvider {
  public:
   virtual ~ResidueProvider() = default;
 
-  // True when `op` is a residue this provider must sink.
   virtual bool isResidue(mlir::Operation* op) const = 0;
 
-  // Normalizes `op`; nullopt when it is not a residue.
   virtual std::optional<ResidueView> match(mlir::Operation* op) const = 0;
 
-  // True when `view.opType` is mappable (classifies fallback reasons only).
   virtual bool hasMapping(const ResidueView& view,
                           mlir::MLIRContext* ctx) const {
     (void)view;
@@ -48,7 +45,6 @@ class ResidueProvider {
     return false;
   }
 
-  // Element type for a string tensor element, or null when unmodeled.
   virtual mlir::Type stringElementType(mlir::Type elementType,
                                        mlir::MLIRContext* ctx) const {
     (void)elementType;
@@ -56,7 +52,6 @@ class ResidueProvider {
     return {};
   }
 
-  // Emits a constant residue; failure leaves it to the fallback carrier.
   virtual mlir::LogicalResult emitConstant(
       mlir::ConversionPatternRewriter& rewriter, mlir::Operation* op,
       const ResidueView& view, mlir::ArrayRef<mlir::Type> resultTypes,
@@ -69,7 +64,6 @@ class ResidueProvider {
     return mlir::failure();
   }
 
-  // Emits the mapped form; failure rolls back to the fallback carrier.
   virtual mlir::LogicalResult emitMapped(
       mlir::ConversionPatternRewriter& rewriter, mlir::Operation* op,
       const ResidueView& view, mlir::ArrayRef<mlir::Value> operands,
@@ -77,8 +71,8 @@ class ResidueProvider {
       llvm::SmallVectorImpl<mlir::Value>& results) const = 0;
 };
 
-// TF provider: F1 unregistered `tf.*`, F2 stablehlo.custom_call, F3 declared
-// `call_target_name` ops.
+// TF provider: F1 (`stablehlo.custom_call`) and F2 (unregistered op declaring
+// `call_target_name` — the renamed `annc.residue` carrier's form).
 std::unique_ptr<ResidueProvider> createTfResidueProvider();
 
 }  // namespace annc
