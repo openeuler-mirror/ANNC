@@ -11,3 +11,12 @@ if(ANNC_ENABLE_ONNX)
   # Pipeline orchestrator for the ONNX Runtime EP's runtime-compile mode.
   add_subdirectory(onnx/onnx-pipeline)
 endif()
+
+# TF stablehlo V2 route (opt-in, ANNC_ENABLE_TF2ATIR_V2): annc-converter-v2
+# is the pip-TF-wheel based GraphDef rewrite; it is process-isolated from
+# ANNC's LLVM/MLIR stack (no annc target is linked).
+if(ANNC_ENABLE_TF2ATIR_V2)
+  add_subdirectory(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../addons/tensorflow/annc-converter-v2
+    annc-converter-v2)
+endif()

@@ -24,14 +24,17 @@ option(ANNC_DEBUG "Build only ANNC-owned code with debug flags (-g3 -O0 -UNDEBUG
 option(ANNC_ENABLE_TENSORFLOW "Build the TensorFlow frontend tools (annc-tf2atir, annc-converter, annc-tf-pipeline)" ON)
 option(ANNC_ENABLE_TENSORFLOW_ADDON "Build the TensorFlow addons (annc_optimizer, annc_fused_op); requires ANNC_ENABLE_TENSORFLOW" ${ANNC_ENABLE_TENSORFLOW})
 option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protobuf sources" ON)
-# TF frontend refactor (stablehlo artifact consumption): stablehlo dialect
-# dependency and the sink conversion layer, opt-in. ON requires an external
-# LLVM/MLIR 20.1.8 toolchain (the stablehlo v1.9.x baseline); OFF (default)
-# keeps the historical build path untouched and pulls in no stablehlo.
-option(ANNC_ENABLE_TF2ATIR_V2 "Build the stablehlo artifact sink layer (requires LLVM/MLIR 20.1.8 toolchain and third_party/stablehlo)" OFF)
+
 # The ONNX Runtime EP plugin is opt-in: it is compiled against an external ORT
 # SDK that the default build neither needs nor downloads.
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
+# TF stablehlo V2 route (one opt-in switch for the whole route): the stablehlo
+# dialect integration + sink layer, and the V2 tools (annc-converter-v2 now;
+# annc-tf2atir-v2 once merged). ON requires an external LLVM/MLIR 20.1.8
+# toolchain, third_party/stablehlo and, from the converter's rewrite core
+# onward, the pip TensorFlow wheel. OFF (default) keeps the historical build
+# path untouched.
+option(ANNC_ENABLE_TF2ATIR_V2 "Build the TensorFlow stablehlo V2 route (sink layer and V2 tools)" OFF)
 set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
 set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for the EP's native pool (always used by the EP); an install/SDK tree does not carry them")
 set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the native-pool context layout and archives were verified against; the adapter refuses the native path in any other host and falls back to the public KernelContext_ParallelFor adapter")
@@ -311,7 +314,6 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
-
 
 # Entered only with ANNC_ENABLE_TF2ATIR_V2=ON; the default build never touches it.
 #
