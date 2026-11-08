@@ -24,32 +24,9 @@
 func.func @blocked_gemm(
     %c: memref<12x20xf32>,
     %a: memref<12x8xf32>,
-    %b: memref<8x20xf32>) {
+    %b: memref<8x20xf32>) attributes {annc.aarch64.gemm_strategies = {s0 = {version = 4 : i64, target_arch = "hip12", isa = "neon", data_type = "f32", kernel_family = "annc-neon-f32-v1", cache_strategy = "fixed", kernel_strategy = "fixed", cache_parameters = {mc = 6 : i64, nc = 16 : i64, kc = 4 : i64}, kernel_parameters = {mr = 3 : i64, panel_lanes = 2 : i64}, execution_kind = "gemm", rhs_packing = "packed"}}} {
   linalg.matmul {
-    annc.aarch64.gemm_plan = {
-      first_kc_mode = "overwrite",
-      data_type = "f32",
-      k = 8 : i64,
-      kc = 4 : i64,
-      lda = 8 : i64,
-      ldb = 20 : i64,
-      ldc = 20 : i64,
-      m = 12 : i64,
-      macro_order = "mkn",
-      mc = 6 : i64,
-      mr = 3 : i64,
-      n = 20 : i64,
-      nc = 16 : i64,
-      next_kc_mode = "accumulate",
-      panel_lanes = 2 : i64,
-      execution_kind = "gemm", rhs_pack_source = "generated",
-      rhs_packing = "packed",
-      tasks_m = 1 : i64, tasks_n = 1 : i64,
-      thread_count = 1 : i64, shard_direction = "rows",
-      thread_partition = "static-2d",
-      vector_length_bytes = 32 : i64,
-      version = 1 : i64
-    }
+    annc.aarch64.gemm_problem = {version = 1 : i64, m = 12 : i64, n = 20 : i64, k = 8 : i64, lda = 8 : i64, ldb = 20 : i64, ldc = 20 : i64}, annc.aarch64.gemm_strategy = "s0", annc.aarch64.gemm_candidate = {version = 4 : i64, planning_state = "planned", strategy = "s0", max_thread_count = 1 : i64, thread_count = 1 : i64, tasks_m = 1 : i64, tasks_n = 1 : i64, shard_direction = "rows", thread_partition = "static-2d"}
   } ins(%a, %b : memref<12x8xf32>, memref<8x20xf32>)
     outs(%c : memref<12x20xf32>)
   return

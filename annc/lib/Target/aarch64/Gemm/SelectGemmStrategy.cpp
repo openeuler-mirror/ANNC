@@ -20,87 +20,62 @@ LogicalResult selectGemmStrategy(
     Operation *op, int64_t intraThreadCount,
     const aarch64::gemm::GemmTuningConfig &config, bool enablePrepack) {
   if (!op->hasAttr(aarch64::gemm::kProblemAttrName)) return success();
-  if (op->hasAttr(aarch64::gemm::kCandidateAttrName) ||
-      op->hasAttr(aarch64::gemm::kPlanAttrName)) {
-    return op->emitOpError("already has a GEMM candidate or finalized plan");
+  if (op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
+    return op->emitOpError("already has a GEMM candidate");
   }
   FailureOr<aarch64::gemm::GemmProblem> problem =
       aarch64::gemm::readProblem(op);
   if (failed(problem)) return failure();
 
-  Builder builder(op->getContext());
-  NamedAttrList candidate;
-  candidate.append("version",
-                   builder.getI64IntegerAttr(aarch64::gemm::kPlanVersion));
-  auto selection = aarch64::gemm::selectGemmPath(
-      config.isa, problem->m, problem->n, problem->k, enablePrepack,
-      op->hasAttr(aarch64::gemm::kRhsNameAttrName));
+  const auto selectPath = [&](bool allowSpecialized) {
+    return aarch64::gemm::selectGemmPath(
+        config.isa, problem->m, problem->n, problem->k, enablePrepack,
+        op->hasAttr(aarch64::gemm::kRhsNameAttrName), allowSpecialized);
+  };
+  const auto &kernelPolicy =
+      aarch64::gemm::getGemmKernelTilingStrategy(config.kernel.kind);
+  const auto configureKernel = [&](aarch64::gemm::GemmExecutionKind kind)
+      -> std::optional<aarch64::gemm::GemmKernelStrategy> {
+    const auto &abi = aarch64::gemm::getGemmKernelABI(
+        config.target, config.isa, config.dataType, kind);
+    auto kernel = kernelPolicy.configureForExecution(config.kernel, kind,
+                                                     config.isa, abi);
+    if (!kernel || !kernelPolicy.isValidForExecution(
+                       *kernel, kind, config.isa, config.dataType, abi))
+      return std::nullopt;
+    return kernel;
+  };
+  auto selection = selectPath(true);
   if (op->hasAttr(atir::kGemmEpilogueAttr) &&
       selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm &&
       (selection.executionKind !=
            aarch64::gemm::GemmExecutionKind::kMatrixVector ||
-       !epilogueMatvecEnabled())) {
+       !epilogueMatvecEnabled()))
     selection.executionKind = aarch64::gemm::GemmExecutionKind::kGemm;
+  auto kernel = configureKernel(selection.executionKind);
+  if (!kernel &&
+      selection.executionKind != aarch64::gemm::GemmExecutionKind::kGemm) {
+    selection = selectPath(false);
+    kernel = configureKernel(selection.executionKind);
   }
-  const auto executionKind = selection.executionKind;
-  const aarch64::gemm::GemmKernelABI &abi = aarch64::gemm::getGemmKernelABI(
-      config.target, config.isa, config.dataType, executionKind);
-  candidate.append(
-      "target_arch",
-      builder.getStringAttr(aarch64::gemm::getGemmTargetName(config.target)));
-  candidate.append(
-      "isa", builder.getStringAttr(aarch64::gemm::getGemmIsaName(config.isa)));
-  candidate.append("data_type",
-                   builder.getStringAttr(
-                       aarch64::gemm::getGemmDataTypeName(config.dataType)));
-  candidate.append("kernel_family", builder.getStringAttr(abi.family));
-  candidate.append("planning_state", builder.getStringAttr("policy"));
-  candidate.append("mc", builder.getI64IntegerAttr(config.cacheTile.mc));
-  candidate.append("nc", builder.getI64IntegerAttr(config.cacheTile.nc));
-  candidate.append("kc", builder.getI64IntegerAttr(config.cacheTile.kc));
-  aarch64::gemm::GemmKernelTile kernelTile = config.kernelTile;
-  if (executionKind == aarch64::gemm::GemmExecutionKind::kMatrixVector)
-    kernelTile = {4, 1};
-  else if (executionKind == aarch64::gemm::GemmExecutionKind::kVectorMatrix)
-    kernelTile = {1, 4};
-  candidate.append("mr", builder.getI64IntegerAttr(kernelTile.mr));
-  candidate.append("panel_lanes",
-                   builder.getI64IntegerAttr(kernelTile.panelLanes));
-  candidate.append(
-      "load_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.load_cycles_per_byte));
-  candidate.append(
-      "store_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.store_cycles_per_byte));
-  candidate.append(
-      "compute_cycle_scale",
-      builder.getF64FloatAttr(config.costModel.compute_cycle_scale));
-  candidate.append(
-      "gemv_compute_cycle_scale",
-      builder.getF64FloatAttr(config.costModel.gemv_compute_cycle_scale));
-  candidate.append(
-      "microkernel_call_cycles",
-      builder.getF64FloatAttr(config.costModel.microkernel_call_cycles));
-  candidate.append(
-      "pack_cycles_per_byte",
-      builder.getF64FloatAttr(config.costModel.pack_cycles_per_byte));
-  candidate.append("pack_call_cycles",
-                   builder.getF64FloatAttr(config.costModel.pack_call_cycles));
-  candidate.append("max_thread_count",
-                   builder.getI64IntegerAttr(intraThreadCount));
-  candidate.append("thread_partition", builder.getStringAttr("static-2d"));
-  candidate.append(
-      aarch64::gemm::kExecutionKindAttrName,
-      builder.getStringAttr(
-          aarch64::gemm::getGemmExecutionKindName(executionKind)));
-  const char* rhsPackingName =
-      selection.rhsPacking == aarch64::gemm::RhsPacking::kDirect   ? "direct"
-      : selection.rhsPacking == aarch64::gemm::RhsPacking::kPacked ? "packed"
-                                                                   : "prepacked";
-  candidate.append(aarch64::gemm::kRhsPackingAttrName,
-                   builder.getStringAttr(rhsPackingName));
-  op->setDiscardableAttr(aarch64::gemm::kCandidateAttrName,
-                         candidate.getDictionary(op->getContext()));
+  if (!kernel)
+    return op->emitOpError("has a tuning strategy unsupported by the kernel ABI");
+  if (selection.rhsPacking == aarch64::gemm::RhsPacking::kPrepacked &&
+      !aarch64::gemm::isRhsPrepackSupported(config.cache.kind,
+                                           kernel->kind)) {
+    return op->emitOpError(
+        "prepacked RHS currently requires fixed cache and kernel strategies");
+  }
+  aarch64::gemm::writeThreadPlanningInput(op,
+                                          {{config.target,
+                                            config.isa,
+                                            config.dataType,
+                                            selection.executionKind,
+                                            config.cache,
+                                            *kernel,
+                                            selection.rhsPacking},
+                                           config.costModel,
+                                           intraThreadCount});
   return success();
 }
 

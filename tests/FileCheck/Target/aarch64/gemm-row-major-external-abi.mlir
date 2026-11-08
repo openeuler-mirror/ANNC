@@ -7,23 +7,11 @@
 // CHECK: llvm.call @annc_aarch64_neon_kernel_rm_mr2_n3_kg_r1_f32
 // CHECK-NOT: @__annc_aarch64_gemm_microkernel_rm_leaf
 func.func @row_major_neon(%c: memref<2x3xf32>, %a: memref<2x5xf32>,
-                           %b: memref<5x3xf32>) {
+                           %b: memref<5x3xf32>) attributes {annc.aarch64.gemm_strategies = {s0 = {version = 4 : i64, target_arch = "hip12", isa = "neon", data_type = "f32", kernel_family = "annc-neon-f32-v1", cache_strategy = "fixed", kernel_strategy = "fixed", cache_parameters = {mc = 3 : i64, nc = 16 : i64, kc = 8 : i64}, kernel_parameters = {mr = 3 : i64, panel_lanes = 2 : i64}, execution_kind = "gemm", rhs_packing = "direct"}}} {
   linalg.matmul {
     annc.aarch64.gemm_stage = "kernel_tiled",
     annc.aarch64.kc_mode = "overwrite",
-    annc.aarch64.gemm_plan = {
-      target_arch = "hip12", isa = "neon", data_type = "f32",
-      kernel_family = "annc-neon-f32-v1", first_kc_mode = "overwrite",
-      k = 5 : i64, kc = 8 : i64, lda = 5 : i64, ldb = 3 : i64,
-      ldc = 3 : i64, m = 2 : i64, macro_order = "mkn", mc = 3 : i64,
-      mr = 3 : i64, n = 3 : i64, nc = 16 : i64,
-      next_kc_mode = "accumulate", panel_lanes = 2 : i64,
-      execution_kind = "gemm", rhs_pack_source = "none",
-      rhs_packing = "direct",
-      tasks_m = 1 : i64, tasks_n = 1 : i64, thread_count = 1 : i64,
-      shard_direction = "rows", thread_partition = "static-2d",
-      vector_length_bytes = 16 : i64, version = 1 : i64
-    }
+    annc.aarch64.gemm_problem = {version = 1 : i64, m = 2 : i64, n = 3 : i64, k = 5 : i64, lda = 5 : i64, ldb = 3 : i64, ldc = 3 : i64}, annc.aarch64.gemm_strategy = "s0", annc.aarch64.gemm_candidate = {version = 4 : i64, planning_state = "planned", strategy = "s0", max_thread_count = 1 : i64, thread_count = 1 : i64, tasks_m = 1 : i64, tasks_n = 1 : i64, shard_direction = "rows", thread_partition = "static-2d"}
   } ins(%a, %b : memref<2x5xf32>, memref<5x3xf32>)
     outs(%c : memref<2x3xf32>)
   return
