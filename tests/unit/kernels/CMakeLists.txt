@@ -197,3 +197,14 @@ if(ANNC_ENABLE_KDNN_ADAPTOR)
 else()
     target_compile_definitions(builtin_shared_spec_test PRIVATE ANNC_TEST_ENABLE_KDNN=0)
 endif()
+
+# Host numerical/protocol coverage for all production aarch64 context specs.
+# The runner builds isolated wrappers and does not need TensorFlow or KDNN.
+if(Python3_Interpreter_FOUND)
+  add_test(NAME KernelContext.ProductionKernels
+    COMMAND "${CMAKE_COMMAND}" -E env "CXX=${CMAKE_CXX_COMPILER}"
+      "${Python3_EXECUTABLE}" -I
+      "${CMAKE_CURRENT_SOURCE_DIR}/run_context_kernels.py")
+else()
+  message(STATUS "Python3 interpreter not found; KernelContext.ProductionKernels not registered")
+endif()
