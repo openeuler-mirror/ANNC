@@ -258,6 +258,13 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
     }
 
     tensorflow::NodeDef *alias = graph.add_node();
+    // Roll back the just-appended alias on any late rejection: the caller's
+    // graph must stay untouched when this function reports failure.
+    auto fail = [&](const std::string &reason) {
+      if (error) *error = reason;
+      graph.mutable_node()->RemoveLast();
+      return false;
+    };
     alias->set_name(originalNode.name());
     alias->set_op(requiredCount == 1 ? "Identity" : "IdentityN");
     alias->set_device(originalNode.device());
@@ -267,29 +274,20 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
       if (!target->fusion || target->slot < 0 ||
           target->slot >=
               static_cast<int64_t>(target->fusion->outputs.size())) {
-        if (error) {
-          *error = "output node '" + originalNode.name() +
-                   "' has an invalid fusion output slot";
-        }
-        return false;
+        return fail("output node '" + originalNode.name() +
+                    "' has an invalid fusion output slot");
       }
       if (target->fusion->name == originalNode.name()) {
-        if (error) {
-          *error = "fusion node name conflicts with output alias '" +
-                   originalNode.name() + "'";
-        }
-        return false;
+        return fail("fusion node name conflicts with output alias '" +
+                    originalNode.name() + "'");
       }
       alias->add_input(target->fusion->name + ":" +
                        std::to_string(target->slot));
       tensorflow::DataType type =
           fusionDType(target->fusion->outputs[target->slot].dtype);
       if (type == tensorflow::DT_INVALID) {
-        if (error) {
-          *error = "output node '" + originalNode.name() +
-                   "' has an unsupported dtype";
-        }
-        return false;
+        return fail("output node '" + originalNode.name() +
+                    "' has an unsupported dtype");
       }
       types.push_back(type);
     }
@@ -307,69 +305,59 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
 }
 
 tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
-    tensorflow::GraphDef &graph, const FusionInfo &fusion) const {
+    tensorflow::GraphDef &graph, const FusionInfo &fusion,
+    std::string *error) const {
   if (fusion.outputs.empty()) return nullptr;  // contract: run validate first
   const std::vector<FusionArg> &outputs = fusion.outputs;
   const bool contextV3 = fusion.abi == "annc_context_v3";
-  // ANNCFused groups inputs by role while metadata keeps pattern order:
-  // match by the latter, materialize the former for runtime ABI.
+  const bool grouped =
+      contextV3 || fusion.abi == "mlir_ciface" ||
+      fusion.abi == "annc_execution_v2";
+  // ANNCFused groups inputs by role while metadata keeps pattern order.
+  // Grouping carries each arg's pattern index along: the permutation is
+  // index-based, so duplicate tfNames (MatMul(x, x)) stay distinct.
   std::vector<FusionArg> orderedArgs;
-  orderedArgs.reserve(fusion.args.size());
-  if (contextV3 || fusion.abi == "mlir_ciface" ||
-      fusion.abi == "annc_execution_v2") {
-    for (const char *role : {"constant", "fixed", "dynamic"}) {
-      for (const FusionArg &arg : fusion.args) {
-        if (arg.role == role) orderedArgs.push_back(arg);
+  std::vector<int64_t> transportOfCanonical;
+  if (grouped) {
+    for (const FusionArg &arg : fusion.args) {
+      if (arg.role != "constant" && arg.role != "fixed" &&
+          arg.role != "dynamic") {
+        if (error) {
+          *error = "fusion '" + fusion.name + "' arg '" + arg.tfName +
+                   "' has unknown role '" + arg.role + "'";
+        }
+        return nullptr;  // role grouping would silently drop it
       }
     }
+    const int64_t argCount = static_cast<int64_t>(fusion.args.size());
+    orderedArgs.reserve(fusion.args.size());
+    for (const char *role : {"constant", "fixed", "dynamic"}) {
+      for (int64_t i = 0; i < argCount; ++i) {
+        if (fusion.args[i].role == role) {
+          orderedArgs.push_back(fusion.args[i]);
+          transportOfCanonical.push_back(i);
+        }
+      }
+    }
+    // transportOfCanonical is transport-position -> pattern index; invert it
+    // into the canonical -> transport permutation the ABI records.
+    std::vector<int64_t> inverse(argCount, 0);
+    for (int64_t p = 0; p < static_cast<int64_t>(orderedArgs.size()); ++p)
+      inverse[transportOfCanonical[p]] = p;
+    transportOfCanonical.swap(inverse);
   } else {
     orderedArgs.assign(fusion.args.begin(), fusion.args.end());
   }
   const std::vector<FusionArg> &args = orderedArgs;
-  // canonical (outline) index -> transport (op input) index. Context v3
-  // records it in context_input_order; legacy ABIs via kernel_arg_order.
-  // Matching is by tfName: a duplicate tfName clears the mapping (validate
-  // rejects duplicates; this only guards direct builder misuse).
-  std::vector<int64_t> transportOfCanonical;
-  if (contextV3) {
-    transportOfCanonical.reserve(fusion.args.size());
-    for (const FusionArg &canonical : fusion.args) {
-      auto it = std::find_if(
-          orderedArgs.begin(), orderedArgs.end(),
-          [&](const FusionArg &arg) { return arg.tfName == canonical.tfName; });
-      if (it == orderedArgs.end()) {
-        transportOfCanonical.clear();
-        break;
-      }
-      transportOfCanonical.push_back(
-          static_cast<int64_t>(std::distance(orderedArgs.begin(), it)));
-    }
-  }
+  // Context v3 records the permutation in context_input_order; legacy ABIs
+  // in kernel_arg_order, with output buffers appended after all inputs.
+  // Explicit metadata may override for legacy ABIs.
   std::vector<int64_t> resolvedKernelArgOrder = fusion.kernelArgOrder;
-  if (!contextV3 &&
-      (fusion.abi == "mlir_ciface" || fusion.abi == "annc_execution_v2") &&
-      resolvedKernelArgOrder.empty() &&
-      orderedArgs.size() == fusion.args.size()) {
-    // The outlined function uses the pattern input order. Runtime inputs are
-    // grouped by role, so permute the C-interface arguments back to that
-    // outlined order and append output buffers after all inputs.
-    resolvedKernelArgOrder.reserve(orderedArgs.size() + outputs.size());
-    for (const FusionArg &originalArg : fusion.args) {
-      auto it = std::find_if(
-          orderedArgs.begin(), orderedArgs.end(),
-          [&](const FusionArg &arg) { return arg.tfName == originalArg.tfName; });
-      if (it == orderedArgs.end()) {
-        resolvedKernelArgOrder.clear();
-        break;
-      }
+  if (!contextV3 && grouped && resolvedKernelArgOrder.empty()) {
+    resolvedKernelArgOrder = transportOfCanonical;
+    for (size_t i = 0; i < outputs.size(); ++i)
       resolvedKernelArgOrder.push_back(
-          static_cast<int64_t>(std::distance(orderedArgs.begin(), it)));
-    }
-    if (!resolvedKernelArgOrder.empty()) {
-      for (size_t i = 0; i < outputs.size(); ++i)
-        resolvedKernelArgOrder.push_back(
-            static_cast<int64_t>(orderedArgs.size() + i));
-    }
+          static_cast<int64_t>(orderedArgs.size() + i));
   }
   const std::string &outputName = outputs.front().tfName;
 
