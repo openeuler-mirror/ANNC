@@ -232,6 +232,44 @@ TEST(AnncEpContextSiteValidation, RejectsMissingOutputs) {
   EXPECT_NE(error.find("output"), std::string::npos);
 }
 
+TEST(AnncEpContextSiteValidation, ContextArrayHasNoFourteenArgumentDispatchLimit) {
+  Site site = ValidContextSite();
+  site.args.clear();
+  for (int64_t rank = 0; rank < 4; ++rank) {
+    std::vector<int64_t> shape(static_cast<size_t>(rank), 1);
+    site.args.push_back({"a" + std::to_string(rank), "dynamic", "f32", rank,
+                         shape});
+  }
+  std::string error;
+  site.args.push_back({"x", "dynamic", "f32", 2, {1, 1}});
+  site.args.push_back({"y", "dynamic", "f32", 3, {1, 1, 1}});
+  site.args.push_back({"z", "dynamic", "f32", 1, {1}});
+  site.args.push_back({"q", "dynamic", "f32", 1, {1}});
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+  for (int i = 0; i < 11; ++i) {
+    site.args.push_back({"e" + std::to_string(i), "dynamic", "f32", 1, {1}});
+  }
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+}
+
+TEST(AnncEpContextSiteValidation, RejectsRetiredExecutionAbi) {
+  Site site = ValidContextSite();
+  site.abi = "annc_execution_v2";
+  std::string error;
+  EXPECT_FALSE(ValidateSite(site, &error));
+}
+
+TEST(AnncEpContextSiteValidation, RequiresMaskedScalarAttributes) {
+  Site site = ValidContextSite();
+  site.pattern = "masked_mul";
+  std::string error;
+  EXPECT_FALSE(ValidateSite(site, &error));
+  site.contextI64Attrs = {1, 1, 0, 0, 1, 0, 0x3f800000, 0};
+  EXPECT_TRUE(ValidateSite(site, &error)) << error;
+  site.contextI64Attrs[1] = 0;
+  EXPECT_FALSE(ValidateSite(site, &error));
+}
+
 // ---------------------------------------------------------------------------
 // ModelSignature: what the disk cache key must be sensitive to.
 //

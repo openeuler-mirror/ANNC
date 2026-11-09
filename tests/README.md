@@ -63,6 +63,9 @@ ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
 ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
 
+# Context kernel 独立检查，仅需 Python 和 C++17 编译器（CXX 可覆盖）
+ANNC_CONTEXT_SANITIZE=1 python3 tests/unit/kernels/run_context_kernels.py
+
 # FileCheck
 # ANNC_LLVM_BIN 不设置时读取 build/annc_llvm_bin.txt（configure 写入）
 PATH="$PWD/build/bin:$ANNC_LLVM_BIN:$PATH" \
@@ -85,9 +88,8 @@ bash tests/FileCheck/run.sh
   和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
-  `onnxruntime`。若构建用的解释器没有这两个包，configure 时用
-  `-DANNC_TEST_PYTHON=/path/to/venv/bin/python3` 指定测试解释器（该变量只影响
-  CTest 的 Python 用例，不会改变 Python 绑定的构建解释器）。
+  `onnxruntime`。若默认解释器没有这两个包，configure 时用
+  `-DANNC_TEST_PYTHON=/path/to/venv/bin/python3` 指定测试解释器。
   EP 在运行期现场编译 kernel 时要读进程环境里的 `ANNC_EP_ORT_BUILD_TREE`；
   configure 时设置了同名缓存变量的话，`tests/integration/ort_ep/CMakeLists.txt`
   会把它写进这些测试的 `ENVIRONMENT`，因此 `ctest` 前不必再手工导出（换 ORT
@@ -106,7 +108,8 @@ bash tests/FileCheck/run.sh
 | `unit/annc/jit_template_fingerprint_test.cpp` | L0 | JIT 模板指纹 |
 | `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
 | `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |
-| `unit/kernels/*_test.cpp`（8 个） | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
+| `unit/kernels/*_test.cpp` | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
+| `unit/kernels/run_context_kernels.py`、`kernel_context_driver.cpp` | L0 | 手写 Context kernel 数值与路径验证；CTest 名称 `KernelContext.ProductionKernels` |
 | `unit/onnx2atir/onnx_frontend_test.cpp` | L0 | ONNX 前端各 stage |
 | `unit/ort_ep/annc_ep_compile_test.cpp` | L0 | EP 编译/缓存签名 |
 | `unit/ort_ep/annc_ep_execution_test.cpp` | L0 | EP 执行上下文错误记账（fake OrtApi） |

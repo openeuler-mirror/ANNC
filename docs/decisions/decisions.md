@@ -243,3 +243,15 @@
 | **备选方案** | 逐文件写最终目录会暴露半包；先检查再普通 rename 不能保证并发不覆盖；复用 EP 的删除旧缓存流程会破坏用户已有目录；引入任务服务或动态插件增加初版维护成本。 |
 | **接受条件** | HLD 范围与模块接口联合确认，配置及报告版本责任明确，必需校验和身份规范冻结；通过目标平台的并发/中断/磁盘与权限故障验证，并完成既有 TF/ONNX 路径回归。 |
 | **详细设计** | [CLI 入口模块详细设计](../design/annc-partition/cli-design.md)，重点见第 5、6、8—10、13—14 章。 |
+
+<a id="adr-022"></a>
+
+## ADR-022：Kernel Context 与统一 Runtime ABI
+
+状态：**手写 builtin 迁移已实现；整体统一 ABI 仍为 proposed**，更新 2026-10-24。详细边界见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。
+
+| 项目 | 内容 |
+| --- | --- |
+| **决策** | 新产物使用版本化 `annc_context_v3`，kernel 与融合函数外部入口统一为 `AnncStatusCode (*)(AnncKernelContext*)`。Context 包含借用的 tensor view、typed attrs 和 C 服务表；输出预绑定与执行时分配属于同一 slot 协议。复用现有 registry/backend 选择、分配实现、线程池和公共 lowering，在临近 LLVM 调用时封装 payload。 |
+| **线程池调用** | kernel 使用 `context.getThreadPool()` 获取借用句柄，以 `Shard(maxParallelism, workers, total, costPerUnit, work)` 分片。服务表追加可选 C `shard` 回调并逐字段检查 `struct_size`；旧服务表缺少 shard 时串行回退。 |
+| **后果** | 调用签名、动态输出和错误契约统一，输入数量不再受旧参数 switch 限制；需要协调 schema、fusion、lowering、运行时和测试迁移，并验证 C/LLVM 布局与生命周期。 |

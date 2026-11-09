@@ -318,17 +318,17 @@ MatMul/epilogue 仍见 3.3，不在此重复；这 9 类不代表 TF 路径支�
 | `dnn_embedding_hash_bucket` | `KPFusedDnnEmbeddingWithHashBucket` |
 | `kp_embedding_action_id_gather` | `KPFusedEmbeddingActionIdGatherR{r1}x{r2}` |
 | `kp_target_behavior_interaction` | `KPFusedTargetBehaviorInteraction` |
-| `kp_sparse_dynamic_stitch` | `KPFusedSparseDynamicStitchN{n}` |
+| `kp_sparse_dynamic_stitch` | `KPFusedSparseDynamicStitch`|
 | `kp_sparse_segment_reduce` | `KPFusedSparseSegmentReduce{I32,I64}{Sum,Mean}` |
 | `kp_embedding_padding` | `KPFusedEmbeddingPadding` |
 | `kp_embedding_padding_fast` | `KPFusedEmbeddingPaddingFast` |
-| `kp_sparse_reshape` | `KPFusedSparseReshape{I32,I64}[DynLimit]` |
+| `kp_sparse_reshape` | `KPFusedSparseReshapeI64` |
 | `kp_sparse_select` | `KPFusedSparseSelect` |
 
 表中花括号和方括号表示名称变体，不是算子名字面量：`r1`、`r2` 是两个输入的
 rank；`n` 是 stitch 分支数；`I32` / `I64` 和 `Sum` / `Mean` 按匹配结果选取；
-`DynLimit` 是可选后缀。例如实际名称可以是
-`KPFusedEmbeddingActionIdGatherR2x2` 或 `KPFusedSparseSegmentReduceI64Mean`。
+例如实际名称可以是 `KPFusedEmbeddingActionIdGatherR2x2` 或
+`KPFusedSparseSegmentReduceI64Mean`。
 
 实际命中取决于模型子图和 kernel 支持情况，并非启用 optimizer 后全部都会命中。
 

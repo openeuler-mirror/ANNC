@@ -13,6 +13,18 @@ find_package(GTest REQUIRED)
 find_package(Threads REQUIRED)
 include(GoogleTest)
 
+# Keep the test interpreter separate from the Python bindings' interpreter.
+set(ANNC_TEST_PYTHON "" CACHE FILEPATH
+    "Interpreter for CTest-driven Python suites (defaults to the one found by FindPython3)")
+if(ANNC_TEST_PYTHON)
+  set(Python3_EXECUTABLE "${ANNC_TEST_PYTHON}")
+endif()
+if(TARGET annc_ep)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+else()
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+endif()
+
 # L0: C++ unit tests, grouped by the production subsystem they cover.
 add_subdirectory(unit/annc)
 add_subdirectory(unit/kernels)
@@ -30,15 +42,6 @@ endif()
 # kernel e2e drivers under e2e/kernel_context. Their CTest registration stays
 # in integration/ort_ep.
 if(TARGET annc_ep)
-  # The EP Python fixtures need onnx + onnxruntime, which the interpreter used
-  # for the C++ build does not necessarily provide.  Keep the override local to
-  # the test tree so it cannot change the Python bindings' interpreter.
-  set(ANNC_TEST_PYTHON "" CACHE FILEPATH
-      "Interpreter for CTest-driven Python suites (defaults to the one found by FindPython3)")
-  if(ANNC_TEST_PYTHON)
-    set(Python3_EXECUTABLE "${ANNC_TEST_PYTHON}")
-  endif()
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_subdirectory(unit/ort_ep)
   add_subdirectory(integration/ort_ep)
 endif()

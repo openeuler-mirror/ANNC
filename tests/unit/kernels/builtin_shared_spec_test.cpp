@@ -153,14 +153,22 @@ TEST(BuiltinSharedSpecTest, RegistryExposesMatMulAarch64) {
   EXPECT_EQ(symbolOpt->substr(symbolOpt->size() - 5), "_auto");
 }
 
-TEST(BuiltinSharedSpecTest, ResolverFindsMatMulAarch64) {
-  auto symbol = KernelRegistry::instance().lookupKernelSymbol(
-      KernelQuery{"MatMul", "aarch64", {{"T", "float"}}, "annc_context_v3"});
-
-  ASSERT_TRUE(symbol.has_value());
-  EXPECT_TRUE(symbol->rfind("ANNCKernel_ContextV3_MatMul_", 0) == 0);
-  ASSERT_GE(symbol->size(), 5u);
-  EXPECT_EQ(symbol->substr(symbol->size() - 5), "_auto");
+TEST(BuiltinSharedSpecTest, OnnxBuiltinsExposeOnlyContextV3) {
+  for (const char* op : {"TensordotMatMul", "LayerNorm", "BatchedMatMulAdd",
+                         "BatchedMatMulAdd4", "MaskedMul1", "MaskedMul2",
+                         "MaskedMul3", "MaskedMul4", "MaskedMul6", "MaskedMul7",
+                         "MaskedMul11", "MaskedMul1Flat", "MaskedMul3Flat",
+                         "MaskedMul4Flat"}) {
+    SCOPED_TRACE(op);
+    KernelQuery query{op, "aarch64", {{"T", "float"}}, "annc_context_v3"};
+    if (std::string(op).rfind("MaskedMul", 0) == 0)
+      query.type_constraints.push_back({"TMask", "int64_t"});
+    auto symbol = KernelRegistry::instance().lookupKernelSymbol(query);
+    ASSERT_TRUE(symbol.has_value());
+    EXPECT_EQ(symbol->rfind("ANNCKernel_ContextV3_", 0), 0u);
+    query.abi = "annc_execution_v2";
+    EXPECT_FALSE(KernelRegistry::instance().hasKernel(query));
+  }
 }
 
 TEST(BuiltinSharedSpecTest, Aarch64MatMulWrapperRuns) {
@@ -173,6 +181,22 @@ TEST(BuiltinSharedSpecTest, RegistryExposesMatMulKdnn) {
       KernelQuery{"MatMul", "kdnn", {{"T", "float"}}, "annc_context_v3"});
 
   EXPECT_TRUE(symbolOpt.has_value());
+}
+
+TEST(BuiltinSharedSpecTest, KdnnTensorRefPreservesViewMetadata) {
+  float buffer[16] = {0.0f};
+  const int64_t dims[] = {2, 4}, strides[] = {5, 1};
+  auto view = makeView(buffer, dims, strides);
+  view.offset = 3;
+
+  auto tensorRef =
+      annc::kernels::kdnn_adaptor::makeDenseTensorRef(view, KDNN::Layout::AB);
+
+  EXPECT_EQ(tensorRef.info.GetDims()[0], static_cast<KDNN::SizeType>(2));
+  EXPECT_EQ(tensorRef.info.GetDims()[1], static_cast<KDNN::SizeType>(4));
+  EXPECT_EQ(tensorRef.info.GetStrides()[0], static_cast<KDNN::SizeType>(5));
+  EXPECT_EQ(tensorRef.info.GetStrides()[1], static_cast<KDNN::SizeType>(1));
+  EXPECT_EQ(tensorRef.data, buffer + 3);
 }
 
 TEST(BuiltinSharedSpecTest, KdnnMatMulWrapperRuns) {
@@ -198,13 +222,6 @@ TEST(BuiltinSharedSpecTest, KdnnMatMulWrapperRuns) {
 
   ASSERT_TRUE(WIFEXITED(status));
   EXPECT_EQ(WEXITSTATUS(status), 0);
-}
-
-TEST(BuiltinSharedSpecTest, MatMulHasBothBackends) {
-  EXPECT_TRUE(KernelRegistry::instance().hasKernel(
-      KernelQuery{"MatMul", "aarch64", {{"T", "float"}}, "annc_context_v3"}));
-  EXPECT_TRUE(KernelRegistry::instance().hasKernel(
-      KernelQuery{"MatMul", "kdnn", {{"T", "float"}}, "annc_context_v3"}));
 }
 
 TEST(BuiltinSharedSpecTest, MatMulSymbolsDifferBetweenBackends) {
