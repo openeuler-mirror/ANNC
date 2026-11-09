@@ -28,7 +28,7 @@ option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protob
 # dependency and the sink conversion layer, opt-in. ON requires an external
 # LLVM/MLIR 20.1.8 toolchain (the stablehlo v1.9.x baseline); OFF (default)
 # keeps the historical build path untouched and pulls in no stablehlo.
-option(ANNC_ENABLE_STABLEHLO "Build the stablehlo artifact sink layer (requires LLVM/MLIR 20.1.8 toolchain and third_party/stablehlo)" OFF)
+option(ANNC_ENABLE_TF2ATIR_V2 "Build the stablehlo artifact sink layer (requires LLVM/MLIR 20.1.8 toolchain and third_party/stablehlo)" OFF)
 # The ONNX Runtime EP plugin is opt-in: it is compiled against an external ORT
 # SDK that the default build neither needs nor downloads.
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
@@ -313,16 +313,16 @@ include(AddMLIR)
 include(HandleLLVMOptions)
 
 
-# Entered only with ANNC_ENABLE_STABLEHLO=ON; the default build never touches it.
+# Entered only with ANNC_ENABLE_TF2ATIR_V2=ON; the default build never touches it.
 #
 # stablehlo registers its libraries into the MLIR_DIALECT_LIBS /
 # MLIR_CONVERSION_LIBS global properties; annc-asm / annc-opt / annc-verify
 # read both properties and would otherwise pull in the whole stablehlo set.
 # Snapshot/restore them so only explicitly linked stablehlo targets are built.
-if(ANNC_ENABLE_STABLEHLO)
+if(ANNC_ENABLE_TF2ATIR_V2)
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/stablehlo/CMakeLists.txt")
     message(FATAL_ERROR
-      "ANNC_ENABLE_STABLEHLO=ON requires third_party/stablehlo (v1.9.7). "
+      "ANNC_ENABLE_TF2ATIR_V2=ON requires third_party/stablehlo (v1.9.7). "
       "Fetch it with: git -C third_party clone --depth 1 --branch v1.9.7 "
       "https://github.com/openxla/stablehlo.git stablehlo")
   endif()

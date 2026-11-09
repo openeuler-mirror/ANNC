@@ -1,3 +1,6 @@
 add_subdirectory(AtirToLinalg)
 add_subdirectory(Common)
 add_subdirectory(Context)
+if(ANNC_ENABLE_TF2ATIR_V2)
+  add_subdirectory(StablehloToAtir)
+endif()
