@@ -61,3 +61,14 @@ target_link_libraries(ciface_dispatch_test PRIVATE
 gtest_discover_tests(ciface_dispatch_test
     TEST_PREFIX "CifaceDispatch."
 )
+
+# Sink component contracts (stablehlo layer only).
+if(ANNC_ENABLE_TF2ATIR_V2)
+    add_executable(stablehlo_sink_component_test stablehlo_sink_component_test.cpp)
+    target_include_directories(stablehlo_sink_component_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")
+    target_link_libraries(stablehlo_sink_component_test PRIVATE
+        GTest::gtest_main Threads::Threads StablehloToAtirConversion AtirDialect)
+    gtest_discover_tests(stablehlo_sink_component_test
+        TEST_PREFIX "StablehloSinkComponent.")
+endif()
