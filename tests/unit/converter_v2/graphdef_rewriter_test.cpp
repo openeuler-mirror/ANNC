@@ -303,8 +303,8 @@ TEST(GraphDefRewriter, AppendsKernelArgOrderWithDuplicateInputs) {
   f.args.push_back({"dynamic", "x", {2}, 1, "float32"});
   f.args.push_back({"dynamic", "x", {2}, 1, "float32"});
   f.outputs.push_back({"output", "m:0", {2}, 1, "float32"});
-  ANNCFusedNodeBuilder builder(graph, "", "",
-                               ANNCFusedNodeBuilder::FusionOutputMap());
+  ANNCFusedNodeBuilder::FusionOutputMap map;  // kept alive: builder holds a ref
+  ANNCFusedNodeBuilder builder(graph, "", "", map);
   tensorflow::NodeDef *fused = builder.appendNode(graph, f);
   ASSERT_NE(fused, nullptr);
   const auto &order = fused->attr().at("kernel_arg_order").list().i();
@@ -327,8 +327,8 @@ TEST(GraphDefRewriter, RejectsUnknownRole) {
   f.args.push_back({"dynamic", "p", {2}, 1, "float32"});
   f.args.push_back({"dynmaic", "q", {2}, 1, "float32"});
   f.outputs.push_back({"output", "m:0", {2}, 1, "float32"});
-  ANNCFusedNodeBuilder builder(graph, "", "",
-                               ANNCFusedNodeBuilder::FusionOutputMap());
+  ANNCFusedNodeBuilder::FusionOutputMap map;  // kept alive: builder holds a ref
+  ANNCFusedNodeBuilder builder(graph, "", "", map);
   std::string error;
   EXPECT_EQ(builder.appendNode(graph, f, &error), nullptr);
   EXPECT_NE(error.find("unknown role"), std::string::npos) << error;
