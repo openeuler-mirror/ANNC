@@ -233,14 +233,17 @@ TEST(GraphDefRewriter, RejectsInvalidAliases) {
   // shapes; returns "" on success or the rejection reason.
   auto run_alias_case = [&](const FusionInfo &fusion,
                             const ANNCFusedNodeBuilder::FusionOutputMap &map,
-                            int count) {
+                            int count, int *outNodes = nullptr) {
     tensorflow::GraphDef original;
     makeSampleGraph(original);
     declared_shapes(original, count);
     ANNCFusedNodeBuilder builder(original, "", "", map);
     tensorflow::GraphDef out;
     std::string error;
-    if (!builder.appendOutputAliases(out, &error)) return error;
+    if (!builder.appendOutputAliases(out, &error)) {
+      if (outNodes) *outNodes = out.node_size();
+      return error;
+    }
     return std::string();
   };
 
@@ -262,22 +265,73 @@ TEST(GraphDefRewriter, RejectsInvalidAliases) {
     auto f = sampleFusion();
     ANNCFusedNodeBuilder::FusionOutputMap map;
     map["m:0"] = {&f, 5};
-    assert_reason(run_alias_case(f, map, 1), "invalid fusion output slot");
+    int nodes = 0;
+    assert_reason(run_alias_case(f, map, 1, &nodes),
+                  "invalid fusion output slot");
+    EXPECT_EQ(nodes, 0);  // out is empty again: the alias was rolled back
   }
   {  // fusion node name collides with the alias
     auto f = sampleFusion();
     f.name = "m";
     ANNCFusedNodeBuilder::FusionOutputMap map;
     map["m:0"] = {&f, 0};
-    assert_reason(run_alias_case(f, map, 1), "conflicts");
+    int nodes = 0;
+    assert_reason(run_alias_case(f, map, 1, &nodes), "conflicts");
+    EXPECT_EQ(nodes, 0);  // out is empty again: the alias was rolled back
   }
   {  // unsupported output dtype
     auto f = sampleFusion();
     f.outputs[0].dtype = "bogus";
     ANNCFusedNodeBuilder::FusionOutputMap map;
     map["m:0"] = {&f, 0};
-    assert_reason(run_alias_case(f, map, 1), "unsupported dtype");
+    int nodes = 0;
+    assert_reason(run_alias_case(f, map, 1, &nodes), "unsupported dtype");
+    EXPECT_EQ(nodes, 0);  // out is empty again: the alias was rolled back
   }
+}
+
+TEST(GraphDefRewriter, AppendsKernelArgOrderWithDuplicateInputs) {
+  // Two args share tfName (MatMul(x, x)): the permutation is index-based, so
+  // both inputs stay distinct — [0, 1] plus the output buffer.
+  tensorflow::GraphDef graph;
+  makeSampleGraph(graph);
+  FusionInfo f;
+  f.name = "f0";
+  f.pattern = "matmul";
+  f.kernelName = "k0";
+  f.abi = "mlir_ciface";
+  f.args.push_back({"dynamic", "x", {2}, 1, "float32"});
+  f.args.push_back({"dynamic", "x", {2}, 1, "float32"});
+  f.outputs.push_back({"output", "m:0", {2}, 1, "float32"});
+  ANNCFusedNodeBuilder builder(graph, "", "",
+                               ANNCFusedNodeBuilder::FusionOutputMap());
+  tensorflow::NodeDef *fused = builder.appendNode(graph, f);
+  ASSERT_NE(fused, nullptr);
+  const auto &order = fused->attr().at("kernel_arg_order").list().i();
+  ASSERT_EQ(order.size(), 3);
+  EXPECT_EQ(order[0], 0);
+  EXPECT_EQ(order[1], 1);
+  EXPECT_EQ(order[2], 2);
+}
+
+TEST(GraphDefRewriter, RejectsUnknownRole) {
+  // A mistyped role would be silently dropped by role grouping; the builder
+  // must refuse the emission instead.
+  tensorflow::GraphDef graph;
+  makeSampleGraph(graph);
+  FusionInfo f;
+  f.name = "f0";
+  f.pattern = "matmul";
+  f.kernelName = "k0";
+  f.abi = "mlir_ciface";
+  f.args.push_back({"dynamic", "p", {2}, 1, "float32"});
+  f.args.push_back({"dynmaic", "q", {2}, 1, "float32"});
+  f.outputs.push_back({"output", "m:0", {2}, 1, "float32"});
+  ANNCFusedNodeBuilder builder(graph, "", "",
+                               ANNCFusedNodeBuilder::FusionOutputMap());
+  std::string error;
+  EXPECT_EQ(builder.appendNode(graph, f, &error), nullptr);
+  EXPECT_NE(error.find("unknown role"), std::string::npos) << error;
 }
 
 }  // namespace annc::converter_v2

@@ -32,7 +32,8 @@ class ANNCFusedNodeBuilder {
   bool appendOutputAliases(tensorflow::GraphDef &graph,
                            std::string *error) const;
   tensorflow::NodeDef *appendNode(tensorflow::GraphDef &graph,
-                                  const FusionInfo &fusion) const;
+                                  const FusionInfo &fusion,
+                                  std::string *error = nullptr) const;
 
  private:
   const tensorflow::GraphDef &original;

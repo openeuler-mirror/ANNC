@@ -72,6 +72,15 @@ target_include_directories(annc_converter_v2_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_compile_features(annc_converter_v2_core PUBLIC cxx_std_17)
+# ANNC_DEBUG's global -UNDEBUG cancels the NDEBUG below; the wheel's protobuf
+# headers then reference absl log symbols that libtensorflow_framework hides,
+# and linking fails. The two options cannot combine.
+if(ANNC_DEBUG)
+  message(FATAL_ERROR
+    "ANNC_DEBUG=ON is incompatible with annc-converter-v2; build with "
+    "ANNC_DEBUG=OFF (standalone builds are unaffected).")
+endif()
+
 # NDEBUG is a hard requirement for every TU that includes the wheel's
 # protobuf headers (see the wheel discovery note above); PUBLIC so dependents
 # inherit it.
