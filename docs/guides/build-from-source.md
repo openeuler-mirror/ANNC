@@ -194,21 +194,25 @@ configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
 配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
 目标，不作为验证口径。
 
-#### annc-converter-v2（TF wheel，随后续 PR 提供）
+#### annc-converter-v2（TensorFlow 依赖与 addons 一致）
 
-同一开关构建 `annc-converter-v2`（pip TensorFlow wheel 的 GraphDef 重写
-工具，与 ANNC 的 LLVM/MLIR 栈进程隔离）。当前批次仅包含融合元数据读取
-组件与单元测试（构建不依赖 TF wheel）；wheel 探测（`TENSORFLOW_ROOT`）、
-GraphDef 重写核心与命令行随后续 PR 提供——届时 configure 需要 pip
-TensorFlow wheel，`-DNDEBUG` 为硬性要求，`ANNC_DEBUG=ON` 将与工具不兼容
-（配置期报错）。
+同一开关构建 `annc-converter-v2`（TensorFlow GraphDef 重写工具，与 ANNC
+的 LLVM/MLIR 栈进程隔离）。TF 依赖与 `tensorflow_addons` 同一组变量与
+解析流程（`build.sh` 原样透传）：显式 `ANNC_TENSORFLOW_INCLUDE_DIR`
+（如宿主 SDK `<TF_ROOT>/install/annc-tensorflow-headers/include`）优先，
+为空回落 `python3` TensorFlow（`tf.sysconfig` 探测头/flags/
+`libtensorflow_framework`）；`ANNC_TENSORFLOW_CXX11_ABI` 必须显式设
+`0`/`1`。与 addons 的唯一差异：只链接 `libtensorflow_framework`。
 
 ```shell
-# 当前批次（无 wheel 依赖；单元测试随 ctest 注册）
-cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON
-# 后续批次加入 wheel 探测后可用：
-#   -DTENSORFLOW_ROOT=/path/to/site-packages/tensorflow
+cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON \
+  -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
+  -DANNC_TENSORFLOW_CXX11_ABI=1
 ```
+
+`-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与该工具不兼容
+（配置期报错）；单元测试（`FusionMeta.*`、`GraphDefRewriter.*`）随
+`ctest` 注册。
 
 ## 验证安装
 
