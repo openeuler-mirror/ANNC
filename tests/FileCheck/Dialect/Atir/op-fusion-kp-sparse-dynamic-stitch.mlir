@@ -1,5 +1,12 @@
+// RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" --atir-prune-func | annc-asm --split-input-file --atir-fast-codegen | FileCheck %s --check-prefix=V3
+// V3: atir.Customize
+// V3-SAME: custom.attr_values = [2]
+// V3-SAME: custom.op_name = "KPFusedSparseDynamicStitch"
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
-// RUN: annc-opt %s --atir-op-fusion | FileCheck %s --check-prefix=OPFUSION
+// RUN: annc-opt %s --atir-op-fusion -o %t
+// RUN: FileCheck %s --check-prefix=OPFUSION --implicit-check-not=dynamic_dims --input-file=%t
+// RUN: annc-fusion-metadata %t -o %t.json
+// RUN: FileCheck %s --check-prefix=METADATA --input-file=%t.json
 // Config fusion first level for sparse dynamic stitch: the subgraph in
 // main is extracted into a private kernel func with annc.kernel +
 // fusion.metadata while preserving the canonical context input/result ABI.
@@ -28,6 +35,14 @@
 // OPFUSION-SAME: abi = "annc_context_v3"
 // OPFUSION-SAME: context_i64_attrs = [2]
 // OPFUSION-SAME: kernel_arg_order = []
+// V3 omits the legacy axis mapping; JSON retains an empty list for compatibility.
+// The output's own shape remains intact.
+// METADATA: "abi": "annc_context_v3"
+// METADATA: "dynamic_dims": []
+// METADATA: "outputs": [
+// METADATA: "shape": [
+// METADATA-NEXT: 4,
+// METADATA-NEXT: 3
 module attributes {module.state = "atir"} {
 func.func @main(
     %arg0: !atir.tensor<4xi64, name = "x">,
