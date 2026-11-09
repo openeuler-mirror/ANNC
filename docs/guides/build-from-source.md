@@ -194,20 +194,21 @@ configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
 配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
 目标，不作为验证口径。
 
-#### annc-converter-v2（TF wheel）
+#### annc-converter-v2（TF wheel，随后续 PR 提供）
 
 同一开关构建 `annc-converter-v2`（pip TensorFlow wheel 的 GraphDef 重写
-工具，与 ANNC 的 LLVM/MLIR 栈进程隔离）。配置期探测 wheel：
-`import tensorflow` 可用即可，或显式指定：
+工具，与 ANNC 的 LLVM/MLIR 栈进程隔离）。当前批次仅包含融合元数据读取
+组件与单元测试（构建不依赖 TF wheel）；wheel 探测（`TENSORFLOW_ROOT`）、
+GraphDef 重写核心与命令行随后续 PR 提供——届时 configure 需要 pip
+TensorFlow wheel，`-DNDEBUG` 为硬性要求，`ANNC_DEBUG=ON` 将与工具不兼容
+（配置期报错）。
 
 ```shell
-cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON \
-  -DTENSORFLOW_ROOT=/path/to/site-packages/tensorflow
+# 当前批次（无 wheel 依赖；单元测试随 ctest 注册）
+cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON
+# 后续批次加入 wheel 探测后可用：
+#   -DTENSORFLOW_ROOT=/path/to/site-packages/tensorflow
 ```
-
-产物为 `build-v2/bin/annc-converter-v2`；其单元测试（`FusionMeta.*`）
-随 `ctest` 注册。`-DNDEBUG` 是 wheel protobuf 头的硬性要求，因此
-`ANNC_DEBUG=ON` 与该工具不兼容（配置期直接报错）。
 
 ## 验证安装
 
