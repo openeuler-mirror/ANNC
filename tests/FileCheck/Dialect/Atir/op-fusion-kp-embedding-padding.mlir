@@ -1,3 +1,6 @@
+// RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" --atir-prune-func | annc-asm --split-input-file --atir-fast-codegen | FileCheck %s --check-prefix=V3
+// V3: atir.Customize
+// V3-SAME: custom.op_name = "KPFusedEmbeddingPadding
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for embedding padding (Padding + PaddingFast),
 // Context V3 extracts the subgraph into a private kernel func with

@@ -1,3 +1,6 @@
+// RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" --atir-prune-func | annc-asm --split-input-file --atir-fast-codegen | FileCheck %s --check-prefix=V3
+// V3: atir.Customize
+// V3-SAME: custom.op_name = "KPFusedSparseSelect
 // RUN: annc-opt --split-input-file %s -atir-config-fusion="config=%S/../../../../configs/fusion/kp_embedding_patterns.json run-builtin-after=false warn-limit=0" | FileCheck %s --check-prefix=CONFIG
 // Config fusion first level for sparse select (KPFusedSparseSelect),
 // Context V3 kernel func signature (a, b, c, gt, eq1, eq2,

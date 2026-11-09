@@ -97,7 +97,7 @@ EP 在调用返回后校验其与宿主分配一致。输出数量须与 ORT 融
 2026-10-22 已通过 AArch64/openEuler、ORT 1.26.0 功能验证：CTest 215 项通过，
 1 项原本禁用的微基准，包含四类真实 ONNX 闭环。性能与业务模型验收待完成。
 完整槽位、所有权、兼容、验证日志与复现命令见
-[ONNX Context 运行时设计](../../docs/design/runtime/onnx-context-runtime-design.md)。
+[Kernel Context 设计的 ONNX Runtime 接入章节](../../docs/design/runtime/kernel-context-runtime-design.md#9-onnx-runtime-接入)。
 
 ## 构建
 
