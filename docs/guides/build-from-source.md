@@ -98,7 +98,7 @@ ninja && ninja install
 | `ANNC_KDNN_RELEASE_URL` | URL | `https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/BoostKit-boostcore-kdnn_3.1.0.zip` | RELEASE 模式 zip 包下载地址 |
 | `ANNC_KDNN_RELEASE_SHA256` | 字符串 | `61a4b0b55a80ca742b43dde638b7fdd63c7ef36f26f3615e4f1ad008750217a8` | RELEASE 模式 zip 包 SHA256 校验值；留空则跳过校验 |
 | `ANNC_KDNN_LIB_VARIANT` | 字符串 | `sve-threadpool` | RELEASE 模式下库变体，可选 `sve-threadpool`、`sve-omp`、`sve2-threadpool`、`sve2-omp` |
-| `ANNC_ENABLE_TF2ATIR_V2` | `ON`/`OFF` | `OFF` | 构建 TF stablehlo V2 路线：stablehlo 方言集成与 sink 层（v1.9.7 Embedded，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）与 V2 工具（`annc-converter-v2` 随批次合入；`annc-tf2atir-v2` 同开关），见下文「TF stablehlo V2 路线」 |
+| `ANNC_ENABLE_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 stablehlo artifact sink 层（v1.9.7 Embedded 模式，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）；TF stablehlo 前端 / stablehlo sink 迁移线的依赖，见下文「StableHLO artifact sink 层」 |
 
 所有框架组合都会构建通用 `annc-partition` 查询入口。当前该目标仅提供占位流程（各阶段返回 `not implemented`），不注册真实 TF 切分能力，也不改变既有前端、addon 或后端开关。
 
@@ -150,8 +150,13 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 
 ### TF stablehlo V2 路线（sink 层与 V2 工具）
 
-`ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线（stablehlo 集成与 sink 层，
-V2 工具并入同一开关）。stablehlo 集成为 v1.9.7 的 Embedded 模式：
+`ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线：stablehlo 方言集成与 sink
+层，以及 V2 工具（当前 `annc-converter-v2`；`annc-tf2atir-v2` 随其批次
+并入同一开关）。默认 OFF，不触碰历史构建路径。
+
+#### stablehlo 集成（sink 层依赖）
+
+`ANNC_ENABLE_TF2ATIR_V2=ON` 时进入 stablehlo v1.9.7 的 Embedded 集成：
 stablehlo 以 `EXCLUDE_FROM_ALL` 子目录加入构建，并通过全局属性快照/还原
 使只有被 ANNC 目标显式链接的 stablehlo 库参与编译；默认构建（OFF）完全
 不触碰 stablehlo。该层是 TF stablehlo 前端（pb2stablehlo）与 stablehlo
@@ -188,6 +193,22 @@ configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
 连带编译 `conversions/tosa` 等转换，其 TOSA 代码面向 stablehlo v1.9.x
 配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
 目标，不作为验证口径。
+
+#### annc-converter-v2（TF wheel，随后续 PR 提供）
+
+同一开关构建 `annc-converter-v2`（pip TensorFlow wheel 的 GraphDef 重写
+工具，与 ANNC 的 LLVM/MLIR 栈进程隔离）。当前批次仅包含融合元数据读取
+组件与单元测试（构建不依赖 TF wheel）；wheel 探测（`TENSORFLOW_ROOT`）、
+GraphDef 重写核心与命令行随后续 PR 提供——届时 configure 需要 pip
+TensorFlow wheel，`-DNDEBUG` 为硬性要求，`ANNC_DEBUG=ON` 将与工具不兼容
+（配置期报错）。
+
+```shell
+# 当前批次（无 wheel 依赖；单元测试随 ctest 注册）
+cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON
+# 后续批次加入 wheel 探测后可用：
+#   -DTENSORFLOW_ROOT=/path/to/site-packages/tensorflow
+```
 
 ## 验证安装
 
