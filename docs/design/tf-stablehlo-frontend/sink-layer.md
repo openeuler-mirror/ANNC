@@ -50,7 +50,6 @@ TF GraphDef / SavedModel
 | 情形（批 3 驱动判定） | 结果 |
 | --- | --- |
 | 残差不在 `kOpMap` / 目标未注册 | `atir.unsupported`，`reason=unknown_op` |
-| 残差 rank 未定（rank gate） | `atir.unsupported`，`reason=unrank_blocked` |
 | 发射后本地 verify 仍失败（哨兵修复后） | `atir.unsupported`，`reason=spec_mismatch` |
 | 已注册非残差 op | 原位保留，计入 census（`keep`） |
 

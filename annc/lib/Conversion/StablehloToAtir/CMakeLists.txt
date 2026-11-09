@@ -4,7 +4,11 @@ file(GLOB _srcs CONFIGURE_DEPENDS *.cpp tf/*.cpp)
 add_mlir_library(StablehloToAtirConversion ${_srcs}
   ADDITIONAL_HEADER_DIRS
   ${CMAKE_SOURCE_DIR}/annc/include
+  DEPENDS
+  StablehloToAtirPassIncGen
   LINK_LIBS PUBLIC
-  MLIRIR MLIRSupport MLIRTransforms MLIRArithDialect MLIRFuncDialect
-  StablehloRegister AtirDialect ANNCHelper nlohmann_json::nlohmann_json
+  MLIRIR MLIRPass MLIRSupport MLIRParser MLIRRewrite MLIRTransforms
+  MLIRArithDialect MLIRFuncDialect MLIRShapeDialect
+  StablehloRegister AtirDialect AtirBuilder CommonConversion ANNCHelper
+  nlohmann_json::nlohmann_json
 )
