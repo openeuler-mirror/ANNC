@@ -167,7 +167,7 @@ class TfResidueProvider final : public ResidueProvider {
   }
 
   LogicalResult emitConstant(
-      ConversionPatternRewriter& rewriter, Operation* op,
+      RewriterBase& rewriter, Operation* op,
       const ResidueView& view, ArrayRef<Type> resultTypes,
       llvm::SmallVectorImpl<Value>& results) const override {
     if (view.opType != "Const") return failure();  // DT_STRING only
@@ -191,7 +191,7 @@ class TfResidueProvider final : public ResidueProvider {
   }
 
   LogicalResult emitMapped(
-      ConversionPatternRewriter& rewriter, Operation* op,
+      RewriterBase& rewriter, Operation* op,
       const ResidueView& view, ArrayRef<Value> operands,
       ArrayRef<Type> resultTypes,
       llvm::SmallVectorImpl<Value>& results) const override {

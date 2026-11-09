@@ -53,7 +53,7 @@ class ResidueProvider {
   }
 
   virtual mlir::LogicalResult emitConstant(
-      mlir::ConversionPatternRewriter& rewriter, mlir::Operation* op,
+      mlir::RewriterBase& rewriter, mlir::Operation* op,
       const ResidueView& view, mlir::ArrayRef<mlir::Type> resultTypes,
       llvm::SmallVectorImpl<mlir::Value>& results) const {
     (void)rewriter;
@@ -65,7 +65,7 @@ class ResidueProvider {
   }
 
   virtual mlir::LogicalResult emitMapped(
-      mlir::ConversionPatternRewriter& rewriter, mlir::Operation* op,
+      mlir::RewriterBase& rewriter, mlir::Operation* op,
       const ResidueView& view, mlir::ArrayRef<mlir::Value> operands,
       mlir::ArrayRef<mlir::Type> resultTypes,
       llvm::SmallVectorImpl<mlir::Value>& results) const = 0;
