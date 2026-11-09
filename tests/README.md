@@ -28,14 +28,16 @@ tests/
 │   ├── annc/               # op_coverage、JIT cache、template fingerprint、ciface dispatch
 │   ├── kernels/            # kernel registry/priority、builtin spec、execution context、GEMM 等
 │   ├── onnx2atir/          # ONNX 前端 GTest
+│   ├── tensorflow/         # TF 前端、插件参数派发和跨 ABI 线程池回调
 │   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
 ├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
 ├── integration/
 │   ├── annc_partition/     # annc-partition 查询与骨架阶段诊断 pytest
-│   ├── cmake/              # CMake 模块契约（KDNN import 能力）pytest
+│   ├── cmake/              # CMake 模块契约（含 TF 插件 SDK 选择与隔离）pytest
 │   ├── fusion/             # config fusion 集成 pytest
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
 │   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
+│   ├── tensorflow/         # TF1.15 插件宿主加载与 JIT C 接口 CTest
 │   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
 ├── e2e/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
@@ -59,6 +61,10 @@ python3 -m pytest tests/ -v
 # 构建目录不在 build/ 时：
 ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 
+# TF 插件 SDK 配置，以及 TF1.15 构建中的宿主加载和跨 ABI 调用
+python3 -m pytest tests/integration/cmake/test_tf_plugin_sdk.py -q
+ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
+
 # Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
 ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
 ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
@@ -78,6 +84,10 @@ bash tests/FileCheck/run.sh
 - `pytest` 必须安装在所选 Python 解释器中；ONNX 前端用例还需要 `onnx` 包。
 - `integration/onnx2atir/` 需要 Python `onnx` 包与已构建的 `annc-onnx2atir`；
   缺任一条件时模块整体 skip。
+- TF SDK 配置测试使用模拟 SDK，检查 CMake 为插件选择的头文件、库和编译参数。
+  TF1.15 宿主测试在 AArch64 上加载真实插件。preload 模式使用所选 SDK 的 Python，
+  linked 模式使用链接到 SDK 两个库的 C++ Session。两种模式执行同一张图，
+  将 `ANNCFused` 输出与原生 `Add` 逐元素比较。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。
