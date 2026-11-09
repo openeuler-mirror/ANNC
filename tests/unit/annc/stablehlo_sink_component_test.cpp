@@ -169,4 +169,48 @@ TEST_F(StablehloSinkComponentTest, EmitV2OpContract) {
   }
 }
 
+
+TEST_F(StablehloSinkComponentTest, EmitConstantContract) {
+  // DT_STRING Const sinks to atir.constant_v2 with the decoded payload.
+  auto f = func(R"mlir(func.func @f(%s: tensor<2x!tf_type.string>) { return })mlir");
+  ASSERT_TRUE(f);
+  auto strElem =
+      cast<ShapedType>(f.getArgument(0).getType()).getElementType();
+  auto value = DenseElementsAttr::get(RankedTensorType::get({2}, strElem),
+                                      {llvm::StringRef("a"), "b"});
+  IRRewriter rewriter(ctx_.get());
+  rewriter.setInsertionPoint(f.getBody().front().getTerminator());
+  auto provider = annc::createTfResidueProvider();
+  auto source = DictionaryAttr::get(
+      ctx_.get(), {NamedAttribute(StringAttr::get(ctx_.get(), "value"), value)});
+  annc::ResidueView view{"Const", source};
+  SmallVector<Type> results{
+      RankedTensorType::get({2}, atir::StringType::get(ctx_.get()))};
+  SmallVector<Value> emitted;
+  ASSERT_TRUE(
+      succeeded(provider->emitConstant(rewriter, f, view, results, emitted)));
+  ASSERT_EQ(emitted.size(), 1u);
+  Operation* op = emitted[0].getDefiningOp();
+  ASSERT_NE(op, nullptr);
+  EXPECT_EQ(op->getName().getStringRef(), "atir.constant_v2");
+  auto values = op->getAttrOfType<ArrayAttr>("values");
+  ASSERT_TRUE(values);
+  ASSERT_EQ(values.size(), 2u);
+  EXPECT_EQ(cast<StringAttr>(values[0]).getValue(), "a");
+  EXPECT_EQ(cast<StringAttr>(values[1]).getValue(), "b");
+  EXPECT_FALSE(op->getAttrOfType<StringAttr>("sym_name").getValue().empty());
+
+  // Non-DT_STRING Const is rejected without leaving an op behind.
+  auto f2 = func(R"mlir(func.func @f(%x: tensor<2xf32>) { return })mlir");
+  ASSERT_TRUE(f2);
+  auto f32Value = DenseElementsAttr::get(
+      RankedTensorType::get({2}, rewriter.getF32Type()), {1.0f, 2.0f});
+  auto source2 = DictionaryAttr::get(
+      ctx_.get(), {NamedAttribute(StringAttr::get(ctx_.get(), "value"), f32Value)});
+  annc::ResidueView view2{"Const", source2};
+  SmallVector<Value> emitted2;
+  EXPECT_TRUE(failed(provider->emitConstant(rewriter, f2, view2, results, emitted2)));
+  EXPECT_TRUE(emitted2.empty());
+}
+
 }  // namespace
