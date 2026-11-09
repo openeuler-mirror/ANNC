@@ -71,4 +71,11 @@ if(ANNC_ENABLE_TF2ATIR_V2)
         GTest::gtest_main Threads::Threads StablehloToAtirConversion AtirDialect)
     gtest_discover_tests(stablehlo_sink_component_test
         TEST_PREFIX "StablehloSinkComponent.")
+    add_executable(stablehlo_sink_pass_test stablehlo_sink_pass_test.cpp)
+    target_include_directories(stablehlo_sink_pass_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")
+    target_link_libraries(stablehlo_sink_pass_test PRIVATE
+        GTest::gtest_main Threads::Threads StablehloToAtirConversion AtirDialect)
+    gtest_discover_tests(stablehlo_sink_pass_test
+        TEST_PREFIX "StablehloSinkPass.")
 endif()
