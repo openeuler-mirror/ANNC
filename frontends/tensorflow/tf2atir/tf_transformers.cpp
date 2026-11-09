@@ -7,6 +7,27 @@ using namespace mlir;
 
 namespace annc::tf2atir {
 
+// TF tensordot joins its free and contraction axes with a constant ConcatV2.
+static bool decodePermutation(const NodeInfo* node, OpContext& ctx,
+                              std::vector<int64_t>& values) {
+  if (decodeIntConstValues(node, values)) return true;
+  if (!node || node->op_type != "ConcatV2" || node->inputs.size() < 2)
+    return false;
+  std::vector<int64_t> axis;
+  if (!decodeIntConstValues(ctx.findNode(node->inputs.back()), axis) ||
+      axis != std::vector<int64_t>{0})
+    return false;
+  std::vector<int64_t> joined;
+  for (size_t i = 0; i + 1 < node->inputs.size(); ++i) {
+    const NodeInfo* part = ctx.findNode(node->inputs[i]);
+    if (!part || part->outputs.empty() || part->outputs[0].shape.size() != 1 ||
+        !decodeIntConstValues(part, joined))
+      return false;
+  }
+  values = std::move(joined);
+  return true;
+}
+
 // atir.Transpose: static permutation from a "perm" attr or the constant input,
 // with the permutation tensor kept as an operand for runtime interpretation.
 LogicalResult transformTranspose(const NodeInfo& node, ArrayRef<Type> outs,
@@ -23,8 +44,7 @@ LogicalResult transformTranspose(const NodeInfo& node, ArrayRef<Type> outs,
   }
   if (perm.empty() && node.inputs.size() >= 2) {
     std::vector<int64_t> decoded;
-    if (const NodeInfo* cnode = ctx.findNode(node.inputs[1]);
-        cnode && decodeIntConstValues(cnode, decoded))
+    if (decodePermutation(ctx.findNode(node.inputs[1]), ctx, decoded))
       perm.assign(decoded.begin(), decoded.end());
   }
   if (perm.empty() && !node.outputs.empty()) {

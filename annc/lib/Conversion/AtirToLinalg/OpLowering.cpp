@@ -51,8 +51,8 @@ FailureOr<AffineMap> addBroadcastMap(RankedTensorType input,
   llvm_unreachable("unknown epilogue broadcast");
 }
 
-void preserveRhsCheckpointName(Operation* target, atir::MatMulOp source) {
-  auto rhsType = llvm::dyn_cast<atir::TensorType>(source.getRhs().getType());
+void preserveRhsCheckpointName(Operation* target, Value rhs) {
+  auto rhsType = llvm::dyn_cast<atir::TensorType>(rhs.getType());
   if (!rhsType) return;
   auto name = rhsType.getName();
   if (!name || name.getValue().empty()) return;
@@ -142,7 +142,7 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
   for (NamedAttribute attr : op->getAttrs())
     generic->setAttr(attr.getName(), attr.getValue());
   generic->setAttr(kGemmAttrName, UnitAttr::get(ctx));
-  preserveRhsCheckpointName(generic, op);
+  preserveRhsCheckpointName(generic, op.getRhs());
   return generic.getResult(0);
 }
 }  // namespace
@@ -154,6 +154,7 @@ void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter,
                                          patterns.getContext());
   patterns.add<MatMulLoweringToLinalg>(atirTypeConverter,
                                        patterns.getContext());
+  patterns.add<DotLoweringToLinalg>(inputTypeConverter, patterns.getContext());
   patterns.add<AddLoweringToLinalg>(atirTypeConverter, patterns.getContext());
   patterns.add<ReluLoweringToLinalg>(atirTypeConverter, patterns.getContext());
   patterns.add<BufferLoweringToLinalg>(atirTypeConverter,
@@ -440,9 +441,47 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter,
     }
     auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
         loc, c.getType(), ValueRange{lhs, rhs}, c, op->getAttrs());
-    preserveRhsCheckpointName(linalgMatmul, op);
+    preserveRhsCheckpointName(linalgMatmul, op.getRhs());
     rewriter.replaceOp(op, linalgMatmul.getResult(0));
   }
+}
+
+LogicalResult DotLoweringToLinalg::matchAndRewrite(
+    atir::DotOp op, atir::DotOp::Adaptor adaptor,
+    ConversionPatternRewriter& rewriter) const {
+  auto lhs = dyn_cast<MemRefType>(adaptor.getLhs().getType());
+  auto rhs = dyn_cast<MemRefType>(adaptor.getRhs().getType());
+  auto output = dyn_cast<MemRefType>(adaptor.getOutput().getType());
+  if (!lhs || !rhs || !output || lhs.getRank() != 3 || rhs.getRank() != 2 ||
+      output.getRank() != 3 || !lhs.hasStaticShape() || !rhs.hasStaticShape() ||
+      !output.hasStaticShape() || !lhs.getLayout().isIdentity() ||
+      !rhs.getLayout().isIdentity() || !output.getLayout().isIdentity() ||
+      !lhs.getElementType().isF32() ||
+      lhs.getElementType() != rhs.getElementType() ||
+      lhs.getElementType() != output.getElementType() ||
+      lhs.getDimSize(2) != rhs.getDimSize(0) ||
+      lhs.getDimSize(0) != output.getDimSize(0) ||
+      lhs.getDimSize(1) != output.getDimSize(1) ||
+      rhs.getDimSize(1) != output.getDimSize(2))
+    return rewriter.notifyMatchFailure(
+        op, "requires static contiguous f32 [B,S,K] x [K,N] -> [B,S,N]");
+
+  if (output.getNumElements() == 0) {
+    rewriter.replaceOp(op, adaptor.getOutput());
+    return success();
+  }
+
+  SmallVector<ReassociationIndices> reassociation = {{0, 1}, {2}};
+  auto flatLhs = rewriter.create<memref::CollapseShapeOp>(
+      op.getLoc(), adaptor.getLhs(), reassociation);
+  auto flatOutput = rewriter.create<memref::CollapseShapeOp>(
+      op.getLoc(), adaptor.getOutput(), reassociation);
+  auto matmul = rewriter.create<linalg::MatmulOp>(
+      op.getLoc(), ValueRange{flatLhs, adaptor.getRhs()},
+      ValueRange{flatOutput});
+  preserveRhsCheckpointName(matmul, op.getRhs());
+  rewriter.replaceOp(op, adaptor.getOutput());
+  return success();
 }
 
 void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter& rewriter,
