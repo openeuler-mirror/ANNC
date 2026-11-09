@@ -145,4 +145,26 @@ TEST_F(FusionMetaJsonTest, RejectsInvalidFusionEntry) {
 }
 
 }  // namespace
+TEST(FusionMeta, ParsesEmptyFusionsArray) {
+  std::filesystem::path path = std::filesystem::temp_directory_path() /
+                               "annc_converter_v2_fusion_meta_empty.json";
+  { std::ofstream out(path); out << R"json({"fusions": []})json"; }
+  auto result = readFusionMetadataJson(path.string());
+  ASSERT_TRUE(result.ok()) << result.error;
+  EXPECT_EQ(result.value.size(), 0u);
+  std::filesystem::remove(path);
+}
+
+TEST(FusionMeta, ValidateRejectsContextV3WithKernelArgOrder) {
+  FusionInfo f;
+  f.name = "f0";
+  f.pattern = "matmul_bias";
+  f.kernelName = "k0";
+  f.abi = "annc_context_v3";
+  f.kernelArgOrder = {0, 1};
+  f.args.push_back({"dynamic", "dense", {2}, 1, "float32"});
+  f.outputs.push_back({"output", "dense:0", {2}, 1, "float32"});
+  EXPECT_FALSE(validateFusionInfo(f).ok());
+}
+
 }  // namespace annc::converter_v2
