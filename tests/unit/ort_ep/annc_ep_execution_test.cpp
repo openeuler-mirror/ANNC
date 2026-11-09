@@ -403,6 +403,31 @@ TEST_F(ExecutionContextFailureTest, ContractViolationsDoNotTouchOrt) {
             true);
 }
 
+TEST_F(ExecutionContextFailureTest, ScalarOutputAndInvalidDimensions) {
+  // The ranks match their contracts, so the dims check is reached rather than
+  // short-circuited by the rank check.
+  {
+    // Common context permits a null dimensions pointer for a scalar.
+    std::vector<OutputContract> rank0{{0, ANNC_ELEMENT_TYPE_F32}};
+    OnnxExecutionContext context(&fake_.api, fake_.kernel_context, rank0);
+    AnncTensorDesc no_dims{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 0,
+                           ANNC_ALLOCATION_NONE, nullptr, nullptr};
+    EXPECT_EQ(AllocateOutput(context.abi(), 0, &no_dims), ANNC_STATUS_OK);
+  }
+  {
+    std::vector<OutputContract> rank1{{1, ANNC_ELEMENT_TYPE_F32}};
+    OnnxExecutionContext context(&fake_.api, fake_.kernel_context, rank1);
+    AnncTensorDesc negative{sizeof(AnncTensorDesc), ANNC_ELEMENT_TYPE_F32, 1,
+                            ANNC_ALLOCATION_NONE, kNegativeDim, nullptr};
+    EXPECT_EQ(AllocateOutput(context.abi(), 0, &negative),
+              ANNC_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(fake_.last_status_message.find("invalid output request") !=
+                  std::string::npos,
+              true);
+  }
+  EXPECT_EQ(fake_.get_output_calls, 1);
+}
+
 TEST_F(ExecutionContextFailureTest, ZeroSizeOutputPassesTheRuntimeDims) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
   AnncKernelContext* abi = context.abi();
@@ -581,6 +606,25 @@ TEST_F(ExecutionContextFailureTest, ParallelForShardsAndFlagsTheRegion) {
 // With neither signal the range is split the way the in-tree pool's grain
 // default (1) and ORT's own num_batches<=0 default split it: one unit per
 // block, bounded by the pool's degree.
+TEST_F(ExecutionContextFailureTest, NoCostSignalUsesPoolDegreeAndCoversRange) {
+  OrtThreadPool pool(&fake_.api, fake_.kernel_context);
+  std::vector<int64_t> shard_sizes;
+  pool.parallel_for(64, annc::threadpool::ParallelForOptions{},
+                    [&](int64_t begin, int64_t end) {
+                      shard_sizes.push_back(end - begin);
+                    });
+  EXPECT_EQ(fake_.parallel_for_calls, 1);
+  const auto expected_shards = static_cast<size_t>(std::min(64, pool.num_threads()));
+  EXPECT_EQ(shard_sizes.size(), expected_shards);
+  EXPECT_EQ(fake_.last_parallel_batches, expected_shards);
+  int64_t covered = 0;
+  for (int64_t size : shard_sizes) {
+    EXPECT_GT(size, 0);
+    covered += size;
+  }
+  EXPECT_EQ(covered, 64);
+}
+
 TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
   AnncKernelContext* abi = context.abi();
@@ -593,6 +637,282 @@ TEST_F(ExecutionContextFailureTest, TemporaryWithoutDimsIsRejected) {
                 std::string::npos,
             true);
   EXPECT_EQ(fake_.alloc_calls, 0);
+}
+
+TEST_F(ExecutionContextFailureTest, ServiceViewsOwnShapeAndKeepRequestImmutable) {
+  OnnxExecutionContext owner(&fake_.api, fake_.kernel_context, contracts_);
+  auto* abi = owner.abi();
+  int64_t dims[] = {2, 3, 5};
+  AnncTensorDesc request{sizeof(request), ANNC_ELEMENT_TYPE_F32, 3, 0, dims, nullptr};
+  AnncTensorView output{};
+  ASSERT_EQ(abi->services->allocate_output(abi->services->opaque, 0, &request,
+                                           &output), ANNC_STATUS_OK);
+  EXPECT_EQ(request.data, nullptr);
+  dims[0] = 99;
+  EXPECT_EQ(output.sizes[0], 2);
+  EXPECT_EQ(output.strides[0], 15);
+  EXPECT_EQ(abi->services->native_thread_pool(abi->services->opaque, "unknown"),
+            nullptr);
+}
+
+TEST_F(ExecutionContextFailureTest, ScalarTempAndExplicitShardLimit) {
+  OnnxExecutionContext owner(&fake_.api, fake_.kernel_context, contracts_);
+  annc::kernels::KernelContext context(owner.abi());
+  AnncTensorView temp{};
+  ASSERT_EQ((context.allocateTemp<float, 0>(nullptr, &temp)), ANNC_STATUS_OK);
+  EXPECT_EQ(fake_.last_alloc_bytes, sizeof(float));
+  int64_t covered = 0;
+  auto pool = context.getThreadPool();
+  EXPECT_EQ(annc::kernels::Shard(2, pool, 300000, 128,
+                  [&](int64_t begin, int64_t end) { covered += end - begin; }),
+            ANNC_STATUS_OK);
+  EXPECT_EQ(covered, 300000);
+  EXPECT_LE(fake_.last_parallel_batches, 2u);
+}
+
+TEST_F(ExecutionContextFailureTest, PacksSlotsScalarAttributesAndOutputMapping) {
+  float first[] = {1, 2, 3, 4}, second[] = {5, 6, 7, 8}, eps = 0.125f;
+  fake_.inputs = {{{2, 2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, first},
+                  {{2, 2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, second},
+                  {{}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &eps}};
+  ContextCall request;
+  request.arg_indices = {1, 0, 2};  // Equal rank and dtype must not swap slots.
+  request.arg_ranks = {2, 2, 0};
+  request.arg_types.assign(3, ANNC_ELEMENT_TYPE_F32);
+  request.outputs = {{2, ANNC_ELEMENT_TYPE_F32}};
+  request.output_slots = {3};
+  request.i64_attrs = {17, -4};
+  // Runtime fusion resources use their own array and survive multiple calls.
+  const int64_t instance_value = 91;
+  request.resources = {{sizeof(AnncResourceView), 1, "test.instance",
+                        &instance_value, sizeof(instance_value)}};
+  request.symbol = reinterpret_cast<void*>(+[](AnncKernelContext* raw) {
+    ++FakeApi::Current().kernel_calls;
+    EXPECT_EQ(raw->num_attrs, 2u);
+    EXPECT_EQ(raw->num_resources, 1u);
+    return annc::kernels::invokeContextKernel(raw, [](auto& context) {
+      const auto* a = context.getInput(0);
+      const auto* b = context.getInput(1);
+      const auto* eps = context.getInput(2);
+      EXPECT_EQ(a->rank, 2u);
+      EXPECT_EQ(a->strides[0], 2);
+      EXPECT_EQ(eps->rank, 0u);
+      EXPECT_EQ(*annc::kernels::contextData<float>(*a), 5);
+      EXPECT_EQ(*annc::kernels::contextData<float>(*b), 1);
+      EXPECT_EQ(*annc::kernels::contextData<float>(*eps), 0.125f);
+      EXPECT_EQ(*context.getI64Attr(0), 17);
+      EXPECT_EQ(*context.getI64Attr(1), -4);
+      const auto* resource = static_cast<const int64_t*>(
+          context.getResource("test.instance", 1, sizeof(int64_t)));
+      EXPECT_NE(resource, nullptr);
+      if (!resource) return ANNC_STATUS_INVALID_ARGUMENT;
+      EXPECT_EQ(*resource, 91);
+      auto output = context.template allocateOutput<float>(0, {2, 2});
+      if (!output) return context.status();
+      auto* out = annc::kernels::contextData<float>(*output);
+      for (int i = 0; i < 4; ++i)
+        out[i] = annc::kernels::contextData<float>(*a)[i] +
+                 annc::kernels::contextData<float>(*b)[i];
+      return ANNC_STATUS_OK;
+    });
+  });
+  // Both public shape APIs must construct the same call context.
+  for (bool borrowed : {true, false}) {
+    fake_.api.GetTensorElementTypeAndShapeDataReference =
+        borrowed ? &FakeApi::GetShapeReference : nullptr;
+    EXPECT_EQ(ComputeWithContext(&fake_.api, fake_.kernel_context, request), nullptr);
+    const auto* out = reinterpret_cast<const float*>(fake_.alloc_buffer);
+    EXPECT_EQ((std::vector<float>(out, out + 4)),
+              (std::vector<float>{6, 8, 10, 12}));
+  }
+  EXPECT_EQ(fake_.kernel_calls, 2);
+  EXPECT_EQ(fake_.output_indices, (std::vector<size_t>{3, 3}));
+}
+
+TEST_F(ExecutionContextFailureTest, ContextArraysSupportMoreThanFourteenInputs) {
+  float value = 1;
+  fake_.inputs.assign(16, FakeTensor{{}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &value});
+  ContextCall request;
+  request.arg_ranks.assign(16, 0);
+  request.arg_types.assign(16, ANNC_ELEMENT_TYPE_F32);
+  for (int i = 0; i < 16; ++i) request.arg_indices.push_back(i);
+  request.symbol = reinterpret_cast<void*>(+[](AnncKernelContext* raw) -> AnncStatusCode {
+    ++FakeApi::Current().kernel_calls;
+    EXPECT_EQ(raw->num_inputs, 16u);
+    EXPECT_EQ(raw->inputs[15].rank, 0u);
+    return ANNC_STATUS_OK;
+  });
+  EXPECT_EQ(ComputeWithContext(&fake_.api, fake_.kernel_context, request), nullptr);
+  EXPECT_EQ(fake_.kernel_calls, 1);
+}
+
+TEST_F(ExecutionContextFailureTest, InvalidInputContractDoesNotInvokeKernel) {
+  float value = 1;
+  fake_.inputs = {{{1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &value}};
+  ContextCall request;
+  request.arg_indices = {0};
+  request.arg_ranks = {1};
+  request.arg_types = {ANNC_ELEMENT_TYPE_F32};
+  request.symbol = reinterpret_cast<void*>(+[](AnncKernelContext*) -> AnncStatusCode {
+    ++FakeApi::Current().kernel_calls;
+    return ANNC_STATUS_OK;
+  });
+  for (int kind = 0; kind < 4; ++kind) {
+    auto bad = request;
+    if (kind == 0) bad.arg_indices[0] = 1;
+    if (kind == 1) bad.arg_ranks[0] = 2;
+    if (kind == 2) bad.arg_types[0] = ANNC_ELEMENT_TYPE_I64;
+    if (kind == 3) fake_.inputs[0].data = nullptr;
+    auto* error = ComputeWithContext(&fake_.api, fake_.kernel_context, bad);
+    ASSERT_NE(error, nullptr);
+    fake_.api.ReleaseStatus(error);
+  }
+  EXPECT_EQ(fake_.kernel_calls, 0);
+}
+
+TEST_F(ExecutionContextFailureTest, MissingOutputAndReportedErrorReachCaller) {
+  ContextCall request;
+  request.outputs = contracts_;
+  request.symbol = reinterpret_cast<void*>(+[](AnncKernelContext*) -> AnncStatusCode {
+    return ANNC_STATUS_OK;
+  });
+  auto* missing = ComputeWithContext(&fake_.api, fake_.kernel_context, request);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_NE(fake_.last_status_message.find("did not allocate"), std::string::npos);
+  fake_.api.ReleaseStatus(missing);
+  request.symbol = reinterpret_cast<void*>(+[](AnncKernelContext* raw) -> AnncStatusCode {
+    raw->services->report_error(raw->services->opaque, ANNC_STATUS_INTERNAL,
+                                "kernel's first error");
+    return ANNC_STATUS_OK;  // A recorded error wins over an accidental OK return.
+  });
+  auto* reported = ComputeWithContext(&fake_.api, fake_.kernel_context, request);
+  ASSERT_NE(reported, nullptr);
+  EXPECT_EQ(fake_.last_status_message,
+            "ANNC EP execution context: kernel's first error");
+  fake_.api.ReleaseStatus(reported);
+}
+
+TEST_F(ExecutionContextFailureTest, AllocatedButUnboundOutputIsRejected) {
+  ContextCall request;
+  request.outputs.assign(2, {1, ANNC_ELEMENT_TYPE_F32});
+  request.symbol =
+      reinterpret_cast<void*>(+[](AnncKernelContext* raw) -> AnncStatusCode {
+        const auto unbound_slot =
+            *static_cast<const int64_t*>(raw->attrs[0].data);
+        const int64_t dims[] = {2};
+        AnncTensorDesc desc{sizeof(desc), ANNC_ELEMENT_TYPE_F32, 1, 0, dims,
+                            nullptr};
+        for (uint32_t slot = 0; slot < raw->num_outputs; ++slot) {
+          AnncTensorView local{};
+          auto code = raw->services->allocate_output(raw->services->opaque,
+                                                     slot, &desc, &local);
+          if (code != ANNC_STATUS_OK) return code;
+          if (slot != unbound_slot) raw->outputs[slot] = local;
+        }
+        return ANNC_STATUS_OK;
+      });
+  for (int64_t slot : {0, 1}) {
+    SCOPED_TRACE(slot);
+    request.i64_attrs = {slot};
+    auto* error = ComputeWithContext(&fake_.api, fake_.kernel_context, request);
+    ASSERT_NE(error, nullptr);
+    EXPECT_NE(fake_.last_status_message.find("did not bind every output"),
+              std::string::npos);
+    fake_.api.ReleaseStatus(error);
+  }
+  EXPECT_EQ(fake_.get_output_calls, 4);
+}
+
+TEST_F(ExecutionContextFailureTest, ModifiedOutputViewIsRejected) {
+  ContextCall request;
+  request.outputs = {{1, ANNC_ELEMENT_TYPE_F32}};
+  request.symbol =
+      reinterpret_cast<void*>(+[](AnncKernelContext* raw) -> AnncStatusCode {
+        static const int64_t dims[] = {2}, strides[] = {1};
+        AnncTensorDesc desc{sizeof(desc), ANNC_ELEMENT_TYPE_F32, 1, 0, dims,
+                            nullptr};
+        auto& view = raw->outputs[0];
+        auto code = raw->services->allocate_output(raw->services->opaque, 0,
+                                                   &desc, &view);
+        if (code != ANNC_STATUS_OK) return code;
+        switch (*static_cast<const int64_t*>(raw->attrs[0].data)) {
+          case 0:
+            view.allocated = nullptr;
+            break;
+          case 1:
+            view.aligned = nullptr;
+            break;
+          case 2:
+            view.offset = 1;
+            break;
+          case 3:
+            view.element_type = ANNC_ELEMENT_TYPE_I32;
+            break;
+          case 4:
+            view.rank = 0;
+            break;
+          // Even equal metadata must retain the host-owned pointers.
+          case 5:
+            view.sizes = dims;
+            break;
+          case 6:
+            view.strides = strides;
+            break;
+          case 7:
+            view.layout = ANNC_LAYOUT_STRIDED + 1;
+            break;
+          case 8:
+            view.flags &= ~ANNC_TENSOR_BOUND;
+            break;
+          case 9:
+            view.flags |= ANNC_TENSOR_READ_ONLY;
+            break;
+        }
+        return ANNC_STATUS_OK;
+      });
+  const char* fields[] = {"allocated", "aligned",  "offset",  "element_type",
+                          "rank",      "sizes",    "strides", "layout",
+                          "bound",     "read_only"};
+  for (int64_t field = 0; field < 10; ++field) {
+    SCOPED_TRACE(fields[field]);
+    request.i64_attrs = {field};
+    auto* error = ComputeWithContext(&fake_.api, fake_.kernel_context, request);
+    ASSERT_NE(error, nullptr);
+    EXPECT_NE(fake_.last_status_message.find("did not bind every output"),
+              std::string::npos);
+    fake_.api.ReleaseStatus(error);
+  }
+}
+
+TEST_F(ExecutionContextFailureTest,
+       ScalarAndEmptyOutputsCanBindInReverseOrder) {
+  ContextCall request;
+  request.outputs = {{0, ANNC_ELEMENT_TYPE_F32}, {1, ANNC_ELEMENT_TYPE_F32}};
+  request.output_slots = {3, 5};
+  request.symbol =
+      reinterpret_cast<void*>(+[](AnncKernelContext* raw) -> AnncStatusCode {
+        const int64_t dims[] = {0};
+        AnncTensorDesc desc{sizeof(desc), ANNC_ELEMENT_TYPE_F32, 1, 0, dims,
+                            nullptr};
+        auto& fake = FakeApi::Current();
+        fake.tensor_data =
+            nullptr;  // A bound empty tensor may have no storage.
+        auto code = raw->services->allocate_output(raw->services->opaque, 1,
+                                                   &desc, &raw->outputs[1]);
+        if (code != ANNC_STATUS_OK) return code;
+        fake.tensor_data = fake.alloc_buffer;
+        desc.rank = 0;
+        desc.dims = nullptr;
+        AnncTensorView scalar{};
+        code = raw->services->allocate_output(raw->services->opaque, 0, &desc,
+                                              &scalar);
+        if (code != ANNC_STATUS_OK) return code;
+        raw->outputs[0] = scalar;  // Explicit publication is also valid.
+        return ANNC_STATUS_OK;
+      });
+  EXPECT_EQ(ComputeWithContext(&fake_.api, fake_.kernel_context, request),
+            nullptr);
+  EXPECT_EQ(fake_.output_indices, (std::vector<size_t>{5, 3}));
 }
 
 // The argument resolver is pure, so its rules are pinned directly -- inputs
