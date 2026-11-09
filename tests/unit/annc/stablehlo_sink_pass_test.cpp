@@ -77,7 +77,7 @@ TEST_F(ResidueSinkPassTest, SinksMappedResidueCarrier) {
 TEST_F(ResidueSinkPassTest, SinksCustomCallForm) {
   const char *text = R"mlir(
     func.func @main(%arg0: tensor<2xf32>) -> tensor<2xf32> {
-      %res = stablehlo.custom_call @tf_var() {call_target_name = "Variable"} : () -> tensor<2xf32>
+      %res = stablehlo.custom_call @Variable() : () -> tensor<2xf32>
       return %res : tensor<2xf32>
     }
   )mlir";
@@ -147,7 +147,7 @@ TEST_F(ResidueSinkPassTest, MapsUnrankedResidueThrough) {
   EXPECT_EQ(findOp(*module, "atir.unsupported"), nullptr);
   mlir::Operation *mapped = findOp(*module, "atir.variable_v2");
   ASSERT_NE(mapped, nullptr);
-  auto ty = dyn_cast<ShapedType>(mapped->getResult(0).getType());
+  auto ty = mlir::dyn_cast<mlir::ShapedType>(mapped->getResult(0).getType());
   ASSERT_NE(ty, nullptr);
   EXPECT_FALSE(ty.hasRank());
 }
