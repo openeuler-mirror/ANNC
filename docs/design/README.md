@@ -12,6 +12,7 @@
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
 | TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
 | ANNC 异构图切分优化器（待评审，已搭建代码骨架） | [总体设计](annc-partition/overview.md) · [CLI 入口详细设计](annc-partition/cli-design.md) |
+| Kernel Context 设计与测试 | [Kernel Context 与统一 Runtime ABI 设计](runtime/kernel-context-runtime-design.md) |
 
 ## 约定
 
