@@ -22,7 +22,8 @@ target_link_libraries(annc_jit_cache_1_15 PUBLIC OpenSSL::Crypto
 
 add_library(annc_fused_op_1_15 SHARED
   "${_plugin}/fused_op.cc" "${_plugin}/fused_op_register.cc"
-  "${_plugin}/fused_op_jit.cc" threadpool_callbacks.cc)
+  "${_plugin}/fused_op_jit.cc" "${_plugin}/fused_op_context.cc"
+  threadpool_callbacks.cc)
 target_link_libraries(annc_fused_op_1_15 PRIVATE
   annc_jit_cache_1_15 Threads::Threads dl)
 

@@ -21,6 +21,13 @@ struct ReluLoweringToLinalg : public mlir::OpConversionPattern<atir::ReluOp> {
       mlir::ConversionPatternRewriter &rewriter) const override;
 };
 
+struct DotLoweringToLinalg : public mlir::OpConversionPattern<atir::DotOp> {
+  using OpConversionPattern<atir::DotOp>::OpConversionPattern;
+  mlir::LogicalResult matchAndRewrite(
+      atir::DotOp op, atir::DotOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
+
 struct BufferLoweringToLinalg
     : public mlir::OpConversionPattern<atir::BufferOp> {
   using OpConversionPattern<atir::BufferOp>::OpConversionPattern;
