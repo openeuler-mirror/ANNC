@@ -20,34 +20,57 @@ set(ANNC_TENSORFLOW_CXX11_ABI "" CACHE STRING
   "Required _GLIBCXX_USE_CXX11_ABI value (0 or 1)")
 
 # Resolution flow of tensorflow_addons/CMakeLists.txt: explicit
-# ANNC_TENSORFLOW_* first, else Python tf.sysconfig (headers, compile flags
-# and libtensorflow_framework from one source).
+# ANNC_TENSORFLOW_* first (TF version from version.h; no Python needed when
+# both include dir and library are explicit), else Python tf.sysconfig
+# (headers, compile flags and libtensorflow_framework from one source).
 function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   if(NOT ANNC_TENSORFLOW_CXX11_ABI MATCHES "^[01]$")
     message(FATAL_ERROR "ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1")
   endif()
 
   set(_compile_options)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -c
-      "import tensorflow as tf; print(tf.__version__)"
-    OUTPUT_VARIABLE _tf_version
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE _tf_version_result
-    ERROR_QUIET)
-  if(NOT _tf_version_result EQUAL 0 OR NOT _tf_version MATCHES "^2\.")
-    message(FATAL_ERROR
-      "annc-converter-v2 supports TensorFlow 2.x only; got "
-      "'${_tf_version}'. The TF 1.15 line lives in "
-      "tensorflow_addons/plugin/1_15.")
-  endif()
   if(ANNC_TENSORFLOW_INCLUDE_DIR)
     get_filename_component(_include_dir
       "${ANNC_TENSORFLOW_INCLUDE_DIR}" ABSOLUTE)
     set(_include_source "explicit")
+    set(_version_header "${_include_dir}/tensorflow/core/public/version.h")
+    if(NOT EXISTS "${_version_header}")
+      message(FATAL_ERROR
+        "TensorFlow version header not found: ${_version_header}")
+    endif()
+    file(READ "${_version_header}" _version_text)
+    if(_version_text MATCHES "#define TF_MAJOR_VERSION ([0-9]+)")
+      if(NOT CMAKE_MATCH_1 EQUAL 2)
+        message(FATAL_ERROR
+          "annc-converter-v2 supports TensorFlow 2.x only; version.h says "
+          "major=${CMAKE_MATCH_1}. The TF 1.15 line lives in "
+          "tensorflow_addons/plugin/1_15.")
+      endif()
+    else()
+      # Install-form SDK headers wrap version.h without the version macros;
+      # the explicit path then relies on the caller providing a 2.x SDK
+      # (a 1.15 framework would ship libtensorflow_framework.so.1).
+      message(STATUS
+        "annc-converter-v2: TF version not readable from the SDK headers; "
+        "expecting a TensorFlow 2.x SDK on the explicit path.")
+    endif()
   else()
+    # Python TensorFlow: headers, compile flags and version all come from
+    # one tf.sysconfig source.
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -c
+        "import tensorflow as tf; print(tf.__version__)"
+      OUTPUT_VARIABLE _tf_version
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _tf_version_result
+      ERROR_QUIET)
+    if(NOT _tf_version_result EQUAL 0 OR NOT _tf_version MATCHES "^2\.")
+      message(FATAL_ERROR
+        "annc-converter-v2 supports TensorFlow 2.x only; got "
+        "'${_tf_version}'. The TF 1.15 line lives in "
+        "tensorflow_addons/plugin/1_15.")
+    endif()
     execute_process(
       COMMAND "${Python3_EXECUTABLE}" -c
         "import tensorflow as tf; print(tf.sysconfig.get_include())"
@@ -169,8 +192,24 @@ set_target_properties(annc_converter_v2_core PROPERTIES
   INSTALL_RPATH "${_v2_tf_libdir}"
 )
 
-# Unit tests live in the shared test tree; ctest runs the same cases.
-if(BUILD_TESTING)
+add_executable(annc-converter-v2
+  main.cpp
+)
+target_link_libraries(annc-converter-v2 PRIVATE
+  annc_converter_v2_core
+)
+# RPATH must live on the executable: static-library properties do not
+# propagate, and install() would otherwise rewrite it to the global value,
+# losing the TensorFlow framework directory.
+set_target_properties(annc-converter-v2 PROPERTIES
+  BUILD_RPATH "${_v2_tf_libdir}"
+  INSTALL_RPATH "${_v2_tf_libdir}"
+)
+install(TARGETS annc-converter-v2 DESTINATION bin)
+
+# Standalone builds register the unit tests here. In-tree registration lives
+# in tests/unit/converter_v2 (tests/ owns all test registration).
+if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   find_package(GTest REQUIRED)
   include(GoogleTest)
   add_executable(fusion_meta_test

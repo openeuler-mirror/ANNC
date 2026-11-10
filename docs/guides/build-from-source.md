@@ -212,7 +212,9 @@ cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON \
 
 `-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与该工具不兼容
 （配置期报错）；单元测试（`FusionMeta.*`、`GraphDefRewriter.*`）随
-`ctest` 注册。
+`ctest` 注册。与 v1 的行为差异（JSON-only 元数据、站点丢弃语义、别名
+策略等）与 CLI 用法见
+[addons/tensorflow/annc-converter-v2/README.md](../../addons/tensorflow/annc-converter-v2/README.md)。
 
 ## 验证安装
 

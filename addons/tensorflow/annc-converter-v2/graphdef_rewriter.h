@@ -1,10 +1,10 @@
 #ifndef ANNC_TOOLS_ANNC_CONVERTER_V2_GRAPH_DEF_REWRITER_H
 #define ANNC_TOOLS_ANNC_CONVERTER_V2_GRAPH_DEF_REWRITER_H
 
-// ANNCFused node assembly for the standalone GraphDef rewriter (std-only,
-// protos from the pip TF wheel). The emitted node attributes are the runtime
-// contract of tensorflow_addons/annc_fused_op*.cc; keep in sync with the v1
-// tool. The file-level flow joins the CLI batch.
+// ANNCFused node assembly and the file-level rewrite for the standalone
+// GraphDef rewriter (std-only, TensorFlow dependency like tensorflow_addons).
+// The emitted node attributes are the runtime contract of
+// tensorflow_addons/annc_fused_op*.cc; keep in sync with the v1 tool.
 
 #include <string>
 #include <unordered_map>
@@ -14,6 +14,18 @@
 #include "tensorflow/core/framework/graph.pb.h"
 
 namespace annc::converter_v2 {
+
+struct GraphDefRewriteOptions {
+  std::string inputGraphPath;
+  std::string outputGraphPath;
+  std::string kernelNameOverride;
+  std::string sharedLibPath;
+  std::string atirModulePath;
+  bool verbose = false;
+};
+
+bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
+                                  const GraphDefRewriteOptions &options);
 
 class ANNCFusedNodeBuilder {
  public:
