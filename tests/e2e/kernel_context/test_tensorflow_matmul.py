@@ -1,14 +1,31 @@
-"""Context V3 MatMul through TensorFlow fusion and kernel execution."""
+"""Generated MatMul through TensorFlow fusion and JIT kernel execution.
+
+Use the repository's NEON tuning fixture unless ANNC_GEMM_CONFIG is set.
+"""
+
+import os
 
 import pytest
 
+from e2e_utils import ROOT
 from tf_graph import build_graph, kernel_spec
 from tf_pipeline import run_pipeline
 
 
 CASES = {
-    "matmul_v3": kernel_spec(
-        "matmul", "MatMul", mode="jit", env={"ANNC_GEMM": "2"}
+    "matmul_generated": kernel_spec(
+        "matmul",
+        "MatMul",
+        mode="jit",
+        abi="mlir_ciface",
+        env={
+            "ANNC_GEMM": "2",
+            "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
+            or str(
+                ROOT / "tests/FileCheck/Target/aarch64/Inputs/"
+                "gemm-tuning-hip09-neon-test.json"
+            ),
+        },
     ),
 }
 
@@ -32,5 +49,5 @@ def make_graph(case):
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_context_v3_matmul_full_pipeline(case, tmp_path):
+def test_generated_matmul_full_pipeline(case, tmp_path):
     run_pipeline(CASES[case], make_graph, case, tmp_path)

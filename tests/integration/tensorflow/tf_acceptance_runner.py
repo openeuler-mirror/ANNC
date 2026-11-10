@@ -219,8 +219,7 @@ def fusion_evidence(metadata, pattern, members, outputs, work, mode, reject=Fals
     entry = selected[0]
     assert entry["pattern"] == pattern, "Unexpected fusion metadata pattern"
     names = {str(name).split(":")[0] for name in entry["member_node_names"]}
-    expected_abi = "annc_context_v3" if pattern == "matmul" else "mlir_ciface"
-    assert entry["abi"] == target.attr["abi"].s.decode() == expected_abi
+    assert entry["abi"] == target.attr["abi"].s.decode() == "mlir_ciface"
     assert entry["execution_mode"] == mode
     assert bool(target.attr["shared_lib_path"].s) == (mode == "aot")
     assert set(members) <= names, "Missing fused members: " + str(set(members) - names)
@@ -338,6 +337,13 @@ def main():
             "ANNC_WORK_DIR": str(args.work_dir / "pipeline"),
             "ANNC_KEEP_TEMPS": "1",
             "ANNC_GEMM": "1",
+            # These cases validate generated GEMM, including in KDNN builds.
+            "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS": "MatMul,MatMulAdd,MatMulAddRelu",
+            "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
+            or str(
+                ROOT / "tests/FileCheck/Target/aarch64/Inputs/"
+                "gemm-tuning-hip09-neon-test.json"
+            ),
             "ANNC_VERBOSE": "1",
             "ANNC_FUSED_PROFILE": "0",
         }

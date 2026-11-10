@@ -190,8 +190,9 @@ struct MatMulAddReluWithAddOutputRewrite
 
 REGISTER_CUSTOM_PATTERN(MatMulAddReluWithAddOutputRewrite);
 
-// Plain context MatMul is independent of the KDNN adaptor. Other MatMul
-// variants retain their previous registration and lowering behavior.
+// Lower MatMul only inside an entry already assigned the Context ABI. This
+// pattern does not select an ABI or opt ordinary GEMM into the builtin path,
+// regardless of the order of FastCodegen and OpFusion.
 struct ContextMatMulRewrite : public MatmulToCustomCallRewrite {
   using MatmulToCustomCallRewrite::MatmulToCustomCallRewrite;
 
