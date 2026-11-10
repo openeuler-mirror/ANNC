@@ -45,6 +45,12 @@ if(TARGET annc-onnx2atir)
   add_subdirectory(unit/onnx2atir)
 endif()
 
+# annc-converter-v2 unit tests: registered while the V2 route built the core
+# library (the core target carries the TF include/link setup).
+if(TARGET annc_converter_v2_core)
+  add_subdirectory(unit/converter_v2)
+endif()
+
 # ONNX Runtime EP tests: registered only while ANNC_ENABLE_ONNXRUNTIME_EP=ON,
 # which is what defines the annc_ep target.  The GTest suites live under
 # unit/ort_ep; Python fixtures live under integration/ort_ep, and Context
