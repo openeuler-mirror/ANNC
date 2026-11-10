@@ -577,16 +577,6 @@ std::vector<int> BuildDefaultKernelArgOrder(int num_inputs, int num_outputs) {
   return order;
 }
 
-std::vector<int> ResolveKernelArgOrder(const std::vector<int>& configured_order,
-                                       int num_inputs, int num_outputs,
-                                       bool has_input_ranks) {
-  if (!configured_order.empty()) return configured_order;
-  if (num_inputs == 3 && num_outputs == 1 && !has_input_ranks) {
-    return {2, 0, 3, 1};
-  }
-  return BuildDefaultKernelArgOrder(num_inputs, num_outputs);
-}
-
 std::vector<int64_t> ShapeVector(const TensorShape& shape) {
   std::vector<int64_t> dims;
   dims.reserve(shape.dims());
@@ -684,6 +674,16 @@ Status CallMlirCiface(void* func, const std::vector<void*>& args) {
 
 }  // namespace
 
+std::vector<int> ResolveKernelArgOrder(const std::vector<int>& configured_order,
+                                       int num_inputs, int num_outputs,
+                                       bool has_input_ranks) {
+  if (!configured_order.empty()) return configured_order;
+  if (num_inputs == 3 && num_outputs == 1 && !has_input_ranks) {
+    return {2, 0, 3, 1};
+  }
+  return BuildDefaultKernelArgOrder(num_inputs, num_outputs);
+}
+
 // ============================================================================
 // ANNCFusedOp Implementation
 // ============================================================================
@@ -697,6 +697,7 @@ ANNCFusedOp::ANNCFusedOp(OpKernelConstruction* context)
       num_fixed_(0),
       num_dynamic_(0),
       zero_initialize_outputs_(true),
+      prepack_enabled_(anncTensorFlowPrepackEnabled()),
       handle_(nullptr),
       mlir_ciface_func_(nullptr),
       annc_set_current_threadpool_(nullptr),
@@ -900,6 +901,8 @@ annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
   request.intra_thread_count = intra_thread_count;
+  request.enable_prepack = prepack_enabled_ && abi_ == "mlir_ciface";
+  request.immutable_arguments = jit_immutable_arguments_;
   request.argument_shapes.reserve(arguments.size());
   for (const auto& argument : arguments) {
     request.argument_shapes.push_back(argument.dims);
@@ -942,6 +945,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   thread::ThreadPool* tf_thread_pool = GetTensorFlowCpuThreadPool(context);
 
   std::shared_ptr<annc::jit::JitExecutable> jit_executable;
+  std::shared_ptr<AnncJitBinding> jit_binding;
   void* kernel_function = mlir_ciface_func_;
   auto set_thread_pool = annc_set_current_threadpool_;
   auto get_thread_pool = annc_get_current_threadpool_;
@@ -970,6 +974,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       mutex_lock lock(jit_fastpath_mu_);
       if (last_jit_executable_ &&
           SameJitArguments(last_jit_arguments_, arguments)) {
+        jit_binding = last_jit_binding_;
         jit_executable = last_jit_executable_;
       }
     }
@@ -983,13 +988,17 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       }
       steady_call = true;
     } else {
+      const bool prepack = prepack_enabled_ && abi_ == "mlir_ciface";
+      if (prepack) InitializeJitWeights(context);
+      const std::string& identity =
+          prepack ? jit_identity_ : jit_template_identity_;
       annc::jit::JitCacheKey cache_key;
       std::string cache_key_error;
       auto t_jit_cache_key_start =
           profile_enabled ? Clock::now() : TimePoint{};
       OP_REQUIRES(context,
-                  annc::jit::BuildJitCacheKey(jit_template_identity_, arguments,
-                                              &cache_key, &cache_key_error),
+                  annc::jit::BuildJitCacheKey(identity, arguments, &cache_key,
+                                              &cache_key_error),
                   errors::Internal("Cannot build ANNC JIT cache key: ",
                                    cache_key_error));
       if (profile_enabled) {
@@ -1057,8 +1066,11 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       library_loaded_this_call =
           lookup.event != annc::jit::CacheEvent::kHit;
       steady_call = (lookup.event == annc::jit::CacheEvent::kHit);
+      if (prepack)
+        OP_REQUIRES_OK(context, BindJitWeights(jit_executable, &jit_binding));
       if (IsJitShapeFastPathEnabled()) {
         mutex_lock lock(jit_fastpath_mu_);
+        last_jit_binding_ = jit_binding;
         last_jit_arguments_ = arguments;
         last_jit_executable_ = jit_executable;
       }
@@ -1102,8 +1114,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       profile_sample.kernel_us = ElapsedUs(t_kernel_start);
     }
   } else {
-    execute_status = ExecuteMlirCifaceKernel(
-        context, kernel_function, profile_enabled, &profile_sample);
+    execute_status =
+        ExecuteMlirCifaceKernel(context, kernel_function, profile_enabled,
+                                &profile_sample, jit_binding.get());
   }
   OP_REQUIRES_OK(context, execute_status);
   auto t_threadpool_restore_start =
@@ -1207,10 +1220,9 @@ Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
   return OkStatus();
 }
 
-Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
-                                            void* kernel_function,
-                                            bool profile_enabled,
-                                            AnncFusedProfileSample* profile_sample) {
+Status ANNCFusedOp::ExecuteMlirCifaceKernel(
+    OpKernelContext* context, void* kernel_function, bool profile_enabled,
+    AnncFusedProfileSample* profile_sample, const AnncJitBinding* binding) {
   if (!kernel_function) {
     LOG(ERROR) << "[ANNC-FUSED-EXEC] kernel symbol is null kernel="
                << kernel_name_;
@@ -1244,6 +1256,11 @@ Status ANNCFusedOp::ExecuteMlirCifaceKernel(OpKernelContext* context,
     Status status = BuildRankedMemRefArg(
         tensor, rank, &rank0[i], &rank1[i], &rank2[i], &rank3[i], &rank4[i],
         &rank5[i], &rank6[i], &memrefs[i], &string_storage[i]);
+    if (status.ok() && binding && !binding->packed.empty() &&
+        binding->packed[i]) {
+      rank2[i][0].allocated = binding->packed[i]->data;
+      rank2[i][0].aligned = binding->packed[i]->data;
+    }
     if (!status.ok()) {
       LOG(ERROR) << "[ANNC-FUSED-EXEC] failed to build input memref kernel="
                  << kernel_name_ << " input_index=" << i
