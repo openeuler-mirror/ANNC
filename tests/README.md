@@ -30,7 +30,7 @@ tests/
 │   ├── onnx2atir/          # ONNX 前端 GTest
 │   ├── tensorflow/         # TF 前端、插件参数派发和跨 ABI 线程池回调
 │   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
-├── FileCheck/              # 52 个 .mlir + 自制 runner（lit 迁移另立任务）
+├── FileCheck/              # FileCheck 用例 + 自制 runner（lit 迁移另立任务）
 ├── integration/
 │   ├── annc_partition/     # annc-partition 查询与骨架阶段诊断 pytest
 │   ├── cmake/              # CMake 模块契约（含 TF 插件 SDK 选择与隔离）pytest
