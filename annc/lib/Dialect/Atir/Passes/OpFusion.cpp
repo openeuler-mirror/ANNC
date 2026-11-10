@@ -1476,6 +1476,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
 
     // Preserve the generated MatMul body for GEMM lowering. Context ABI
     // availability alone must not select the scalar builtin implementation.
+    // ContextMatMulRewrite handles functions explicitly assigned the Context
+    // ABI; it does not select the ABI of an ordinary MatMul fusion here.
     Operation *outputOp =
         epilogue ? epilogueTerminalOp(*epilogue) : matmulOp.getOperation();
     Value output = epilogue ? outputOp->getOperand(0) : matmulOp.getC();
