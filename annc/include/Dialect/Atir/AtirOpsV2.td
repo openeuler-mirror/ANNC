@@ -293,8 +293,8 @@ def Atir_TopKV2Op : Atir_Op<"top_k_v2"> {
 // (reason=unknown_op), losing their semantics to string matching downstream.
 // They are view/encoding carriers by construction — stablehlo cannot express
 // them — so they enter this complement dialect as first-class ops. Their
-// unranked/dynamic payloads are legal (that is what the views transport),
-// which exempts them from the sink's unrank_blocked guard.
+// unranked/dynamic payloads are legal (that is what the views transport):
+// the sink maps them straight through, with no rank gate on any carrier.
 //===----------------------------------------------------------------------===//
 
 def Atir_GetDimV2Op : Atir_Op<"get_dim_v2"> {
