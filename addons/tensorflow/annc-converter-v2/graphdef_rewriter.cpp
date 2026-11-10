@@ -1,22 +1,15 @@
+#include "graph_rewriter_core.h"
 #include "graphdef_rewriter.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <unistd.h>
-
-#include <google/protobuf/io/tokenizer.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
-#include <google/protobuf/text_format.h>
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 
@@ -197,86 +190,6 @@ bool hasConsumers(const tensorflow::GraphDef &graph,
   return false;
 }
 }  // namespace
-
-// Temp file + rename: a failed write never leaves a truncated GraphDef.
-static bool writeBinaryGraphDef(const tensorflow::GraphDef &graph,
-                                const std::string &path) {
-  std::string serialized;
-  if (!graph.SerializeToString(&serialized)) return false;
-  const std::string tmpPath = path + ".tmp." + std::to_string(::getpid());
-  {
-    std::ofstream output(tmpPath, std::ios::binary);
-    if (!output.is_open()) {
-      std::cerr << "[annc-converter-v2] Error: cannot open output file: "
-                << path << "\n";
-      return false;
-    }
-    output.write(serialized.data(),
-                 static_cast<std::streamsize>(serialized.size()));
-    output.close();
-    if (!output.good()) {
-      std::cerr << "[annc-converter-v2] Error: failed to write output: "
-                << path << "\n";
-      return false;
-    }
-  }
-  if (std::rename(tmpPath.c_str(), path.c_str()) != 0) {
-    std::cerr << "[annc-converter-v2] Error: cannot finalize output: " << path
-              << "\n";
-    return false;
-  }
-  return true;
-}
-
-static bool readBinaryGraphDef(const std::string &path,
-                               tensorflow::GraphDef *graph) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input.is_open()) return false;
-  std::string data((std::istreambuf_iterator<char>(input)),
-                   std::istreambuf_iterator<char>());
-  if (input.bad()) return false;
-  return graph->ParseFromString(data);
-}
-
-namespace {
-
-// Caps protobuf text-format errors at one line (the default parser would
-// spray its own multi-line log on stderr).
-struct QuietTextErrorCollector : google::protobuf::io::ErrorCollector {
-  std::string firstError;
-  void RecordError(int line, int column,
-                   absl::string_view message) override {
-    if (firstError.empty())
-      firstError = "line " + std::to_string(line + 1) + ": " +
-                   std::string(message);
-  }
-  void RecordWarning(int, int, absl::string_view) override {}
-};
-
-}  // namespace
-
-static bool readTextGraphDef(const std::string &path,
-                             tensorflow::GraphDef *graph) {
-  std::ifstream input(path);
-  if (!input.is_open()) return false;
-  std::string data((std::istreambuf_iterator<char>(input)),
-                   std::istreambuf_iterator<char>());
-  if (input.bad()) return false;
-  QuietTextErrorCollector collector;
-  google::protobuf::TextFormat::Parser parser;
-  parser.RecordErrorsTo(&collector);
-  google::protobuf::io::ArrayInputStream stream(data.data(),
-                                                static_cast<int>(data.size()));
-  if (!parser.Parse(&stream, graph)) {
-    std::cerr << "[annc-converter-v2] Error: invalid text GraphDef in " << path
-              << (collector.firstError.empty()
-                      ? ""
-                      : " (" + collector.firstError + ")")
-              << "\n";
-    return false;
-  }
-  return true;
-}
 
 ANNCFusedNodeBuilder::ANNCFusedNodeBuilder(
     const tensorflow::GraphDef &original, std::string sharedLibPath,
@@ -697,26 +610,21 @@ void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
 
 }  // namespace
 
-bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
-                                  const GraphDefRewriteOptions &options) {
-  tensorflow::GraphDef graph;
-  if (!readBinaryGraphDef(options.inputGraphPath, &graph) &&
-      !readTextGraphDef(options.inputGraphPath, &graph)) {
-    std::cerr << "[annc-converter-v2] Error: failed to read GraphDef: "
-              << options.inputGraphPath << "\n";
+bool rewriteGraphDefInPlace(tensorflow::GraphDef *graph,
+                            std::vector<FusionInfo> fusionInfos,
+                            const RewritePaths &paths, std::string *error) {
+  auto fail = [&](const std::string &reason) {
+    if (error) *error = reason;
     return false;
-  }
+  };
+  if (fusionInfos.empty())
+    return fail("no ANNCFused metadata entries");
 
-  if (fusionInfos.empty()) {
-    std::cerr << "[annc-converter-v2] Error: no ANNCFused metadata entries\n";
-    return false;
-  }
-
-  dropUnresolvableFusions(fusionInfos, graph);
+  dropUnresolvableFusions(fusionInfos, *graph);
   if (fusionInfos.empty()) {
     std::cerr << "[annc-converter-v2] Warning: no usable fusion site; "
-                 "writing the input graph unchanged\n";
-    return writeBinaryGraphDef(graph, options.outputGraphPath);
+                 "keeping the input graph unchanged\n";
+    return true;
   }
 
   const bool needsAotLibrary = std::any_of(
@@ -727,66 +635,48 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
       fusionInfos.begin(), fusionInfos.end(), [](const FusionInfo &fusion) {
         return fusion.executionMode == "jit";
       });
-  if (needsAotLibrary && options.sharedLibPath.empty()) {
-    std::cerr << "[annc-converter-v2] Error: AOT fusion metadata requires "
-                 "--shared_lib_path\n";
-    return false;
-  }
-  if (needsJitTemplate && options.atirModulePath.empty()) {
-    std::cerr << "[annc-converter-v2] Error: JIT fusion metadata requires "
-                 "--atir_module_path\n";
-    return false;
-  }
+  if (needsAotLibrary && paths.sharedLibPath.empty())
+    return fail("AOT fusion metadata requires --shared_lib_path");
+  if (needsJitTemplate && paths.atirModulePath.empty())
+    return fail("JIT fusion metadata requires --atir_module_path");
 
-  if (!options.kernelNameOverride.empty()) {
-    if (fusionInfos.size() != 1) {
-      std::cerr << "[annc-converter-v2] Error: --kernel_name override is only "
-                   "supported for single-fusion metadata\n";
-      return false;
-    }
-    fusionInfos.front().kernelName = options.kernelNameOverride;
+  if (!paths.kernelNameOverride.empty()) {
+    if (fusionInfos.size() != 1)
+      return fail("--kernel_name override is only supported for "
+                  "single-fusion metadata");
+    fusionInfos.front().kernelName = paths.kernelNameOverride;
   }
 
   ANNCFusedNodeBuilder::FusionOutputMap fusionByOutput;
   std::set<std::string> fusionNames;
   for (const auto &fusion : fusionInfos) {
-    if (!fusionNames.insert(fusion.name).second) {
-      std::cerr << "[annc-converter-v2] Error: duplicate fusion name: "
-                << fusion.name << "\n";
-      return false;
-    }
-    if (options.verbose) {
+    if (!fusionNames.insert(fusion.name).second)
+      return fail("duplicate fusion name: " + fusion.name);
+    if (paths.verbose) {
       std::cout << "[annc-converter-v2] Rewriting fusion node from ATIR: "
                 << fusion.name << " pattern=" << fusion.pattern << "\n";
     }
     for (size_t slot = 0; slot < fusion.outputs.size(); ++slot) {
       auto endpoint = parseTensorEndpoint(fusion.outputs[slot].tfName);
-      if (!endpoint.ok() || endpoint.value.control) {
-        std::cerr
-            << "[annc-converter-v2] Error: invalid fusion output endpoint: "
-            << fusion.outputs[slot].tfName << "\n";
-        return false;
-      }
+      if (!endpoint.ok() || endpoint.value.control)
+        return fail("invalid fusion output endpoint: " +
+                    fusion.outputs[slot].tfName);
       auto [it, inserted] = fusionByOutput.emplace(
           endpoint.value.canonicalDataName(),
           ANNCFusedNodeBuilder::FusionOutputTarget{&fusion,
                                                    static_cast<int64_t>(slot)});
-      if (!inserted) {
-        std::cerr << "[annc-converter-v2] Error: duplicate fusion output "
-                     "endpoint: "
-                  << endpoint.value.canonicalDataName() << "\n";
-        return false;
-      }
+      if (!inserted)
+        return fail("duplicate fusion output endpoint: " +
+                    endpoint.value.canonicalDataName());
     }
   }
 
-  ANNCFusedNodeBuilder fusedNodeBuilder(graph, options.sharedLibPath,
-                                        options.atirModulePath,
-                                        fusionByOutput);
+  ANNCFusedNodeBuilder fusedNodeBuilder(*graph, paths.sharedLibPath,
+                                        paths.atirModulePath, fusionByOutput);
   // Preserve graph-level metadata, including versions, expected by Grappler.
-  tensorflow::GraphDef rewritten = graph;
+  tensorflow::GraphDef rewritten = *graph;
   rewritten.clear_node();
-  for (const auto &node : graph.node()) {
+  for (const auto &node : graph->node()) {
     if (fusedNodeBuilder.replacesOutputNode(node.name())) continue;
     tensorflow::NodeDef *out = rewritten.add_node();
     *out = node;
@@ -798,20 +688,18 @@ bool rewriteGraphDefWithANNCFused(std::vector<FusionInfo> fusionInfos,
   }
 
   for (const auto &fusion : fusionInfos) {
-    if (fusedNodeBuilder.appendNode(rewritten, fusion) == nullptr) {
-      std::cerr << "[annc-converter-v2] Error: failed to emit the ANNCFused "
-                   "node for fusion '"
-                << fusion.name << "'\n";
-      return false;
-    }
+    if (fusedNodeBuilder.appendNode(rewritten, fusion) == nullptr)
+      return fail("failed to emit the ANNCFused node for fusion '" +
+                  fusion.name + "'");
   }
   std::string aliasError;
-  if (!fusedNodeBuilder.appendOutputAliases(rewritten, &aliasError)) {
-    std::cerr << "[annc-converter-v2] Error: " << aliasError << "\n";
-    return false;
-  }
+  if (!fusedNodeBuilder.appendOutputAliases(rewritten, &aliasError))
+    return fail(aliasError);
 
-  return writeBinaryGraphDef(rewritten, options.outputGraphPath);
+  // Commit only after every step succeeded: on failure the caller's graph
+  // stays loadable.
+  *graph = std::move(rewritten);
+  return true;
 }
 
 }  // namespace annc::converter_v2

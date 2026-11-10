@@ -2,14 +2,15 @@
 
 #include <gtest/gtest.h>
 
-#include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
 #include "fusion_meta.h"
+#include "graph_rewriter_core.h"
+#include "graph_rewriter_entry.h"
 #include <google/protobuf/text_format.h>
+#include <google/protobuf/util/message_differencer.h>
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 
@@ -373,24 +374,7 @@ TEST(GraphDefRewriter, RejectsUnknownRole) {
 }
 
 // ---------------------------------------------------------------------------
-// File-level rewrite: temp input graph + FusionInfo -> rewrite -> read back.
-
-// Per-process temp dir: concurrent ctest runs never share files.
-const std::string &tempDir() {
-  static const std::string dir =
-      (std::filesystem::temp_directory_path() /
-       ("cv2_fl_" + std::to_string(::getpid())))
-          .string();
-  std::filesystem::create_directories(dir);
-  return dir;
-}
-
-std::string writeFile(const std::string &path, const std::string &content,
-                      bool binary) {
-  std::ofstream out(path, binary ? std::ios::binary : std::ios::trunc);
-  out << content;
-  return path;
-}
+// In-place core: metadata + in-memory graph -> rewritten graph.
 
 const char *kSampleTextGraph =
     R"pb(node { name: "p" op: "Placeholder" attr { key: "dtype" value { type: DT_FLOAT } } }
@@ -416,21 +400,9 @@ FusionInfo siteFusion(const char *name = "f0", const char *output = "m:0") {
   return f;
 }
 
-GraphDefRewriteOptions fileOptions(const std::string &in,
-                                   const std::string &out) {
-  GraphDefRewriteOptions o;
-  o.inputGraphPath = in;
-  o.outputGraphPath = out;
-  o.sharedLibPath = "/tmp/libgenerated.so";
-  return o;
-}
-
-tensorflow::GraphDef readGraph(const std::string &path) {
-  std::ifstream in(path, std::ios::binary);
-  std::string data((std::istreambuf_iterator<char>(in)),
-                   std::istreambuf_iterator<char>());
+tensorflow::GraphDef parseGraph(const std::string &text) {
   tensorflow::GraphDef graph;
-  EXPECT_TRUE(graph.ParseFromString(data)) << path;
+  EXPECT_TRUE(google::protobuf::TextFormat::ParseFromString(text, &graph));
   return graph;
 }
 
@@ -441,13 +413,14 @@ const tensorflow::NodeDef *find(const tensorflow::GraphDef &graph,
   return nullptr;
 }
 
-TEST(GraphDefRewriterFile, RewritesGraphFiles) {
-  const std::string &dir = tempDir();
-  auto in = writeFile(dir + "/e2e.pbtxt", kSampleTextGraph, false);
-  auto out = dir + "/e2e.pb";
+TEST(GraphDefRewriterCore, RewritesGraphInPlace) {
+  auto graph = parseGraph(kSampleTextGraph);
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
   ASSERT_TRUE(
-      rewriteGraphDefWithANNCFused({siteFusion()}, fileOptions(in, out)));
-  auto graph = readGraph(out);
+      rewriteGraphDefInPlace(&graph, {siteFusion()}, paths, &error))
+      << error;
   const auto *fused = find(graph, "f0");
   ASSERT_NE(fused, nullptr);
   EXPECT_EQ(fused->op(), "ANNCFused");
@@ -460,45 +433,36 @@ TEST(GraphDefRewriterFile, RewritesGraphFiles) {
   EXPECT_EQ(alias->op(), "Identity");
   EXPECT_EQ(alias->input(0), "f0:0");
   EXPECT_NE(find(graph, "p"), nullptr);
-
-  // The same rewrite round-trips a binary input.
-  tensorflow::GraphDef sample;
-  ASSERT_TRUE(
-      google::protobuf::TextFormat::ParseFromString(kSampleTextGraph, &sample));
-  auto bin = writeFile(dir + "/e2e.pb", sample.SerializeAsString(), true);
-  auto binOut = dir + "/e2e_bin_out.pb";
-  ASSERT_TRUE(rewriteGraphDefWithANNCFused({siteFusion()},
-                                           fileOptions(bin, binOut)));
-  EXPECT_NE(find(readGraph(binOut), "f0"), nullptr);
+  EXPECT_NE(find(graph, "c"), nullptr);
 }
 
-TEST(GraphDefRewriterFile, DropsUnresolvableSites) {
-  const std::string &dir = tempDir();
-  // Runs one rewrite with a single fusion; returns the output graph.
-  auto rewrite = [&](const FusionInfo &fusion, const char *stem,
-                     const std::string &text) {
-    auto in = writeFile(dir + "/" + stem + ".pbtxt", text, false);
-    auto out = dir + "/" + stem + ".pb";
-    EXPECT_TRUE(rewriteGraphDefWithANNCFused({fusion}, fileOptions(in, out)));
-    return readGraph(out);
+TEST(GraphDefRewriterCore, DropsUnresolvableSites) {
+  // Runs one in-place rewrite with a single fusion.
+  auto rewrite = [](FusionInfo fusion, const std::string &text) {
+    RewritePaths paths;
+    paths.sharedLibPath = "/tmp/libgenerated.so";
+    auto graph = parseGraph(text);
+    std::string error;
+    EXPECT_TRUE(rewriteGraphDefInPlace(&graph, {fusion}, paths, &error))
+        << error;
+    return graph;
   };
   {
-    auto graph = rewrite(siteFusion("f0", "ghost:0"), "drop_out",
-                         kSampleTextGraph);
+    auto graph = rewrite(siteFusion("f0", "ghost:0"), kSampleTextGraph);
     EXPECT_EQ(find(graph, "f0"), nullptr);  // dropped whole: original kept
     EXPECT_EQ(graph.node_size(), 3);
   }
   {
     auto fusion = siteFusion();
     fusion.args.push_back({"dynamic", "ghost", {2}, 1, "float32"});
-    auto graph = rewrite(fusion, "drop_in", kSampleTextGraph);
+    auto graph = rewrite(fusion, kSampleTextGraph);
     EXPECT_EQ(find(graph, "f0"), nullptr);
     EXPECT_EQ(graph.node_size(), 3);
   }
   {
     auto fusion = siteFusion();
     fusion.args.push_back({"dynamic", "m:0", {2}, 1, "float32"});
-    auto graph = rewrite(fusion, "drop_self", kSampleTextGraph);
+    auto graph = rewrite(fusion, kSampleTextGraph);
     EXPECT_EQ(find(graph, "f0"), nullptr);  // self-cycle dropped
     EXPECT_EQ(graph.node_size(), 3);
   }
@@ -508,72 +472,103 @@ TEST(GraphDefRewriterFile, DropsUnresolvableSites) {
     // graph.
     auto text = std::string(kSampleTextGraph) +
                 "\nnode { name: \"w\" op: \"NoOp\" input: \"^m\" }";
-    auto graph = rewrite(siteFusion(), "drop_ctrl", text);
+    auto graph = rewrite(siteFusion(), text);
     EXPECT_EQ(find(graph, "f0"), nullptr);
     EXPECT_EQ(graph.node_size(), 4);
   }
 }
 
-TEST(GraphDefRewriterFile, RejectsInvalidRequests) {
-  const std::string &dir = tempDir();
+TEST(GraphDefRewriterCore, RejectsInvalidRequests) {
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
   {  // duplicate fusion names would emit two same-named nodes
-    auto in = writeFile(dir + "/dup.pbtxt", kSampleTextGraph, false);
-    ASSERT_FALSE(rewriteGraphDefWithANNCFused(
-        {siteFusion("f0"), siteFusion("f0")},
-        fileOptions(in, dir + "/dup.pb")));
+    auto graph = parseGraph(kSampleTextGraph);
+    std::string error;
+    EXPECT_FALSE(rewriteGraphDefInPlace(
+        &graph, {siteFusion("f0"), siteFusion("f0")}, paths, &error));
   }
-  {  // unwritable output path
-    auto in = writeFile(dir + "/ro.pbtxt", kSampleTextGraph, false);
-    ASSERT_FALSE(rewriteGraphDefWithANNCFused(
-        {siteFusion()}, fileOptions(in, dir + "/no_such_dir/ro.pb")));
-  }
-  {  // AOT needs --shared_lib_path; JIT needs --atir_module_path
-    auto in = writeFile(dir + "/mode.pbtxt", kSampleTextGraph, false);
-    auto options = fileOptions(in, dir + "/mode.pb");
-    options.sharedLibPath.clear();
-    ASSERT_FALSE(rewriteGraphDefWithANNCFused({siteFusion()}, options));
+  {  // AOT needs a shared library; JIT needs an ATIR module
+    auto graph = parseGraph(kSampleTextGraph);
+    RewritePaths noLib = paths;
+    noLib.sharedLibPath.clear();
+    std::string error;
+    EXPECT_FALSE(
+        rewriteGraphDefInPlace(&graph, {siteFusion()}, noLib, &error));
     auto jit = siteFusion();
     jit.executionMode = "jit";
-    ASSERT_FALSE(rewriteGraphDefWithANNCFused({jit}, options));
+    EXPECT_FALSE(
+        rewriteGraphDefInPlace(&graph, {jit}, noLib, &error));
   }
   {  // --kernel_name override is single-site only
-    auto in = writeFile(dir + "/kn.pbtxt", consumerTextGraph(), false);
-    auto options = fileOptions(in, dir + "/kn.pb");
-    options.kernelNameOverride = "k9";
-    ASSERT_FALSE(rewriteGraphDefWithANNCFused(
-        {siteFusion(), siteFusion("f1", "r:0")}, options));
+    auto graph = parseGraph(consumerTextGraph());
+    RewritePaths override = paths;
+    override.kernelNameOverride = "k9";
+    std::string error;
+    EXPECT_FALSE(rewriteGraphDefInPlace(
+        &graph, {siteFusion(), siteFusion("f1", "r:0")}, override, &error));
   }
 }
 
-TEST(GraphDefRewriterFile, DropsCrossSiteCycle) {
-  const std::string &dir = tempDir();
-  auto in = writeFile(dir + "/cycle.pbtxt", consumerTextGraph(), false);
-  auto out = dir + "/cycle.pb";
+TEST(GraphDefRewriterCore, DropsCrossSiteCycle) {
+  auto graph = parseGraph(consumerTextGraph());
   auto f0 = siteFusion("f0", "m:0");
   f0.args.push_back({"dynamic", "r:0", {2}, 1, "float32"});  // wired to f1
   auto f1 = siteFusion("f1", "r:0");
   f1.args.clear();
   f1.args.push_back({"dynamic", "m:0", {2}, 1, "float32"});  // wired to f0
-  ASSERT_TRUE(rewriteGraphDefWithANNCFused({f0, f1}, fileOptions(in, out)));
-  auto graph = readGraph(out);
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
+  ASSERT_TRUE(rewriteGraphDefInPlace(&graph, {f0, f1}, paths, &error));
   EXPECT_EQ(find(graph, "f0"), nullptr);  // both cyclic sites dropped
   EXPECT_EQ(find(graph, "f1"), nullptr);
   EXPECT_EQ(graph.node_size(), 4);
 }
 
-TEST(GraphDefRewriterFile, KeepsAliasWhenConsumerIsAlsoReplaced) {
-  const std::string &dir = tempDir();
-  auto in = writeFile(dir + "/alias.pbtxt", consumerTextGraph(), false);
-  auto out = dir + "/alias.pb";
-  ASSERT_TRUE(rewriteGraphDefWithANNCFused({siteFusion(), siteFusion("f1", "r:0")},
-                                           fileOptions(in, out)));
-  auto graph = readGraph(out);
+TEST(GraphDefRewriterCore, KeepsAliasWhenConsumerIsAlsoReplaced) {
+  auto graph = parseGraph(consumerTextGraph());
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
+  ASSERT_TRUE(rewriteGraphDefInPlace(
+      &graph, {siteFusion(), siteFusion("f1", "r:0")}, paths, &error));
   // r (the only consumer of m) is replaced by f1: m keeps its alias anyway.
   const auto *alias = find(graph, "m");
   ASSERT_NE(alias, nullptr);
   EXPECT_EQ(alias->op(), "Identity");
   EXPECT_EQ(alias->input(0), "f0:0");
   EXPECT_NE(find(graph, "f1"), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Plugin entry (C ABI): the dlopen surface annc_optimizer consumes.
+
+TEST(GraphDefRewriterEntry, RewritesThroughTheCInterface) {
+  auto graph = parseGraph(kSampleTextGraph);
+  EXPECT_EQ(annc_graph_rewriter_abi(), 1);
+  std::ofstream out("/tmp/annc_entry_test_metadata.json", std::ios::trunc);
+  out << R"json({"fusions": [{"name": "f0", "pattern": "matmul_bias", )json"
+      R"json("kernel_name": "k0", "execution_mode": "aot", "args": [)json"
+      R"json({"role": "dynamic", "tf_name": "p", "shape": [2], "rank": 1, )json"
+      R"json("dtype": "float32"}, {"role": "constant", "tf_name": "c", )json"
+      R"json("shape": [2], "rank": 1, "dtype": "float32"}], "outputs": [)json"
+      R"json({"role": "output", "tf_name": "m:0", "shape": [2], "rank": 1, )json"
+      R"json("dtype": "float32"}]}]})json";
+  out.close();
+  const char *error = nullptr;
+  ASSERT_TRUE(annc_rewrite_graphdef_in_place(
+      &graph, "/tmp/annc_entry_test_metadata.json", "/tmp/libgenerated.so",
+      "", "", 0, &error))
+      << (error ? error : "");
+  EXPECT_NE(find(graph, "f0"), nullptr);
+}
+
+TEST(GraphDefRewriterEntry, ReportsErrorsThroughErrorOut) {
+  auto graph = parseGraph(kSampleTextGraph);
+  const char *error = nullptr;
+  EXPECT_FALSE(annc_rewrite_graphdef_in_place(
+      &graph, "/nonexistent/metadata.json", "", "", "", 0, &error));
+  EXPECT_NE(error, nullptr);
 }
 
 }  // namespace annc::converter_v2
