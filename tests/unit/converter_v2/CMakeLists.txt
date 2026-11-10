@@ -1,5 +1,6 @@
 # annc-converter-v2 unit tests (in-tree registration). The standalone build
-# registers the same suites inside the addon's CMakeLists.txt instead.
+# produces the PRELOAD plugin only — these executables need a TF symbol
+# provider, so they exist solely in the in-tree (development) build.
 find_package(GTest REQUIRED)
 include(GoogleTest)
 

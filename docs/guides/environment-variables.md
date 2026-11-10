@@ -51,6 +51,11 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | 图改写工具 `annc-tf-pipeline` 的调用超时（参数名：`timeout_seconds`）；JIT 编译工具 `annc-asm`、`annc` 也使用此环境变量，每次调用单独计时 |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
+| `ANNC_V2_REWRITE_INPROC` | `1` | 未设置 | 置 `1` 时 Grappler 改写走 v2 进程内路径：`dlopen` 加载 `libannc_graph_rewriter.so` 并调用其 C 入口；任何失败向 stderr 告警并自动回退 v1 pipeline 路径 |
+| `ANNC_V2_FUSION_METADATA` | JSON 文件路径 | 无 | v2 进程内改写的 `fusion_metadata.json` 路径（由 `annc-fusion-metadata` 产出）；未设置时 v2 改写失败并回退 |
+| `ANNC_V2_SHARED_LIB` | `.so` 路径 | 无 | v2 进程内改写的 AOT kernel 共享库 |
+| `ANNC_V2_ATIR_MODULE` | 文件路径 | 无 | v2 进程内改写的 JIT fusion-only ATIR |
+| `ANNC_V2_KERNEL_NAME` | 名称 | 无 | v2 进程内改写的 kernel 名覆盖（仅单 fusion 元数据有效） |
 
 TensorFlow Grappler 的普通 GEMM JIT 可按需配置：
 

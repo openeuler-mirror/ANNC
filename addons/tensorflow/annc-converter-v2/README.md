@@ -1,18 +1,24 @@
 # annc-converter-v2
 
 `annc-converter` 的并行重实现：把 Fusion Metadata 应用到原始 TensorFlow
-GraphDef 上，将被融合子图替换为 `ANNCFused` 自定义 Op 节点。CLI 与
-v1（`annc/tools/annc-converter`）基本一致，有意差异：
+GraphDef 上，将被融合子图替换为 `ANNCFused` 自定义 Op 节点。与 v1 的
+有意差异：
 
-- **元数据来源仅支持 `--metadata_json`**（`annc-fusion-metadata` 先从
-  融合 ATIR 导出 JSON）；v1 的 ATIR 文本直读路径不进入 v2；
+- **元数据来源仅支持 `fusion_metadata.json`**（`annc-fusion-metadata`
+  先从融合 ATIR 导出）；v1 的 ATIR 文本直读路径不进入 v2；
 - **不可落地的站点整条丢弃**（宁缺不错，stderr 告警）：输出端点不在
   原图、输入无法解析、常量型输入接到非常量节点、控制边指向被替换
-  节点、站点间循环接线；全部丢弃时写出原图并返回成功；
-- **仅支持 TensorFlow 2.x**（配置期校验；SDK 的 protobuf 头需
-  ≥ v3.22 的 `ErrorCollector` 签名）；
-- 被替换的输出节点**始终**生成 Identity 别名（v1 在仍有消费者时跳过）；
-- 输出固定为 binary GraphDef；输入支持 `.pb`/`.pbtxt`，不做 gzip。
+  节点、站点间循环接线；全部丢弃时保留原图并返回成功；
+- **仅支持 TensorFlow 2.x**；SDK 的 protobuf 头需 ≥ v3.22 的
+  `ErrorCollector` 签名；
+- 被替换的输出节点**始终**生成 Identity 别名（v1 在仍有消费者时跳过）。
+
+## 部署形态：PRELOAD 插件
+
+产物为 `libannc_graph_rewriter.so`：TF/protobuf 符号保持未定义，由
+predictor 进程加载插件时解析——构建与部署**不依赖 pip TensorFlow**。`ANNC_V2_REWRITE_INPROC=1` 时
+`ANNCOptimizer` 在 Grappler 时机通过 `dlopen` 进程内调用改写入口，失败
+自动回退 v1 pipeline 路径（env 见 [部署文档](../../../tests/tf-build-and-deploy.md)）。
 
 ## 与 v1 的差异：TF/LLVM 进程隔离
 
@@ -26,34 +32,27 @@ v1 同时链接 TF protobuf 与 annc 的 LLVM/MLIR。本工具的形态：
   契约，不解析 MLIR。
 
 `annc-tf-pipeline` 当前仍编排 v1；切换时需把 `annc-fusion-metadata`
-的 JSON 导出（现为可选 `--dump-fusion-metadata`）作为 v2 前置步骤。
+的 JSON 导出作为 v2 前置步骤。
 
 ## 构建与运行
 
-构建命令、TF 依赖变量（与 `tensorflow_addons` 同一组，`build.sh` 透传）
-见 [从源码构建 · annc-converter-v2](../../../docs/guides/build-from-source.md)。
-两点本地约束：
+构建命令见
+[从源码构建 · annc-converter-v2](../../../docs/guides/build-from-source.md)。
+部署机（standalone 插件构建）只依赖显式宿主 SDK 头，不探测任何 TF 库；
+`ANNC_DEBUG=ON` 与本组件不兼容（其全局 `-UNDEBUG` 会破坏 TF 头的链接，
+配置期报错）。
 
-- TF 头的 protobuf 生成代码在非 NDEBUG 下引用 `absl` log 模板实例，而
-  `libtensorflow_framework` 以隐藏可见性藏掉了这些实例（链接必然失败）；
-  本目录 CMake 已注入 NDEBUG，故 `ANNC_DEBUG=ON`（全局 `-UNDEBUG`）与
-  本工具不兼容，配置期报错。
-- `libtensorflow_framework.so.2` 带版本号（无开发者符号链接），构建与
-  安装的 RPATH 均写入其所在目录；运行环境库路径不同时，重新配置
-  `ANNC_TENSORFLOW_LIBRARIES` 或设 `LD_LIBRARY_PATH`。
+## 进程内改写的配置
 
-## 用法
+`ANNCOptimizer`（env 灰度）需要：
 
-```bash
-annc-converter-v2 --metadata_json fusion_metadata.json \
-  --input_graphdef input.pb --output_graphdef rewritten.pb \
-  [--shared_lib_path /path/libgenerated.so \
-   --atir_module_path /path/fusion.mlir] [--kernel_name k0] [--verbose]
-```
+- `ANNC_V2_FUSION_METADATA`：`fusion_metadata.json` 路径（由
+  `annc-fusion-metadata` 产出）；
+- `ANNC_V2_SHARED_LIB` / `ANNC_V2_ATIR_MODULE` / `ANNC_V2_KERNEL_NAME`：
+  kernel 产物路径（对应 metadata 中的 AOT/JIT fusion）。
 
-`--metadata_json` 由 `annc-fusion-metadata` 产出。输入 GraphDef 按
-binary 解析、失败后按 text 重试；输出固定 binary。重写后的图保持原图
-输出名（被替换节点处生成 Identity 别名）；站点丢弃路径直接输出原始图。
+改写后图保持原图输出名（被替换节点处生成 Identity 别名）；站点丢弃
+路径保留原图计算。
 
 ## 验证与契约
 

@@ -18,6 +18,8 @@
 
 #include "absl/strings/str_cat.h"
 
+#include "graph_rewriter_entry.h"
+
 
 namespace tensorflow {
 namespace grappler {
@@ -87,6 +89,51 @@ bool ContainsAnncFusedNode(const GraphDef& graph) {
                      [](const NodeDef& node) {
                        return node.op() == "ANNCFused";
                      });
+}
+
+// v2 in-process rewrite (ANNC_V2_REWRITE_INPROC=1): loads the PRELOAD plugin
+// libannc_graph_rewriter.so and calls its C entry; the plugin's TF/protobuf
+// symbols are resolved by this process. Any failure logs a warning and falls
+// back to the v1 pipeline path. The fusion metadata and kernel paths come
+// from ANNC_V2_FUSION_METADATA / ANNC_V2_SHARED_LIB / ANNC_V2_ATIR_MODULE /
+// ANNC_V2_KERNEL_NAME.
+// Same-source declaration from graph_rewriter_entry.h; dlsym by
+// kAnncRewriteEntryName and call through the declared signature so any
+// drift between the plugin and this caller fails the build.
+using AnncRewriteFn = decltype(&annc_rewrite_graphdef_in_place);
+
+bool V2InprocRewriteEnabled() {
+  const char* flag = std::getenv("ANNC_V2_REWRITE_INPROC");
+  return flag != nullptr && std::string(flag) == "1";
+}
+
+bool V2RewriteGraphInPlace(GraphDef* graph, std::string* error) {
+  // Deliberately never dlclose'd: the handle is cached for every later
+  // session and unloading would invalidate the plugin's static error buffer.
+  void* handle = dlopen("libannc_graph_rewriter.so", RTLD_NOW | RTLD_GLOBAL);
+  if (handle == nullptr) {
+    *error = dlerror();
+    return false;
+  }
+  auto rewrite = reinterpret_cast<AnncRewriteFn>(
+      dlsym(handle, kAnncRewriteEntryName));
+  if (rewrite == nullptr) {
+    *error = dlerror();
+    return false;
+  }
+  const char* metadata = std::getenv("ANNC_V2_FUSION_METADATA");
+  if (metadata == nullptr) {
+    *error = "ANNC_V2_FUSION_METADATA is not set";
+    return false;
+  }
+  const char* plugin_error = nullptr;
+  bool ok = rewrite(graph, metadata, std::getenv("ANNC_V2_SHARED_LIB"),
+                    std::getenv("ANNC_V2_ATIR_MODULE"),
+                    std::getenv("ANNC_V2_KERNEL_NAME"), 0, &plugin_error);
+  if (!ok) {
+    *error = plugin_error != nullptr ? plugin_error : "rewrite failed";
+  }
+  return ok;
 }
 
 }  // namespace
@@ -239,6 +286,20 @@ Status ANNCOptimizer::Optimize(Cluster* cluster,
     LOG(INFO) << "ANNCOptimizer skipping graph that already contains ANNCFused";
     *output = grappler_item.graph;
     return OkStatus();
+  }
+
+  // v2 in-process rewrite (opt-in): the PRELOAD plugin rewrites the graph
+  // inside this process; on any failure fall back to the v1 pipeline path.
+  if (V2InprocRewriteEnabled()) {
+    GraphDef rewritten = grappler_item.graph;
+    std::string v2_error;
+    if (V2RewriteGraphInPlace(&rewritten, &v2_error)) {
+      LOG(INFO) << "ANNCOptimizer v2 in-process rewrite applied";
+      *output = std::move(rewritten);
+      return OkStatus();
+    }
+    LOG(WARNING) << "v2 in-process rewrite failed: " << v2_error
+                 << ", falling back to the v1 pipeline path";
   }
 
   GraphDef input_graph = grappler_item.graph;

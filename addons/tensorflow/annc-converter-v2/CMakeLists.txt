@@ -1,28 +1,60 @@
-# annc-converter-v2: standalone TensorFlow GraphDef rewrite. TF dependency
-# resolved exactly like tensorflow_addons (same variables, forwarded by
-# build.sh), linking only libtensorflow_framework; never annc's LLVM/MLIR.
-# Standalone: cmake -S addons/tensorflow/annc-converter-v2 -B <build-dir>
+# annc-converter-v2: TensorFlow GraphDef rewrite as a host-resolved PRELOAD
+# plugin. The deployable form is libannc_graph_rewriter.so: its TF/protobuf
+# symbols stay undefined and are resolved by the predictor process at load
+# time (the tensorflow_addons ANNC_TENSORFLOW_PRELOAD mechanism), so no TF
+# library is probed or linked and pip wheels stay out of the deployment.
 # In-tree:    frontends/CMakeLists.txt under ANNC_ENABLE_TF2ATIR_V2.
+# Standalone: cmake -S addons/tensorflow/annc-converter-v2 -B <build-dir>
+#             -DANNC_TENSORFLOW_PRELOAD=ON -DANNC_TENSORFLOW_INCLUDE_DIR=<SDK>
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   cmake_minimum_required(VERSION 3.16)
   project(annc-converter-v2 LANGUAGES CXX)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED YES)
-  include(CTest)
+endif()
+
+set(_v2_standalone FALSE)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(_v2_standalone TRUE)
 endif()
 
 set(ANNC_TENSORFLOW_INCLUDE_DIR "" CACHE PATH
-  "TensorFlow header root; empty uses Python TensorFlow")
+  "Host TensorFlow SDK header root (required by the standalone plugin build)")
 set(ANNC_TENSORFLOW_LIBRARIES "" CACHE STRING
-  "TensorFlow shared libraries; empty uses Python TensorFlow")
+  "TensorFlow shared libraries for the in-tree unit tests; empty uses Python TensorFlow")
 set(ANNC_TENSORFLOW_CXX11_ABI "" CACHE STRING
   "Required _GLIBCXX_USE_CXX11_ABI value (0 or 1)")
 
-# Resolution flow of tensorflow_addons/CMakeLists.txt: explicit
-# ANNC_TENSORFLOW_* first (TF version from version.h; no Python needed when
-# both include dir and library are explicit), else Python tf.sysconfig
-# (headers, compile flags and libtensorflow_framework from one source).
+# The PRELOAD switch is defined by tensorflow_addons in-tree (default ON, the
+# serving form); standalone builds declare it here. The plugin is only
+# produced with an explicit host SDK header root at hand.
+if(_v2_standalone AND NOT DEFINED ANNC_TENSORFLOW_PRELOAD)
+  option(ANNC_TENSORFLOW_PRELOAD
+    "Build annc_graph_rewriter as a host-resolved PRELOAD plugin" OFF)
+endif()
+set(_v2_plugin OFF)
+if(ANNC_TENSORFLOW_PRELOAD
+   AND (_v2_standalone OR ANNC_TENSORFLOW_INCLUDE_DIR))
+  set(_v2_plugin ON)
+endif()
+if(_v2_standalone)
+  if(NOT ANNC_TENSORFLOW_PRELOAD)
+    message(STATUS
+      "annc-converter-v2: nothing to build in standalone mode without "
+      "ANNC_TENSORFLOW_PRELOAD=ON (the standalone form is the plugin only).")
+    return()
+  endif()
+  if(NOT ANNC_TENSORFLOW_INCLUDE_DIR)
+    message(FATAL_ERROR
+      "ANNC_TENSORFLOW_PRELOAD=ON requires an explicit ANNC_TENSORFLOW_INCLUDE_DIR "
+      "(the host SDK headers); the plugin mode never probes a Python TensorFlow.")
+  endif()
+endif()
+
+# Resolution flow of tensorflow_addons/CMakeLists.txt. Only the in-tree unit
+# tests need a symbol provider (their executables link libtensorflow_framework
+# through the core); the plugin itself compiles against headers alone.
 function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   if(NOT ANNC_TENSORFLOW_CXX11_ABI MATCHES "^[01]$")
     message(FATAL_ERROR "ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1")
@@ -149,7 +181,24 @@ function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   set(${out_compile_options} "${_compile_options}" PARENT_SCOPE)
 endfunction()
 
-annc_resolve_tensorflow(_v2_tf_include _v2_tf_framework _v2_tf_flags)
+if(_v2_plugin AND NOT _v2_standalone)
+  # In-tree plugin build: reuse whatever headers the test-oriented resolution
+  # picked (wheel or SDK); the plugin links no library either way.
+  annc_resolve_tensorflow(_v2_tf_include _v2_tf_framework _v2_tf_flags)
+  message(STATUS
+    "annc-converter-v2: plugin headers from the in-tree resolution (${_v2_tf_include})")
+elseif(_v2_plugin)
+  # Standalone plugin: headers only (same source as the host predictor).
+  get_filename_component(_v2_tf_include
+    "${ANNC_TENSORFLOW_INCLUDE_DIR}" ABSOLUTE)
+  set(_v2_tf_framework "")
+  set(_v2_tf_flags "")
+  message(STATUS
+    "annc-converter-v2: plugin headers: ${_v2_tf_include} (host SDK; no TF library probing)")
+else()
+  # In-tree without the plugin flag: resolve only for the unit tests.
+  annc_resolve_tensorflow(_v2_tf_include _v2_tf_framework _v2_tf_flags)
+endif()
 
 # nlohmann/json: in-tree target from the repo root; standalone adds
 # third_party/json.
@@ -158,30 +207,81 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/json" nlohmann_json)
 endif()
 
-# Core library shared by the unit tests and the executable (later commit).
-add_library(annc_converter_v2_core STATIC
+# Compiled once as OBJECT pieces, consumed twice: the in-tree static library
+# (which links libtensorflow_framework for the unit-test executables) and the
+# PRELOAD plugin (which must not link it).
+add_library(annc_converter_v2_core_objs OBJECT
   fusion_meta.cpp
   graphdef_rewriter.cpp
+  graph_rewriter_entry.cpp
 )
-target_include_directories(annc_converter_v2_core SYSTEM PUBLIC
+set_target_properties(annc_converter_v2_core_objs PROPERTIES
+  POSITION_INDEPENDENT_CODE ON)
+target_include_directories(annc_converter_v2_core_objs SYSTEM PUBLIC
   "${_v2_tf_include}"
   "${CMAKE_CURRENT_SOURCE_DIR}"
 )
-target_compile_features(annc_converter_v2_core PUBLIC cxx_std_17)
-target_compile_options(annc_converter_v2_core PUBLIC ${_v2_tf_flags})
-target_compile_definitions(annc_converter_v2_core PUBLIC
+target_link_libraries(annc_converter_v2_core_objs PUBLIC
+  nlohmann_json::nlohmann_json)
+target_compile_features(annc_converter_v2_core_objs PUBLIC cxx_std_17)
+target_compile_options(annc_converter_v2_core_objs PUBLIC ${_v2_tf_flags})
+target_compile_definitions(annc_converter_v2_core_objs PUBLIC
   _GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI}
+  NDEBUG
 )
 # NDEBUG is a hard requirement for every TU that includes the TF headers'
-# protobuf output (see the resolution note above); PUBLIC so dependents
-# inherit it. ANNC_DEBUG's global -UNDEBUG therefore breaks the link with
-# absl symbols the headers reference but libtensorflow_framework hides.
+# protobuf output; ANNC_DEBUG's global -UNDEBUG would re-enable the absl log
+# references those headers emit and cannot link against.
 if(ANNC_DEBUG)
   message(FATAL_ERROR
     "ANNC_DEBUG=ON is incompatible with annc-converter-v2; build with "
     "ANNC_DEBUG=OFF (standalone builds are unaffected).")
 endif()
-target_compile_definitions(annc_converter_v2_core PUBLIC NDEBUG)
+
+# Deployable PRELOAD plugin: keeps TF/protobuf symbols undefined (-z undefs
+# wins over any earlier -z defs) for the host predictor process to resolve at
+# load time.
+if(_v2_plugin)
+  add_library(annc_graph_rewriter SHARED
+    $<TARGET_OBJECTS:annc_converter_v2_core_objs>
+  )
+  # CMake 3.16 does not propagate usage requirements through
+  # $<TARGET_OBJECTS>; restate the includes here.
+  target_include_directories(annc_graph_rewriter SYSTEM PRIVATE
+    "${_v2_tf_include}"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  target_link_libraries(annc_graph_rewriter PRIVATE
+    nlohmann_json::nlohmann_json)
+  target_compile_definitions(annc_graph_rewriter PRIVATE
+    _GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI}
+    NDEBUG
+  )
+  target_link_options(annc_graph_rewriter PRIVATE
+    "-Wl,--allow-shlib-undefined" "-Wl,-z,undefs")
+  install(TARGETS annc_graph_rewriter DESTINATION lib)
+endif()
+
+if(_v2_standalone)
+  return()
+endif()
+
+# In-tree static library wrapper: carries the framework link for the unit
+# test executables (the plugin above deliberately does not inherit it).
+add_library(annc_converter_v2_core STATIC
+  $<TARGET_OBJECTS:annc_converter_v2_core_objs>
+)
+# CMake 3.16: usage requirements do not flow through $<TARGET_OBJECTS>;
+# restate the public surface for the test executables.
+target_include_directories(annc_converter_v2_core SYSTEM PUBLIC
+  "${_v2_tf_include}"
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_compile_definitions(annc_converter_v2_core PUBLIC
+  _GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI}
+  NDEBUG
+)
+target_compile_options(annc_converter_v2_core PUBLIC ${_v2_tf_flags})
 target_link_libraries(annc_converter_v2_core PUBLIC
   nlohmann_json::nlohmann_json
   "${_v2_tf_framework}"
@@ -191,45 +291,3 @@ set_target_properties(annc_converter_v2_core PROPERTIES
   BUILD_RPATH "${_v2_tf_libdir}"
   INSTALL_RPATH "${_v2_tf_libdir}"
 )
-
-add_executable(annc-converter-v2
-  main.cpp
-)
-target_link_libraries(annc-converter-v2 PRIVATE
-  annc_converter_v2_core
-)
-# RPATH must live on the executable: static-library properties do not
-# propagate, and install() would otherwise rewrite it to the global value,
-# losing the TensorFlow framework directory.
-set_target_properties(annc-converter-v2 PROPERTIES
-  BUILD_RPATH "${_v2_tf_libdir}"
-  INSTALL_RPATH "${_v2_tf_libdir}"
-)
-install(TARGETS annc-converter-v2 DESTINATION bin)
-
-# Standalone builds register the unit tests here. In-tree registration lives
-# in tests/unit/converter_v2 (tests/ owns all test registration).
-if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  find_package(GTest REQUIRED)
-  include(GoogleTest)
-  add_executable(fusion_meta_test
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/unit/converter_v2/fusion_meta_test.cpp"
-  )
-  target_link_libraries(fusion_meta_test PRIVATE
-    annc_converter_v2_core
-    GTest::gtest_main
-  )
-  gtest_discover_tests(fusion_meta_test
-    TEST_PREFIX "FusionMeta."
-  )
-  add_executable(graphdef_rewriter_test
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/unit/converter_v2/graphdef_rewriter_test.cpp"
-  )
-  target_link_libraries(graphdef_rewriter_test PRIVATE
-    annc_converter_v2_core
-    GTest::gtest_main
-  )
-  gtest_discover_tests(graphdef_rewriter_test
-    TEST_PREFIX "GraphDefRewriter."
-  )
-endif()

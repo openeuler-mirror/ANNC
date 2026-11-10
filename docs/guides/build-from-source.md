@@ -194,27 +194,30 @@ configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
 配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
 目标，不作为验证口径。
 
-#### annc-converter-v2（TensorFlow 依赖与 addons 一致）
+#### annc-converter-v2（PRELOAD 插件）
 
-同一开关构建 `annc-converter-v2`（TensorFlow GraphDef 重写工具，与 ANNC
-的 LLVM/MLIR 栈进程隔离）。TF 依赖与 `tensorflow_addons` 同一组变量与
-解析流程（`build.sh` 原样透传）：显式 `ANNC_TENSORFLOW_INCLUDE_DIR`
-（如宿主 SDK `<TF_ROOT>/install/annc-tensorflow-headers/include`）优先，
-为空回落 `python3` TensorFlow（`tf.sysconfig` 探测头/flags/
-`libtensorflow_framework`）；`ANNC_TENSORFLOW_CXX11_ABI` 必须显式设
-`0`/`1`。与 addons 的唯一差异：只链接 `libtensorflow_framework`。
+同一开关构建 `annc_graph_rewriter`（TensorFlow GraphDef 重写插件，与 ANNC
+的 LLVM/MLIR 栈进程隔离）。部署形态不链接任何 TF 库：构建只要求显式宿主
+SDK 头，TF/protobuf 符号保持未定义、由 predictor 进程加载插件时解析。
+`ANNC_TENSORFLOW_CXX11_ABI` 必须显式设 `0`/`1`。树内构建时单元测试
+（`ConverterV2.FusionMeta.*`、`ConverterV2.GraphDefRewriter*`）随 `ctest`
+注册，其可执行需要一个 TF 符号提供者（显式 `ANNC_TENSORFLOW_LIBRARIES`
+或 Python TensorFlow，与 `tensorflow_addons` 同一解析流程）；与 v1 的
+行为差异（JSON-only 元数据、站点丢弃语义、别名策略等）见
+[addons/tensorflow/annc-converter-v2/README.md](../../addons/tensorflow/annc-converter-v2/README.md)。
+
+部署机上的 standalone 插件构建（零 TF 库探测、零 Python）：
 
 ```shell
-cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON \
+cmake -S addons/tensorflow/annc-converter-v2 -B build-v2 \
+  -DANNC_TENSORFLOW_PRELOAD=ON \
   -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
   -DANNC_TENSORFLOW_CXX11_ABI=1
+cmake --build build-v2    # 产物 build-v2/libannc_graph_rewriter.so
 ```
 
-`-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与该工具不兼容
-（配置期报错）；单元测试（`FusionMeta.*`、`GraphDefRewriter.*`）随
-`ctest` 注册。与 v1 的行为差异（JSON-only 元数据、站点丢弃语义、别名
-策略等）与 CLI 用法见
-[addons/tensorflow/annc-converter-v2/README.md](../../addons/tensorflow/annc-converter-v2/README.md)。
+`-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与本组件不兼容
+（配置期报错）。
 
 ## 验证安装
 
