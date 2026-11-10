@@ -1,11 +1,12 @@
 // RUN: env ANNC_GEMM=0 annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=OFF
-// RUN: env ANNC_GEMM=1 annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=PLAIN
+// RUN: env ANNC_GEMM=1 ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS=MatMul,MatMulAdd,MatMulAddRelu annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=PLAIN
 // RUN: env ANNC_GEMM=2 annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=EPILOGUE
 // RUN: env ANNC_GEMM=3 annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=PLAIN
 // RUN: env ANNC_GEMM=99 annc-opt %s -atir-gemm-epilogue-fusion -atir-op-fusion | FileCheck %s --check-prefix=EPILOGUE
 
 // Explicit discovery supplies candidates in every case; OpFusion must consume
 // them only in Epilogue/All. Prepack must still create a plain MatMul kernel.
+// Disable explicit KDNN outlining in Basic mode to test the generated path.
 // OFF-LABEL: func.func @main(
 // OFF-NOT: call @fused_
 // OFF: "atir.MatMul"
@@ -14,15 +15,15 @@
 // OFF-NOT: func.func private @fused_
 
 // PLAIN-LABEL: func.func @main(
-// PLAIN-NOT: call @fused_matmul_
-// PLAIN: "atir.MatMul"
-// PLAIN-SAME: annc.fusion_materialized
+// PLAIN: call @fused_matmul_
+// PLAIN-NOT: "atir.MatMul"
 // PLAIN: "atir.Add"
 // PLAIN: "atir.Relu"
 // PLAIN-LABEL: func.func private @fused_matmul_
-// PLAIN-SAME: abi = "annc_context_v3"
+// PLAIN-SAME: abi = "mlir_ciface"
 // PLAIN-SAME: fusion.pattern = "matmul"
-// PLAIN: custom.op_name = "MatMul"
+// PLAIN: "atir.MatMul"
+// PLAIN-NOT: atir.Customize
 // PLAIN-NOT: "atir.Add"
 // PLAIN-NOT: "atir.Relu"
 

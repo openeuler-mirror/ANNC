@@ -1474,41 +1474,8 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
       epilogue = std::move(*parsed);
     }
 
-    // Prefer the context kernel for a plain rank-2 MatMul. Keep generated
-    // GEMM as the compatibility path for variants outside the builtin schema
-    // or when the context specialization is unavailable.
-    if (!epilogue && !matmulOp.getWithBias() && !matmulOp.getDoRelu() &&
-        !matmulOp.getRightTranspose() && !matmulOp.getLeftTranspose() &&
-        !matmulOp.getOutputTranspose() && !matmulOp.getMStart() &&
-        !matmulOp.getNStart() && !matmulOp.getKStart() &&
-        !matmulOp.getMSize() && !matmulOp.getNSize() &&
-        !matmulOp.getKSize() && !matmulOp->getAttr("rhs_format")) {
-      auto resultType = dyn_cast<atir::TensorType>(
-          matmulOp.getResult().getType());
-      auto lhsType = dyn_cast<atir::TensorType>(matmulOp.getLhs().getType());
-      auto rhsType = dyn_cast<atir::TensorType>(matmulOp.getRhs().getType());
-      if (resultType && lhsType && rhsType && resultType.hasKnownRank() &&
-          lhsType.hasKnownRank() && rhsType.hasKnownRank() &&
-          getRank(resultType) == 2 && getRank(lhsType) == 2 &&
-          getRank(rhsType) == 2) {
-        bool lhsIsDynamic =
-            hasMatchingBatchDim(matmulOp.getLhs().getType(),
-                                matmulOp.getResult().getType());
-        bool rhsIsDynamic =
-            hasMatchingBatchDim(matmulOp.getRhs().getType(),
-                                matmulOp.getResult().getType());
-        if (lhsIsDynamic == rhsIsDynamic) lhsIsDynamic = true;
-        SmallVector<Operation *> fusedOps = {matmulOp.getOperation()};
-        if (succeeded(outlineContextBuiltin(
-                module, rewriter, matmulOp, "MatMul", "matmul",
-                {matmulOp.getLhs(), matmulOp.getRhs()},
-                {matmulOp.getResult()}, fusedOps, kJitExecutionMode, 0,
-                {lhsIsDynamic ? "dynamic" : "fixed",
-                 lhsIsDynamic ? "fixed" : "dynamic"})))
-          return success();
-      }
-    }
-
+    // Preserve the generated MatMul body for GEMM lowering. Context ABI
+    // availability alone must not select the scalar builtin implementation.
     Operation *outputOp =
         epilogue ? epilogueTerminalOp(*epilogue) : matmulOp.getOperation();
     Value output = epilogue ? outputOp->getOperand(0) : matmulOp.getC();

@@ -328,6 +328,8 @@ flowchart LR
 
 Context v3 手写 builtin 的入口改写由独立的 `--lower-context-kernel-entries` 模块 pass 负责，实现在 `annc/lib/Conversion/Context/`：校验单 builtin 融合边界、解析 kernel，并将入口转换为 `(!llvm.ptr) -> i32`。AArch64 pipeline 在形状特化、FastCodegen 与输入常量折叠之后、ATIR→Linalg 之前显式执行此 pass。普通生成式 GEMM 继续使用原有调用路径，ATIR→Linalg 本身不再隐式改写 context 入口。
 
+普通二维 MatMul 的 JIT 融合保留 `atir.MatMul` 计算体和 `mlir_ciface` ABI，供后续 GEMM pipeline 选择优化实现；不能仅因存在兼容的 Context builtin 就优先替换为手写 MatMul。此约束同样适用于 epilogue 模式下没有匹配到尾算子融合的 MatMul。显式 Context builtin 和满足既有条件的 KDNN、多输出融合继续沿用各自路径。
+
 GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFlow intra-op 线程池（`ctx->device()->tensorflow_cpu_worker_threads()->workers->NumThreads()`）读取，通过 `--annc-aarch64-gemm-pipeline=intra-thread-count=N` 传给 `annc-asm` 的 GEMM lowering；Grappler/`annc-tf2atir` 阶段不再感知线程数。该 pool 在 session 创建时初始化、进程内恒定，因此线程数不进入 JIT cache key（cache 生命周期为 server 运行期，与 pool 生命周期一致）；template fingerprint（schema `annc-atir-template-v3`）亦不包含线程数，线程数只是 JIT 特化维度。直接调用工具时省略该选项则使用串行默认值（1）。
 
 > **现状注**：当前 `annc-tf-pipeline` 默认流水线执行 `annc-tf2atir [--batch_size N] -> annc-opt --atir-rank-inference --atir-identity-canonicalize --atir-gemm-epilogue-fusion --atir-op-fusion -> annc-opt --atir-prune-func=execution-mode=aot -> annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline -> annc --shared -> annc-converter`；没有 AOT kernel 时跳过 AOT 编译。`OpFusion` 创建 kernel func 时写入 `annc.execution_mode`；GEMM pattern 的 func 标记为 `jit`，其他 fusion func 标记为 `aot`。pipeline 保留完整 fusion-only ATIR 作为 JIT 模板，只将 AOT func lowering 后链接进共享库；converter 按每个 fusion 的 mode 分别写入 `shared_lib_path` 或 `atir_module_path`。运行时 JIT 根据实际输入 shape 特化当前 fusion func，并对 GEMM kernel 追加 `--annc-aarch64-gemm-pipeline=intra-thread-count=<runtime pool size>` 完成线程特化 lowering。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。
@@ -485,7 +487,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - **独立实例资源**：`resources` 与标量属性分别传递。ORT 节点实例持有可选的 packed-B，执行时向 Context 绑定只读资源引用，kernel 按资源类型和版本读取；通用 ABI 不设置 `packed_b` 专用字段，IR 与 JSON 不保存运行时指针。
 - **复用宿主线程池**：`parallel_for` 和 `num_threads` 为必需服务，`shard` 与 `native_thread_pool` 为按服务表尺寸探测的可选服务。调度在返回前完成全部任务；串行宿主提供串行实现，公共层不创建线程池。生成代码继续使用 TLS 桥接，手写 builtin 通过 Context 服务表调用宿主。
 - **错误与生命周期**：kernel 返回状态码，宿主同时检查服务记录的错误并转换为框架状态。Context 借用张量、元数据与资源，宿主须保证它们在同步调用期间有效；跨调用复用的资源由节点实例持有，待调用结束后再释放。
-- **迁移与兼容边界**：普通 MatMul、KP 融合、多输出、KDNN/packed GEMM 及四类 ONNX 融合 builtin 已迁移。普通生成代码和多个 builtin 的组合尚未整体统一为 Context，保留 `mlir_ciface` 路径。配置融合与 TF runtime 接受 `mlir_ciface` 和 `annc_context_v3`；旧 V2 产物须配套重新生成，不能只修改元数据 ABI 名称。
+- **迁移与兼容边界**：手写 MatMul builtin、KP 融合、多输出、KDNN/packed GEMM 及四类 ONNX 融合 builtin 已迁移。普通 MatMul 的生成式 GEMM 和其他普通生成代码保留 `mlir_ciface` 路径，多个 builtin 的组合尚未整体统一为 Context。配置融合与 TF runtime 接受 `mlir_ciface` 和 `annc_context_v3`；旧 V2 产物须配套重新生成，不能只修改元数据 ABI 名称。
 
 接口细节、迁移范围与各阶段验证记录见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。整体工具链统一 ABI 仍为 **proposed**；已有验证结论的适用基线和待验收项以该设计文档为准。
 

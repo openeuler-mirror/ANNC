@@ -219,8 +219,7 @@ def fusion_evidence(metadata, pattern, members, outputs, work, mode, reject=Fals
     entry = selected[0]
     assert entry["pattern"] == pattern, "Unexpected fusion metadata pattern"
     names = {str(name).split(":")[0] for name in entry["member_node_names"]}
-    expected_abi = "annc_context_v3" if pattern == "matmul" else "mlir_ciface"
-    assert entry["abi"] == target.attr["abi"].s.decode() == expected_abi
+    assert entry["abi"] == target.attr["abi"].s.decode() == "mlir_ciface"
     assert entry["execution_mode"] == mode
     assert bool(target.attr["shared_lib_path"].s) == (mode == "aot")
     assert set(members) <= names, "Missing fused members: " + str(set(members) - names)
