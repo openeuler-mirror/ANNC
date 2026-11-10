@@ -33,6 +33,18 @@ checkpoint 使用既有 ANNC_DEMO_CHECKPOINT_DIR，不匹配或不可读取的�
 AOT/手工 pass 保留 checkpoint/global 路径。默认内置 GEMM fusion 标记为
 JIT，AOT 分支按执行模式裁剪；不扩展 AOT、ONNX EP 或 execution_v2 JIT 特化。
 
+## TF1.15 接入位置
+
+TF1.15 在 `20d0f8a` 接入同一契约：`addons/tensorflow/plugin/` 保留 TF Tensor、
+代码缓存和每节点 packed RHS；`addons/tensorflow/support/` 通过 C 接口提供模式
+查询、checkpoint 准入和 JIT 编译。请求传递预打包开关及不可变 kernel 参数索引，
+结果返回随 executable 句柄有效的布局和准备入口。TF1.15 插件与 support 可以使用
+不同 C++ 标准 / ABI，资源在分配侧释放；详见[TF1.15 设计](../tensorflow-1-15-support/overall.md)。
+
+该补充不改变下文的缓存身份、权重不可变条件或所有权。TF1.15 专项入口为
+`tests/integration/tensorflow/test_tf_acceptance.py`，覆盖准入成功 / 不匹配与同模板
+不同权重。用例存在不等于目标平台验收通过。
+
 ## 缓存身份与布局
 
 代码复用既有进程级 single-flight/LRU。身份为模板、实际参数 shape、

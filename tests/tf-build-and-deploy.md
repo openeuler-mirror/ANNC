@@ -90,6 +90,14 @@ git log -1 --oneline
 
 ## 2. 构建与安装
 
+本手册的默认插件路径对应 TF2.20。构建 TF1.15 时，通过
+`ANNC_TENSORFLOW_PYTHON_EXECUTABLE` 选择匹配的 TF1.15 Python / SDK，
+按 SDK 实际 flags 设置 C++ 标准和 ABI；不能直接沿用下方示例的 ABI=1。
+TF1.15 的 optimizer / fused-op 安装于 `<ANNC_PREFIX>/lib/tensorflow/1.15/`，
+部署时同步替换 `LD_PRELOAD` 与 `ANNC_FUSED_OP_PATH`。框架入口仍是
+`--enable-tf`；配置和宿主检查见[TF SDK 构建说明](../docs/guides/build-from-source.md#tensorflow-sdk-选择与-tf115-构建)，
+功能和性能验收见[TF1.15 设计](../docs/design/tensorflow-1-15-support/overall.md)。
+
 ### 2.1 生成 TensorFlow protobuf
 
 `build.sh` 首次构建会自动生成 `tf_protos_minimal/gen_code`。直接使用 `cmake` 时先执行：
