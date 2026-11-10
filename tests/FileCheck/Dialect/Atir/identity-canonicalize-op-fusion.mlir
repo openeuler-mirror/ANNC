@@ -28,9 +28,10 @@ module @main attributes {module.state = "atir"} {
 // CHECK-LABEL: func.func @main
 // CHECK-NOT: atir.Identity
 // CHECK: %[[OUTPUT:.*]] = "atir.buffer"() : () -> !atir.tensor<2x2xf32, name = "__annc_output_0">
-// CHECK: %[[RESULT:.*]] = "atir.MatMul"(%[[OUTPUT]],
-// CHECK-SAME: annc.fusion_materialized
+// CHECK: call @fused_matmul_{{.*}}({{.*}}, {{.*}}, %[[OUTPUT]])
 // CHECK-NOT: atir.Identity
-// CHECK: return %[[RESULT]] : !atir.tensor<2x2xf32, name = "__annc_output_0">
+// CHECK: return %[[OUTPUT]] : !atir.tensor<2x2xf32, name = "__annc_output_0">
 // CHECK-LABEL: func.func private @fused_matmul_
-// CHECK-SAME: abi = "annc_context_v3"
+// CHECK-SAME: abi = "mlir_ciface"
+// CHECK: "atir.MatMul"
+// CHECK-NOT: atir.Customize
