@@ -53,7 +53,7 @@ func.func @buffer_to_alloca() {
 // CHECK-NEXT: %[[SUM:.*]] = arith.addf %[[ACC]], %[[PRODUCT]] : f32
 // CHECK-NEXT: linalg.yield %[[SUM]] : f32
 // CHECK-NEXT: } -> tensor<4x4xf32>
-// CHECK-NEXT: %[[RESULT:.*]] = bufferization.to_memref %[[GEMM]] : tensor<4x4xf32> to memref<4x4xf32>
+// CHECK-NEXT: %[[RESULT:.*]] = bufferization.to_{{memref|buffer}} %[[GEMM]] : tensor<4x4xf32> to memref<4x4xf32>
 // CHECK-NEXT: return %[[RESULT]] : memref<4x4xf32>
 func.func @matmul_bias_relu_to_linalg(
     %c: !atir.tensor<4x4xf32>, %a: !atir.tensor<4x8xf32>,
