@@ -51,6 +51,10 @@ TF GraphDef / SavedModel
 | --- | --- |
 | 残差不在 `kOpMap` / 目标未注册 | `atir.unsupported`，`reason=unknown_op` |
 | 发射后本地 verify 仍失败（哨兵修复后） | `atir.unsupported`，`reason=spec_mismatch` |
+
+`detail` 字段现状约定：恒为空串。provider 接口（match / emitMapped /
+hasMapping）不回传发射拒绝原因，driver 无从填写具体证据；下游路由只依
+赖 `reason`。待 provider 扩展拒绝原因查询后再回填，届时同步本表。
 | 已注册非残差 op | 原位保留，计入 census（`keep`） |
 
 `atir.unsupported` 字段：`opType` + 原始属性 `metadata` + `reason` + `detail`，
