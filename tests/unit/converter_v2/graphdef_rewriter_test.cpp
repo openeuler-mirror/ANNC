@@ -314,6 +314,31 @@ TEST(GraphDefRewriter, AppendsKernelArgOrderWithDuplicateInputs) {
   EXPECT_EQ(order[2], 2);
 }
 
+TEST(GraphDefRewriter, ResolvesInputsAgainstOriginalGraph) {
+  // A synthetic tfName missing from the graph whose slash variant exists in
+  // `original` must resolve there — even though the caller appends into a
+  // different output graph (the CLI flow shape); an out-based lookup would
+  // miss and keep the dangling name.
+  tensorflow::GraphDef original;
+  makeSampleGraph(original);
+  auto *xb = original.add_node();
+  xb->set_name("x/begin");
+  xb->set_op("Const");
+  (*xb->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
+
+  FusionInfo f = sampleFusion();
+  f.args = {makeArg("fixed", "c:0", {2, 2}, 2),
+            makeArg("dynamic", "x_begin", {2}, 1)};
+  ANNCFusedNodeBuilder::FusionOutputMap map;
+  ANNCFusedNodeBuilder builder(original, "", "", map);
+  tensorflow::GraphDef out;
+  tensorflow::NodeDef *fused = builder.appendNode(out, f);
+  ASSERT_NE(fused, nullptr);
+  ASSERT_EQ(fused->input_size(), 2);
+  EXPECT_EQ(fused->input(0), "c:0");      // fixed first (transport order)
+  EXPECT_EQ(fused->input(1), "x/begin");  // slash variant resolved in original
+}
+
 TEST(GraphDefRewriter, RejectsUnknownRole) {
   // A mistyped role would be silently dropped by role grouping; the builder
   // must refuse the emission instead.

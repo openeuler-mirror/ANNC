@@ -372,7 +372,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   fused->set_op("ANNCFused");
   fused->set_device(chooseFusionDevice(original, args, outputs));
   for (const FusionArg &arg : args) {
-    fused->add_input(rewriteDataInput(resolveDataName(graph, arg.tfName)));
+    fused->add_input(rewriteDataInput(resolveDataName(original, arg.tfName)));
   }
 
   auto *attrs = fused->mutable_attr();
