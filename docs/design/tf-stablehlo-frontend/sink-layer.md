@@ -82,7 +82,7 @@ string 张量 = builtin 张量 + `!atir.string` 元素类型（无 encoding）�
 
 ## 批次计划
 
-| 批次 | 内容 |
-| --- | --- |
-| 批 3 | `residue-sink` 驱动（ConversionTarget / TypeConverter / pattern 优先级 / rank gate / census）、`Passes.td`、pass 构造与统计输出 |
-| 批 4 | `annc-tf2atir-v2` 工具、端到端 FileCheck、CLI 文档 |
+| 批次 | 内容 | 状态 |
+| --- | --- | --- |
+| 批 3 | `residue-sink` 驱动（ConversionTarget / TypeConverter / pattern 优先级 / census）、`Passes.td`、pass 构造与统计输出 | 已合入 |
+| 批 4 | `annc-tf2atir-v2` 工具、端到端 FileCheck（`tf-residue-v2-sink.mlir`）、CLI 文档 | 已合入（`--op-fusion-v2` 选项随 V2 融合线另行批次） |
