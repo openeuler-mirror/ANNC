@@ -14,7 +14,10 @@
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
+
+#include "Support/CheckpointReader.h"
 
 namespace annc {
 namespace jit {
@@ -203,6 +206,88 @@ static void CleanupAnncJitWorkDir(std::string& work_dir,
   work_dir.clear();
 }
 
+std::vector<std::string> ReadAnncJitInputNames(
+    const std::string& atir_module_path, const std::string& kernel_name,
+    const std::string& template_fingerprint, int num_constants, int num_fixed,
+    int num_dynamic, AnncJitLogCallback log, void* log_context) {
+  const char* checkpoint = std::getenv("ANNC_DEMO_CHECKPOINT_DIR");
+  if (!checkpoint || !*checkpoint || num_constants + num_fixed == 0) return {};
+  std::string work_dir;
+  std::string error = CreateJitWorkDir(&work_dir);
+  AnncJitStatus status = ANNC_JIT_OK;
+  if (!error.empty()) {
+    LogJitMessage(log, log_context, 1,
+                  "[ANNC-JIT] prepack admission unavailable: " + error);
+    return {};
+  }
+  const std::string metadata_path =
+      (fs::path(work_dir) / "fusion_metadata.json").string();
+  error = RunJitTool({AnncToolPath("annc-fusion-metadata"), atir_module_path,
+                      "-o", metadata_path},
+                     "annc-fusion-metadata", log, log_context, &status);
+  std::vector<std::string> names;
+  if (error.empty()) {
+    try {
+      std::ifstream input(metadata_path);
+      nlohmann::json metadata;
+      input >> metadata;
+      const nlohmann::json* selected = nullptr;
+      for (const auto& fusion : metadata.at("fusions")) {
+        if (fusion.at("kernel_name") != kernel_name) continue;
+        if (selected) throw std::runtime_error("duplicate kernel metadata");
+        selected = &fusion;
+      }
+      if (!selected ||
+          selected->at("template_fingerprint") != template_fingerprint)
+        throw std::runtime_error("kernel metadata identity mismatch");
+      const char* roles[] = {"constant", "fixed", "dynamic"};
+      const int counts[] = {num_constants, num_fixed, num_dynamic};
+      for (int role = 0; role < 3; ++role) {
+        const size_t start = names.size();
+        for (const auto& arg : selected->at("args")) {
+          if (arg.at("role") == roles[role])
+            names.push_back(arg.at("tf_name").get<std::string>());
+        }
+        if (names.size() - start != static_cast<size_t>(counts[role]))
+          throw std::runtime_error("kernel metadata input count mismatch");
+      }
+    } catch (const std::exception& exception) {
+      error = std::string("Invalid JIT input metadata: ") + exception.what();
+    }
+  }
+  CleanupAnncJitWorkDir(work_dir, log, log_context);
+  if (!error.empty()) {
+    LogJitMessage(log, log_context, 1,
+                  "[ANNC-JIT] prepack admission unavailable: " + error);
+    return {};
+  }
+  return names;
+}
+
+void FindImmutableInputs(const std::string& atir_path,
+                         const std::string& kernel_name,
+                         const std::string& fingerprint, int constants,
+                         int fixed, int dynamic, const size_t* input_bytes,
+                         uint8_t* eligible, AnncJitLogCallback log,
+                         void* log_context) {
+  const auto names =
+      ReadAnncJitInputNames(atir_path, kernel_name, fingerprint, constants,
+                            fixed, dynamic, log, log_context);
+  if (names.size() != static_cast<size_t>(constants + fixed + dynamic)) return;
+  annc::constant_folding::RhsDataLoader loader;
+  std::vector<uint8_t> bytes;
+  for (int i = 0; i < constants + fixed; ++i) {
+    if (!input_bytes[i]) continue;
+    std::string name = names[i];
+    const auto colon = name.rfind(':');
+    if (colon != std::string::npos) {
+      if (name.substr(colon) != ":0") continue;
+      name.resize(colon);
+    }
+    eligible[i] = loader.load(name, bytes) && bytes.size() == input_bytes[i];
+  }
+}
+
 AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
                                    AnncJitKernel* kernel) {
   kernel->keep_temps = EnvFlagEnabled("ANNC_KEEP_TEMPS");
@@ -222,6 +307,17 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   const std::string lowered_mlir = (work / "kernel_lowered.mlir").string();
   const std::string packed_rhs_c = (work / "kernel_packed_rhs.c").string();
   const std::string so_path = (work / "kernel.so").string();
+  const std::string input_spec = (work / "immutable_inputs.json").string();
+  if (request.enable_prepack) {
+    std::ofstream manifest(input_spec);
+    manifest << nlohmann::json(request.immutable_arguments).dump();
+    manifest.close();
+    if (!manifest) {
+      error = "Cannot write JIT immutable input manifest";
+      CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
+      return ANNC_JIT_INTERNAL;
+    }
+  }
   error = WriteRuntimeShapeSpec(shape_spec, request.kernel_name,
                                 request.argument_shapes);
   if (!error.empty()) {
@@ -243,9 +339,9 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   const std::string fast_codegen_arg = "--atir-fast-codegen";
 #endif
   std::string gemm_pipeline_options;
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  gemm_pipeline_options += "packed-c=" + packed_rhs_c;
-#endif
+  if (request.enable_prepack)
+    gemm_pipeline_options =
+        "packed-c=" + packed_rhs_c + " jit-inputs=" + input_spec;
   if (request.intra_thread_count > 0) {
     if (!gemm_pipeline_options.empty()) gemm_pipeline_options += " ";
     gemm_pipeline_options +=
@@ -279,10 +375,10 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
 
   std::vector<std::string> link_args = {
       AnncToolPath("annc"), lowered_mlir, "--shared", "-o", so_path};
-#ifdef ANNC_ENABLE_CONSTANT_FOLDING
-  link_args.push_back("--packed-rhs-c");
-  link_args.push_back(packed_rhs_c);
-#endif
+  if (request.enable_prepack) {
+    link_args.push_back("--packed-rhs-c");
+    link_args.push_back(packed_rhs_c);
+  }
   error = RunJitTool(link_args, "annc", request.log, request.log_context, &status);
   if (!error.empty()) {
     CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
@@ -336,6 +432,25 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   if (!set_thread_pool || !get_thread_pool) {
     set_thread_pool = nullptr;
     get_thread_pool = nullptr;
+  }
+  if (request.enable_prepack) {
+    auto getter = reinterpret_cast<AnncGetPackedRhsSpecs>(
+        dlsym(handle, "annc_jit_packed_rhs_v1"));
+    auto prepare = reinterpret_cast<AnncPreparePackedRhs>(
+        dlsym(handle, "annc_jit_prepare_rhs_v1"));
+    int64_t count = -1;
+    const auto* specs = getter ? getter(&count) : nullptr;
+    if (!specs || !prepare || count < 0 ||
+        static_cast<size_t>(count) > request.immutable_arguments.size()) {
+      error = "Missing or invalid JIT packed RHS ABI v1";
+      dlclose(handle);
+      kernel->library_handle = nullptr;
+      CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
+      return ANNC_JIT_INTERNAL;
+    }
+    kernel->packed_rhs_specs = specs;
+    kernel->packed_rhs_count = static_cast<size_t>(count);
+    kernel->prepare_rhs = prepare;
   }
   kernel->kernel_function = kernel_function;
   kernel->set_thread_pool_function = set_thread_pool;

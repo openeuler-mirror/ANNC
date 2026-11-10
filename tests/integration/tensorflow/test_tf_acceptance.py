@@ -106,3 +106,8 @@ def test_tensordot_rejects(sdk, tmp_path, case):
 
 def test_tensordot_empty_batch(sdk, tmp_path):
     run_case(sdk, tmp_path, "TF-F11-dynamic-empty")
+
+
+@pytest.mark.parametrize("admission", ["eligible", "mismatch"])
+def test_jit_prepack(sdk, tmp_path, admission):
+    run_case(sdk, tmp_path, "TF-JIT-prepack-" + admission)

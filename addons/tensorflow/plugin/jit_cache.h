@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cxx_api.h"
+#include "packed_rhs.h"
 
 namespace annc {
 namespace jit {
@@ -48,6 +49,10 @@ class JitExecutable final {
   void *kernelFunction() const { return kernel_function_; }
   void *setThreadPoolFunction() const { return set_thread_pool_function_; }
   void *getThreadPoolFunction() const { return get_thread_pool_function_; }
+
+  // Immutable after publication into the process-wide code cache.
+  std::vector<AnncPackedRhsSpec> packed_rhs_specs;
+  AnncPreparePackedRhs prepare_rhs = nullptr;
 
  private:
   // The custom deleter releases support's object through the C API, keeping

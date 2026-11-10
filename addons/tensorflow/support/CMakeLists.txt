@@ -19,6 +19,13 @@ target_include_directories(annc_tensorflow_support PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}" "${_annc_root}/annc/include"
   "${_annc_root}/context/include")
 target_link_libraries(annc_tensorflow_support PRIVATE Threads::Threads dl)
+if(TARGET ANNCCheckpoint)
+  target_link_libraries(annc_tensorflow_support PRIVATE ANNCCheckpoint)
+else()
+  # Reuse the reader source when building the plugin outside the root project.
+  target_sources(annc_tensorflow_support PRIVATE
+    "${_annc_root}/annc/lib/Support/CheckpointReader.cpp")
+endif()
 if(TARGET nlohmann_json::nlohmann_json)
   target_link_libraries(annc_tensorflow_support PRIVATE nlohmann_json::nlohmann_json)
 else()
@@ -27,7 +34,4 @@ else()
 endif()
 if(ANNC_ENABLE_KDNN_ADAPTOR)
   target_compile_definitions(annc_tensorflow_support PRIVATE ANNC_ENABLE_KDNN_ADAPTOR)
-endif()
-if(ANNC_ENABLE_CONSTANT_FOLDING)
-  target_compile_definitions(annc_tensorflow_support PRIVATE ANNC_ENABLE_CONSTANT_FOLDING)
 endif()
