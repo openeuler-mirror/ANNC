@@ -28,6 +28,20 @@ function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   endif()
 
   set(_compile_options)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "import tensorflow as tf; print(tf.__version__)"
+    OUTPUT_VARIABLE _tf_version
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _tf_version_result
+    ERROR_QUIET)
+  if(NOT _tf_version_result EQUAL 0 OR NOT _tf_version MATCHES "^2\.")
+    message(FATAL_ERROR
+      "annc-converter-v2 supports TensorFlow 2.x only; got "
+      "'${_tf_version}'. The TF 1.15 line lives in "
+      "tensorflow_addons/plugin/1_15.")
+  endif()
   if(ANNC_TENSORFLOW_INCLUDE_DIR)
     get_filename_component(_include_dir
       "${ANNC_TENSORFLOW_INCLUDE_DIR}" ABSOLUTE)
@@ -58,7 +72,7 @@ function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
     endif()
     separate_arguments(_compile_flags UNIX_COMMAND "${_compile_flags_string}")
     foreach(_flag IN LISTS _compile_flags)
-      if(NOT _flag MATCHES "^-I" AND NOT _flag MATCHES "^--std="
+      if(NOT _flag MATCHES "^-I" AND NOT _flag MATCHES "^--?std="
          AND NOT _flag MATCHES "_GLIBCXX_USE_CXX11_ABI")
         list(APPEND _compile_options "${_flag}")
       endif()
