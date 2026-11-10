@@ -1794,9 +1794,8 @@ def Atir_UnsupportedOp : Atir_Op<"unsupported"> {
     `opType` stores the source op name,
     `metadata` preserves source attrs verbatim,
     operands/results keep converted types.
-    `reason` classifies each residue op — `unknown_op` (no mapping),
-    `unrank_blocked` (rank unknown; retry once rank facts exist),
-    or `spec_mismatch` (shape/arity contract rejected the build).
+    `reason` classifies each residue op — `unknown_op` (no mapping) or
+    `spec_mismatch` (shape/arity contract rejected the build).
     `detail` holds a human-readable evidence snippet.
   }];
   let arguments = (ins StrAttr:$opType,
