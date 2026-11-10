@@ -116,11 +116,12 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
+| `ANNC_TENSORFLOW_PYTHON_EXECUTABLE` | Python 解释器路径 | `build.sh` 跟随 `PYTHON`；CMake 跟随 `Python3_EXECUTABLE` | 查询目标 TF 版本 / SDK，当前接受 1.15.x 或 2.20.x；一次构建一个版本 |
+| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | 宿主提供 TF 符号；为 `ON` 时不得设置 `ANNC_TENSORFLOW_LIBRARIES`；`OFF` 显式链接同 SDK 库 |
 | `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
-| `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 自动检测 | TensorFlow 插件的 C++11 ABI，可显式指定 |
-| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 自动检测 | TensorFlow 插件的 C++ 标准，可显式指定 |
+| `ANNC_TENSORFLOW_LIBRARIES` | 分号分隔的 TF 库路径 | 空 | linked 模式使用；TF1.15 要求恰好一份 cc 与 framework，空值从目标 Python 库目录查找 |
+| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 从 SDK 探测 | 未报告时须显式指定；与探测值冲突会报错，仅影响 TF 插件侧 |
+| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 从 SDK 探测 | 未报告时须显式指定；TF1.15 接受 14/17，与探测值冲突会报错 |
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |

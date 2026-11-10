@@ -17,7 +17,7 @@ annc-partition --version
 
 ## 端到端 GraphDef 重写
 
-`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：普通 GEMM pattern 默认走 JIT；TF `tensordot_matmul` 在输入形状全静态时走 AOT、含动态维度时走 JIT，其他 fusion 以各 pattern 的执行模式为准。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
 
 > **GEMM 融合需要先打开开关**：`ANNC_GEMM` 未设置时默认为 `0`，`OpFusion` 不做 MatMul/GEMM 融合，也不会产生 JIT kernel，且不会报错。需要 GEMM 融合时先 `export ANNC_GEMM=1`（plain MatMul）或 `ANNC_GEMM=2`（追加 epilogue 尾融合）。取值与依赖见[环境变量参考](environment-variables.md)。
 

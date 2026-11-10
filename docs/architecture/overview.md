@@ -1,8 +1,8 @@
 # ANNC 架构设计文档
 
 > **文档编号**：ANNC-ARCH-001\
-> **文档版本**：v3.10\
-> **发布日期**：2026-11-07\
+> **文档版本**：v3.11\
+> **发布日期**：2026-11-11\
 > **目标受众**：架构评审、产品经理、开发工程师、测试工程师、运维工程师\
 > **文档密级**：公开
 
@@ -11,6 +11,8 @@
 ## 1 概述
 
 > ONNX Runtime EP 的运行时编译接入设计见 [ANNC ORT EP 与 ONNX Pipeline 运行时编译适配设计](../design/onnx-support/ep-design.md)。该设计补充 OrtGraph 导出、pipeline、site ABI、缓存原子发布和 CPU fallback 契约。
+
+> TF1.15 接入结构按 `20d0f8a` 更新，SDK / C ABI 边界、tensordot AOT/JIT 与验收范围见 [TF1.15 设计](../design/tensorflow-1-15-support/overall.md)。
 
 ### 1.1 目的
 
@@ -214,7 +216,7 @@ flowchart TB
 | **前端适配覆盖度**         | TF 前端完整；ONNX 前端已落地（覆盖融合子图所需算子子集），PyTorch 未纳入 | 优先覆盖客户量最大的框架，通过 NodeInfo 抽象降低边际适配成本 |
 | **TF Serving 启动时延** | 首次加载模型需执行编译 pipeline                 | 离线预编译、图优化缓存（未来）、合理设置 timeout        |
 | **磁盘空间**            | ANNC 构建目录约 1–3GB（LLVM/MLIR 由系统包提供） | 构建机独立环境、增量构建                        |
-| **构建环境**            | 依赖 openEuler、鲲鹏 920X、TensorFlow 2.20 | 明确依赖清单，提供 build.sh 一键构建             |
+| **构建环境**            | 依赖 openEuler、鲲鹏 920X；TF SDK 选择 1.15 或 2.20，TF1.15 + ORT EP 组合当前拒绝 | 明确依赖清单，提供 build.sh 一键构建             |
 | **运维监控**            | 需要观察编译失败、超时、回退事件                     | 统一日志、关键事件埋点                         |
 | **模型兼容性**           | 部分 TF 算子/动态 shape 可能不支持              | 失败自动回退，持续扩展算子覆盖                     |
 
@@ -332,7 +334,7 @@ Context v3 手写 builtin 的入口改写由独立的 `--lower-context-kernel-en
 
 GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFlow intra-op 线程池（`ctx->device()->tensorflow_cpu_worker_threads()->workers->NumThreads()`）读取，通过 `--annc-aarch64-gemm-pipeline=intra-thread-count=N` 传给 `annc-asm` 的 GEMM lowering；Grappler/`annc-tf2atir` 阶段不再感知线程数。该 pool 在 session 创建时初始化、进程内恒定，因此线程数不进入 JIT cache key（cache 生命周期为 server 运行期，与 pool 生命周期一致）；template fingerprint（schema `annc-atir-template-v3`）亦不包含线程数，线程数只是 JIT 特化维度。直接调用工具时省略该选项则使用串行默认值（1）。
 
-> **现状注**：当前 `annc-tf-pipeline` 默认流水线执行 `annc-tf2atir [--batch_size N] -> annc-opt --atir-rank-inference --atir-identity-canonicalize --atir-gemm-epilogue-fusion --atir-op-fusion -> annc-opt --atir-prune-func=execution-mode=aot -> annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline -> annc --shared -> annc-converter`；没有 AOT kernel 时跳过 AOT 编译。`OpFusion` 创建 kernel func 时写入 `annc.execution_mode`；GEMM pattern 的 func 标记为 `jit`，其他 fusion func 标记为 `aot`。pipeline 保留完整 fusion-only ATIR 作为 JIT 模板，只将 AOT func lowering 后链接进共享库；converter 按每个 fusion 的 mode 分别写入 `shared_lib_path` 或 `atir_module_path`。运行时 JIT 根据实际输入 shape 特化当前 fusion func，并对 GEMM kernel 追加 `--annc-aarch64-gemm-pipeline=intra-thread-count=<runtime pool size>` 完成线程特化 lowering。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。
+> **现状注**：当前 `annc-tf-pipeline` 默认流水线执行 `annc-tf2atir [--batch_size N] -> annc-opt --atir-rank-inference --atir-identity-canonicalize --atir-gemm-epilogue-fusion --atir-op-fusion -> annc-opt --atir-prune-func=execution-mode=aot -> annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline -> annc --shared -> annc-converter`；没有 AOT kernel 时跳过 AOT 编译。`OpFusion` 创建 kernel func 时写入 `annc.execution_mode`；普通 GEMM pattern 的 func 标记为 `jit`；TF `tensordot_matmul` 根据输入形状选择静态 AOT 或动态 JIT，其他模式以各 pattern 写入的属性为准。pipeline 保留完整 fusion-only ATIR 作为 JIT 模板，只将 AOT func lowering 后链接进共享库；converter 按每个 fusion 的 mode 分别写入 `shared_lib_path` 或 `atir_module_path`。运行时 JIT 根据实际输入 shape 特化当前 fusion func，并对 GEMM kernel 追加 `--annc-aarch64-gemm-pipeline=intra-thread-count=<runtime pool size>` 完成线程特化 lowering。Identity canonicalization 在 ATIR 层移除 descriptor 语义等价的 Identity 透传，避免融合模式依赖 TF 前端的图形特化；Identity 结果可以有多个使用者，删除时统一替换为原输入。未指定 `--batch_size` 时直接保留 GraphDef 中解析出的维度，包括动态维度；只有显式指定正数时才覆盖动态 batch 维度。converter 直接从融合后的 ATIR 提取 metadata；仅传入 `--dump-fusion-metadata` 时额外执行 `annc-fusion-metadata` 写出 JSON（编译期定义 `ANNC_ENABLE_KDNN_ADAPTOR` 时，`--atir-fast-codegen` 替换为 `--atir-fast-codegen=enable-kdnn=true`）。
 
 #### 4.1.3 编译时与运行时边界
 
@@ -587,7 +589,7 @@ sequenceDiagram
 
 | 模块                                | 职责                            | 对外接口                                        | 所属层        | 稳定性 |
 | --------------------------------- | ----------------------------- | ------------------------------------------- | ---------- | --- |
-| `annc/tools/annc-tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N] [--intra_thread_count N]`（未指定时保留动态 shape；线程数写入 module 属性） | ANNC 框架对接层 | 稳定  |
+| `frontends/tensorflow/tf2atir`         | TF GraphDef → ATIR MLIR       | CLI：`annc-tf2atir <input.pb> [--batch_size N]`（未指定时保留动态 shape；JIT 线程数由运行时传给 lowering） | ANNC 框架对接层 | 稳定  |
 | `frontends/onnx/onnx2atir`        | ONNX 模型 → ATIR MLIR           | CLI：`annc-onnx2atir <model.onnx> [-o out.mlir] [--dump-stats JSON] [--dump-inference JSON] [--strict] [--relaxed-opset] [--quiet]`；op 覆盖为目标融合子图所需子集，不支持控制流 | ANNC 框架对接层 | 早期  |
 | `addons/onnxruntime`              | ONNX Runtime EP 插件（运行时编译 + 融合回接）   | ORT：`Env::RegisterExecutionProviderLibrary` + `SessionOptions::AppendExecutionProvider_V2`；导出 `CreateEpFactories` / `ReleaseEpFactory`；支持普通 `mlir_ciface` 与通用 `annc_context_v3`，四类 builtin 经单 context 调用（分配/错误/ORT 调度使用 C 服务表，ADR-022）；开关 `ANNC_ENABLE_ONNXRUNTIME_EP` 默认关闭 | ANNC 框架对接层 | 早期  |
 | `annc/tools/annc-opt`             | ATIR 规范化、优化与融合             | CLI：`annc-opt --atir-identity-canonicalize --atir-op-fusion`（默认流水线用；另暴露完整 pass 集） | 工具链前端      | 稳定  |
@@ -596,27 +598,27 @@ sequenceDiagram
 | `annc/tools/annc-verify`          | 验证 kernel 正确性                  | CLI：`annc-verify output.bin --atir-op-verify="kpGenLibPath=..."` | 工具链前端      | 早期  |
 | `annc/tools/annc-asm`             | ATIR lowering                 | CLI：`annc-asm --atir-fast-codegen --annc-aarch64-gemm-pipeline` | 工具链后端 | 稳定 |
 | `annc/tools/annc`                 | 编译 driver                     | CLI：`annc --shared -o kernel.so`            | 工具链后端      | 稳定  |
-| `annc/tools/annc-converter`       | GraphDef 图重写                    | CLI：`annc-converter --input_graphdef ...` | ANNC 框架对接层 | 稳定  |
-| `annc/tools/annc-tf-pipeline`     | 端到端编排                         | CLI：`annc-tf-pipeline --input_graphdef ...` | 编排         | 稳定  |
+| `frontends/tensorflow/converter`       | GraphDef 图重写                    | CLI：`annc-converter --input_graphdef ...` | ANNC 框架对接层 | 稳定  |
+| `frontends/tensorflow/tf-pipeline`     | 端到端编排                         | CLI：`annc-tf-pipeline --input_graphdef ...` | 编排         | 稳定  |
 | `annc/tools/annc-onnx-pipeline`   | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告 | CLI：`annc-onnx-pipeline --model <model.onnx> --out-dir <dir> [--execution-modes aot] [--work-dir <dir>] [--keep-temps] [--verbose]`；产出 `sites.json`（融合区域成员名单与站点契约）供 EP 运行时编译消费 | 编排         | 早期  |
-| `tensorflow_addons`               | TF Grappler 插件 + ANNCFused Op | TF CustomGraphOptimizer / OpKernel          | ANNC 框架对接层 | 稳定  |
+| `addons/tensorflow/plugin`（TF1.15）、`tensorflow_addons`（TF2.20） | TF Grappler 插件 + ANNCFused Op | TF CustomGraphOptimizer / OpKernel          | ANNC 框架对接层 | 稳定  |
 | `context`                        | 框架无关的上下文与运行时服务协议 | C ABI、`KernelContext`、`ANNCContext` | 通用运行时接口 | v3 |
-| `tensorflow_addons/context`      | Tensor 与 Context 的适配及资源管理 | TF Tensor/分配/错误/线程池 → C 服务表 | ANNC 框架对接层 | v3 |
+| `addons/tensorflow/plugin/fused_op_context.cc`（TF1.15）、`tensorflow_addons/context`（TF2.20） | Tensor 与 Context 的适配及资源管理 | TF Tensor/分配/错误/线程池 → C 服务表 | ANNC 框架对接层 | v3 |
 | `annc/lib/Kernel`                 | Kernel 注册与线程池                 | C++ API：`KernelRegistry`、`AnncThreadPool`   | 工具链后端      | 稳定  |
 
 #### 4.5.2 模块调用关系
 
 ```mermaid
 flowchart TB
-    A[tensorflow_addons/ANNCOptimizer] -->|fork/exec| B[annc-tf-pipeline]
+    A[TF 插件 ANNCOptimizer] -->|fork/exec| B[annc-tf-pipeline]
     B --> C[annc-tf2atir]
     B --> D[annc-opt]
-    B --> E[annc-fusion-metadata]
+    B -->|dump-fusion-metadata 时| E[annc-fusion-metadata]
     B --> F[annc-asm]
     B --> G[annc]
     B --> H[annc-converter]
-    A --> I[tensorflow_addons/ANNCFusedOp]
-    I --> J[annc_generated_kernel.so]
+    A -->|返回改写图，由 TF 调度| I[TF 插件 ANNCFusedOp]
+    I --> J[AOT 共享库或 JIT kernel.so]
     J --> K[annc/lib/Kernel]
 ```
 
@@ -803,7 +805,7 @@ flowchart TB
 
 ### 7.5 兼容性
 
-- **TF 版本兼容**：当前基于 TensorFlow 2.20，Grappler 接口稳定。
+- **TF 版本兼容**：构建选择 TensorFlow 1.15.x 或 2.20.x，插件须匹配宿主 SDK、C++ 标准与 ABI；验收范围见 TF1.15 设计与运行时接入说明。
 - **GraphDef 兼容**：重写后的 GraphDef 保留原始节点属性，失败时可回退。
 - **旧产物兼容**：`ANNCFusedOp` 支持 legacy `kernel_arg_order` 重排。
 
@@ -865,7 +867,7 @@ flowchart TB
 
 - 目标硬件为 AArch64 服务器（当前优先支持鲲鹏 920X），未来可扩展至其他 CPU 架构。
 - 目标操作系统为 openEuler 24.03 LTS SP4（系统 `llvm-toolset-20`）或 22.03 LTS SP4（需自建 LLVM/MLIR 20/21）。
-- 用户已安装 TensorFlow 2.20.0、pybind11、nanobind。
+- 用户已准备所选 TensorFlow 1.15.x / 2.20.x SDK；仅构建 Python 绑定时需要 pybind11、nanobind。
 - 构建环境具备足够的编译内存（ANNC 构建目录约数 GB）。
 - 构建依赖还包括 protobuf-devel、gtest-devel、ninja-build、LLVM/MLIR 20/21 工具链（24.03 为 `llvm-toolset-20`，含 clang 与 MLIR Python 绑定源码；22.03 需自建）；nlohmann/json v3.11.3 由 CMake FetchContent 获取。
 
@@ -989,3 +991,4 @@ flowchart TB
 | v3.8 | 2026-10-31 | liuchang | 将 GEMM epilogue 生成迁入私有二进制 codegen 包，公开后端通过版本化请求与临时 object 接入 |
 | v3.9 | 2026-11-04 | liyancheng | 登记 `annc-partition` CLI 骨架（薄入口与 `PartitionTask` 任务对象，各模块阶段为最小类占位），明确真实切分能力尚未实现 |
 | v3.10 | 2026-11-07 | liyancheng | `annc-partition` 参数解释迁移至 LLVM `cl::opt` 声明式选项表（新增 `CliOptions` 模块），`--help` 选项区与参数严格性由选项表派生 |
+| v3.11 | 2026-11-11 | yly | 按 `20d0f8a` 同步 TF1.15 插件与前端目录、SDK 选择及 tensordot 静态 AOT / 动态 JIT；详细 ABI 与验收范围见 TF1.15 设计 |

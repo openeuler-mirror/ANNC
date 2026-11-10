@@ -43,7 +43,7 @@ export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
 
 自建的安装树同样适用。若直接使用 LLVM 构建树而不安装，MLIR 的配置位于 `<llvm-build>/tools/mlir/cmake/modules`，需显式传 `-DMLIR_DIR`（该布局不在 `ANNC_LLVM_BIN` 的前缀推断范围内）。
 
-然后配置并构建。默认启用 TensorFlow addon，ABI 和 C++ 标准自动检测：
+然后配置并构建。默认启用 TensorFlow addon，版本、ABI 和 C++ 标准从所选 TF Python 检测；SDK 未报告 ABI 或标准时需显式指定，见下文 TF SDK 配置。
 
 ```shell
 mkdir -p build && cd build
@@ -63,7 +63,7 @@ ninja && ninja install
 - `--clean`：清理构建目录后重新构建
 - `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
 - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party 保持原构建类型、不重编
-- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
+- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建所选 TF + ORT 加速栈（当前拒绝 TF1.15 + ORT EP）。TF 版本从目标 Python 检测，一次只构建一个版本；不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
 - `--dry-run`：打印解析后的框架开关并退出，不 configure/build
 - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
 - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
@@ -81,7 +81,7 @@ ninja && ninja install
 |---|---|---|---|
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并编译预生成的 TF proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-tensorflow` |
-| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
+| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建所选版本的 TF 插件与 JIT 缓存，安装 optimizer / fused-op；测试由 `BUILD_TESTING` 控制；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并编译预生成的 ONNX proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
 | `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
@@ -101,6 +101,40 @@ ninja && ninja install
 | `ANNC_ENABLE_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 stablehlo artifact sink 层（v1.9.7 Embedded 模式，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）；TF stablehlo 前端 / stablehlo sink 迁移线的依赖，见下文「StableHLO artifact sink 层」 |
 
 所有框架组合都会构建通用 `annc-partition` 查询入口。当前该目标仅提供占位流程（各阶段返回 `not implemented`），不注册真实 TF 切分能力，也不改变既有前端、addon 或后端开关。
+
+### TensorFlow SDK 选择与 TF1.15 构建
+
+命令在仓库根目录执行。先准备可导入 TF1.15 的目标 Python、匹配的 SDK / 运行库及其 Python 依赖；通用 `requirements.txt` 固定为 `tensorflow==2.20.0`，不能用来安装 TF1.15。TF2.20 同样通过目标 Python 选择，当前构建入口仅接受 1.15.x / 2.20.x。
+
+```shell
+export ANNC_TENSORFLOW_PYTHON_EXECUTABLE=/path/to/tf115/bin/python
+./build.sh --enable-tf --build-type Release --install-prefix "$HOME/ANNC-tf115"
+```
+
+`ANNC_TENSORFLOW_PYTHON_EXECUTABLE` 默认跟随 `build.sh` 的 `PYTHON`；直接调用 CMake 时默认跟随 `Python3_EXECUTABLE`。TF Python 与 ANNC Python 绑定 / 测试解释器可以分开。已有构建缓存与新 SDK 参数不一致时，按脚本提示加 `--clean` 重新配置。
+
+| 配置 | 取值及检查 |
+| --- | --- |
+| `ANNC_TENSORFLOW_CXX_STANDARD` | 从 SDK 编译 flags 探测；TF1.15 接受 `14` / `17`，未报告时必须按 SDK 实际设置显式提供 |
+| `ANNC_TENSORFLOW_CXX11_ABI` | 从 SDK 探测 `0` / `1`；未报告时显式提供，与探测值冲突会报错 |
+| `ANNC_TENSORFLOW_INCLUDE_DIR` | 默认取目标 Python 的 include；显式目录须包含匹配的版本头文件 |
+| `ANNC_TENSORFLOW_PRELOAD` | 默认 `ON`，宿主提供 TF 符号；`OFF` 为显式链接 |
+| `ANNC_TENSORFLOW_LIBRARIES` | 仅 linked 模式使用；TF1.15 要求一份 `libtensorflow_cc` 和一份 `libtensorflow_framework`，分号分隔；为空时在目标 Python 的库目录查找 |
+
+这些变量可由 `build.sh` 从环境传入，也可直接作为 CMake 的 `-D` 参数。TF1.15 的头文件、库和宿主必须属于同一 SDK；默认 preload 模式不得设置库列表。原生 GEMM / 预打包的依赖另见下节。
+
+TF1.15 插件目标为 `annc_optimizer_1_15` / `annc_fused_op_1_15`，文件仍名为 `libannc_optimizer.so` / `libannc_fused_op.so`，构建和安装均位于 `lib/tensorflow/1.15/`。TF2.20 仍使用 `tensorflow_addons/` 和 `${CMAKE_INSTALL_LIBDIR}/` 安装目录。两版需分别构建；当前没有版本专用 `--enable-tf1_15` / `--enable-tf2_20` 开关。
+
+TF1.15 的插件与缓存按 SDK 标准 / ABI 编译，`annc_tensorflow_support` 固定 C++17 / ABI=1，通过 C 接口相连。不要将 SDK 的 ABI 设置扩散到 LLVM/MLIR 或全部 ANNC 目标。接口及生命周期见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md)。
+
+安装后，TF1.15 的 `ANNC_FUSED_OP_PATH` 应指向 `<prefix>/lib/tensorflow/1.15/libannc_fused_op.so`，preload 宿主的 optimizer 路径也使用该目录。实际宿主检查先核对注册项，再运行：
+
+```shell
+ctest --test-dir build -N
+ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
+```
+
+需启用 `BUILD_TESTING` 并构建测试目标。preload 使用目标 Python 宿主，linked 使用同 SDK 的 C++ Session；两种模式需分别配置验证。源码中的 SDK 配置 pytest 使用模拟 SDK，不能替代此处实际加载与执行。
 
 ### GEMM-ASM 完整包
 

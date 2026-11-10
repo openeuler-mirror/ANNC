@@ -3,9 +3,9 @@
 | 文档控制项 | 内容 |
 | ----- | ----- |
 | 文档编号 | ANNC-ARCH-002 |
-| 版本与日期 | 1.0，2026-10-20 |
+| 版本与日期 | 1.1，2026-11-11 |
 | 文档状态 | 架构说明。描述 TensorFlow 与 ONNX Runtime 两条运行时接入路径的产物契约与执行方式 |
-| 设计基线 | `tensorflow_addons/`、`addons/onnxruntime/`（源码基线 `11bef0d0`，分支 `upstream/dev`） |
+| 设计基线 | TF1.15 接入更新至 `20d0f8a`；TF2.20 仍在 `tensorflow_addons/`，ORT 接入见独立设计 |
 | 责任人 | 编译器开发团队 |
 | 上级文档 | [ANNC 架构设计文档](overview.md) |
 
@@ -13,20 +13,26 @@
 
 ## TensorFlow 接入
 
-`tensorflow_addons/` 提供 Grappler 插件和 `ANNCFused` 自定义 TensorFlow Op。
+TF1.15 由 `addons/tensorflow/plugin/` 提供 Grappler 优化器和 `ANNCFused`；本基线 TF2.20 仍由 `tensorflow_addons/` 提供。构建从目标 Python 选择一个 TF 版本，两版共用 `frontends/tensorflow/` 中的独立编译工具。
 
-| 文件 | 说明 |
-|------|------|
-| `tensorflow_addons/annc_optimizer.cc` | Grappler 优化器插件，自动调用 `annc-tf-pipeline` 重写计算图 |
-| `tensorflow_addons/context/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
-| `tensorflow_addons/annc_fused_op_register.cc` | 注册 `ANNCFused` Op |
-| `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
+| 职责 | TF1.15 | TF2.20（本基线） |
+| --- | --- | --- |
+| 优化器与注册 | `plugin/optimizer.cc`、`optimizer_register.cc` | `tensorflow_addons/annc_optimizer.cc`、`annc_optimizer_register.cc` |
+| Op 与 Context 适配 | `plugin/fused_op.cc`、`fused_op_context.cc` | `tensorflow_addons/context/annc_fused_op.cc`、`annc_fused_op_context.cc` |
+| Op 注册 | `plugin/fused_op_register.cc` | `tensorflow_addons/annc_fused_op_register.cc` |
+| JIT 编译与线程池桥接 | `addons/tensorflow/support/`，经 C 接口调用 | 旧插件内实现 |
+
+表中的 `plugin/` 相对 `addons/tensorflow/`。TF1.15 插件匹配 SDK 标准及 ABI，support 固定 C++17 / ABI=1，通过借用数组、回调和不透明句柄交互。插件安装在 `lib/tensorflow/1.15/`；优化器默认从自身目录加载 fused-op。SDK 选择、所有权与线程池生命周期见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md)。
+
+优化器调用 pipeline 失败、重写结果无法读取或补默认属性失败时返回原图。成功改写后的 `ANNCFused` 执行错误返回 TF 状态，不承诺运行时重新执行原子图。
 
 ### AOT 与 JIT
 
-Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 AOT 共享库 `annc_generated_kernel.so` 与 fusion-only ATIR。重写后的 GraphDef 按 fusion 的 `execution_mode` 写不同 attr：**AOT 节点**写 `shared_lib_path`（指向该 `.so`）且 `atir_module_path` 为空，运行时 `dlopen` 加载；**JIT 节点**（GEMM 家族）写 `shared_lib_path=""` 与 `atir_module_path`（fusion-only ATIR 的绝对路径），运行时按实际 shape 现场编译，因此 AOT 节点需保留 `.so`，JIT 节点需保留 ATIR module；纯 JIT 模型可能不产生 `.so`。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
+Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 AOT 共享库 `annc_generated_kernel.so` 与 fusion-only ATIR。重写后的 GraphDef 按 fusion 的 `execution_mode` 写不同 attr：**AOT 节点**写 `shared_lib_path`（指向该 `.so`）且 `atir_module_path` 为空，运行时 `dlopen` 加载；**JIT 节点**（如普通 GEMM、动态形状 tensordot）写 `shared_lib_path=""` 与 `atir_module_path`（fusion-only ATIR 的绝对路径），运行时按实际 shape 现场编译，因此 AOT 节点需保留 `.so`，JIT 节点需保留 ATIR module；纯 JIT 模型可能不产生 `.so`。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
 
-GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运行时按实际 shape
+TF `tensordot_matmul` 对整段展平、MatMul、恢复形状做融合，静态输入形状走 AOT，动态形状走 JIT；两者均为 `mlir_ciface`，经公共 GEMM lowering 生成代码。其匹配条件见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md#41-整段-tensordot-如何识别与执行)。
+
+JIT GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运行时按实际 shape
 同步执行 `annc-asm` 与 `annc`。进程内有界缓存复用编译产物，预打包模式下每个
 `ANNCFusedOp` 独立持有 packed RHS。模板指纹、缓存身份、预打包准入与权重生命周期
 见[JIT 代码与预打包权重分离实现契约](../design/jit-constant-folding/cache-separation.md)。
@@ -40,7 +46,7 @@ MatMul fusion metadata 保持 `ANNCFused` 的运行时输入约定：fixed shape
 
 ### 日志与输出初始化
 
-`ANNCFused` 运行时默认只保留错误日志，避免 Serving 并发请求时 INFO 调试日志影响吞吐和日志可读性。`dlopen`/`dlsym` 以及兼容 `mlir_ciface` 路径的 memref 构造、输出分配、参数顺序和 kernel 调用失败会输出 `LOG(ERROR)`；上下文 ABI 路径的错误通过 status/执行上下文返回，不保证写日志。若另有 Serving 侧的 addon 副本（`tensorflow_serving_addons`，不在本仓库），需与 `tensorflow_addons` 保持对应修改一致。
+`ANNCFused` 运行时默认只保留错误日志，避免 Serving 并发请求时 INFO 调试日志影响吞吐和日志可读性。`dlopen`/`dlsym` 以及兼容 `mlir_ciface` 路径的 memref 构造、输出分配、参数顺序和 kernel 调用失败会输出 `LOG(ERROR)`；上下文 ABI 路径的错误通过 status/执行上下文返回，不保证写日志。若另有 Serving 侧的 addon 副本（`tensorflow_serving_addons`，不在本仓库），需与所选 TF 版本的插件实现保持对应修改一致。
 
 `ANNCFused` 通过 `zero_initialize_outputs` 控制输出 Tensor 是否在调用 kernel 前清零。该 attr 默认 `true`，保持旧 GraphDef 和非全量写输出 kernel 的保守行为；运行时对 `fusion_pattern=dnn_embedding_hash_bucket` 自动关闭清零，因为生成的 embedding kernel 会完整覆盖 `[batch, embedding_dim]` 输出，跳过清零可消除 `avg_output_init` 带来的主要包装层开销。该优化不要求 GraphDef 写入新 attr，避免不同 Serving OpDef 版本下 unknown attr 被忽略。
 

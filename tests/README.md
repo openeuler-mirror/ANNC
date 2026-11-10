@@ -65,6 +65,9 @@ ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 python3 -m pytest tests/integration/cmake/test_tf_plugin_sdk.py -q
 ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
 
+# TF1.15 专项：MatMul、整段 tensordot、反例与 JIT 权重隔离
+ANNC_REQUIRE_E2E=1 python3 -m pytest tests/integration/tensorflow/test_tf_acceptance.py -v
+
 # Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
 ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
 ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
@@ -88,6 +91,12 @@ bash tests/FileCheck/run.sh
   TF1.15 宿主测试在 AArch64 上加载真实插件。preload 模式使用所选 SDK 的 Python，
   linked 模式使用链接到 SDK 两个库的 C++ Session。两种模式执行同一张图，
   将 `ANNCFused` 输出与原生 `Add` 逐元素比较。
+- `integration/tensorflow/test_tf_acceptance.py` 从 `ANNC_BUILD_DIR`（默认 `build/`）
+  的 CMakeCache 读取目标 TF Python，调用兼容 Python 3.7 的 runner；收集测试只需
+  pytest，实际执行需 TF1.15 / NumPy、插件、ANNC 工具和 AArch64 GEMM 依赖。
+  缺配置或产物默认 skip，`ANNC_REQUIRE_E2E=1` 改为失败。runner 保存图、
+  RunMetadata、输出对照及结果 JSON，检查融合成员、ABI、AOT/JIT 模式与实际
+  执行；不测 QPS。设计与性能验收口径见 [TF1.15 设计](../docs/design/tensorflow-1-15-support/overall.md)。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。

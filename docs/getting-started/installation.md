@@ -30,11 +30,15 @@ cd ANNC
 
 ### 2. 安装 Python 依赖
 
+`requirements.txt` 固定 `tensorflow==2.20.0`。TF1.15 接入需单独准备与目标 SDK 匹配、可导入 TF1.15 的 Python 环境，通过 `ANNC_TENSORFLOW_PYTHON_EXECUTABLE` 选择它，见[TF SDK 构建配置](../guides/build-from-source.md#tensorflow-sdk-选择与-tf115-构建)；不要在 TF1.15 环境执行下面的整表安装。
+
+默认 TF2.20 环境安装通用依赖：
+
 ```shell
 pip3 install -r requirements.txt
 ```
 
-包含 `pybind11`、`nanobind`、`numpy`、`pytest` 与 `tensorflow`：`tensorflow` 仅在构建 TF addon 时需要；`pybind11`/`nanobind` 仅在 `--enable-python` 构建 Python 绑定时需要（默认不构建）。
+`requirements.txt` 包含 `pybind11`、`nanobind`、`numpy`、`pytest` 与 `tensorflow`：`tensorflow` 仅在构建 TF addon 时需要；`pybind11`/`nanobind` 仅在 `--enable-python` 构建 Python 绑定时需要（默认不构建）。
 
 ### 3. 安装系统依赖
 
