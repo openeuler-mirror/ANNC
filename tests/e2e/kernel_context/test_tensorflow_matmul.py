@@ -1,7 +1,13 @@
-"""Generated MatMul through TensorFlow fusion and JIT kernel execution."""
+"""Generated MatMul through TensorFlow fusion and JIT kernel execution.
+
+Use the repository's NEON tuning fixture unless ANNC_GEMM_CONFIG is set.
+"""
+
+import os
 
 import pytest
 
+from e2e_utils import ROOT
 from tf_graph import build_graph, kernel_spec
 from tf_pipeline import run_pipeline
 
@@ -12,7 +18,14 @@ CASES = {
         "MatMul",
         mode="jit",
         abi="mlir_ciface",
-        env={"ANNC_GEMM": "2"},
+        env={
+            "ANNC_GEMM": "2",
+            "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
+            or str(
+                ROOT / "tests/FileCheck/Target/aarch64/Inputs/"
+                "gemm-tuning-hip09-neon-test.json"
+            ),
+        },
     ),
 }
 

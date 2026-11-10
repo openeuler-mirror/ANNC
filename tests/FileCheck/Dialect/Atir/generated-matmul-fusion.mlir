@@ -2,6 +2,7 @@
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s --atir-gemm-epilogue-fusion --atir-op-fusion | FileCheck %s --check-prefix=FUSION --implicit-check-not=annc_context_v3 --implicit-check-not=atir.Customize
 // RUN: env ANNC_GEMM=3 annc-opt --split-input-file %s --atir-gemm-epilogue-fusion --atir-op-fusion | FileCheck %s --check-prefix=FUSION --implicit-check-not=annc_context_v3 --implicit-check-not=atir.Customize
 // RUN: env ANNC_GEMM=99 annc-opt --split-input-file %s --atir-gemm-epilogue-fusion --atir-op-fusion | FileCheck %s --check-prefix=FUSION --implicit-check-not=annc_context_v3 --implicit-check-not=atir.Customize
+// RUN: annc-asm --split-input-file %s --atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMul' | env ANNC_GEMM=2 annc-opt --split-input-file --atir-op-fusion | FileCheck %s --check-prefix=FUSION --implicit-check-not=annc_context_v3 --implicit-check-not=atir.Customize
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s --atir-op-fusion | annc-asm --split-input-file --atir-prune-func=execution-mode=jit --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER --implicit-check-not=ANNCKernel_ContextV3_MatMul --implicit-check-not=atir.Customize
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s --atir-op-fusion | annc-asm --split-input-file --atir-prune-func=execution-mode=jit --atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMul' --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER --implicit-check-not=ANNCKernel_ContextV3_MatMul --implicit-check-not=atir.Customize
 
@@ -9,6 +10,8 @@
 // Mode 1 disables explicit KDNN MatMul outlining to exercise the generated
 // fallback even in a KDNN-enabled build. The remaining modes do not use that
 // Basic-only rule. There is no epilogue to discover in either test case.
+// FastCodegen must preserve ordinary GEMM both before and after OpFusion,
+// including when KDNN is enabled and MatMul is explicitly allowlisted.
 // FUSION-LABEL: func.func @main(
 // FUSION: call @fused_matmul_
 // FUSION: return

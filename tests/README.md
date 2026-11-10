@@ -96,6 +96,10 @@ bash tests/FileCheck/run.sh
   `integration/fusion/test_gemm_epilogue_kernel_compile.py` 覆盖请求编译、旧对象隔离
   与真实生成链接，`integration/cmake/test_gemm_codegen_package.py` 覆盖包发现
   和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
+- TF 普通 MatMul 的生成式端到端用例和 TF1.15 验收 runner 默认使用
+  `FileCheck/Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json`，可通过
+  `ANNC_GEMM_CONFIG` 指定其他调优配置。验收 runner 显式关闭 MatMul 系列
+  KDNN outlining，保证 KDNN 与非 KDNN 构建均验证生成式 GEMM 路径。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若默认解释器没有这两个包，configure 时用

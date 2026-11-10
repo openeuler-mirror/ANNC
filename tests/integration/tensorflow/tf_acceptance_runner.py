@@ -337,6 +337,13 @@ def main():
             "ANNC_WORK_DIR": str(args.work_dir / "pipeline"),
             "ANNC_KEEP_TEMPS": "1",
             "ANNC_GEMM": "1",
+            # These cases validate generated GEMM, including in KDNN builds.
+            "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS": "MatMul,MatMulAdd,MatMulAddRelu",
+            "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
+            or str(
+                ROOT / "tests/FileCheck/Target/aarch64/Inputs/"
+                "gemm-tuning-hip09-neon-test.json"
+            ),
             "ANNC_VERBOSE": "1",
             "ANNC_FUSED_PROFILE": "0",
         }
