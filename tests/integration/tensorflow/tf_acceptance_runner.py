@@ -2,10 +2,12 @@
 """Run one acceptance graph with the TF1.15 SDK Python (Python 3.7 supported)."""
 
 import argparse
+from contextlib import ExitStack
 import ctypes
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import textwrap
 
@@ -31,8 +33,8 @@ def build_matmul_case(variant):
     return graph.as_graph_def(add_shapes=True), feeds, outputs, members
 
 
-def build_tensordot_case(variant):
-    b, s, k, n = 2, 3, 8, 4
+def build_tensordot_case(variant, dimensions=(2, 3, 8, 4), weights=None):
+    b, s, k, n = dimensions
     graph = tf.Graph()
     with graph.as_default():
         input_shape = [
@@ -43,9 +45,9 @@ def build_tensordot_case(variant):
             k,
         ]
         x = tf.placeholder(tf.float32, input_shape, name="input")
-        w = tf.constant(
-            np.arange(k * n).reshape(k, n) / (k * n), tf.float32, name="weight"
-        )
+        if weights is None:
+            weights = np.arange(k * n).reshape(k, n) / (k * n)
+        w = tf.constant(weights, tf.float32, name="weight")
         source = x
         members = []
         if variant in ("identity", "transpose"):
@@ -242,17 +244,7 @@ def fusion_evidence(metadata, pattern, members, outputs, work, mode, reject=Fals
     ]
 
 
-def run_fusion(args, data, reject=False):
-    graph, feeds, outputs, members, pattern, exact = data
-    mode = (
-        "jit"
-        if (
-            pattern == "matmul"
-            or args.case.startswith("TF-F11-dynamic")
-            or args.case == "TF-F11-unfolded"
-        )
-        else "aot"
-    )
+def prepare_fusion(args, graph):
     work = args.work_dir
     (work / "input.pb").write_bytes(graph.SerializeToString())
     (work / "fusion_metadata.jsonl").write_text("")
@@ -279,6 +271,22 @@ def run_fusion(args, data, reject=False):
         )
     )
     pipeline.chmod(0o755)
+    return pipeline
+
+
+def run_fusion(args, data, reject=False):
+    graph, feeds, outputs, members, pattern, exact = data
+    mode = (
+        "jit"
+        if (
+            pattern == "matmul"
+            or args.case.startswith("TF-F11-dynamic")
+            or args.case == "TF-F11-unfolded"
+        )
+        else "aot"
+    )
+    work = args.work_dir
+    pipeline = prepare_fusion(args, graph)
     report = {"case": args.case, "outputs": list(outputs), "feeds": [], "fusions": []}
     with open_session(graph, False) as reference, open_session(
         graph, True, pipeline
@@ -311,6 +319,139 @@ def run_fusion(args, data, reject=False):
     return report
 
 
+def run_prepack(args):
+    # Reuse the dynamic fusion graph with dimensions from the existing GEMM
+    # prepack regression, including K/N tails and more than one batch shape.
+    dimensions = (2, 4, 73, 67)
+    k, n = dimensions[2:]
+    admission = args.case.rsplit("-", 1)[1]
+    tools = args.work_dir / "tools"
+    tools.mkdir()
+    for name in ("annc-tf-pipeline", "annc-asm", "annc-fusion-metadata"):
+        (tools / name).symlink_to(args.build_dir / "bin" / name)
+    checked = args.work_dir / "prepack-counts.jsonl"
+    compiler = tools / "annc"
+    # Inspect the generated ABI through the compiler's -o contract, without
+    # depending on JIT temporary directory names or retained files.
+    compiler.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            f"""\
+            import ctypes
+            from pathlib import Path
+            import subprocess
+            import sys
+
+            subprocess.run([{str(args.build_dir / 'bin/annc')!r}] + sys.argv[1:],
+                           check=True)
+            output = Path(sys.argv[sys.argv.index("-o") + 1]).resolve()
+            library = ctypes.CDLL(str(output))
+            getter = getattr(library, "annc_jit_packed_rhs_v1", None)
+            count = ctypes.c_int64(0)
+            assert getter is not None, "Expected JIT packed RHS ABI"
+            getter.argtypes = [ctypes.POINTER(ctypes.c_int64)]
+            getter.restype = ctypes.c_void_p
+            assert getter(ctypes.byref(count)), "Missing packed RHS metadata"
+            assert count.value == {1 if admission == 'eligible' else 0}, \\
+                "Wrong number of prepacked RHS inputs"
+            with Path({str(checked)!r}).open("a") as result:
+                result.write(str(count.value) + "\\n")
+            """
+        )
+    )
+    compiler.chmod(0o755)
+    os.environ["ANNC_PIPELINE_PATH"] = str(tools / "annc-tf-pipeline")
+    os.environ["ANNC_JIT_CACHE_MAX_ENTRIES"] = "8"
+    checkpoint = args.work_dir / "checkpoint"
+    checkpoint.mkdir()
+    graph = tf.Graph()
+    with graph.as_default():
+        # Checkpoint contents establish eligibility only. Actual node
+        # weights below are deliberately different from these zeros.
+        shape = (1, 1) if admission == "mismatch" else (k, n)
+        variable = tf.Variable(np.zeros(shape, dtype=np.float32))
+        saver = tf.train.Saver({"weight": variable})
+        initialize = tf.global_variables_initializer()
+    with tf.Session(graph=graph) as session:
+        session.run(initialize)
+        saver.save(session, str(checkpoint / "variables"))
+    os.environ["ANNC_DEMO_CHECKPOINT_DIR"] = str(checkpoint)
+
+    weights = [
+        ((np.arange(k * n) % 23 - 11) / 32 * scale).astype(np.float32).reshape(k, n)
+        for scale in (1.0, -0.5)
+    ]
+    graph, feeds, outputs, members = build_tensordot_case(
+        "dynamic-b", dimensions, weights[0]
+    )
+    pipeline = prepare_fusion(args, graph)
+    rewritten_path = args.work_dir / "rewritten.pb"
+    subprocess.run(
+        [
+            sys.executable, str(pipeline),
+            "--input_graphdef", str(args.work_dir / "input.pb"),
+            "--output_graphdef", str(rewritten_path),
+            "--output_tensor", outputs[0],
+            "--work_dir", str(args.work_dir / "fusion"),
+            "--keep_temps",
+        ],
+        check=True,
+    )
+    rewritten = tf.GraphDef()
+    rewritten.ParseFromString(rewritten_path.read_bytes())
+    # Reuse the exported template without changing its fingerprint. Weight
+    # values are node inputs; each new Session keeps its own values unchanged.
+    reports, sessions, directories = [], [], []
+    fingerprints = set()
+    with ExitStack() as stack:
+        reference = stack.enter_context(open_session(graph, False))
+        for index in range(2):
+            model_dir = args.work_dir / ("model-" + str(index))
+            model_dir.mkdir()
+            model = tf.GraphDef()
+            model.CopyFrom(rewritten)
+            weight_node = next(node for node in model.node if node.name == "weight")
+            assert weight_node.op == "Const", "Expected exported weight input"
+            weight_node.attr["value"].tensor.CopyFrom(tf.make_tensor_proto(weights[index]))
+            sessions.append(stack.enter_context(open_session(model, False)))
+            (model_dir / "input.pb").write_bytes(model.SerializeToString())
+            directories.append(model_dir)
+            reports.append({"outputs": outputs, "feeds": [], "fusions": []})
+        for index, inputs in enumerate(feeds):
+            for visit, node in enumerate((0, 1, 0)):
+                feed = dict(inputs, weight=weights[node])
+                expected = execute(reference, feed, outputs)
+                metadata = tf.RunMetadata()
+                actual = execute(sessions[node], inputs, outputs, metadata)
+                work = directories[node]
+                run = index * 3 + visit
+                (work / "run_metadata-{}.pb".format(run)).write_bytes(
+                    metadata.SerializeToString()
+                )
+                np.savez(
+                    str(work / "outputs-{}.npz".format(run)),
+                    reference=expected[0],
+                    actual=actual[0],
+                )
+                evidence = fusion_evidence(
+                    metadata, "tensordot_matmul", members, outputs, args.work_dir, "jit"
+                )
+                fingerprints.add(evidence[0]["metadata"]["template_fingerprint"])
+                reports[node]["fusions"].append(evidence)
+                reports[node]["feeds"].append(
+                    {
+                        name: {"shape": list(value.shape), "dtype": str(value.dtype)}
+                        for name, value in feed.items()
+                    }
+                )
+                compare_outputs(expected, actual, False)
+                compare_outputs(expected, execute(sessions[node], inputs, outputs), False)
+    assert len(fingerprints) == 1, "Weight isolation requires the same JIT template"
+    assert checked.is_file(), "Expected JIT compilation"
+    counts = [json.loads(line) for line in checked.read_text().splitlines()]
+    return {"models": reports, "packed_rhs_counts": counts}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", required=True)
@@ -336,7 +477,7 @@ def main():
             ),
             "ANNC_WORK_DIR": str(args.work_dir / "pipeline"),
             "ANNC_KEEP_TEMPS": "1",
-            "ANNC_GEMM": "1",
+            "ANNC_GEMM": "3" if args.case.startswith("TF-JIT-prepack-") else "1",
             # These cases validate generated GEMM, including in KDNN builds.
             "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS": "MatMul,MatMulAdd,MatMulAddRelu",
             "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
@@ -362,7 +503,9 @@ def main():
     )
     tf.load_library(str(build / "lib/tensorflow/1.15/libannc_optimizer.so"))
     tf.load_op_library(os.environ["ANNC_FUSED_OP_PATH"])
-    if args.case.startswith("TF-F"):
+    if args.case.startswith("TF-JIT-prepack-"):
+        report = run_prepack(args)
+    elif args.case.startswith("TF-F"):
         data = build_case(args.case)
         report = run_fusion(args, data)
     elif args.case.startswith("TF-C-reject-"):

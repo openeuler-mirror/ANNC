@@ -93,14 +93,44 @@ bool CheckCache(AnncJitCompileRequest request) {
   CHECK(ComputesSum(second.executable->kernelFunction()));
   return true;
 }
+bool CheckPrepackInterface(const char* source) {
+  int64_t lhs_shape[] = {2, 4, 73}, rhs_shape[] = {73, 67};
+  int64_t out_shape[] = {2, 4, 67};
+  const int64_t* dims[] = {lhs_shape, rhs_shape, out_shape};
+  size_t ranks[] = {3, 2, 3};
+  int64_t immutable = 3;
+  AnncJitCompileRequest request{source,  "matmul", 1, dims,       ranks, 3,
+                                nullptr, nullptr,  1, &immutable, 1};
+  {
+    AnncJitKernelResult result{};
+    anncCompileJitKernel(&request, &result);
+    annc::tensorflow::JitKernelPtr handle(result.kernel);
+    CHECK(handle && result.status == ANNC_JIT_INVALID_ARGUMENT);
+    CHECK(!result.kernel_function && !result.packed_rhs_count);
+  }
+  immutable = 1;
+  AnncJitKernelResult result{};
+  anncCompileJitKernel(&request, &result);
+  annc::tensorflow::JitKernelPtr handle(result.kernel);
+  if (result.status != ANNC_JIT_OK) std::cerr << result.error << '\n';
+  CHECK(result.status == ANNC_JIT_OK && result.kernel_function);
+  CHECK(result.packed_rhs_specs && result.packed_rhs_count == 1 &&
+        result.prepare_rhs);
+  const auto& spec = result.packed_rhs_specs[0];
+  CHECK(spec.argument == 1 && spec.k == 73 && spec.n == 67);
+  return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) return 1;
+  if (argc != 2 && argc != 3) return 1;
   int64_t shape[] = {1, 5};
   const int64_t* dims[] = {shape, shape, shape};
   size_t ranks[] = {2, 2, 2};
   AnncJitCompileRequest request{argv[1], "add", 1,       dims,
                                 ranks,   3,     nullptr, nullptr};
-  return CheckInvalidDimensions(request) && CheckCache(request) ? 0 : 1;
+  return CheckInvalidDimensions(request) && CheckCache(request) &&
+                 (argc == 2 || CheckPrepackInterface(argv[2]))
+             ? 0
+             : 1;
 }
