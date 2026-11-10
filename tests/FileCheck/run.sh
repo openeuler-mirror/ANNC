@@ -12,6 +12,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ANNCOPT="${ANNCOPT:-$REPO_ROOT/build/bin/annc-opt}"
 ANNASM="${ANNASM:-$REPO_ROOT/build/bin/annc-asm}"
 ANNCFUSIONMETADATA="${ANNCFUSIONMETADATA:-$REPO_ROOT/build/bin/annc-fusion-metadata}"
+# v2-route tool: only exists in ANNC_ENABLE_TF2ATIR_V2=ON builds; tests
+# referencing it are skipped (not failed) when the binary is absent.
+ANNCTF2ATIRV2="${ANNCTF2ATIRV2:-$REPO_ROOT/build/bin/annc-tf2atir-v2}"
 ANNCEPILOGUEKERNELCOMPILE="${ANNCEPILOGUEKERNELCOMPILE:-${ANNCGEMMKERNELCOMPILE:-$REPO_ROOT/build/bin/annc-gemm-epilogue-kernel-compile}}"
 ANNCDRIVER="${ANNCDRIVER:-$REPO_ROOT/build/bin/annc}"
 
@@ -63,8 +66,13 @@ for f in $FILES; do
 
     for run in "${runs[@]}"; do
         run="${run//annc-opt/$ANNCOPT}"
+        if [[ "$run" == *annc-tf2atir-v2* && ! -x "$ANNCTF2ATIRV2" ]]; then
+            echo SKIP
+            continue 2
+        fi
         run="${run//annc-asm/$ANNASM}"
         run="${run//annc-fusion-metadata/$ANNCFUSIONMETADATA}"
+        run="${run//annc-tf2atir-v2/$ANNCTF2ATIRV2}"
         run="${run//annc-gemm-epilogue-kernel-compile/$ANNCEPILOGUEKERNELCOMPILE}"
         run="${run// annc / $ANNCDRIVER }"
         run="${run//mlir-opt/$MLIROPT}"

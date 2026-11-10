@@ -46,6 +46,23 @@ annc-tf-pipeline \
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
+## `annc-tf2atir-v2`（V2 路线）
+
+V2 路线的图改写入口：读入前端产物（stablehlo + 残差载体的 `.mlir`），
+执行 residue-sink（映射残差 → `atir.*_v2`，未映射残差 →
+`atir.unsupported` 带原因与完整源属性），其余方言原样保留，输出带
+debug 信息的 ATIR。随 `ANNC_ENABLE_TF2ATIR_V2=ON` 构建（默认 OFF），
+端到端 FileCheck 见
+`tests/FileCheck/Conversion/tf-residue-v2-sink.mlir`。
+
+```shell
+annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
+```
+
+工具本身前端无关（sink 只认残差载体）；`ANNC_V2_REWRITE_INPROC=1` 的
+部署形态见
+[addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
+
 ## 分步编译命令
 
 以下命令是手动执行一次 GraphDef 到 `ANNCFused` GraphDef 的**最小序列**。它与 `annc-tf-pipeline` 不等价：pipeline 会在 `ANNC_GEMM=2` 时运行 `--atir-gemm-epilogue-fusion`，按需要追加 KDNN fast-codegen 与常量折叠，并在没有任何 AOT kernel 时跳过 `annc-asm`/`annc`（`--atir-rank-inference` 已包含在下面的第 2 步中）。
