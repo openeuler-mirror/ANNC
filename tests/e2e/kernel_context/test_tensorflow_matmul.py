@@ -1,4 +1,4 @@
-"""Context V3 MatMul through TensorFlow fusion and kernel execution."""
+"""Generated MatMul through TensorFlow fusion and JIT kernel execution."""
 
 import pytest
 
@@ -7,8 +7,12 @@ from tf_pipeline import run_pipeline
 
 
 CASES = {
-    "matmul_v3": kernel_spec(
-        "matmul", "MatMul", mode="jit", env={"ANNC_GEMM": "2"}
+    "matmul_generated": kernel_spec(
+        "matmul",
+        "MatMul",
+        mode="jit",
+        abi="mlir_ciface",
+        env={"ANNC_GEMM": "2"},
     ),
 }
 
@@ -32,5 +36,5 @@ def make_graph(case):
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_context_v3_matmul_full_pipeline(case, tmp_path):
+def test_generated_matmul_full_pipeline(case, tmp_path):
     run_pipeline(CASES[case], make_graph, case, tmp_path)

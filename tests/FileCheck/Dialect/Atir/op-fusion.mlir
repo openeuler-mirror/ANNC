@@ -1,5 +1,5 @@
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %s -atir-op-fusion | FileCheck %s
-// OpFusion: outline plain MatMul as a Context V3 builtin when available.
+// OpFusion: preserve plain MatMul in a generated GEMM kernel.
 
 // main 函数内部有 matmul，触发 fusion
 // CHECK-LABEL: func @main
@@ -8,15 +8,14 @@ func.func @main(
     %b: !atir.tensor<128x64xf32>,
     %c: !atir.tensor<64x64xf32>) -> !atir.tensor<64x64xf32> {
   %0 = "atir.MatMul"(%c, %a, %b) <{do_relu = false, left_transpose = false, output_transpose = false, relu_limit = -1.0 : f32, right_transpose = false, withBias = false}> : (!atir.tensor<64x64xf32>, !atir.tensor<64x128xf32>, !atir.tensor<128x64xf32>) -> !atir.tensor<64x64xf32>
-  // CHECK: "atir.MatMul"
-  // CHECK-SAME: annc.fusion_materialized
-  // CHECK-NOT: call @fused_matmul
+  // CHECK: call @fused_matmul
   // CHECK: func.func private @fused_matmul
   // CHECK: annc.execution_mode = "jit"
   // CHECK: fusion.metadata
-  // CHECK-SAME: abi = "annc_context_v3"
+  // CHECK-SAME: abi = "mlir_ciface"
   // CHECK-SAME: template_fingerprint =
-  // CHECK: custom.op_name = "MatMul"
+  // CHECK: "atir.MatMul"
+  // CHECK-NOT: atir.Customize
   return %0 : !atir.tensor<64x64xf32>
 }
 
