@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "Context/KernelContext.h"
-#include "Kernel/ExecutionContext.h"
 #include "compat.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -53,10 +52,6 @@ class ANNCFusedOp : public OpKernel {
                                  void* kernel_function,
                                  bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample);
-  Status ExecuteExecutionV2Kernel(OpKernelContext* context,
-                                  void* kernel_function,
-                                  bool profile_enabled,
-                                  AnncFusedProfileSample* profile_sample);
   Status ExecuteContextV3Kernel(OpKernelContext* context,
                                 void* kernel_function);
 
@@ -100,8 +95,7 @@ class ANNCFusedOp : public OpKernel {
   std::string shared_lib_path_;
   // Fusion-only ATIR module consumed by runtime JIT compilation.
   std::string atir_module_path_;
-  // Calling convention: "mlir_ciface", "annc_execution_v2", or
-  // the single-pointer "annc_context_v3".
+  // Calling convention: "mlir_ciface" or the single-pointer "annc_context_v3".
   std::string abi_;
   // Whether runtime clears output tensors before calling the generated kernel.
   bool zero_initialize_outputs_;
