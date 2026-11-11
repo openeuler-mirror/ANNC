@@ -39,6 +39,14 @@ if(TARGET annc_tensorflow_support AND TARGET annc-tf-pipeline)
 endif()
 add_subdirectory(unit/tensorflow)
 
+# pb2stablehlo unit tests: registered only while the V2 switch
+# (ANNC_ENABLE_TF2ATIR_V2, TF-2.20 side) defines the pb2_transform_objs
+# target. The suite compiles in the transform's wheel-isolated domain
+# (no GTest; see its CMakeLists).
+if(TARGET pb2_transform_objs)
+  add_subdirectory(unit/transform)
+endif()
+
 # ONNX frontend unit test: registered only while ANNC_ENABLE_ONNX=ON, which is
 # what defines the annc-onnx2atir target.
 if(TARGET annc-onnx2atir)

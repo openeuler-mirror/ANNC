@@ -273,6 +273,17 @@ flowchart TB
 | **ANNC 工具链后端** | 对切分子图做 lowering、tiling、向量化、代码生成，产出 kernel `.so`                              | 框架无关，面向目标芯片生成原生代码                |
 | **底层芯片**       | 执行生成的 AArch64 原生 kernel（NEON/SVE 向量指令、多级缓存、多核并行）                             | 接收后端产出的机器码执行                     |
 
+##### V2 stablehlo 路线（opt-in）
+
+在上述 v1 路线之外，同一仓库维护一条 opt-in 的 stablehlo 路线（单一开关
+`ANNC_ENABLE_TF2ATIR_V2`，默认关闭）：GraphDef 经
+[pb2stablehlo 前端](../design/tf-stablehlo-frontend/frontend-transform.md)
+转为 stablehlo 主图 + 残差载体（`annc.residue` / `stablehlo.custom_call`），
+再由 [residue-sink](../design/tf-stablehlo-frontend/sink-layer.md) 落到 ATIR
+混合 IR，供 V2 融合与下游 lowering 使用。该路线的前端在独立的 wheel 构建域
+（TF 2.20 wheel 的 vendored MLIR/LLVM，隔离决策见
+[ADR-023](../decisions/decisions.md#adr-023)），与 v1 工具链互不混链。
+
 #### 4.1.2 数据流总览
 
 从 AI 模型到 AArch64 原生 kernel 的完整数据流：

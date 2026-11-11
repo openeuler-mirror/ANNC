@@ -13,6 +13,7 @@ nanobind>=2.4,<3
 numpy<2
 pytest>=8,<9
 # TensorFlow is only needed while the TensorFlow addons are built
-# (ANNC_ENABLE_TENSORFLOW_ADDON, on by default). Builds that disable the addons
-# — e.g. --disable-tensorflow or --disable-tensorflow-addon — do not need it.
+# (ANNC_ENABLE_TENSORFLOW_ADDON, on by default) or the V2 switch
+# ANNC_ENABLE_TF2ATIR_V2 is on (the wheel-isolated pb2stablehlo frontend
+# requires 2.20.x). Builds that disable both do not need it.
 tensorflow==2.20.0
