@@ -127,6 +127,7 @@ enum ExitCode {
   kExitArgs = 2,
   kExitInit = 3,
   kExitGraphStructure = 4,
+  kExitInternal = 5,  // importer/functionalize/pipeline stage failure
 };
 
 // Map-free attr lookup (Map::find unreliable across the ODR boundary).

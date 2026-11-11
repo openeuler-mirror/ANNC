@@ -239,10 +239,12 @@ absl::Status SynthOpRegistry::LookUp(
 
 namespace {
 
+// The rewrite domain's single "registered op" notion: the wheel registry
+// loaded into g_opspecs (T1 decision: wheel registry is the only OpDef
+// source). The TF Graph builder inside FunctionalizeGraphDefControlFlow
+// keeps its own OpRegistry::Global lookups -- that is TF's own domain.
 bool IsRegisteredOp(const std::string& op) {
-  const tensorflow::OpRegistrationData* rd = nullptr;
-  return tensorflow::OpRegistry::Global()->LookUp(op, &rd).ok() &&
-         rd != nullptr;
+  return g_opspecs.count(op) != 0;
 }
 
 // Max output-slot count per unregistered op, taken across all uses (dtype
