@@ -183,6 +183,10 @@ target_include_directories(annc_jit_cache PUBLIC
 target_link_libraries(annc_jit_cache PRIVATE dl)
 
 add_library(annc_optimizer SHARED ${ANNC_OPTIMIZER_SOURCES})
+# The v2 in-process rewrite dlopen's libannc_graph_rewriter; the entry
+# declaration (graph_rewriter_entry.h) lives in the converter directory.
+target_include_directories(annc_optimizer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../addons/tensorflow/annc-converter-v2")
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 target_link_libraries(annc_fused_op PRIVATE ANNCCheckpoint)
 target_link_libraries(annc_fused_op PRIVATE annc_jit_cache ANNCContext)

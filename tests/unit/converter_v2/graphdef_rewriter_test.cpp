@@ -2,10 +2,18 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <string>
 #include <vector>
 
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "fusion_meta.h"
+#include "graph_rewriter_core.h"
+#include "graph_rewriter_entry.h"
+#include <google/protobuf/text_format.h>
+#include <google/protobuf/util/message_differencer.h>
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 
@@ -204,7 +212,7 @@ TEST(GraphDefRewriter, AppendsOutputAliasIdentityN) {
   EXPECT_EQ(alias.attr().at("T").list().type_size(), 2);
 }
 
-TEST(GraphDefRewriter, SkipsAliasForConsumedOutputs) {
+TEST(GraphDefRewriter, AliasChecksConsumersInThePassedGraph) {
   tensorflow::GraphDef original;
   makeSampleGraph(original);
   auto *rel = original.add_node();
@@ -214,10 +222,19 @@ TEST(GraphDefRewriter, SkipsAliasForConsumedOutputs) {
   auto f = sampleFusion();
   ANNCFusedNodeBuilder::FusionOutputMap map{{"m:0", {&f, 0}}};
   ANNCFusedNodeBuilder builder(original, "/tmp/libk.so", "", map);
-  tensorflow::GraphDef out;
+  // The caller passes the rewritten graph, where rel's input is already
+  // rerouted to the fused node: m has no consumers left and keeps its alias.
+  tensorflow::GraphDef rewritten;
+  auto *kept = rewritten.add_node();
+  kept->set_name("rel");
+  kept->set_op("Relu");
+  kept->add_input("f0:0");
   std::string error;
-  ASSERT_TRUE(builder.appendOutputAliases(out, &error)) << error;
-  EXPECT_EQ(out.node_size(), 0);  // m still has consumers: no alias
+  ASSERT_TRUE(builder.appendOutputAliases(rewritten, &error)) << error;
+  ASSERT_EQ(rewritten.node_size(), 2);
+  EXPECT_EQ(rewritten.node(1).name(), "m");
+  EXPECT_EQ(rewritten.node(1).op(), "Identity");
+  EXPECT_EQ(rewritten.node(1).input(0), "f0:0");
 }
 
 TEST(GraphDefRewriter, RejectsInvalidAliases) {
@@ -357,6 +374,214 @@ TEST(GraphDefRewriter, RejectsUnknownRole) {
   std::string error;
   EXPECT_EQ(builder.appendNode(graph, f, &error), nullptr);
   EXPECT_NE(error.find("unknown role"), std::string::npos) << error;
+}
+
+// ---------------------------------------------------------------------------
+// In-place core: metadata + in-memory graph -> rewritten graph.
+
+const char *kSampleTextGraph =
+    R"pb(node { name: "p" op: "Placeholder" attr { key: "dtype" value { type: DT_FLOAT } } }
+node { name: "c" op: "Const" attr { key: "dtype" value { type: DT_FLOAT } } }
+node { name: "m" op: "MatMul" input: "p:0" input: "c:0" attr { key: "T" value { type: DT_FLOAT } } })pb";
+
+// Text sample plus a consumer node of the fused output (cycle/alias cases).
+std::string consumerTextGraph() {
+  return std::string(kSampleTextGraph) +
+         "\nnode { name: \"r\" op: \"Relu\" input: \"m:0\" attr { key: \"T\" "
+         "value { type: DT_FLOAT } } }";
+}
+
+FusionInfo siteFusion(const char *name = "f0", const char *output = "m:0") {
+  FusionInfo f;
+  f.name = name;
+  f.pattern = "matmul_bias";
+  f.kernelName = "k0";
+  f.executionMode = "aot";
+  f.args.push_back({"dynamic", "p", {2}, 1, "float32"});
+  f.args.push_back({"constant", "c", {2}, 1, "float32"});
+  f.outputs.push_back({"output", output, {2}, 1, "float32"});
+  return f;
+}
+
+tensorflow::GraphDef parseGraph(const std::string &text) {
+  tensorflow::GraphDef graph;
+  EXPECT_TRUE(google::protobuf::TextFormat::ParseFromString(text, &graph));
+  return graph;
+}
+
+const tensorflow::NodeDef *find(const tensorflow::GraphDef &graph,
+                                const char *name) {
+  for (const auto &node : graph.node())
+    if (node.name() == name) return &node;
+  return nullptr;
+}
+
+TEST(GraphDefRewriterCore, RewritesGraphInPlace) {
+  auto graph = parseGraph(kSampleTextGraph);
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
+  ASSERT_TRUE(
+      rewriteGraphDefInPlace(&graph, {siteFusion()}, paths, &error))
+      << error;
+  const auto *fused = find(graph, "f0");
+  ASSERT_NE(fused, nullptr);
+  EXPECT_EQ(fused->op(), "ANNCFused");
+  // Constant-role inputs are grouped first: c before p (non-fused inputs
+  // keep the sample graph's port-less spelling).
+  EXPECT_EQ(fused->input(0), "c");
+  EXPECT_EQ(fused->input(1), "p");
+  const auto *alias = find(graph, "m");
+  ASSERT_NE(alias, nullptr);
+  EXPECT_EQ(alias->op(), "Identity");
+  EXPECT_EQ(alias->input(0), "f0:0");
+  EXPECT_NE(find(graph, "p"), nullptr);
+  EXPECT_NE(find(graph, "c"), nullptr);
+}
+
+TEST(GraphDefRewriterCore, DropsUnresolvableSites) {
+  // Runs one in-place rewrite with a single fusion.
+  auto rewrite = [](FusionInfo fusion, const std::string &text) {
+    RewritePaths paths;
+    paths.sharedLibPath = "/tmp/libgenerated.so";
+    auto graph = parseGraph(text);
+    std::string error;
+    EXPECT_TRUE(rewriteGraphDefInPlace(&graph, {fusion}, paths, &error))
+        << error;
+    return graph;
+  };
+  {
+    auto graph = rewrite(siteFusion("f0", "ghost:0"), kSampleTextGraph);
+    EXPECT_EQ(find(graph, "f0"), nullptr);  // dropped whole: original kept
+    EXPECT_EQ(graph.node_size(), 3);
+  }
+  {
+    auto fusion = siteFusion();
+    fusion.args.push_back({"dynamic", "ghost", {2}, 1, "float32"});
+    auto graph = rewrite(fusion, kSampleTextGraph);
+    EXPECT_EQ(find(graph, "f0"), nullptr);
+    EXPECT_EQ(graph.node_size(), 3);
+  }
+  {
+    auto fusion = siteFusion();
+    fusion.args.push_back({"dynamic", "m:0", {2}, 1, "float32"});
+    auto graph = rewrite(fusion, kSampleTextGraph);
+    EXPECT_EQ(find(graph, "f0"), nullptr);  // self-cycle dropped
+    EXPECT_EQ(graph.node_size(), 3);
+  }
+  {
+    // A control edge pointing at the replaced node would dangle after the
+    // node is removed: the site is dropped instead of emitting an invalid
+    // graph.
+    auto text = std::string(kSampleTextGraph) +
+                "\nnode { name: \"w\" op: \"NoOp\" input: \"^m\" }";
+    auto graph = rewrite(siteFusion(), text);
+    EXPECT_EQ(find(graph, "f0"), nullptr);
+    EXPECT_EQ(graph.node_size(), 4);
+  }
+}
+
+TEST(GraphDefRewriterCore, RejectsInvalidRequests) {
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  {  // duplicate fusion names would emit two same-named nodes
+    auto graph = parseGraph(kSampleTextGraph);
+    std::string error;
+    EXPECT_FALSE(rewriteGraphDefInPlace(
+        &graph, {siteFusion("f0"), siteFusion("f0")}, paths, &error));
+  }
+  {  // AOT needs a shared library; JIT needs an ATIR module
+    auto graph = parseGraph(kSampleTextGraph);
+    RewritePaths noLib = paths;
+    noLib.sharedLibPath.clear();
+    std::string error;
+    EXPECT_FALSE(
+        rewriteGraphDefInPlace(&graph, {siteFusion()}, noLib, &error));
+    auto jit = siteFusion();
+    jit.executionMode = "jit";
+    EXPECT_FALSE(
+        rewriteGraphDefInPlace(&graph, {jit}, noLib, &error));
+  }
+  {  // --kernel_name override is single-site only
+    auto graph = parseGraph(consumerTextGraph());
+    RewritePaths override = paths;
+    override.kernelNameOverride = "k9";
+    std::string error;
+    EXPECT_FALSE(rewriteGraphDefInPlace(
+        &graph, {siteFusion(), siteFusion("f1", "r:0")}, override, &error));
+  }
+}
+
+TEST(GraphDefRewriterCore, DropsCrossSiteCycle) {
+  auto graph = parseGraph(consumerTextGraph());
+  auto f0 = siteFusion("f0", "m:0");
+  f0.args.push_back({"dynamic", "r:0", {2}, 1, "float32"});  // wired to f1
+  auto f1 = siteFusion("f1", "r:0");
+  f1.args.clear();
+  f1.args.push_back({"dynamic", "m:0", {2}, 1, "float32"});  // wired to f0
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
+  ASSERT_TRUE(rewriteGraphDefInPlace(&graph, {f0, f1}, paths, &error));
+  EXPECT_EQ(find(graph, "f0"), nullptr);  // both cyclic sites dropped
+  EXPECT_EQ(find(graph, "f1"), nullptr);
+  EXPECT_EQ(graph.node_size(), 4);
+}
+
+TEST(GraphDefRewriterCore, KeepsAliasWhenConsumerIsAlsoReplaced) {
+  auto graph = parseGraph(consumerTextGraph());
+  RewritePaths paths;
+  paths.sharedLibPath = "/tmp/libgenerated.so";
+  std::string error;
+  ASSERT_TRUE(rewriteGraphDefInPlace(
+      &graph, {siteFusion(), siteFusion("f1", "r:0")}, paths, &error));
+  // r (the only consumer of m) is replaced by f1: m keeps its alias anyway.
+  const auto *alias = find(graph, "m");
+  ASSERT_NE(alias, nullptr);
+  EXPECT_EQ(alias->op(), "Identity");
+  EXPECT_EQ(alias->input(0), "f0:0");
+  EXPECT_NE(find(graph, "f1"), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Plugin entry (C ABI): the dlopen surface annc_optimizer consumes.
+
+TEST(GraphDefRewriterEntry, RewritesThroughTheCInterface) {
+  auto graph = parseGraph(kSampleTextGraph);
+  EXPECT_EQ(annc_graph_rewriter_abi(), 1);
+  // mkstemp: a unique fixture per process, removed at the end — ctest may
+  // run suites in parallel and /tmp is shared.
+  std::string metadata_path = "/tmp/annc_entry_metadata_XXXXXX";
+  std::vector<char> buf(metadata_path.begin(), metadata_path.end());
+  buf.push_back('\0');
+  int fd = mkstemp(buf.data());
+  ASSERT_NE(fd, -1);
+  close(fd);
+  metadata_path = buf.data();
+  std::ofstream out(metadata_path, std::ios::trunc);
+  out << R"json({"fusions": [{"name": "f0", "pattern": "matmul_bias", )json"
+      R"json("kernel_name": "k0", "execution_mode": "aot", "args": [)json"
+      R"json({"role": "dynamic", "tf_name": "p", "shape": [2], "rank": 1, )json"
+      R"json("dtype": "float32"}, {"role": "constant", "tf_name": "c", )json"
+      R"json("shape": [2], "rank": 1, "dtype": "float32"}], "outputs": [)json"
+      R"json({"role": "output", "tf_name": "m:0", "shape": [2], "rank": 1, )json"
+      R"json("dtype": "float32"}]}]})json";
+  out.close();
+  const char *error = nullptr;
+  ASSERT_TRUE(annc_rewrite_graphdef_in_place(
+      &graph, metadata_path.c_str(), "/tmp/libgenerated.so", "", "", 0,
+      &error))
+      << (error ? error : "");
+  EXPECT_NE(find(graph, "f0"), nullptr);
+  std::remove(metadata_path.c_str());
+}
+
+TEST(GraphDefRewriterEntry, ReportsErrorsThroughErrorOut) {
+  auto graph = parseGraph(kSampleTextGraph);
+  const char *error = nullptr;
+  EXPECT_FALSE(annc_rewrite_graphdef_in_place(
+      &graph, "/nonexistent/metadata.json", "", "", "", 0, &error));
+  EXPECT_NE(error, nullptr);
 }
 
 }  // namespace annc::converter_v2

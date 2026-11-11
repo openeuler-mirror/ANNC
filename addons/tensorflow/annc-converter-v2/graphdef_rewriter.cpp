@@ -1,8 +1,14 @@
+#include "graph_rewriter_core.h"
 #include "graphdef_rewriter.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <iostream>
+#include <map>
+#include <set>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -214,10 +220,9 @@ bool ANNCFusedNodeBuilder::replacesOutputNode(
   return false;
 }
 
-// Appends alias nodes named after each replaced original output node so
-// downstream consumers (and graph outputs) keep working. The caller owns
-// dropping the replaced nodes; a fusion.name colliding with a node name is
-// rejected here. *error, when non-null, receives the failure reason.
+// Appends Identity aliases named after each replaced original output node so
+// downstream consumers and graph outputs keep working (the caller owns
+// dropping the replaced nodes). *error, when non-null, gets the reason.
 bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
                                                std::string *error) const {
   using AliasTarget = std::pair<int64_t, const FusionOutputTarget *>;
@@ -231,7 +236,9 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
       }
     }
     if (targets.empty()) continue;
-    if (hasConsumers(original, originalNode.name())) continue;
+    // Consumer checks run on the graph being built: a consumer that is
+    // itself a replaced fusion output no longer counts.
+    if (hasConsumers(graph, originalNode.name())) continue;
     std::sort(targets.begin(), targets.end(),
               [](const AliasTarget &lhs, const AliasTarget &rhs) {
                 return lhs.first < rhs.first;
@@ -258,8 +265,7 @@ bool ANNCFusedNodeBuilder::appendOutputAliases(tensorflow::GraphDef &graph,
     }
 
     tensorflow::NodeDef *alias = graph.add_node();
-    // Roll back the just-appended alias on any late rejection: the caller's
-    // graph must stay untouched when this function reports failure.
+    // Roll back the just-appended alias on any late rejection.
     auto fail = [&](const std::string &reason) {
       if (error) *error = reason;
       graph.mutable_node()->RemoveLast();
@@ -313,8 +319,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   const bool grouped =
       contextV3 || fusion.abi == "mlir_ciface" ||
       fusion.abi == "annc_execution_v2";
-  // ANNCFused groups inputs by role while metadata keeps pattern order.
-  // Grouping carries each arg's pattern index along: the permutation is
+  // Grouping carries each arg's pattern index: the permutation is
   // index-based, so duplicate tfNames (MatMul(x, x)) stay distinct.
   std::vector<FusionArg> orderedArgs;
   std::vector<int64_t> transportOfCanonical;
@@ -339,8 +344,7 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
         }
       }
     }
-    // transportOfCanonical is transport-position -> pattern index; invert it
-    // into the canonical -> transport permutation the ABI records.
+    // Invert transport-position -> pattern index into the permutation.
     std::vector<int64_t> inverse(argCount, 0);
     for (int64_t p = 0; p < static_cast<int64_t>(orderedArgs.size()); ++p)
       inverse[transportOfCanonical[p]] = p;
@@ -349,9 +353,8 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
     orderedArgs.assign(fusion.args.begin(), fusion.args.end());
   }
   const std::vector<FusionArg> &args = orderedArgs;
-  // Context v3 records the permutation in context_input_order; legacy ABIs
-  // in kernel_arg_order, with output buffers appended after all inputs.
-  // Explicit metadata may override for legacy ABIs.
+  // Context v3 records the permutation in context_input_order, legacy ABIs
+  // in kernel_arg_order (outputs appended; metadata may override).
   std::vector<int64_t> resolvedKernelArgOrder = fusion.kernelArgOrder;
   if (!contextV3 && grouped && resolvedKernelArgOrder.empty()) {
     resolvedKernelArgOrder = transportOfCanonical;
@@ -435,15 +438,13 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   for (const FusionArg &output : outputs) {
     outputShapes->add_s(formatRuntimeOutputShape(output.shape));
   }
-  // kernel_arg_order is emitted unconditionally: the v1 tool always materializes
-  // the attribute (empty for context v3), and the runtime treats an empty list
-  // as "no override". Omitting it would make the two converters differ.
+  // kernel_arg_order is emitted unconditionally (empty = "no override" for
+  // the runtime); omitting it would differ from the v1 tool.
   auto *kernelArgOrderAttr = (*attrs)["kernel_arg_order"].mutable_list();
   for (int64_t value : resolvedKernelArgOrder)
     kernelArgOrderAttr->add_i(value);
   if (contextV3) {
-    // Context v3 runtime contract: inputs are transported in role-group order
-    // and context_input_order says where each canonical (outline) index sits.
+    // Context v3: context_input_order locates each canonical input index.
     auto *inputOrder = (*attrs)["context_input_order"].mutable_list();
     for (int64_t value : transportOfCanonical) inputOrder->add_i(value);
     auto *contextAttrs = (*attrs)["context_i64_attrs"].mutable_list();
@@ -460,6 +461,253 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   (*attrs)["fusion_pattern"].set_s(fusion.pattern);
 
   return fused;
+}
+
+namespace {
+
+bool fusionEndpointsResolve(
+    const FusionInfo &fusion, const tensorflow::GraphDef &graph,
+    const ANNCFusedNodeBuilder::FusionOutputMap &fusionByOutput,
+    const std::set<std::string> &controlEdgeTargets, std::string *reason) {
+  // Outputs must resolve in the original graph itself: judging them against
+  // fusion outputs would always pass and let a dangling site through.
+  for (const FusionArg &output : fusion.outputs) {
+    auto endpoint = parseTensorEndpoint(output.tfName);
+    if (endpoint.ok() && !endpoint.value.control) {
+      if (findNode(graph, endpoint.value.node) != nullptr) continue;
+      std::string alt = slashVariant(endpoint.value.node);
+      if (!alt.empty() && findNode(graph, alt) != nullptr) continue;
+    }
+    *reason = "output '" + output.tfName + "' is not a graph node";
+    return false;
+  }
+  // A control edge at a replaced node would dangle once it is removed.
+  for (const FusionArg &output : fusion.outputs) {
+    auto endpoint = parseTensorEndpoint(output.tfName);
+    if (!endpoint.ok() || endpoint.value.control) continue;
+    if (controlEdgeTargets.count(endpoint.value.node) != 0) {
+      *reason = "control edge '^" + endpoint.value.node +
+                "' would dangle after replacement";
+      return false;
+    }
+  }
+  // Inputs may resolve in the original graph or in another fusion's output.
+  auto inputResolves = [&](const std::string &name) {
+    auto endpoint = parseTensorEndpoint(name);
+    if (!endpoint.ok() || endpoint.value.control) return false;
+    if (findNode(graph, endpoint.value.node) != nullptr) return true;
+    std::string alt = slashVariant(endpoint.value.node);
+    if (!alt.empty() && findNode(graph, alt) != nullptr) return true;
+    return fusionByOutput.count(endpoint.value.canonicalDataName()) != 0;
+  };
+  for (const FusionArg &arg : fusion.args) {
+    if (!inputResolves(arg.tfName)) {
+      *reason = "input '" + arg.tfName + "' is not a graph node";
+      return false;
+    }
+  }
+  // Constant-role wiring must be Const/HostConst: CSE renames constants by
+  // loc and names degrade (observed: begin wired to a strided_slice), which
+  // feeds the kernel dynamic values. Non-Const: drop the site whole.
+  for (const FusionArg &arg : fusion.args) {
+    if (arg.role != "constant") continue;
+    auto endpoint = parseTensorEndpoint(arg.tfName);
+    if (!endpoint.ok() || endpoint.value.control) continue;  // filtered above
+    const tensorflow::NodeDef *node = findNode(graph, endpoint.value.node);
+    if (node == nullptr) {
+      std::string alt = slashVariant(endpoint.value.node);
+      node = alt.empty() ? nullptr : findNode(graph, alt);
+    }
+    if (node != nullptr && node->op() != "Const" && node->op() != "HostConst") {
+      *reason = "constant-role input '" + arg.tfName + "' resolves to " +
+                node->op() + " node";
+      return false;
+    }
+  }
+  return true;
+}
+
+// Drop unresolvable fusions until the set stabilizes (dropping one may
+// unblock others), together with self-wired and cyclic sites (Kahn peeling
+// leaves exactly the cyclic ones).
+void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
+                             const tensorflow::GraphDef &graph) {
+  // Control-edge targets of the original graph, collected once: the graph
+  // never changes across the fixpoint loop, and rescanning every node's
+  // inputs per fusion per round would cost O(sites x outputs x edges) on
+  // large graphs.
+  std::set<std::string> controlEdgeTargets;
+  for (const tensorflow::NodeDef &node : graph.node()) {
+    for (const std::string &input : node.input()) {
+      auto endpoint = parseTensorEndpoint(input);
+      if (endpoint.ok() && endpoint.value.control)
+        controlEdgeTargets.insert(endpoint.value.node);
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    ANNCFusedNodeBuilder::FusionOutputMap tentative;
+    std::map<std::string, const std::string *> outputOwner;
+    for (const FusionInfo &fusion : fusionInfos) {
+      for (size_t slot = 0; slot < fusion.outputs.size(); ++slot) {
+        auto endpoint = parseTensorEndpoint(fusion.outputs[slot].tfName);
+        if (endpoint.ok() && !endpoint.value.control) {
+          tentative.emplace(endpoint.value.canonicalDataName(),
+                            ANNCFusedNodeBuilder::FusionOutputTarget{
+                                &fusion, static_cast<int64_t>(slot)});
+          outputOwner[endpoint.value.canonicalDataName()] = &fusion.name;
+        }
+      }
+    }
+    // Fusion-to-fusion dependency edges for the peeling pass.
+    std::map<std::string, std::set<std::string>> deps;
+    for (const FusionInfo &fusion : fusionInfos)
+      deps[fusion.name];  // an entry for every site
+    for (const FusionInfo &fusion : fusionInfos) {
+      for (const FusionArg &arg : fusion.args) {
+        auto endpoint = parseTensorEndpoint(arg.tfName);
+        if (!endpoint.ok() || endpoint.value.control) continue;
+        auto owner = outputOwner.find(endpoint.value.canonicalDataName());
+        if (owner != outputOwner.end())
+          deps[fusion.name].insert(*owner->second);
+      }
+    }
+    std::set<std::string> cyclic;
+    {
+      std::set<std::string> peeledNames;
+      bool progressed = true;
+      while (progressed) {
+        progressed = false;
+        for (const auto &[name, targets] : deps) {
+          if (peeledNames.count(name) != 0) continue;
+          if (targets.count(name) != 0) continue;  // self-wiring: never peels
+          if (std::all_of(targets.begin(), targets.end(),
+                          [&](const std::string &target) {
+                            return peeledNames.count(target) != 0;
+                          })) {
+            peeledNames.insert(name);
+            progressed = true;
+          }
+        }
+      }
+      for (const auto &entry : deps)
+        if (peeledNames.count(entry.first) == 0) cyclic.insert(entry.first);
+    }
+    std::vector<FusionInfo> kept;
+    kept.reserve(fusionInfos.size());
+    for (const FusionInfo &fusion : fusionInfos) {
+      std::string reason;
+      const bool onCycle = cyclic.count(fusion.name) != 0;
+      if (onCycle ||
+          !fusionEndpointsResolve(fusion, graph, tentative, controlEdgeTargets,
+                                  &reason)) {
+        if (onCycle) reason = "cyclic output wiring";
+        std::cerr << "[annc-converter-v2] Warning: dropping fusion '"
+                  << fusion.name << "' (" << fusion.pattern
+                  << "): " << reason << "\n";
+        changed = true;
+        continue;
+      }
+      kept.push_back(fusion);
+    }
+    fusionInfos = std::move(kept);
+  }
+}
+
+}  // namespace
+
+bool rewriteGraphDefInPlace(tensorflow::GraphDef *graph,
+                            std::vector<FusionInfo> fusionInfos,
+                            const RewritePaths &paths, std::string *error) {
+  auto fail = [&](const std::string &reason) {
+    if (error) *error = reason;
+    return false;
+  };
+  if (fusionInfos.empty())
+    return fail("no ANNCFused metadata entries");
+
+  dropUnresolvableFusions(fusionInfos, *graph);
+  if (fusionInfos.empty()) {
+    std::cerr << "[annc-converter-v2] Warning: no usable fusion site; "
+                 "keeping the input graph unchanged\n";
+    return true;
+  }
+
+  const bool needsAotLibrary = std::any_of(
+      fusionInfos.begin(), fusionInfos.end(), [](const FusionInfo &fusion) {
+        return fusion.executionMode == "aot";
+      });
+  const bool needsJitTemplate = std::any_of(
+      fusionInfos.begin(), fusionInfos.end(), [](const FusionInfo &fusion) {
+        return fusion.executionMode == "jit";
+      });
+  if (needsAotLibrary && paths.sharedLibPath.empty())
+    return fail("AOT fusion metadata requires --shared_lib_path");
+  if (needsJitTemplate && paths.atirModulePath.empty())
+    return fail("JIT fusion metadata requires --atir_module_path");
+
+  if (!paths.kernelNameOverride.empty()) {
+    if (fusionInfos.size() != 1)
+      return fail("--kernel_name override is only supported for "
+                  "single-fusion metadata");
+    fusionInfos.front().kernelName = paths.kernelNameOverride;
+  }
+
+  ANNCFusedNodeBuilder::FusionOutputMap fusionByOutput;
+  std::set<std::string> fusionNames;
+  for (const auto &fusion : fusionInfos) {
+    if (!fusionNames.insert(fusion.name).second)
+      return fail("duplicate fusion name: " + fusion.name);
+    if (paths.verbose) {
+      std::cout << "[annc-converter-v2] Rewriting fusion node from ATIR: "
+                << fusion.name << " pattern=" << fusion.pattern << "\n";
+    }
+    for (size_t slot = 0; slot < fusion.outputs.size(); ++slot) {
+      auto endpoint = parseTensorEndpoint(fusion.outputs[slot].tfName);
+      if (!endpoint.ok() || endpoint.value.control)
+        return fail("invalid fusion output endpoint: " +
+                    fusion.outputs[slot].tfName);
+      auto [it, inserted] = fusionByOutput.emplace(
+          endpoint.value.canonicalDataName(),
+          ANNCFusedNodeBuilder::FusionOutputTarget{&fusion,
+                                                   static_cast<int64_t>(slot)});
+      if (!inserted)
+        return fail("duplicate fusion output endpoint: " +
+                    endpoint.value.canonicalDataName());
+    }
+  }
+
+  ANNCFusedNodeBuilder fusedNodeBuilder(*graph, paths.sharedLibPath,
+                                        paths.atirModulePath, fusionByOutput);
+  // Preserve graph-level metadata, including versions, expected by Grappler.
+  tensorflow::GraphDef rewritten = *graph;
+  rewritten.clear_node();
+  for (const auto &node : graph->node()) {
+    if (fusedNodeBuilder.replacesOutputNode(node.name())) continue;
+    tensorflow::NodeDef *out = rewritten.add_node();
+    *out = node;
+
+    out->clear_input();
+    for (const auto &input : node.input()) {
+      out->add_input(fusedNodeBuilder.rewriteDataInput(input));
+    }
+  }
+
+  for (const auto &fusion : fusionInfos) {
+    if (fusedNodeBuilder.appendNode(rewritten, fusion) == nullptr)
+      return fail("failed to emit the ANNCFused node for fusion '" +
+                  fusion.name + "'");
+  }
+  std::string aliasError;
+  if (!fusedNodeBuilder.appendOutputAliases(rewritten, &aliasError))
+    return fail(aliasError);
+
+  // Commit only after every step succeeded: on failure the caller's graph
+  // stays loadable.
+  *graph = std::move(rewritten);
+  return true;
 }
 
 }  // namespace annc::converter_v2
