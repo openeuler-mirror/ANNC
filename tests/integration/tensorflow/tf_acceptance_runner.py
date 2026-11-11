@@ -100,10 +100,34 @@ def build_tensordot_case(variant, dimensions=(2, 3, 8, 4), weights=None):
     return graph.as_graph_def(add_shapes=True), feeds, outputs, members
 
 
+def build_epilogue_case():
+    graph = tf.Graph()
+    with graph.as_default():
+        lhs = tf.placeholder(tf.float32, [None, 5], name="lhs")
+        rhs = tf.placeholder(tf.float32, [5, 7], name="rhs")
+        bias = tf.placeholder(tf.float32, [7], name="bias")
+        scale = tf.placeholder(tf.float32, [], name="scale")
+        product = tf.matmul(lhs, rhs, name="product")
+        added = tf.add(product, bias, name="added")
+        scaled = tf.multiply(added, scale, name="scaled")
+        output = tf.nn.relu(scaled, name="output")
+    feeds = [
+        dict(
+            lhs=(np.arange(rows * 5, dtype=np.float32).reshape(rows, 5) % 7 - 3) / 8,
+            rhs=(np.arange(35, dtype=np.float32).reshape(5, 7) % 11 - 5) / 16,
+            bias=(np.arange(7, dtype=np.float32) - 3) / 4,
+            scale=np.array(-0.5, np.float32),
+        )
+        for rows in (2, 1, 2)
+    ]
+    return graph.as_graph_def(add_shapes=True), feeds, [output.op.name], []
+
+
 def build_case(spec):
     builders = {
         "matmul": build_matmul_case,
         "tensordot": build_tensordot_case,
+        "epilogue": lambda variant: build_epilogue_case(),
     }
     return builders[spec["builder"]](spec.get("variant"))
 
@@ -313,6 +337,16 @@ def run_fusion(args, data, reference_data=None):
     reference_graph, reference_feeds = reference_data or (graph, feeds)
     optimized_graph, actual_outputs = graph, outputs
     pipeline = prepare_fusion(args, graph)
+    if spec.get("fallback"):
+        pipeline.write_text(
+            "#!"
+            + sys.executable
+            + "\nfrom pathlib import Path\n"
+            + "Path("
+            + repr(str(work / "pipeline-invoked"))
+            + ").touch()\n"
+            + "raise SystemExit(1)\n"
+        )
     if "module" in spec:
         optimized_graph = rewrite_graph(args, graph, spec["frontend"])
         nodes = [node for node in optimized_graph.node if node.op == "ANNCFused"]
@@ -356,18 +390,26 @@ def run_fusion(args, data, reference_data=None):
                     for name, value in feed.items()
                 }
             )
-            report["fusions"].append(
-                fusion_evidence(
-                    metadata,
-                    spec["pattern"],
-                    members,
-                    actual_outputs,
-                    work,
-                    spec["mode"],
-                    spec.get("reject", False),
-                    spec["abi"],
+            if spec.get("fallback"):
+                assert (work / "pipeline-invoked").is_file(), "Pipeline was not invoked"
+                assert not any(
+                    n.op == "ANNCFused"
+                    for part in metadata.partition_graphs
+                    for n in part.node
                 )
-            )
+            else:
+                report["fusions"].append(
+                    fusion_evidence(
+                        metadata,
+                        spec["pattern"],
+                        members,
+                        actual_outputs,
+                        work,
+                        spec["mode"],
+                        spec.get("reject", False),
+                        spec["abi"],
+                    )
+                )
             atol = 1e-6 if "module" in spec else None
             compare_outputs(expected, actual, spec.get("exact", False), atol)
             compare_outputs(
@@ -531,6 +573,65 @@ def run_existing_kernel(args):
     return run_fusion(args, data, reference_data)
 
 
+def run_aot_prepack(args):
+    dimensions = (2, 4, 73, 67)
+    k, n = dimensions[2:]
+    weights = ((np.arange(k * n) % 23 - 11) / 32).astype(np.float32).reshape(k, n)
+    checkpoint = args.work_dir / "checkpoint"
+    checkpoint.mkdir()
+    graph = tf.Graph()
+    with graph.as_default():
+        variable = tf.Variable(weights)
+        saver = tf.train.Saver({"weight": variable})
+        initialize = tf.global_variables_initializer()
+    with tf.Session(graph=graph) as session:
+        session.run(initialize)
+        saver.save(session, str(checkpoint / "variables"))
+    os.environ["ANNC_DEMO_CHECKPOINT_DIR"] = str(checkpoint)
+    tools = args.work_dir / "tools"
+    tools.mkdir()
+    for name in (
+        "annc-tf-pipeline",
+        "annc-tf2atir",
+        "annc-opt",
+        "annc-asm",
+        "annc-fusion-metadata",
+        "annc-converter",
+    ):
+        (tools / name).symlink_to(args.build_dir / "bin" / name)
+    checked = args.work_dir / "aot-packed.jsonl"
+    compiler = tools / "annc"
+    # Observe the public compiler input, then verify its data was linked.
+    compiler.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+        import ctypes
+        from pathlib import Path
+        import re
+        import subprocess
+        import sys
+
+        subprocess.run([{str(args.build_dir / 'bin/annc')!r}] + sys.argv[1:], check=True)
+        packed = "--packed-rhs-c" in sys.argv
+        assert packed == {args.spec['packed']!r}
+        if packed:
+            source = Path(sys.argv[sys.argv.index("--packed-rhs-c") + 1])
+            symbols = re.findall(r"const float (\\w+)\\[\\]", source.read_text())
+            assert symbols, "No AOT weights packed"
+            library = ctypes.CDLL(str(Path(sys.argv[sys.argv.index("-o") + 1]).resolve()))
+            for symbol in symbols:
+                ctypes.c_float.in_dll(library, symbol)
+        with Path({str(checked)!r}).open("a") as result:
+            result.write(str(int(packed)) + "\\n")
+        """))
+    compiler.chmod(0o755)
+    args.pipeline = tools / "annc-tf-pipeline"
+    graph, feeds, outputs, members = build_tensordot_case("static", dimensions, weights)
+    feeds += [{"input": -feeds[0]["input"]}, feeds[0]]
+    report = run_fusion(args, (graph, feeds, outputs, members))
+    assert checked.is_file(), "AOT compilation was not observed"
+    report["packed"] = [json.loads(line) for line in checked.read_text().splitlines()]
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", required=True)
@@ -590,7 +691,7 @@ def main():
     if "module" in args.spec:
         report = run_existing_kernel(args)
     elif "handler" in args.spec:
-        handlers = {"prepack": run_prepack}
+        handlers = {"prepack": run_prepack, "aot_prepack": run_aot_prepack}
         report = handlers[args.spec["handler"]](args)
     else:
         report = run_fusion(args, build_case(args.spec))
