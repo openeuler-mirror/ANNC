@@ -251,6 +251,7 @@ void writeThreadPlanningInput(mlir::Operation *op,
 void writeCandidate(mlir::Operation *op,
                     const GemmThreadPlanningResult &result);
 void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing);
+mlir::LogicalResult planGemmThreads(mlir::Operation *op);
 void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest);
 void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination);
 mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,
