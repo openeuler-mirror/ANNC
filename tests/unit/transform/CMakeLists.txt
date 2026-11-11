@@ -30,7 +30,7 @@ add_test(NAME Pb2CommonTest COMMAND pb2_common_test)
 # T2 suites: the pb-domain inference chain and the tf-rank pass. Same
 # borrowing pattern as above (include/flags from the object library, link
 # env from pb2_wheel_env).
-foreach(_suite pb2_infer pb2_tf_rank_infer pb2_mlir_passes pb2_t5)
+foreach(_suite pb2_infer pb2_tf_rank_infer pb2_mlir_passes pb2_t5 pb2_wrap)
   add_executable(${_suite}_test
     ${_suite}_test.cpp
     $<TARGET_OBJECTS:pb2_transform_objs>)
