@@ -57,6 +57,10 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `PB_DEBUG_IMPORT_INPUTS` | pb2stablehlo：打印导入输入规格统计（feeds/shape 覆盖） |
 | `ANNC_NO_OFFICIAL_INFER` | pb2stablehlo：关闭 pb 域官方 shape 富化（grappler GraphProperties），图保持原样；A/B 量测用，此时 MLIR 侧 rank 规则引擎兜底注册 op |
 | `ANNC_NO_TF_RANK_INFER` | pb2stablehlo：关闭 MLIR 侧 tf 方言 rank 规则引擎（legalize 前）；A/B 量测用，残差载体将无 rank 来源 |
+| `ANNC_NO_UNRANK_WRAP` | pb2stablehlo：关闭 unrank 一元 op 的 getDim/setDim 序列视图包装（legalize 前）；A/B 量测用，关闭后 unranked 实例走 Smuggle 兜底 |
+| `ANNC_NO_STRIDED_SLICE_DYN` | pb2stablehlo：关闭动态输入 StridedSlice 直译（常量界限归一化 + real_dynamic_slice）；关闭后走残差通道 |
+| `ANNC_NO_STRING_TRANSPORT` | pb2stablehlo：关闭 string 搬运 op 的 encodeString/decodeString 三明治；关闭后 string op 保持残差 |
+| `ANNC_NO_STRING_UNWRAP` | pb2stablehlo：关闭 legalize 后的 string 三明治回滚（op2 未转回 tf 形态时还原 string 操作数） |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
 | `ANNC_V2_REWRITE_INPROC` | `1` | 未设置 | 置 `1` 时 Grappler 改写走 v2 进程内路径：`dlopen` 加载 `libannc_graph_rewriter.so` 并调用其 C 入口；任何失败向 stderr 告警并自动回退 v1 pipeline 路径 |

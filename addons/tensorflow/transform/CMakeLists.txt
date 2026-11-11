@@ -174,25 +174,16 @@ add_library(pb2_transform_objs OBJECT
   passes/pb2_restore_pass.cpp
   pipeline/pb2_emit.cpp
   wrap/pb2_unrank_wrap.cpp
-  wrap/pb2_strided_slice.cpp)
-
-# The import and run-pipelines TUs reference shlo_pipeline:: (the legalize
-# orchestration with its wrap-layer passes, landing with T8); OBJECT
-# libraries have no link check, but folding them into pb2_transform_objs
-# would break the test binaries. T8 completes the closure and folds back.
-add_library(pb2_pipeline_objs OBJECT
+  wrap/pb2_strided_slice.cpp
+  wrap/pb2_string_transport.cpp
   graph/pb2_import.cpp
-  pipeline/pb2_run_pipelines.cpp)
+  pipeline/pb2_run_pipelines.cpp
+  pipeline/tf2shlo_pipeline.cc
+  wrap/pb2_string_unwrap.cpp)
 
-target_include_directories(pb2_pipeline_objs BEFORE PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${_tf_include}
-  ${_tf_mlir_include}
-  ${_llvm_snapshot})
-target_compile_features(pb2_pipeline_objs PRIVATE cxx_std_17)
-target_compile_options(pb2_pipeline_objs PRIVATE -O1 -g -pthread)
-target_compile_definitions(pb2_pipeline_objs PRIVATE
-  NDEBUG "_GLIBCXX_USE_CXX11_ABI=${_tf_cxx11_abi}")
+# T8 completes the link closure: tf2shlo_pipeline.cc provides the
+# last referenced symbol, so import + run_pipelines fold back in.
+
 
 # BEFORE: the project-level global include_directories() (third_party/llvm,
 # build-llvm20, stablehlo, ...) would otherwise precede these paths and the
@@ -223,3 +214,24 @@ target_link_libraries(pb2_wheel_env INTERFACE
 target_link_options(pb2_wheel_env INTERFACE
   "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/version.script"
   "-Wl,-rpath,${_tf_lib}")
+
+# The pb2stablehlo executable: every transform object + the entry TU,
+# linked against the TF wheel .so files (exports nothing, rpath the wheel).
+add_executable(pb2stablehlo
+  pb2stablehlo.cpp
+  $<TARGET_OBJECTS:pb2_transform_objs>)
+target_include_directories(pb2stablehlo BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${_tf_include}
+  ${_tf_mlir_include}
+  ${_llvm_snapshot})
+target_compile_features(pb2stablehlo PRIVATE cxx_std_17)
+target_compile_options(pb2stablehlo PRIVATE -O1 -g -pthread)
+target_compile_definitions(pb2stablehlo PRIVATE
+  NDEBUG "_GLIBCXX_USE_CXX11_ABI=${_tf_cxx11_abi}")
+target_link_libraries(pb2stablehlo PRIVATE pb2_wheel_env)
+# The install tree keeps pointing at the wheel's lib directory (a fixed
+# absolute path on the build machine); installing elsewhere without a
+# matching wheel install will need CMAKE_INSTALL_RPATH reconfigured.
+set_target_properties(pb2stablehlo PROPERTIES INSTALL_RPATH "${_tf_lib}")
+install(TARGETS pb2stablehlo RUNTIME DESTINATION bin)
