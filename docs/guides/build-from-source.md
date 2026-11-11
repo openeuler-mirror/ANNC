@@ -8,6 +8,9 @@
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 ```
 
+TensorFlow 1.15、TensorFlow 2.20 和 ONNX Runtime 的插件均安装到
+`<install-prefix>/${CMAKE_INSTALL_LIBDIR}`（通常是 `lib` 或 `lib64`）。
+
 LLVM/MLIR 使用外部工具链（CMake `find_package`，不锁定版本），不再下载或编译 LLVM；nlohmann/json 由 CMake 在 configure 时 `FetchContent` 获取到 `third_party/json/`。openEuler 24.03 用系统 `llvm-toolset-20`；openEuler 22.03 仓库只有 LLVM/MLIR 12.0.1，需自建 LLVM/MLIR 20/21 并通过 `ANNC_LLVM_BIN` 或 `-DLLVM_DIR`/`-DMLIR_DIR` 指定，见[安装 ANNC](../getting-started/installation.md#4-llvm--mlir-与-nlohmannjson)。
 
 RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不启用 KDNN 后端，需同时打开 adaptor）：
