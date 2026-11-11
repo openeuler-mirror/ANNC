@@ -468,7 +468,7 @@ namespace {
 bool fusionEndpointsResolve(
     const FusionInfo &fusion, const tensorflow::GraphDef &graph,
     const ANNCFusedNodeBuilder::FusionOutputMap &fusionByOutput,
-    std::string *reason) {
+    const std::set<std::string> &controlEdgeTargets, std::string *reason) {
   // Outputs must resolve in the original graph itself: judging them against
   // fusion outputs would always pass and let a dangling site through.
   for (const FusionArg &output : fusion.outputs) {
@@ -485,16 +485,10 @@ bool fusionEndpointsResolve(
   for (const FusionArg &output : fusion.outputs) {
     auto endpoint = parseTensorEndpoint(output.tfName);
     if (!endpoint.ok() || endpoint.value.control) continue;
-    for (const tensorflow::NodeDef &node : graph.node()) {
-      for (const std::string &input : node.input()) {
-        auto edge = parseTensorEndpoint(input);
-        if (edge.ok() && edge.value.control &&
-            edge.value.node == endpoint.value.node) {
-          *reason = "control edge '^" + endpoint.value.node +
-                    "' would dangle after replacement";
-          return false;
-        }
-      }
+    if (controlEdgeTargets.count(endpoint.value.node) != 0) {
+      *reason = "control edge '^" + endpoint.value.node +
+                "' would dangle after replacement";
+      return false;
     }
   }
   // Inputs may resolve in the original graph or in another fusion's output.
@@ -538,6 +532,19 @@ bool fusionEndpointsResolve(
 // leaves exactly the cyclic ones).
 void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
                              const tensorflow::GraphDef &graph) {
+  // Control-edge targets of the original graph, collected once: the graph
+  // never changes across the fixpoint loop, and rescanning every node's
+  // inputs per fusion per round would cost O(sites x outputs x edges) on
+  // large graphs.
+  std::set<std::string> controlEdgeTargets;
+  for (const tensorflow::NodeDef &node : graph.node()) {
+    for (const std::string &input : node.input()) {
+      auto endpoint = parseTensorEndpoint(input);
+      if (endpoint.ok() && endpoint.value.control)
+        controlEdgeTargets.insert(endpoint.value.node);
+    }
+  }
+
   bool changed = true;
   while (changed) {
     changed = false;
@@ -594,7 +601,8 @@ void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
       std::string reason;
       const bool onCycle = cyclic.count(fusion.name) != 0;
       if (onCycle ||
-          !fusionEndpointsResolve(fusion, graph, tentative, &reason)) {
+          !fusionEndpointsResolve(fusion, graph, tentative, controlEdgeTargets,
+                                  &reason)) {
         if (onCycle) reason = "cyclic output wiring";
         std::cerr << "[annc-converter-v2] Warning: dropping fusion '"
                   << fusion.name << "' (" << fusion.pattern
