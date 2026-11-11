@@ -199,3 +199,34 @@ def test_configured_gather(sdk, tmp_path):
             exact=True,
         ),
     )
+
+
+def test_gemm_epilogue(sdk, tmp_path):
+    run_case(
+        sdk,
+        tmp_path,
+        "gemm_epilogue",
+        dict(
+            builder="epilogue",
+            pattern="matmul_add_mul_relu",
+            abi="mlir_ciface",
+            mode="jit",
+            env=dict(GENERATED_GEMM, ANNC_GEMM="2"),
+        ),
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["ordinary", "packed"])
+def test_aot_prepack(sdk, tmp_path, enabled):
+    spec = dict(
+        FUSION_CASES["TF-F11-static"],
+        handler="aot_prepack",
+        packed=enabled,
+        env=dict(GENERATED_GEMM, ANNC_GEMM="3" if enabled else "1"),
+    )
+    run_case(sdk, tmp_path, "aot_prepack", spec)
+
+
+def test_pipeline_failure_falls_back(sdk, tmp_path):
+    spec = dict(FUSION_CASES["TF-F11-static"], fallback=True)
+    run_case(sdk, tmp_path, "pipeline_failure", spec)

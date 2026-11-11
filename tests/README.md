@@ -104,7 +104,7 @@ bash tests/FileCheck/run.sh
   `build/tests/tensorflow-runtime.json` 读取 SDK Python 和插件目标路径，
   不按版本猜测目录。SDK Python 也需要 pytest，以复用 `e2e/kernel_context/`
   中的构图函数；原有逐算子测试保留。设置 `ANNC_REQUIRE_E2E=1` 后缺依赖报错。
-  MatMul、tensordot 用例经过 Grappler；复用的逐算子图经过
+  MatMul、tensordot 和编译失败回退用例经过 Grappler；复用的逐算子图经过
   pipeline 重写后在 TF Session 执行，保留原输入、输出和数值容差。
   TF1.15 无原生 int64 SparseSegment CPU kernel；该两项保留 int64 被测输入，
   用已有 int32 场景的相同索引值计算参考输出，不覆盖超出 int32 范围的索引。
@@ -148,7 +148,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
-| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件验收：MatMul/tensordot、JIT 预打包及复用的逐算子融合图 |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件验收：复用逐算子融合图；MatMul/tensordot、GEMM 尾部融合、JIT/AOT 预打包及编译失败回退 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
