@@ -87,10 +87,10 @@ GraphDef / SavedModel
 | 批 | 内容 | 行数量级 | 状态 |
 | --- | --- | --- | --- |
 | T1 | common 层（节点索引/输入引用/OpDef 加载/dtype 推导/attr 与 JSON 通道）+ 构建骨架 + 单测 | ~1070 | 已合入 |
-| T2 | shape 推导层（graph pass / infer / official infer / tf rank infer） | ~840 | 本批 |
-| T3 | GraphDef 导入（pb 改写/functionalize/官方导入/编排）+ pass 声明头 | ~875 | 本批（单测随 T5 链接闭合补齐） |
-| T4 | MLIR pass 集（12 个 pass：ref 归一/executor 扁平化/源恢复/形状注记/残差封装与改名等） | ~1570 | 本批 |
-| T5 | restore + emit（残差载体改名 `annc.residue` 的落点） | ~730 | 待迁 |
+| T2 | shape 推导层（graph pass / infer / official infer / tf rank infer） | ~840 | 已合入 |
+| T3 | GraphDef 导入（pb 改写/functionalize/官方导入/编排）+ pass 声明头 | ~875 | 已合入（pb 域单测随 T8 链接闭合补齐） |
+| T4 | MLIR pass 集（12 个 pass：ref 归一/executor 扁平化/源恢复/形状注记/残差封装与改名等） | ~1570 | 已合入 |
+| T5 | restore + emit（残差恢复/权重规划/attr 双通道；RunPipelines 拆独立 TU 随 T8 闭合） | ~730 | 本批 |
 | T6 | wrap 层（shape 组：unrank/dyn view/strided slice） | ~950 | 待迁 |
 | T7 | wrap 层（string 组：transport/unwrap） | ~940 | 待迁 |
 | T8 | 管线 + 入口可执行 + 集成 pytest + fixtures + CLI 文档 | ~480+测试 | 待迁 |
@@ -109,9 +109,11 @@ GraphDef / SavedModel
 3. 替代方案（为 T4/T5 符号造 test-only 链接替身，提前测 pb 域改写）
    评估后不采用：替身与真实实现的签名/行为漂移无防护，寿命只有两批。
 
-补测计划：T5 实现落位、链接闭合时，pb 域改写（custom-op stand-in、
-读链重接、argified→feed、dead-Switch 级联、feeds 装配顺序）随 T5 批
-补入 `tests/unit/transform/`。
+补测计划：链接闭合时（T5 勘定：RunPipelines 依赖
+shlo_pipeline::AddTFToStablehloPasses，其实现 tf2shlo_pipeline.cc 与
+wrap 层 pass 随 T8 落地），pb 域改写（custom-op stand-in、读链重接、
+argified→feed、dead-Switch 级联、feeds 装配顺序）随 T8 批补入
+`tests/unit/transform/`。
 
 **T4 测试覆盖现状（2026-11-11）**：单测覆盖 5/12——suffix strip、
 executor 扁平化（正例：island 提升 + RAUW + graph/island/fetch 消失；

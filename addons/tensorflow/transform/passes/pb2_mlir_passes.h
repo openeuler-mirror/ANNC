@@ -37,6 +37,8 @@ std::unique_ptr<mlir::Pass> CreateRestoreOpsPass(
 // Single-pass runner preserving the legacy RestoreOps contract: prints the
 // fatal message and exits(4) on invariant failures, returns 1 on recoverable
 // ones (no func / feed count mismatch), 0 on success.
+// Legacy contract: may terminate the process (exit 4) on a fatal
+// invariant -- unwinding a half-restored module is unsafe past that point.
 int RunRestoreOpsPass(mlir::ModuleOp module, const Options& opt,
                       const std::vector<FeedSpec>& feeds,
                       const CustomOpTable& custom_ops, mlir::OpBuilder& b,
