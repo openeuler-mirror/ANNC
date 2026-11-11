@@ -141,7 +141,63 @@ static void TestReshapeConstShapeVector() {
 
 }  // namespace
 
+// GatherV2 with rank-0 params/indices would compute rank -1; the guard
+// must drop the proposal (no crash, no wrong upgrade).
+static void TestNegativeRankProposalDropped() {
+  mlir::MLIRContext ctx;
+  auto module = parse(ctx, R"mlir(
+    module {
+      %p = "some.const"() {value = dense<0.0> : tensor<f32>} : () -> tensor<f32>
+      %i = "some.const"() {value = dense<0> : tensor<i32>} : () -> tensor<i32>
+      %a = "some.const"() {value = dense<0> : tensor<i64>} : () -> tensor<i64>
+      %0 = "tf.GatherV2"(%p, %i, %a) {batch_dims = 0 : i64, test.tag = "out"} : (tensor<f32>, tensor<i32>, tensor<i64>) -> tensor<*xf32>
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createTfRankInferPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(rankOfTagged(*module, "out") == -1);  // stayed unranked
+}
+
+// A malformed "tf.Reshape" carrying fewer operands than the rule assumes
+// must not read out of bounds: no proposal, module untouched.
+static void TestShortArityReshapeIsIgnored() {
+  mlir::MLIRContext ctx;
+  auto module = parse(ctx, R"mlir(
+    module {
+      %x = "some.const"() {value = dense<0.0> : tensor<4xf32>} : () -> tensor<4xf32>
+      %0 = "tf.Reshape"(%x) {test.tag = "out"} : (tensor<4xf32>) -> tensor<*xf32>
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createTfRankInferPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(rankOfTagged(*module, "out") == -1);
+}
+
+// A negative StridedSlice mask is malformed IR: no equation may be
+// fabricated from it (popcount(-1)=64 would propose a nonsense rank).
+static void TestNegativeMaskIsRejected() {
+  mlir::MLIRContext ctx;
+  auto module = parse(ctx, R"mlir(
+    module {
+      %x = "some.const"() {value = dense<0.0> : tensor<2x3xf32>} : () -> tensor<2x3xf32>
+      %b = "some.const"() {value = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
+      %e = "some.const"() {value = dense<1> : tensor<1xi32>} : () -> tensor<1xi32>
+      %s = "some.const"() {value = dense<1> : tensor<1xi32>} : () -> tensor<1xi32>
+      %0 = "tf.StridedSlice"(%x, %b, %e, %s) {shrink_axis_mask = -1 : i64, test.tag = "out"} : (tensor<2x3xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> tensor<*xf32>
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createTfRankInferPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(rankOfTagged(*module, "out") == -1);
+}
+
 int main() {
+  TestNegativeRankProposalDropped();
+  TestShortArityReshapeIsIgnored();
+  TestNegativeMaskIsRejected();
   TestSameShapePropagation();
   TestBroadcastMaxRank();
   TestConflictingProposalsFreeze();

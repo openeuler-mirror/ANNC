@@ -151,13 +151,17 @@ static void TestBuildUnregisteredOpDefs() {
   BuildUnregisteredOpDefs(f.graph, synth, &injected);
   PB2_CHECK(synth.count("MyCustomOp") == 1);
   const tensorflow::OpDef& od = synth.at("MyCustomOp");
-  PB2_CHECK(od.input_arg_size() == 2);
+  // Variadic wildcard input: one arg keyed by a list(type); outputs stay
+  // per-slot. The node states its own input count via the injected list.
+  PB2_CHECK(od.input_arg_size() == 1);
+  PB2_CHECK(od.input_arg(0).type_list_attr() == "tl");
   PB2_CHECK(od.output_arg_size() == 1);
-  PB2_CHECK(od.input_arg(0).type_attr() == "t0");
   PB2_CHECK(od.output_arg(0).type_attr() == "o0");
   PB2_CHECK(g_synth_attr_keys.at("MyCustomOp") ==
-        std::set<std::string>({"t0", "t1", "o0"}));
-  PB2_CHECK(injected.node(1).attr().at("t0").type() == tensorflow::DT_FLOAT);
+        std::set<std::string>({"tl", "o0"}));
+  PB2_CHECK(injected.node(1).attr().at("tl").list().type_size() == 2);
+  PB2_CHECK(injected.node(1).attr().at("tl").list().type(0) ==
+            tensorflow::DT_FLOAT);
   (void)custom;
 }
 
