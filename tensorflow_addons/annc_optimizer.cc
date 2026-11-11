@@ -108,18 +108,51 @@ bool V2InprocRewriteEnabled() {
 }
 
 bool V2RewriteGraphInPlace(GraphDef* graph, std::string* error) {
-  // Deliberately never dlclose'd: the handle is cached for every later
-  // session and unloading would invalidate the plugin's static error buffer.
-  void* handle = dlopen("libannc_graph_rewriter.so", RTLD_NOW | RTLD_GLOBAL);
-  if (handle == nullptr) {
-    *error = dlerror();
-    return false;
-  }
-  auto rewrite = reinterpret_cast<AnncRewriteFn>(
-      dlsym(handle, kAnncRewriteEntryName));
-  if (rewrite == nullptr) {
-    *error = dlerror();
-    return false;
+  // Plugin resolution, the same three levels as LoadFusedOpLibrary: the
+  // ANNC_V2_GRAPH_REWRITER_PATH env, the directory this plugin lives in
+  // (both plugins deploy side by side), then the bare soname for the loader
+  // search path. Handle and entry pointer are cached across sessions;
+  // deliberately never dlclose'd — unloading would invalidate the plugin's
+  // static error buffer. A failed resolution allows retrying after the
+  // deployment is fixed.
+  static void* handle = nullptr;
+  static AnncRewriteFn rewrite = nullptr;
+  static bool resolved = false;
+  if (!resolved) {
+    std::string so_path;
+    const char* env_path = std::getenv("ANNC_V2_GRAPH_REWRITER_PATH");
+    if (env_path != nullptr && env_path[0] != '\0') {
+      so_path = env_path;
+    } else {
+      Dl_info info;
+      if (dladdr(reinterpret_cast<void*>(&AnncOptimizerLibraryAnchor),
+                 &info)) {
+        std::string self_dir(info.dli_fname);
+        auto pos = self_dir.rfind('/');
+        if (pos != std::string::npos) {
+          so_path = self_dir.substr(0, pos + 1) + "libannc_graph_rewriter.so";
+        }
+      }
+    }
+    if (so_path.empty()) {
+      so_path = "libannc_graph_rewriter.so";
+    }
+    resolved = true;
+    handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (handle == nullptr) {
+      *error = "dlopen " + so_path + ": " + dlerror();
+      resolved = false;
+      return false;
+    }
+    rewrite = reinterpret_cast<AnncRewriteFn>(
+        dlsym(handle, kAnncRewriteEntryName));
+    if (rewrite == nullptr) {
+      *error = std::string("dlsym ") + kAnncRewriteEntryName + ": " +
+               dlerror();
+      resolved = false;
+      return false;
+    }
+    LOG(INFO) << "ANNCOptimizer loaded graph rewriter plugin: " << so_path;
   }
   const char* metadata = std::getenv("ANNC_V2_FUSION_METADATA");
   if (metadata == nullptr) {

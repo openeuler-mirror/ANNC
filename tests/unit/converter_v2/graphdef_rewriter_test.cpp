@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "fusion_meta.h"
 #include "graph_rewriter_core.h"
 #include "graph_rewriter_entry.h"
@@ -546,7 +549,16 @@ TEST(GraphDefRewriterCore, KeepsAliasWhenConsumerIsAlsoReplaced) {
 TEST(GraphDefRewriterEntry, RewritesThroughTheCInterface) {
   auto graph = parseGraph(kSampleTextGraph);
   EXPECT_EQ(annc_graph_rewriter_abi(), 1);
-  std::ofstream out("/tmp/annc_entry_test_metadata.json", std::ios::trunc);
+  // mkstemp: a unique fixture per process, removed at the end — ctest may
+  // run suites in parallel and /tmp is shared.
+  std::string metadata_path = "/tmp/annc_entry_metadata_XXXXXX";
+  std::vector<char> buf(metadata_path.begin(), metadata_path.end());
+  buf.push_back('\0');
+  int fd = mkstemp(buf.data());
+  ASSERT_NE(fd, -1);
+  close(fd);
+  metadata_path = buf.data();
+  std::ofstream out(metadata_path, std::ios::trunc);
   out << R"json({"fusions": [{"name": "f0", "pattern": "matmul_bias", )json"
       R"json("kernel_name": "k0", "execution_mode": "aot", "args": [)json"
       R"json({"role": "dynamic", "tf_name": "p", "shape": [2], "rank": 1, )json"
@@ -557,10 +569,11 @@ TEST(GraphDefRewriterEntry, RewritesThroughTheCInterface) {
   out.close();
   const char *error = nullptr;
   ASSERT_TRUE(annc_rewrite_graphdef_in_place(
-      &graph, "/tmp/annc_entry_test_metadata.json", "/tmp/libgenerated.so",
-      "", "", 0, &error))
+      &graph, metadata_path.c_str(), "/tmp/libgenerated.so", "", "", 0,
+      &error))
       << (error ? error : "");
   EXPECT_NE(find(graph, "f0"), nullptr);
+  std::remove(metadata_path.c_str());
 }
 
 TEST(GraphDefRewriterEntry, ReportsErrorsThroughErrorOut) {
