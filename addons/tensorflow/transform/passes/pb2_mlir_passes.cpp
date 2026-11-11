@@ -257,16 +257,14 @@ void FlattenExecutorImpl(mlir::ModuleOp module) {
       auto fetch =
           llvm::dyn_cast<mlir::tf_executor::FetchOp>(gb.getTerminator());
       if (fetch == nullptr) return;
-      llvm::SmallVector<mlir::Operation*> region_ops;
       for (mlir::Operation& op : gb.getOperations()) {
         if (llvm::isa<mlir::tf_executor::IslandOp>(op) ||
             llvm::isa<mlir::tf_executor::FetchOp>(op))
           continue;
         llvm::StringRef n = op.getName().getStringRef();
-        if (n == "tf.If" || n == "tf.While" || n == "tf.Case") {
-          region_ops.push_back(&op);  // self-contained carrier, moved whole
-          continue;
-        }
+        if (n == "tf.If" || n == "tf.While" || n == "tf.Case")
+          continue;  // self-contained carrier, lifted whole below
+        
         if (std::getenv("PB_VERBOSE") != nullptr)
           std::cerr << "[flatten-skip] non-island op: " << n.str() << "\n";
         return;
@@ -313,22 +311,30 @@ void FlattenExecutorImpl(mlir::ModuleOp module) {
       for (unsigned i = 0; i < graph->getNumResults(); ++i)
         graph->getResult(i).replaceAllUsesWith(fetch.getOperand(i));
 
-      // 4. per island: lift inner ops before the graph, RAUW results.
-      for (auto island : islands) {
-        mlir::Block& ib = island.getBody().front();
-        auto yield = llvm::cast<mlir::tf_executor::YieldOp>(ib.getTerminator());
-        for (mlir::Operation& op :
-             llvm::make_early_inc_range(ib.getOperations())) {
-          if (llvm::isa<mlir::tf_executor::YieldOp>(op)) continue;
-          op.moveBefore(graph);
+      // 4. Lift everything in original block order: island payloads and
+      //    region carriers interleaved. A fixed order (payloads first or
+      //    carriers first) breaks dominance in one of the two legal
+      //    shapes -- an If consuming island output, or island ops
+      //    consuming an If's result.
+      for (mlir::Operation& op :
+           llvm::make_early_inc_range(gb.getOperations())) {
+        if (llvm::isa<mlir::tf_executor::FetchOp>(op)) continue;
+        if (auto island = llvm::dyn_cast<mlir::tf_executor::IslandOp>(op)) {
+          mlir::Block& ib = island.getBody().front();
+          auto yield =
+              llvm::cast<mlir::tf_executor::YieldOp>(ib.getTerminator());
+          for (mlir::Operation& iop :
+               llvm::make_early_inc_range(ib.getOperations())) {
+            if (llvm::isa<mlir::tf_executor::YieldOp>(iop)) continue;
+            iop.moveBefore(graph);
+          }
+          for (unsigned i = 0; i < yield.getNumOperands(); ++i)
+            island.getResult(i).replaceAllUsesWith(yield.getOperand(i));
+          island.erase();
+          continue;
         }
-        for (unsigned i = 0; i < yield.getNumOperands(); ++i)
-          island.getResult(i).replaceAllUsesWith(yield.getOperand(i));
-        island.erase();
+        op.moveBefore(graph);  // region carrier, moved whole
       }
-      // 5. region carriers move out last (operands already RAUW'd to real
-      //    in-block values, so dominance holds).
-      for (mlir::Operation* rop : region_ops) rop->moveBefore(graph);
       fetch.erase();
       graph.erase();
       ++n;
@@ -1118,6 +1124,10 @@ void WrapRegisteredResidueImpl(mlir::ModuleOp module,
     if (!nm.starts_with("tf.") || nm == "tf.residue") return;
     std::string cls(nm.drop_front(3));
     if (!g_opspecs.count(cls)) return;
+    // Region-carrying ops (IfRegion/WhileRegion survivors of a failed
+    // legalize) cannot become a region-less carrier without destroying
+    // their bodies: leave them for the sink's own fallback path.
+    if (op->getNumRegions() != 0) return;
     wrap_targets.push_back(op);
     auto& e = reg_res[cls];
     if (++e.first == 1) {
