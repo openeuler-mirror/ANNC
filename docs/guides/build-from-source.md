@@ -151,8 +151,13 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 ### TF stablehlo V2 路线（sink 层与 V2 工具）
 
 `ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线：stablehlo 方言集成与 sink
-层，以及 V2 工具（当前 `annc-converter-v2`；`annc-tf2atir-v2` 随其批次
-并入同一开关）。默认 OFF，不触碰历史构建路径。
+层，以及 V2 工具（`annc-converter-v2`、`annc-tf2atir-v2`，随各自批次
+并入同一开关）。TF 2.20 环境下同一开关还包含 `pb2stablehlo`（GraphDef
+→ StableHLO 前端，`addons/tensorflow/transform/`，增量交付中）：wheel
+隔离编译——需 TF 2.20 pip wheel（配置期门禁版本），llvm 头按
+`third_party/llvm-include` 本地快照 → `ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR`
+→ 官方仓 sparse clone（`ANNC_TF_TRANSFORM_LLVM_REPO`/`_REF` 可覆盖，
+默认 llvmorg-21.0.0）三级解析，与项目 LLVM/MLIR 工具链完全隔离。默认 OFF，不触碰历史构建路径。
 
 #### stablehlo 集成（sink 层依赖）
 

@@ -46,6 +46,6 @@ tmp/
 frontends/onnx/protos/gen_code
 build-stablehlo/
 
-# pb2tfmlir 前端（addons/tensorflow/transform）：LLVM 头快照（来源见其
-# README.txt）不入库；构建产物随 CMake 进入 build/bin。
+# pb2tfmlir 前端（addons/tensorflow/transform）：本地预置的 LLVM 头快照目录
+# 不入库（可选；缺失时 configure 从官方仓拉取到构建树，见 transform/CMakeLists.txt）。
 addons/tensorflow/transform/third_party/
