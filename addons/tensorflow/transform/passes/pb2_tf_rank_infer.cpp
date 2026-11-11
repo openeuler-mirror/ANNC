@@ -16,6 +16,10 @@ using mlir::Value;
 using Dims = llvm::SmallVector<int64_t, 4>;
 
 constexpr int kMaxIterations = 100;
+// TensorFlow's own tensor rank limit; proposals beyond it are malformed
+// (negative ranks would otherwise become SIZE_MAX through size_t casts and
+// blow up the Dims allocation).
+constexpr int64_t kMaxTensorRank = 253;
 
 static bool isSameShapeFamily(llvm::StringRef tfOp) {
   // All are same-shape ops (output shape == input shape), manually vetted.
@@ -75,6 +79,7 @@ struct RankSolver {
   llvm::DenseSet<Value> conflicted;
 
   void proposeRank(Value v, int64_t rank) {
+    if (rank < 0 || rank > kMaxTensorRank) return;  // no proposal, no crash
     if (!mlir::isa<mlir::UnrankedTensorType>(v.getType())) return;
     if (conflicted.count(v)) return;
     Dims dims(static_cast<size_t>(rank), mlir::ShapedType::kDynamic);
@@ -93,6 +98,7 @@ struct RankSolver {
 
   // TF broadcasting hard guarantee (one-way): rank(result) = max(known ranks).
   void proposeBroadcast(Operation *op) {
+    if (op->getNumResults() == 0) return;
     int64_t best = -1;
     for (Value v : op->getOperands())
       if (auto r = knownRankOf(v)) best = std::max(best, *r);
@@ -136,6 +142,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   if (isBroadcastBinary(tfOp)) { s.proposeBroadcast(op); return; }
 
   if (tfOp == "Unique") {  // TF asserts WithRank(x, 1): y/idx rank 1.
+    if (numIn < 1 || numOut < 1) return;
     s.proposeRank(in(0), 1);
     s.proposeRank(out(0), 1);
     if (numOut >= 2) s.proposeRank(out(1), 1);
@@ -144,6 +151,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   if (tfOp == "MatMul") {
     // TF MatMul is strictly rank-2. BatchMatMul(V2) supports rank>=3
     // (batched) and has NO rule here -- a wrong rank beats nothing.
+    if (numIn < 2 || numOut < 1) return;
     s.proposeRank(in(0), 2);
     s.proposeRank(in(1), 2);
     s.proposeRank(out(0), 2);
@@ -152,6 +160,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   if (tfOp == "SparseSegmentSum" || tfOp == "SparseSegmentMean" ||
       tfOp == "SparseSegmentSqrtN") {
     // data ≡ result (rank equation); indices/segment_ids rank 1.
+    if (numIn < 1 || numOut < 1) return;
     s.proposeRankEquality({in(0), out(0)});
     if (numIn >= 2) s.proposeRank(in(1), 1);
     if (numIn >= 3) s.proposeRank(in(2), 1);
@@ -159,6 +168,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   }
   if (tfOp == "ConcatV2") {
     // ConcatV2: values..., axis (last input); all values share one rank.
+    if (numOut < 1) return;
     std::optional<int64_t> rank;
     for (unsigned i = 0; i + 1 < numIn; ++i)
       if (auto r = knownRankOf(in(i))) { rank = r; break; }
@@ -172,6 +182,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   }
   if (tfOp == "Concat") {
     // legacy Concat: concat_dim FIRST (in(0)), then values...
+    if (numIn < 1 || numOut < 1) return;
     std::optional<int64_t> rank;
     for (unsigned i = 1; i < numIn; ++i)
       if (auto r = knownRankOf(in(i))) { rank = r; break; }
@@ -185,6 +196,7 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   }
   if (tfOp == "Pack") {
     // inputs share rank r, result is r+1 (axis inserted).
+    if (numOut < 1) return;
     std::optional<int64_t> rank;
     for (unsigned i = 0; i < numIn; ++i)
       if (auto r = knownRankOf(in(i))) { rank = r; break; }
@@ -197,12 +209,14 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
     return;
   }
   if (tfOp == "ExpandDims") {
+    if (numIn < 1 || numOut < 1) return;
     if (auto r = knownRankOf(in(0))) s.proposeRank(out(0), *r + 1);
     else if (auto r = knownRankOf(out(0)))
       if (*r >= 1) s.proposeRank(in(0), *r - 1);
     return;
   }
   if (tfOp == "TopK") {
+    if (numIn < 1 || numOut < 1) return;
     if (auto r = knownRankOf(in(0))) {
       s.proposeRank(out(0), *r);
       if (numOut >= 2) s.proposeRank(out(1), *r);
@@ -227,9 +241,8 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   if (tfOp == "Reshape") {
     // Constant shape vector: output rank = vector length (exact, sound).
     // (lands the "needs constant evaluation" note above).
-    if (numIn >= 2) {
-      if (auto cl = constVecLen(in(1))) s.proposeRank(out(0), *cl);
-    }
+    if (numIn < 2 || numOut < 1) return;
+    if (auto cl = constVecLen(in(1))) s.proposeRank(out(0), *cl);
     // shape vector itself is rank 1. Output rank = element COUNT of the
     // shape vector (its dim-0 VALUE), which needs constant evaluation --
     // NOT the vector's own rank. A wrong rank is worse than no rank.
@@ -239,48 +252,52 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
   if (tfOp == "Fill") {
     // dims vector is rank 1; output rank = element count (needs constant
     // evaluation -- same reasoning as Reshape).
+    if (numIn < 1 || numOut < 1) return;
     if (auto cl = constVecLen(in(0))) s.proposeRank(out(0), *cl);
     s.proposeRank(in(0), 1);
     return;
   }
   if (tfOp == "Range") {
+    if (numOut < 1) return;
     for (unsigned i = 0; i < numIn; ++i) s.proposeRank(in(i), 0);
     s.proposeRank(out(0), 1);
     return;
   }
+  if (numOut < 1) return;  // Shape/Rank/Size and every rule below read out(0)
   if (tfOp == "Shape") { s.proposeRank(out(0), 1); return; }
   if (tfOp == "Rank") { s.proposeRank(out(0), 0); return; }
   if (tfOp == "Size") { s.proposeRank(out(0), 0); return; }
   if (tfOp == "StridedSlice") {
     // begin/end/strides rank 1; hard equation propagated BOTH ways:
-    // rank(result) = rank(x) + popcount(new_axis) - popcount(shrink_axis)
+    // rank(result) = rank(x) + popcount(new_axis) - popcount(shrink_axis).
+    // Masks must be present and non-negative: a negative mask is malformed
+    // IR and popcount(-1)=64 would fabricate a rank+64 equation.
+    if (numIn < 4 || numOut < 1) return;
     s.proposeRank(in(1), 1);
     s.proposeRank(in(2), 1);
     s.proposeRank(in(3), 1);
-    int64_t na = 0, sa = 0;
-    if (auto v = intAttrOf(op, "new_axis_mask")) na = popcount(*v);
-    if (auto v = intAttrOf(op, "shrink_axis_mask")) sa = popcount(*v);
+    auto na = intAttrOf(op, "new_axis_mask");
+    auto sa = intAttrOf(op, "shrink_axis_mask");
+    if (!na || *na < 0 || !sa || *sa < 0) return;
     if (auto r = knownRankOf(in(0)))
-      s.proposeRank(out(0), *r + na - sa);
+      s.proposeRank(out(0), *r + popcount(*na) - popcount(*sa));
     else if (auto r = knownRankOf(out(0)))
-      s.proposeRank(in(0), *r - na + sa);
+      s.proposeRank(in(0), *r - popcount(*na) + popcount(*sa));
     return;
   }
-  if (tfOp == "Transpose") {
-    s.proposeRankEquality({in(0), out(0)});
-    s.proposeRank(in(1), 1);
-    return;
-  }
-  if (tfOp == "Tile") {
+  if (tfOp == "Transpose" || tfOp == "Tile") {
+    if (numIn < 2 || numOut < 1) return;
     s.proposeRankEquality({in(0), out(0)});
     s.proposeRank(in(1), 1);
     return;
   }
   if (tfOp == "Switch") {
+    if (numIn < 1 || numOut < 2) return;
     s.proposeRankEquality({in(0), out(0), out(1)});
     return;
   }
   if (tfOp == "Merge") {
+    if (numIn < 1 || numOut < 1) return;
     llvm::SmallVector<Value, 4> members;
     for (unsigned i = 0; i < numIn; ++i) members.push_back(in(i));
     members.push_back(out(0));
@@ -289,10 +306,12 @@ static void collect(Operation *op, RankSolver &s, llvm::StringRef tfOp) {
     return;
   }
   if (tfOp == "Enter" || tfOp == "Exit" || tfOp == "NextIteration") {
+    if (numIn < 1 || numOut < 1) return;
     s.proposeRankEquality({in(0), out(0)});
     return;
   }
   if (tfOp == "LoopCond") {
+    if (numIn < 1 || numOut < 1) return;
     s.proposeRankEquality({in(0), out(0)});
     s.proposeRank(in(0), 0);
     return;

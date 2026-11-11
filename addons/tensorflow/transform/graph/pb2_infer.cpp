@@ -8,7 +8,8 @@ std::map<std::string, std::set<std::string>> g_synth_attr_keys;
 namespace {
 
 // "1,2,-1" -> dims. Empty or illegal segments are fatal (silent atoll("")==0
-// would fake a 0-dim).
+// would fake a 0-dim), and so are out-of-range values (strtoll would silently
+// clamp to LLONG_MAX). '-' is only legal as a leading sign.
 std::vector<int64_t> ParseDims(const std::string& ds, const std::string& name) {
   std::vector<int64_t> dims;
   size_t st = 0;
@@ -17,12 +18,21 @@ std::vector<int64_t> ParseDims(const std::string& ds, const std::string& name) {
     std::string seg =
         (c == std::string::npos) ? ds.substr(st) : ds.substr(st, c - st);
     if (seg.empty() ||
-        seg.find_first_not_of("0123456789-") != std::string::npos) {
+        seg.find_first_not_of("0123456789-") != std::string::npos ||
+        seg.find('-', 1) != std::string::npos) {
       std::cerr << "[FATAL] --input " << name << ": bad dims segment '"
                 << seg << "' in \"" << ds << "\"\n";
       exit(kExitGraphStructure);
     }
-    dims.push_back(std::strtoll(seg.c_str(), nullptr, 10));
+    errno = 0;
+    char* end = nullptr;
+    long long v = std::strtoll(seg.c_str(), &end, 10);
+    if (errno == ERANGE || end != seg.c_str() + seg.size()) {
+      std::cerr << "[FATAL] --input " << name
+                << ": dims segment '" << seg << "' out of range\n";
+      exit(kExitGraphStructure);
+    }
+    dims.push_back(v);
     if (c == std::string::npos) break;
     st = c + 1;
   }
@@ -235,12 +245,14 @@ bool IsRegisteredOp(const std::string& op) {
          rd != nullptr;
 }
 
-// Max data-input count and max output-slot count per unregistered op, taken
-// across all uses (the same custom op may appear with different arities in
-// different nodes; dtype slots come from the node index, extra slots from
-// "producer:N" references).
+// Max output-slot count per unregistered op, taken across all uses (dtype
+// slots come from the node index, extra slots from "producer:N" references).
+// Inputs need no arity: the synthetic arg is variadic (type_list_attr), so
+// each node states its own input count via the injected list(type) attr --
+// a per-slot scheme keyed on a cross-node max would misalign on nodes with
+// fewer inputs than the max.
 struct SynthArities {
-  std::map<std::string, int> max_in, max_out;
+  std::map<std::string, int> max_out;
 };
 
 SynthArities CollectSynthArities(const GraphDef& src) {
@@ -249,10 +261,6 @@ SynthArities CollectSynthArities(const GraphDef& src) {
   for (auto& nd : src.node()) by_name[nd.name()] = &nd;
   for (auto& nd : src.node()) {
     if (IsRegisteredOp(nd.op())) continue;
-    int n_in = 0;
-    for (auto& in : nd.input())
-      if (in.empty() || in[0] != '^') ++n_in;
-    ar.max_in[nd.op()] = std::max(ar.max_in[nd.op()], n_in);
     auto pit = g_nodes.find(nd.name());
     int dtype_slots =
         pit != g_nodes.end() ? (int)pit->second.out_dtypes.size() : 1;
@@ -273,12 +281,21 @@ SynthArities CollectSynthArities(const GraphDef& src) {
   return ar;
 }
 
-// One wildcard-typed input arg ("t<i>") and output arg ("o<i>") per slot.
-void AppendSynthArg(OpDef* d, const std::string& prefix, int index,
-                    bool is_input) {
-  std::string key = prefix + std::to_string(index);
-  auto* arg = is_input ? d->add_input_arg() : d->add_output_arg();
-  arg->set_name((is_input ? "in_" : "out_") + std::to_string(index));
+// Variadic wildcard input ("tl" as a list(type)) and one wildcard-typed
+// output arg ("o<i>") per slot.
+void AppendSynthInput(OpDef* d) {
+  auto* arg = d->add_input_arg();
+  arg->set_name("in");
+  arg->set_type_list_attr("tl");
+  auto* attr = d->add_attr();
+  attr->set_name("tl");
+  attr->set_type("list(type)");
+}
+
+void AppendSynthOutput(OpDef* d, int index) {
+  std::string key = "o" + std::to_string(index);
+  auto* arg = d->add_output_arg();
+  arg->set_name("out_" + std::to_string(index));
   arg->set_type_attr(key);
   auto* attr = d->add_attr();
   attr->set_name(key);
@@ -300,15 +317,16 @@ void InjectSynthTypeAttrs(GraphDef* fg, const SynthArities& ar) {
     int n_out = ar.max_out.count(nd.op()) ? ar.max_out.at(nd.op()) : 0;
     if (n_out == 0) continue;  // registered op: untouched
     std::set<std::string>& injected = g_synth_attr_keys[nd.op()];
-    int in_k = 0;
+    // Input side: one list(type) attr carrying exactly this node's data
+    // inputs (both the collector and this loop gate on TryResolveRef, so
+    // the data-input notion cannot diverge between the two passes).
+    auto* tl = (*nd.mutable_attr())["tl"].mutable_list();
     for (auto& in : nd.input()) {
       auto ref = TryResolveRef(in);
       if (!ref.has_value() || ref->control) continue;
-      std::string key = "t" + std::to_string(in_k);
-      (*nd.mutable_attr())[key].set_type(slot_dtype(ref->node, ref->slot));
-      injected.insert(key);
-      ++in_k;
+      tl->add_type(slot_dtype(ref->node, ref->slot));
     }
+    injected.insert("tl");
     for (int s = 0; s < n_out; ++s) {
       std::string key = "o" + std::to_string(s);
       (*nd.mutable_attr())[key].set_type(slot_dtype(nd.name(), s));
@@ -326,11 +344,11 @@ void BuildUnregisteredOpDefs(
     const GraphDef& src, std::map<std::string, OpDef>& synth, GraphDef* fg) {
   synth.clear();
   SynthArities ar = CollectSynthArities(src);
-  for (auto& [op, max_in] : ar.max_in) {
+  for (auto& [op, max_out] : ar.max_out) {
     OpDef& d = synth[op];
     d.set_name(op);
-    for (int i = 0; i < max_in; ++i) AppendSynthArg(&d, "t", i, true);
-    for (int i = 0; i < ar.max_out[op]; ++i) AppendSynthArg(&d, "o", i, false);
+    AppendSynthInput(&d);
+    for (int i = 0; i < max_out; ++i) AppendSynthOutput(&d, i);
   }
   if (fg == nullptr) return;
   *fg = src;
