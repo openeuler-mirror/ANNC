@@ -97,8 +97,8 @@ GraphDef / SavedModel
 > getDim/setDim 序列视图）不迁——该改写会在图中引入一维扁平中间
 > 形态，属于不需要的形状结构变化；动态 Reshape 保持残差通道，
 > 由 sink 侧处理。
-| T7 | wrap 层（string 组：transport/unwrap） | ~1090（含测试 150） | 本批 |
-| T8 | 管线 + 入口可执行 + 集成 pytest + fixtures + CLI 文档 | ~480+测试 | 待迁 |
+| T7 | wrap 层（string 组：transport/unwrap） | ~1090（含测试 150） | 已合入 |
+| T8 | 管线（tf2shlo 编排+Smuggle）+ 入口可执行 + 集成 pytest + 文档 | ~700（含测试） | 本批 |
 
 批次纪律：各批可独立构建；开发与测试分离提交；`ANNC_ENABLE_TF2ATIR_V2`
 单一开关贯穿（与 converter-v2 / sink 侧一致）。
