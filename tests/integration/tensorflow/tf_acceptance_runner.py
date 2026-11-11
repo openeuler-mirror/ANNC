@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run one acceptance graph with the TF1.15 SDK Python (Python 3.7 supported)."""
+"""Run one acceptance graph with the configured SDK Python (Python 3.7 supported)."""
 
 import argparse
 from contextlib import ExitStack
 import ctypes
+import importlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ def build_matmul_case(variant):
         x = tf.placeholder(tf.float32, [None if dynamic else m, k], name="input")
         w = tf.constant(np.arange(k * n).reshape(k, n) / 32, tf.float32, name="weight")
         y = tf.matmul(x, w, name="matmul")
-        members = ["matmul"]
+        members = []
         outputs = [y.op.name]
     feeds = [
         {"input": (np.arange(rows * k, dtype=np.float32).reshape(rows, k) - 12) / 16}
@@ -99,17 +100,39 @@ def build_tensordot_case(variant, dimensions=(2, 3, 8, 4), weights=None):
     return graph.as_graph_def(add_shapes=True), feeds, outputs, members
 
 
-def build_case(case):
-    family, variant = case.split("-", 2)[1:]
-    if family == "F01":
-        data = build_matmul_case(variant)
-        return data + ("matmul", False)
-    if family == "F11":
-        return build_tensordot_case(variant) + ("tensordot_matmul", False)
-    raise ValueError(case)
+def build_epilogue_case():
+    graph = tf.Graph()
+    with graph.as_default():
+        lhs = tf.placeholder(tf.float32, [None, 5], name="lhs")
+        rhs = tf.placeholder(tf.float32, [5, 7], name="rhs")
+        bias = tf.placeholder(tf.float32, [7], name="bias")
+        scale = tf.placeholder(tf.float32, [], name="scale")
+        product = tf.matmul(lhs, rhs, name="product")
+        added = tf.add(product, bias, name="added")
+        scaled = tf.multiply(added, scale, name="scaled")
+        output = tf.nn.relu(scaled, name="output")
+    feeds = [
+        dict(
+            lhs=(np.arange(rows * 5, dtype=np.float32).reshape(rows, 5) % 7 - 3) / 8,
+            rhs=(np.arange(35, dtype=np.float32).reshape(5, 7) % 11 - 5) / 16,
+            bias=(np.arange(7, dtype=np.float32) - 3) / 4,
+            scale=np.array(-0.5, np.float32),
+        )
+        for rows in (2, 1, 2)
+    ]
+    return graph.as_graph_def(add_shapes=True), feeds, [output.op.name], []
 
 
-def compare_outputs(expected, actual, exact):
+def build_case(spec):
+    builders = {
+        "matmul": build_matmul_case,
+        "tensordot": build_tensordot_case,
+        "epilogue": lambda variant: build_epilogue_case(),
+    }
+    return builders[spec["builder"]](spec.get("variant"))
+
+
+def compare_outputs(expected, actual, exact, atol=None):
     assert len(expected) == len(actual), "Output count changed"
     for index, (ref, value) in enumerate(zip(expected, actual)):
         assert ref.dtype == value.dtype, "Output {} dtype changed".format(index)
@@ -119,6 +142,8 @@ def compare_outputs(expected, actual, exact):
         assert np.isfinite(ref).all() and np.isfinite(value).all()
         if exact or ref.dtype.kind not in "fc":
             np.testing.assert_array_equal(value, ref)
+        elif atol is not None:
+            np.testing.assert_allclose(value, ref, rtol=1e-5, atol=atol)
         else:
             error = np.abs(value - ref)
             bound = 1e-5 * np.maximum(1, np.abs(ref))
@@ -127,7 +152,7 @@ def compare_outputs(expected, actual, exact):
             )
 
 
-def open_session(graph_def, enabled, pipeline=None):
+def open_session(graph_def, enabled, pipeline=None, threads=1):
     graph = tf.Graph()
     with graph.as_default():
         tf.import_graph_def(graph_def, name="")
@@ -138,7 +163,7 @@ def open_session(graph_def, enabled, pipeline=None):
             "_output_shapes", node.attr["_output_shapes"]
         )
     config = tf.ConfigProto(
-        intra_op_parallelism_threads=1,
+        intra_op_parallelism_threads=threads,
         inter_op_parallelism_threads=1,
         device_count={"GPU": 0},
     )
@@ -174,7 +199,9 @@ def execute(session, feeds, outputs, metadata=None):
     )
 
 
-def fusion_evidence(metadata, pattern, members, outputs, work, mode, reject=False):
+def fusion_evidence(
+    metadata, pattern, members, outputs, work, mode, reject=False, abi="mlir_ciface"
+):
     nodes = {n.name: n for p in metadata.partition_graphs for n in p.node}
     executed = {
         n.node_name for d in metadata.step_stats.dev_stats for n in d.node_stats
@@ -221,10 +248,17 @@ def fusion_evidence(metadata, pattern, members, outputs, work, mode, reject=Fals
     entry = selected[0]
     assert entry["pattern"] == pattern, "Unexpected fusion metadata pattern"
     names = {str(name).split(":")[0] for name in entry["member_node_names"]}
-    assert entry["abi"] == target.attr["abi"].s.decode() == "mlir_ciface"
+    assert entry["abi"] == target.attr["abi"].s.decode() == abi
     assert entry["execution_mode"] == mode
     assert bool(target.attr["shared_lib_path"].s) == (mode == "aot")
     assert set(members) <= names, "Missing fused members: " + str(set(members) - names)
+    if pattern == "matmul" and abi == "mlir_ciface":
+        # Generated MatMul identifies replaced edges through outputs; its
+        # optional member_node_names may be empty.
+        assert [a["tf_name"] for a in entry["outputs"]] in (
+            list(outputs),
+            [name + ":0" for name in outputs],
+        ), "Wrong MatMul output boundary"
     if pattern == "tensordot_matmul":
         assert {a["tf_name"] for a in selected[0]["args"]} == {
             "weight",
@@ -259,8 +293,9 @@ def prepare_fusion(args, graph):
             import subprocess
             import sys
 
-            command = [{str(args.build_dir / 'bin/annc-tf-pipeline')!r}]
-            result = subprocess.run(command + sys.argv[1:] + ["--dump-fusion-metadata"])
+            command = [{str(args.pipeline)!r}]
+            result = subprocess.run(command + sys.argv[1:] + ["--dump-fusion-metadata"]
+                                    + {args.spec.get("pipeline_args", [])!r})
             if result.returncode == 0:
                 directory = Path(sys.argv[sys.argv.index("--work_dir") + 1])
                 metadata = json.loads((directory / "fusion_metadata.json").read_text())
@@ -274,27 +309,71 @@ def prepare_fusion(args, graph):
     return pipeline
 
 
-def run_fusion(args, data, reject=False):
-    graph, feeds, outputs, members, pattern, exact = data
-    mode = (
-        "jit"
-        if (
-            pattern == "matmul"
-            or args.case.startswith("TF-F11-dynamic")
-            or args.case == "TF-F11-unfolded"
-        )
-        else "aot"
-    )
-    work = args.work_dir
+def rewrite_graph(args, graph, frontend):
     pipeline = prepare_fusion(args, graph)
+    rewritten_path = args.work_dir / "rewritten.pb"
+    command = [
+        sys.executable,
+        str(pipeline),
+        "--input_graphdef",
+        str(args.work_dir / "input.pb"),
+        "--output_graphdef",
+        str(rewritten_path),
+        "--work_dir",
+        str(args.work_dir / "fusion"),
+        "--keep_temps",
+    ]
+    for output in frontend:
+        command.extend(["--output_tensor", output])
+    subprocess.run(command, check=True)
+    rewritten = tf.GraphDef()
+    rewritten.ParseFromString(rewritten_path.read_bytes())
+    return rewritten
+
+
+def run_fusion(args, data, reference_data=None):
+    graph, feeds, outputs, members = data
+    spec, work = args.spec, args.work_dir
+    reference_graph, reference_feeds = reference_data or (graph, feeds)
+    optimized_graph, actual_outputs = graph, outputs
+    pipeline = prepare_fusion(args, graph)
+    if spec.get("fallback"):
+        pipeline.write_text(
+            "#!"
+            + sys.executable
+            + "\nfrom pathlib import Path\n"
+            + "Path("
+            + repr(str(work / "pipeline-invoked"))
+            + ").touch()\n"
+            + "raise SystemExit(1)\n"
+        )
+    if "module" in spec:
+        optimized_graph = rewrite_graph(args, graph, spec["frontend"])
+        nodes = [node for node in optimized_graph.node if node.op == "ANNCFused"]
+        assert len(nodes) == 1, "Expected one fused kernel"
+        fused = nodes[0]
+        slots = spec.get("output_slots", list(range(len(outputs))))
+        assert fused.attr["num_outputs"].i == len([s for s in slots if s is not None])
+        actual_outputs = [
+            name if slot is None else fused.name + ":" + str(slot)
+            for name, slot in zip(outputs, slots)
+        ]
     report = {"case": args.case, "outputs": list(outputs), "feeds": [], "fusions": []}
-    with open_session(graph, False) as reference, open_session(
-        graph, True, pipeline
+    threads = 4 if "module" in spec else 1
+    with open_session(
+        reference_graph, False, threads=threads
+    ) as reference, open_session(
+        optimized_graph, "module" not in spec, pipeline, threads=threads
     ) as optimized:
         for index, feed in enumerate(feeds):
-            expected = execute(reference, feed, outputs)
+            expected = execute(reference, reference_feeds[index], outputs)
+            retained = {
+                name: value
+                for name, value in feed.items()
+                if name.split(":")[0] in {n.name for n in optimized_graph.node}
+            }
             metadata = tf.RunMetadata()
-            actual = execute(optimized, feed, outputs, metadata)
+            actual = execute(optimized, retained, actual_outputs, metadata)
             (work / "run_metadata-{}.pb".format(index)).write_bytes(
                 metadata.SerializeToString()
             )
@@ -311,11 +390,34 @@ def run_fusion(args, data, reject=False):
                     for name, value in feed.items()
                 }
             )
-            report["fusions"].append(
-                fusion_evidence(metadata, pattern, members, outputs, work, mode, reject)
+            if spec.get("fallback"):
+                assert (work / "pipeline-invoked").is_file(), "Pipeline was not invoked"
+                assert not any(
+                    n.op == "ANNCFused"
+                    for part in metadata.partition_graphs
+                    for n in part.node
+                )
+            else:
+                report["fusions"].append(
+                    fusion_evidence(
+                        metadata,
+                        spec["pattern"],
+                        members,
+                        actual_outputs,
+                        work,
+                        spec["mode"],
+                        spec.get("reject", False),
+                        spec["abi"],
+                    )
+                )
+            atol = 1e-6 if "module" in spec else None
+            compare_outputs(expected, actual, spec.get("exact", False), atol)
+            compare_outputs(
+                expected,
+                execute(optimized, retained, actual_outputs),
+                spec.get("exact", False),
+                atol,
             )
-            compare_outputs(expected, actual, exact)
-            compare_outputs(expected, execute(optimized, feed, outputs), exact)
     return report
 
 
@@ -324,7 +426,7 @@ def run_prepack(args):
     # prepack regression, including K/N tails and more than one batch shape.
     dimensions = (2, 4, 73, 67)
     k, n = dimensions[2:]
-    admission = args.case.rsplit("-", 1)[1]
+    admission = args.spec["admission"]
     tools = args.work_dir / "tools"
     tools.mkdir()
     for name in ("annc-tf-pipeline", "annc-asm", "annc-fusion-metadata"):
@@ -452,34 +554,112 @@ def run_prepack(args):
     return {"models": reports, "packed_rhs_counts": counts}
 
 
+def run_existing_kernel(args):
+    sys.path.insert(0, str(ROOT / "tests/e2e/kernel_context"))
+    module = importlib.import_module(args.spec["module"])
+    graph, frontend, outputs, scenarios = module.make_graph(args.spec["graph_case"])
+    args.spec["frontend"] = frontend
+    data = graph, [feed for _, feed in scenarios], [name for name, _ in outputs], []
+    reference_data = None
+    if "reference_case" in args.spec:
+        reference, _, _, reference_scenarios = module.make_graph(
+            args.spec["reference_case"]
+        )
+        reference_feeds = [feed for _, feed in reference_scenarios]
+        for actual, expected in zip(data[1], reference_feeds):
+            for name in actual:
+                np.testing.assert_array_equal(actual[name], expected[name])
+        reference_data = reference, reference_feeds
+    return run_fusion(args, data, reference_data)
+
+
+def run_aot_prepack(args):
+    dimensions = (2, 4, 73, 67)
+    k, n = dimensions[2:]
+    weights = ((np.arange(k * n) % 23 - 11) / 32).astype(np.float32).reshape(k, n)
+    checkpoint = args.work_dir / "checkpoint"
+    checkpoint.mkdir()
+    graph = tf.Graph()
+    with graph.as_default():
+        variable = tf.Variable(weights)
+        saver = tf.train.Saver({"weight": variable})
+        initialize = tf.global_variables_initializer()
+    with tf.Session(graph=graph) as session:
+        session.run(initialize)
+        saver.save(session, str(checkpoint / "variables"))
+    os.environ["ANNC_DEMO_CHECKPOINT_DIR"] = str(checkpoint)
+    tools = args.work_dir / "tools"
+    tools.mkdir()
+    for name in (
+        "annc-tf-pipeline",
+        "annc-tf2atir",
+        "annc-opt",
+        "annc-asm",
+        "annc-fusion-metadata",
+        "annc-converter",
+    ):
+        (tools / name).symlink_to(args.build_dir / "bin" / name)
+    checked = args.work_dir / "aot-packed.jsonl"
+    compiler = tools / "annc"
+    # Observe the public compiler input, then verify its data was linked.
+    compiler.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+        import ctypes
+        from pathlib import Path
+        import re
+        import subprocess
+        import sys
+
+        subprocess.run([{str(args.build_dir / 'bin/annc')!r}] + sys.argv[1:], check=True)
+        packed = "--packed-rhs-c" in sys.argv
+        assert packed == {args.spec['packed']!r}
+        if packed:
+            source = Path(sys.argv[sys.argv.index("--packed-rhs-c") + 1])
+            symbols = re.findall(r"const float (\\w+)\\[\\]", source.read_text())
+            assert symbols, "No AOT weights packed"
+            library = ctypes.CDLL(str(Path(sys.argv[sys.argv.index("-o") + 1]).resolve()))
+            for symbol in symbols:
+                ctypes.c_float.in_dll(library, symbol)
+        with Path({str(checked)!r}).open("a") as result:
+            result.write(str(int(packed)) + "\\n")
+        """))
+    compiler.chmod(0o755)
+    args.pipeline = tools / "annc-tf-pipeline"
+    graph, feeds, outputs, members = build_tensordot_case("static", dimensions, weights)
+    feeds += [{"input": -feeds[0]["input"]}, feeds[0]]
+    report = run_fusion(args, (graph, feeds, outputs, members))
+    assert checked.is_file(), "AOT compilation was not observed"
+    report["packed"] = [json.loads(line) for line in checked.read_text().splitlines()]
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", required=True)
+    parser.add_argument("--case-config", type=Path, required=True)
+    parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
     args.build_dir = args.build_dir.resolve()
+    args.spec = json.loads(args.case_config.read_text())
+    runtime = json.loads(args.runtime.read_text())
+    args.pipeline = Path(runtime["pipeline"])
     args.work_dir = args.work_dir.resolve()
     args.work_dir.mkdir(parents=True, exist_ok=True)
     # Import only in the target SDK process; pytest collection never imports TF.
     global np, tf
     import numpy as np
-    import tensorflow as tf
+    import tensorflow
 
-    assert tf.__version__.startswith("1.15."), "Requires the configured TF1.15 SDK"
+    tf = tensorflow.compat.v1
     tf.disable_eager_execution()
     build = args.build_dir
     os.environ.update(
         {
-            "ANNC_PIPELINE_PATH": str(build / "bin/annc-tf-pipeline"),
-            "ANNC_FUSED_OP_PATH": str(
-                build / "lib/tensorflow/1.15/libannc_fused_op.so"
-            ),
+            "ANNC_PIPELINE_PATH": str(args.pipeline),
+            "ANNC_FUSED_OP_PATH": runtime["fused_op"],
             "ANNC_WORK_DIR": str(args.work_dir / "pipeline"),
             "ANNC_KEEP_TEMPS": "1",
-            "ANNC_GEMM": "3" if args.case.startswith("TF-JIT-prepack-") else "1",
-            # These cases validate generated GEMM, including in KDNN builds.
-            "ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS": "MatMul,MatMulAdd,MatMulAddRelu",
             "ANNC_GEMM_CONFIG": os.environ.get("ANNC_GEMM_CONFIG")
             or str(
                 ROOT / "tests/FileCheck/Target/aarch64/Inputs/"
@@ -496,26 +676,25 @@ def main():
         + ":"
         + os.environ["PATH"]
     )
-    sdk = Path(tf.sysconfig.get_lib())
-    ctypes.CDLL(str(sdk / "libtensorflow_framework.so.1"), mode=ctypes.RTLD_GLOBAL)
-    ctypes.CDLL(
-        str(sdk / "python/_pywrap_tensorflow_internal.so"), mode=ctypes.RTLD_GLOBAL
-    )
-    tf.load_library(str(build / "lib/tensorflow/1.15/libannc_optimizer.so"))
-    tf.load_op_library(os.environ["ANNC_FUSED_OP_PATH"])
-    if args.case.startswith("TF-JIT-prepack-"):
-        report = run_prepack(args)
-    elif args.case.startswith("TF-F"):
-        data = build_case(args.case)
-        report = run_fusion(args, data)
-    elif args.case.startswith("TF-C-reject-"):
-        data = build_tensordot_case(args.case[len("TF-C-reject-") :]) + (
-            "tensordot_matmul",
-            False,
+    os.environ.update(args.spec.get("env", {}))
+    if runtime["preload"]:
+        sdk = Path(tensorflow.sysconfig.get_lib())
+        libraries = (
+            ("libtensorflow_framework.so.1", "python/_pywrap_tensorflow_internal.so")
+            if tensorflow.__version__.startswith("1.")
+            else ("libtensorflow_framework.so.2", "libtensorflow_cc.so.2")
         )
-        report = run_fusion(args, data, reject=True)
+        for library in libraries:
+            ctypes.CDLL(str(sdk / library), mode=ctypes.RTLD_GLOBAL)
+    tensorflow.load_library(runtime["optimizer"])
+    tensorflow.load_op_library(runtime["fused_op"])
+    if "module" in args.spec:
+        report = run_existing_kernel(args)
+    elif "handler" in args.spec:
+        handlers = {"prepack": run_prepack, "aot_prepack": run_aot_prepack}
+        report = handlers[args.spec["handler"]](args)
     else:
-        raise ValueError("Unknown acceptance case: " + args.case)
+        report = run_fusion(args, build_case(args.spec))
     config = {}
     for line in (build / "CMakeCache.txt").read_text().splitlines():
         if (
@@ -534,7 +713,7 @@ def main():
     report.update(
         case=args.case,
         status="passed",
-        tensorflow=tf.__version__,
+        tensorflow=tensorflow.__version__,
         build=str(build),
         configuration=config,
     )
