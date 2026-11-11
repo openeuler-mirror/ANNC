@@ -30,6 +30,9 @@ Status CompileAnncJitKernel(
   input.argument_dims = dims.data();
   input.argument_ranks = ranks.data();
   input.argument_count = dims.size();
+  input.enable_prepack = request.enable_prepack;
+  input.immutable_arguments = request.immutable_arguments.data();
+  input.immutable_argument_count = request.immutable_arguments.size();
   input.log = [](void*, int warning, const char* message) {
     // Logging must not unwind through the C interface.
     try {
@@ -56,10 +59,20 @@ Status CompileAnncJitKernel(
     case ANNC_JIT_OK:
       break;
   }
+  for (size_t i = 0; i < result.packed_rhs_count; ++i) {
+    if (!annc::jit::ValidatePackedRhsSpec(result.packed_rhs_specs[i]))
+      return errors::Internal("Invalid JIT packed RHS layout");
+  }
   // Transfer ownership to the cached executable. Its final release calls back
   // into support to unload kernel.so and clean up the compilation directory.
   *executable =
       std::make_shared<annc::jit::JitExecutable>(std::move(kernel), result);
+  if (result.packed_rhs_count)
+    (*executable)
+        ->packed_rhs_specs.assign(
+            result.packed_rhs_specs,
+            result.packed_rhs_specs + result.packed_rhs_count);
+  (*executable)->prepare_rhs = result.prepare_rhs;
   return OkStatus();
 }
 

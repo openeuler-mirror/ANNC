@@ -15,7 +15,8 @@ if(NOT TARGET annc_tensorflow_support)
                    "${CMAKE_CURRENT_BINARY_DIR}/support")
 endif()
 
-add_library(annc_jit_cache_1_15 STATIC "${_plugin}/jit_cache.cc")
+add_library(annc_jit_cache_1_15 STATIC
+  "${_plugin}/jit_cache.cc" "${_plugin}/packed_rhs.cc")
 target_include_directories(annc_jit_cache_1_15 PUBLIC "${_plugin}")
 target_link_libraries(annc_jit_cache_1_15 PUBLIC OpenSSL::Crypto
                       annc_tensorflow_support)
@@ -23,7 +24,7 @@ target_link_libraries(annc_jit_cache_1_15 PUBLIC OpenSSL::Crypto
 add_library(annc_fused_op_1_15 SHARED
   "${_plugin}/fused_op.cc" "${_plugin}/fused_op_register.cc"
   "${_plugin}/fused_op_jit.cc" "${_plugin}/fused_op_context.cc"
-  threadpool_callbacks.cc)
+  "${_plugin}/fused_op_prepack.cc" threadpool_callbacks.cc)
 target_link_libraries(annc_fused_op_1_15 PRIVATE
   annc_jit_cache_1_15 Threads::Threads dl)
 
