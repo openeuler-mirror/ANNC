@@ -160,6 +160,63 @@ static void TestFlattenExecutorCountMismatchBailsOut() {
   PB2_CHECK(findOp(*module, "some.op", "p0") != nullptr);
 }
 
+// Both legal dependency directions in one graph: an If consuming an
+// island's output AND an island consuming the If's result. Lifting must
+// keep the original block order (def-before-use both ways), or the module
+// stops verifying. "tf.If" is left unregistered here on purpose: the
+// flattener identifies carriers by name, so the generic form with a real
+// region exercises exactly the same path.
+static void TestFlattenExecutorInterleavedDominance() {
+  mlir::MLIRContext ctx;
+  loadExecutorDialects(ctx);
+  // The generic tf.If would be rejected inside an executor graph by the
+  // ODS verifier; skip the parse-time check, flatten, then verify -- by
+  // then the graph is gone and legality is restored.
+  mlir::ParserConfig pcfg(&ctx, /*verifyAfterParse=*/false);
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @main(%arg0: tensor<f32>) -> tensor<f32> {
+        %g = "tf_executor.graph"() ({
+          %src:2 = "tf_executor.island"() ({
+            %v1 = "some.op"(%arg0) {test.tag = "src"} : (tensor<f32>) -> tensor<f32>
+            "tf_executor.yield"(%v1) : (tensor<f32>) -> ()
+          }) : () -> (tensor<f32>, !tf_executor.control)
+          %ifr = "tf.If"(%src#0) ({
+            %inner = "some.op"(%src#0) {test.tag = "inner"} : (tensor<f32>) -> tensor<f32>
+            "tf.If.yield"(%inner) : (tensor<f32>) -> ()
+          }) {test.tag = "if"} : (tensor<f32>) -> tensor<f32>
+          %cons:2 = "tf_executor.island"() ({
+            %v2 = "some.op"(%ifr) {test.tag = "cons"} : (tensor<f32>) -> tensor<f32>
+            "tf_executor.yield"(%v2) : (tensor<f32>) -> ()
+          }) : () -> (tensor<f32>, !tf_executor.control)
+          "tf_executor.fetch"(%cons#0) : (tensor<f32>) -> ()
+        }) : () -> tensor<f32>
+        func.return %g : tensor<f32>
+      }
+    })mlir",
+                                    pcfg);
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.enableVerifier(false);  // input holds the executor-illegal generic If
+  pm.addPass(pb_passes::CreateFlattenExecutorPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(findOp(*module, "tf_executor.graph") == nullptr);
+  auto* src = findOp(*module, "some.op", "src");
+  auto* ifr = findOp(*module, "tf.If", "if");
+  auto* cons = findOp(*module, "some.op", "cons");
+  PB2_CHECK(src && ifr && cons);
+  // Original block order: src before the If, the If before its consumer.
+  unsigned iSrc = 0, iIf = 0, iCons = 0, idx = 0;
+  module->walk([&](mlir::Operation* op) {
+    if (op == src) iSrc = idx;
+    if (op == ifr) iIf = idx;
+    if (op == cons) iCons = idx;
+    ++idx;
+  });
+  PB2_CHECK(iSrc < iIf && iIf < iCons);
+  PB2_CHECK(succeeded(mlir::verify(*module)));  // dominance holds
+}
+
 // Registered tf.* leftovers become tf.residue carriers: attrs ride along,
 // call_target_name keeps the op name, and the reason distinguishes
 // static-gated classes from plain no-pattern ones.
@@ -223,6 +280,7 @@ int main() {
   TestStripFunctionalizeSuffix();
   TestFlattenExecutorPositive();
   TestFlattenExecutorCountMismatchBailsOut();
+  TestFlattenExecutorInterleavedDominance();
   TestWrapRegisteredResidue();
   TestRenameResidueCarrier();
   PB2_TEST_SUMMARY("mlir-passes-test");
