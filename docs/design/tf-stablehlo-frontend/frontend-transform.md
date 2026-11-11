@@ -91,13 +91,13 @@ GraphDef / SavedModel
 | T3 | GraphDef 导入（pb 改写/functionalize/官方导入/编排）+ pass 声明头 | ~875 | 已合入（pb 域单测随 T8 链接闭合补齐） |
 | T4 | MLIR pass 集（12 个 pass：ref 归一/executor 扁平化/源恢复/形状注记/残差封装与改名等） | ~1570 | 已合入 |
 | T5 | restore + emit（残差恢复/权重规划/attr 双通道；RunPipelines 拆独立 TU 随 T8 闭合） | ~730 | 已合入 |
-| T6 | wrap 层（shape 组：unrank/strided slice） | ~890（含测试 160） | 本批 |
+| T6 | wrap 层（shape 组：unrank/strided slice） | ~890（含测试 160） | 已合入 |
 
 > T6 决策记录：1030 的 dyn-view pass（动态 Reshape 短路为
 > getDim/setDim 序列视图）不迁——该改写会在图中引入一维扁平中间
 > 形态，属于不需要的形状结构变化；动态 Reshape 保持残差通道，
 > 由 sink 侧处理。
-| T7 | wrap 层（string 组：transport/unwrap） | ~940 | 待迁 |
+| T7 | wrap 层（string 组：transport/unwrap） | ~1090（含测试 150） | 本批 |
 | T8 | 管线 + 入口可执行 + 集成 pytest + fixtures + CLI 文档 | ~480+测试 | 待迁 |
 
 批次纪律：各批可独立构建；开发与测试分离提交；`ANNC_ENABLE_TF2ATIR_V2`
