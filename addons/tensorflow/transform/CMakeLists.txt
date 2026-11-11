@@ -170,20 +170,26 @@ add_library(pb2_transform_objs OBJECT
   graph/pb2_infer.cpp
   graph/pb2_official_infer.cpp
   passes/pb2_tf_rank_infer.cpp
-  passes/pb2_mlir_passes.cpp)
+  passes/pb2_mlir_passes.cpp
+  passes/pb2_restore_pass.cpp
+  pipeline/pb2_emit.cpp)
 
-# The import TU references T4/T5 implementation symbols; OBJECT libraries
-# have no link check, but folding it into pb2_transform_objs would break the
-# test binaries. T5 completes the link closure and folds it back.
-add_library(pb2_import_objs OBJECT graph/pb2_import.cpp)
-target_include_directories(pb2_import_objs BEFORE PRIVATE
+# The import and run-pipelines TUs reference shlo_pipeline:: (the legalize
+# orchestration with its wrap-layer passes, landing with T8); OBJECT
+# libraries have no link check, but folding them into pb2_transform_objs
+# would break the test binaries. T8 completes the closure and folds back.
+add_library(pb2_pipeline_objs OBJECT
+  graph/pb2_import.cpp
+  pipeline/pb2_run_pipelines.cpp)
+
+target_include_directories(pb2_pipeline_objs BEFORE PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${_tf_include}
   ${_tf_mlir_include}
   ${_llvm_snapshot})
-target_compile_features(pb2_import_objs PRIVATE cxx_std_17)
-target_compile_options(pb2_import_objs PRIVATE -O1 -g -pthread)
-target_compile_definitions(pb2_import_objs PRIVATE
+target_compile_features(pb2_pipeline_objs PRIVATE cxx_std_17)
+target_compile_options(pb2_pipeline_objs PRIVATE -O1 -g -pthread)
+target_compile_definitions(pb2_pipeline_objs PRIVATE
   NDEBUG "_GLIBCXX_USE_CXX11_ABI=${_tf_cxx11_abi}")
 
 # BEFORE: the project-level global include_directories() (third_party/llvm,
