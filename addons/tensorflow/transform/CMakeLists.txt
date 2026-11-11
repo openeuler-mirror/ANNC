@@ -172,7 +172,9 @@ add_library(pb2_transform_objs OBJECT
   passes/pb2_tf_rank_infer.cpp
   passes/pb2_mlir_passes.cpp
   passes/pb2_restore_pass.cpp
-  pipeline/pb2_emit.cpp)
+  pipeline/pb2_emit.cpp
+  wrap/pb2_unrank_wrap.cpp
+  wrap/pb2_strided_slice.cpp)
 
 # The import and run-pipelines TUs reference shlo_pipeline:: (the legalize
 # orchestration with its wrap-layer passes, landing with T8); OBJECT
