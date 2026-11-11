@@ -216,14 +216,42 @@ def test_gather_graphdef_fusion_compile_and_execute(tmp_path):
     assert "pattern=kp_fused_gather_external" in execution.stderr
 
 
-def _worker(rewritten_path, addon_path, report_path):
-    """Run in a subprocess to isolate TensorFlow registration and caches."""
+def make_graph(case):
     import numpy as np
     import tensorflow as tf
     from google.protobuf import text_format
 
-    original_def = tf.compat.v1.GraphDef()
-    text_format.Parse(FIXTURE.read_text(), original_def)
+    original = tf.compat.v1.GraphDef()
+    text_format.Parse(FIXTURE.read_text(), original)
+    data = np.array([[-3, 2, -1, 4], [5, -6, 7, -8]], dtype=np.float32)
+    keys = np.array([[1, 0, 0], [0, 0, 1], [1, 0, 0], [0, 0, 1]], dtype=np.int64)
+    cases = [
+        ("duplicates", 0),
+        ("single_unique", 1),
+        ("different_column", 2),
+        ("repeat", 0),
+    ]
+    scenarios = [
+        (
+            label,
+            {
+                "data:0": data,
+                "keys:0": keys,
+                "begin:0": np.array([0, column], dtype=np.int32),
+            },
+        )
+        for label, column in cases
+    ]
+    outputs = [(name, name) for name in (*OUTPUTS, *FUSED_OUTPUTS)]
+    return original, list(OUTPUTS), outputs, scenarios
+
+
+def _worker(rewritten_path, addon_path, report_path):
+    """Run in a subprocess to isolate TensorFlow registration and caches."""
+    import numpy as np
+    import tensorflow as tf
+
+    original_def, _, _, scenarios = make_graph("gather")
     rewritten_def = tf.compat.v1.GraphDef()
     rewritten_def.ParseFromString(Path(rewritten_path).read_bytes())
     nodes = {node.name: node for node in rewritten_def.node}
@@ -267,14 +295,8 @@ def _worker(rewritten_path, addon_path, report_path):
     session_config.graph_options.optimizer_options.opt_level = -1
     session_config.graph_options.rewrite_options.disable_meta_optimizer = True
 
-    data = np.array([[-3, 2, -1, 4], [5, -6, 7, -8]], dtype=np.float32)
-    keys = np.array([[1, 0, 0], [0, 0, 1], [1, 0, 0], [0, 0, 1]], dtype=np.int64)
-    cases = [
-        ("duplicates", 0),
-        ("single_unique", 1),
-        ("different_column", 2),
-        ("repeat", 0),
-    ]
+    data = scenarios[0][1]["data:0"]
+    keys = scenarios[0][1]["keys:0"]
     names = [*OUTPUTS, *FUSED_OUTPUTS]
     rewritten_names = [
         *OUTPUTS,
@@ -288,12 +310,7 @@ def _worker(rewritten_path, addon_path, report_path):
     ) as reference, tf.compat.v1.Session(
         graph=compiled, config=session_config
     ) as actual:
-        for label, column in cases:
-            feeds = {
-                "data:0": data,
-                "keys:0": keys,
-                "begin:0": np.array([0, column], dtype=np.int32),
-            }
+        for label, feeds in scenarios:
             expected = reference.run(names, feed_dict=feeds)
             run_metadata = tf.compat.v1.RunMetadata()
             got = actual.run(
@@ -345,7 +362,7 @@ def _worker(rewritten_path, addon_path, report_path):
     Path(report_path).write_text(
         json.dumps(
             {
-                "cases": [label for label, _ in cases],
+                "cases": [label for label, _ in scenarios],
                 "compared_tensors_per_case": len(names),
                 "fused_node": fused.name,
                 "executed_fused_node": (

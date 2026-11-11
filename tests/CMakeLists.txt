@@ -61,6 +61,26 @@ if(TARGET annc_ep)
   add_subdirectory(integration/ort_ep)
 endif()
 
+if(TARGET annc_fused_op_1_15)
+  set(_tf_optimizer annc_optimizer_1_15)
+  set(_tf_fused_op annc_fused_op_1_15)
+elseif(TARGET annc_fused_op)
+  set(_tf_optimizer annc_optimizer)
+  set(_tf_fused_op annc_fused_op)
+endif()
+if(DEFINED _tf_fused_op AND TARGET annc-tf-pipeline)
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tensorflow-runtime.json"
+    CONTENT "{
+  \"python\": \"${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}\",
+  \"optimizer\": \"$<TARGET_FILE:${_tf_optimizer}>\",
+  \"fused_op\": \"$<TARGET_FILE:${_tf_fused_op}>\",
+  \"pipeline\": \"$<TARGET_FILE:annc-tf-pipeline>\",
+  \"preload\": $<IF:$<BOOL:${ANNC_TENSORFLOW_PRELOAD}>,true,false>,
+  \"kdnn\": $<IF:$<BOOL:${ANNC_ENABLE_KDNN_ADAPTOR}>,true,false>
+}
+")
+endif()
+
 if(TARGET annc_fused_op_1_15 AND TARGET annc-tf-pipeline)
   set(_tf_tests "${CMAKE_CURRENT_SOURCE_DIR}/integration/tensorflow")
   if(ANNC_TENSORFLOW_PRELOAD)
