@@ -206,6 +206,81 @@ static void TestStridedSliceShrinkDynamicSkips() {
   PB2_CHECK(findByName(*module, "stablehlo.real_dynamic_slice") == nullptr);
 }
 
+// TF's negative-end semantics vs the old kDynamic sentinel: x[0:-1] is
+// "drop the last element" (limit 3), NOT "to the dimension end" (4).
+static void TestStridedSliceNegativeEndOne() {
+  mlir::MLIRContext ctx;
+  loadDialects(ctx);
+  auto module = parse(ctx, R"mlir(
+    module {
+      func.func @main(%arg0: tensor<4xf32>) -> tensor<3xf32> {
+        %b = "some.const"() {value = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
+        %e = "some.const"() {value = dense<-1> : tensor<1xi32>} : () -> tensor<1xi32>
+        %s = "some.const"() {value = dense<1> : tensor<1xi32>} : () -> tensor<1xi32>
+        %0 = "tf.residue"(%arg0, %b, %e, %s) {call_target_name = "tf.StridedSlice"} : (tensor<4xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> tensor<3xf32>
+        func.return %0 : tensor<3xf32>
+      }
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createStridedSliceDynPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  auto* slice = findByName(*module, "stablehlo.real_dynamic_slice");
+  PB2_CHECK(slice != nullptr);
+  auto rt = llvm::cast<mlir::RankedTensorType>(slice->getResult(0).getType());
+  PB2_CHECK(rt.getShape() == mlir::ArrayRef<int64_t>{3});  // not 4
+}
+
+// x[10:] with end_mask on a dim of 4: begin clamps into the dimension,
+// the result is empty -- not a negative-span illegal type.
+static void TestStridedSliceOobBeginClamps() {
+  mlir::MLIRContext ctx;
+  loadDialects(ctx);
+  auto module = parse(ctx, R"mlir(
+    module {
+      func.func @main(%arg0: tensor<4xf32>) -> tensor<0xf32> {
+        %b = "some.const"() {value = dense<10> : tensor<1xi32>} : () -> tensor<1xi32>
+        %e = "some.const"() {value = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
+        %s = "some.const"() {value = dense<1> : tensor<1xi32>} : () -> tensor<1xi32>
+        %0 = "tf.residue"(%arg0, %b, %e, %s) {call_target_name = "tf.StridedSlice", end_mask = 1 : i64} : (tensor<4xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> tensor<0xf32>
+        func.return %0 : tensor<0xf32>
+      }
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createStridedSliceDynPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  auto* slice = findByName(*module, "stablehlo.real_dynamic_slice");
+  PB2_CHECK(slice != nullptr);
+  auto rt = llvm::cast<mlir::RankedTensorType>(slice->getResult(0).getType());
+  PB2_CHECK(rt.getShape() == mlir::ArrayRef<int64_t>{0});  // empty
+}
+
+// x[:-100] on a dim of 4: the far-out negative end clamps to an empty
+// result -- never a negative limit.
+static void TestStridedSliceFarNegativeEndClamps() {
+  mlir::MLIRContext ctx;
+  loadDialects(ctx);
+  auto module = parse(ctx, R"mlir(
+    module {
+      func.func @main(%arg0: tensor<4xf32>) -> tensor<0xf32> {
+        %b = "some.const"() {value = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
+        %e = "some.const"() {value = dense<-100> : tensor<1xi32>} : () -> tensor<1xi32>
+        %s = "some.const"() {value = dense<1> : tensor<1xi32>} : () -> tensor<1xi32>
+        %0 = "tf.residue"(%arg0, %b, %e, %s) {call_target_name = "tf.StridedSlice"} : (tensor<4xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> tensor<0xf32>
+        func.return %0 : tensor<0xf32>
+      }
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createStridedSliceDynPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  auto* slice = findByName(*module, "stablehlo.real_dynamic_slice");
+  PB2_CHECK(slice != nullptr);
+  auto rt = llvm::cast<mlir::RankedTensorType>(slice->getResult(0).getType());
+  PB2_CHECK(rt.getShape() == mlir::ArrayRef<int64_t>{0});  // empty
+}
+
 int main() {
   TestUnrankWrap();
   TestStridedSliceDyn();
@@ -213,5 +288,8 @@ int main() {
   TestStridedSliceRank0Skips();
   TestStridedSliceNegativeBeginClamps();
   TestStridedSliceShrinkDynamicSkips();
+  TestStridedSliceNegativeEndOne();
+  TestStridedSliceOobBeginClamps();
+  TestStridedSliceFarNegativeEndClamps();
   PB2_TEST_SUMMARY("wrap-test");
 }
