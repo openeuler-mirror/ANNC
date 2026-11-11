@@ -49,6 +49,12 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`）。当前只被透传为 `annc-tf-pipeline --backend`，而该工具不解析此参数（静默忽略）；实际生效处只有 `ANNCFused` 运行时的 `openblas` 判断，且该 MatMul 直通路径未实现，设置后融合 MatMul 会报 `Unimplemented` |
 | `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | 图改写工具 `annc-tf-pipeline` 的调用超时（参数名：`timeout_seconds`）；JIT 编译工具 `annc-asm`、`annc` 也使用此环境变量，每次调用单独计时 |
+| `PB_NO_FUNC` | pb2stablehlo：跳过 v1 控制流函数化（Switch/Merge→tf.If），图原样进入改写 |
+| `PB_NO_FLATTEN` | pb2stablehlo：跳过 tf_executor 结构扁平化（诊断用） |
+| `PB_VERBOSE` | pb2stablehlo：dead-Switch 清除的残留引用调试输出 |
+| `PB_VERIFY_STAGES` | pb2stablehlo：导入/扁平化/恢复各 stage 后打印模块校验诊断 |
+| `PB_DUMP_IMPORT_GRAPH` | pb2stablehlo：把改写后的 GraphDef 序列化转储到指定路径 |
+| `PB_DEBUG_IMPORT_INPUTS` | pb2stablehlo：打印导入输入规格统计（feeds/shape 覆盖） |
 | `ANNC_NO_OFFICIAL_INFER` | pb2stablehlo：关闭 pb 域官方 shape 富化（grappler GraphProperties），图保持原样；A/B 量测用，此时 MLIR 侧 rank 规则引擎兜底注册 op |
 | `ANNC_NO_TF_RANK_INFER` | pb2stablehlo：关闭 MLIR 侧 tf 方言 rank 规则引擎（legalize 前）；A/B 量测用，残差载体将无 rank 来源 |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |

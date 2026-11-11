@@ -88,7 +88,7 @@ GraphDef / SavedModel
 | --- | --- | --- | --- |
 | T1 | common 层（节点索引/输入引用/OpDef 加载/dtype 推导/attr 与 JSON 通道）+ 构建骨架 + 单测 | ~1070 | 已合入 |
 | T2 | shape 推导层（graph pass / infer / official infer / tf rank infer） | ~840 | 本批 |
-| T3 | GraphDef 导入（functionalize 控制流） | ~810 | 待迁 |
+| T3 | GraphDef 导入（pb 改写/functionalize/官方导入/编排）+ pass 声明头 | ~875 | 本批（单测随 T5 链接闭合补齐） |
 | T4 | MLIR pass 集（pb2_mlir_passes） | ~1570 | 待迁 |
 | T5 | restore + emit（残差载体改名 `annc.residue` 的落点） | ~730 | 待迁 |
 | T6 | wrap 层（shape 组：unrank/dyn view/strided slice） | ~950 | 待迁 |
@@ -97,6 +97,21 @@ GraphDef / SavedModel
 
 批次纪律：各批可独立构建；开发与测试分离提交；`ANNC_ENABLE_TF2ATIR_V2`
 单一开关贯穿（与 converter-v2 / sink 侧一致）。
+
+**T3 无单测的原因（决策记录，2026-11-11）**：
+
+1. `pb2_import.cpp` 是单一 TU，引用 T4 的 15 个 pass 工厂与 T5 的
+   `PlanWeights`/`RunPipelines` 实现——测试二进制必须链接该 TU 的全部
+   符号，而这些实现尚未迁入；
+2. wheel 域 OBJECT 库无链接检查，把 import 并入测试所链的
+   `pb2_transform_objs` 会使全部现有测试链接失败（实测复现过）——因此
+   import 独立为 `pb2_import_objs`，本批验证到编译层（0 error）；
+3. 替代方案（为 T4/T5 符号造 test-only 链接替身，提前测 pb 域改写）
+   评估后不采用：替身与真实实现的签名/行为漂移无防护，寿命只有两批。
+
+补测计划：T5 实现落位、链接闭合时，pb 域改写（custom-op stand-in、
+读链重接、argified→feed、dead-Switch 级联、feeds 装配顺序）随 T5 批
+补入 `tests/unit/transform/`。
 
 ## 构建与验证
 
