@@ -255,3 +255,18 @@
 | **决策** | 新产物使用版本化 `annc_context_v3`，kernel 与融合函数外部入口统一为 `AnncStatusCode (*)(AnncKernelContext*)`。Context 包含借用的 tensor view、typed attrs 和 C 服务表；输出预绑定与执行时分配属于同一 slot 协议。复用现有 registry/backend 选择、分配实现、线程池和公共 lowering，在临近 LLVM 调用时封装 payload。 |
 | **线程池调用** | kernel 使用 `context.getThreadPool()` 获取借用句柄，以 `Shard(maxParallelism, workers, total, costPerUnit, work)` 分片。服务表追加可选 C `shard` 回调并逐字段检查 `struct_size`；旧服务表缺少 shard 时串行回退。 |
 | **后果** | 调用签名、动态输出和错误契约统一，输入数量不再受旧参数 switch 限制；需要协调 schema、fusion、lowering、运行时和测试迁移，并验证 C/LLVM 布局与生命周期。 |
+
+<a id="adr-023"></a>
+
+## ADR-023：pb2stablehlo 前端的 wheel 隔离构建域
+
+状态：**已实施**（批 1 合入 build 骨架与 common 层），2026-11-11。
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | V2 stablehlo 路线的生产端（TF GraphDef → StableHLO 前端）需调用 TF 自身 C++ transform passes（`odml::AddLegalizeTFToStablehloPasses`、`GraphConstructor`、`GraphProperties` 等），其符号只存在于 pip TF wheel 的 `libtensorflow_cc.so.2`；该 .so 内嵌 vendored MLIR 21.0.0git，与项目 LLVM/MLIR 20 工具链的 C++ ABI 不可混用。 |
+| **决策** | 前端作为一个独立构建域编译链接：仅依赖 TF 2.20 wheel（头 + `libtensorflow_cc.so.2`），不引用项目任何 LLVM/MLIR 头或库；挂载在 V2 统一开关（`ANNC_ENABLE_TF2ATIR_V2`，TF-2.20 分支内）之下；llvm 头按三级来源解析（本地快照 → 显式目录 → 官方仓 sparse clone），快照不入库；生成的 `llvm-config.h` 作为构建资产入库；该域的测试用纯 CHECK 宏，不引入项目 GTest。 |
+| **理由** | ① 混链会产生 ilist/ABI 宏层面的错位，链接期以晦涩的 relocation 错误表现（1030 实测）；② 前端是开发机离线工具（产物 `.mlir`，不进 predictor），wheel 依赖不违反部署形态纪律；③ 单一开关保持 V2 路线与 sink/转换器侧的构建一致性；④ 快照不入库、按官方源拉取，避免第三方代码副本长期漂移。 |
+| **备选方案** | 与项目工具链混编（ABI 不可行）；宿主源码树自建 TF C++ SDK（成本远超收益，且 odml passes 需要 wheel 的完整符号面）；vendored 头整体入库（体积与漂移成本高，仅保留 1 个生成头为构建资产）。 |
+| **后果** | ✅ 前端与 v1/V2 其余组件解耦，默认构建零影响；✅ host 侧可用官方 llvm-project 源复现。❌ 构建需可 `import tensorflow` 的 2.20 wheel（配置期强门禁）；❌ 前端工具不可用项目 GTest/工具链调试设施；❌ llvm 头来源依赖网络或本地预置（FATAL 信息含三条出路）。 |
+| **详细设计** | [frontend-transform.md](../design/tf-stablehlo-frontend/frontend-transform.md) |
