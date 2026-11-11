@@ -132,6 +132,7 @@ bash tests/FileCheck/run.sh
 | `unit/annc/jit_template_fingerprint_test.cpp` | L0 | JIT 模板指纹 |
 | `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
 | `unit/transform/pb2_common_test.cpp` | L0 | pb2stablehlo common 层纯函数（V2 开关 + TF 2.20 门控；wheel 隔离域，CHECK 宏） |
+| `integration/tf_transform/` | L2 | pb2stablehlo 端到端：手工 GraphDef 经可执行产出断言（wrap/slice/string/rank；未构建则整文件 skip） |
 | `unit/annc/packed_rhs_test.cpp` | L0 | 权重缓存隔离、布局复用、并发准备和生命周期；同一份用例绑定所选插件实现 |
 | `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |
 | `unit/kernels/*_test.cpp` | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
