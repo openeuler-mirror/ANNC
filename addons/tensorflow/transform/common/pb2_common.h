@@ -119,12 +119,37 @@ extern int g_warn;  // non-fatal warning counter
 struct BuildCtx;
 struct Options;
 
+// Exit codes shared across the route (single definition; fatal paths use
+// these, never bare numbers).
+enum ExitCode {
+  kExitOk = 0,
+  kExitUsage = 1,
+  kExitArgs = 2,
+  kExitInit = 3,
+  kExitGraphStructure = 4,
+};
+
 // Map-free attr lookup (Map::find unreliable across the ODR boundary).
 const AttrValue* FindAttr(const NodeDef& nd, const std::string& key);
-// "node" / "node:slot" / "^node".
+// "node" / "node:slot" / "^node"; fatal on any other encoding (a garbage
+// InputRef would silently corrupt the graph downstream).
 InputRef ResolveRef(const std::string& s);
+// Non-fatal variant for scans over inputs that may carry other encodings
+// (e.g. ref edges "a:b:0" inside BuildUnregisteredOpDefs): nullopt when the
+// string is not one of the three standard forms. Scans must use this, so
+// parsing semantics never fork a fourth time.
+std::optional<InputRef> TryResolveRef(const std::string& s);
 // Digit string -> slot (strtol with overflow clamp; no digits -> 0).
 int ParseSlot(const char* s);
+
+// The one attr->OpDef-default fallback (node attr value first, spec default
+// second, nullopt if neither). Hand-rolled copies of this chain have caused
+// exactly the drift the ODR notes warn about -- use these.
+std::optional<long> AttrIntOrSpecDefault(const NodeDef& nd, const OpDef& spec,
+                                         const std::string& attr_name);
+std::optional<DataType> AttrTypeOrSpecDefault(const NodeDef& nd,
+                                              const OpDef& spec,
+                                              const std::string& attr_name);
 
 // ==== Boundary op names (ABI contract; single source of truth) ====
 // The four wrap boundaries ride stablehlo.custom_call call_target_name;
@@ -150,8 +175,7 @@ inline void CopyNonReservedAttrs(mlir::OperationState& st, mlir::Operation* op) 
 // Post-build module verify: tolerates unregistered-op ODS mismatch, prints the
 // first few diagnostics. Returns the failure count.
 int VerifyBuiltModule(mlir::MLIRContext& context, mlir::ModuleOp module);
-void LoadOpSpecs(
-    const std::string& external_path = "");  // prefer the external OpList
+void LoadOpSpecs();  // wheel registry only; no external OpList input
 
 std::vector<int> MapInputsToArgs(const NodeDef& nd, const OpDef& spec);
 
@@ -172,8 +196,7 @@ struct BuildCtx {  // cross-stage state (the five sets route every node)
   std::set<std::string> var_skip;                // variables + read chain (skip)
 };
 struct Options {
-  std::string graph_path;    // graph pb
-  std::string op_list_path;  // --op_list external OpList (optional)
+  std::string graph_path;        // graph pb
   std::string crash_repro_path;  // --crash_repro; empty = disabled
                                  // (dump prefix then falls back to /tmp)
   std::vector<std::string> inputs, outputs;  // raw: name[:DT[:dims]] / name

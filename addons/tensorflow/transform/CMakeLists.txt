@@ -150,7 +150,11 @@ message(STATUS "pb2stablehlo llvm headers: ${_llvm_snapshot} (${_llvm_source})")
 # final batch and links every object with the TF wheel .so files.
 add_library(pb2_transform_objs OBJECT
   common/pb2_common.cpp
-  common/pb2_attrs.cpp)
+  common/pb2_attrs.cpp
+  graph/pb2_graph_pass.cpp
+  graph/pb2_infer.cpp
+  graph/pb2_official_infer.cpp
+  passes/pb2_tf_rank_infer.cpp)
 
 # BEFORE: the project-level global include_directories() (third_party/llvm,
 # build-llvm20, stablehlo, ...) would otherwise precede these paths and the
