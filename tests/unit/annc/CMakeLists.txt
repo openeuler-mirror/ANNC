@@ -46,6 +46,25 @@ if(TARGET annc_jit_cache)
     )
 endif()
 
+# One behavior suite for the active plugin's packed-weight implementation.
+if(TARGET annc_jit_cache_1_15 OR TARGET annc_jit_cache)
+  if(TARGET annc_jit_cache_1_15)
+    set(_packed_source "${PROJECT_SOURCE_DIR}/addons/tensorflow/plugin")
+    set(_packed_name "packed_rhs")
+  else()
+    set(_packed_source "${PROJECT_SOURCE_DIR}/tensorflow_addons")
+    set(_packed_name "annc_packed_rhs")
+  endif()
+  add_executable(packed_rhs_test packed_rhs_test.cpp
+    "${_packed_source}/${_packed_name}.cc")
+  target_include_directories(packed_rhs_test PRIVATE
+    "${_packed_source}" "${PROJECT_SOURCE_DIR}/annc/include")
+  target_compile_definitions(packed_rhs_test PRIVATE
+    ANNC_PACKED_RHS_HEADER="${_packed_name}.h")
+  target_link_libraries(packed_rhs_test PRIVATE GTest::gtest_main Threads::Threads)
+  gtest_discover_tests(packed_rhs_test)
+endif()
+
 # The mlir_ciface argument dispatch is header-only and independent of
 # TensorFlow; keep its regression test available even in TF-disabled builds.
 add_executable(ciface_dispatch_test

@@ -121,6 +121,7 @@ bash tests/FileCheck/run.sh
 | `unit/tensorflow/frontend/op_coverage_test.cpp` | L0 | TF 算子表构建与控制流回边覆盖 |
 | `unit/annc/jit_template_fingerprint_test.cpp` | L0 | JIT 模板指纹 |
 | `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
+| `unit/annc/packed_rhs_test.cpp` | L0 | 权重缓存隔离、布局复用、并发准备和生命周期；同一份用例绑定所选插件实现 |
 | `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |
 | `unit/kernels/*_test.cpp` | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
 | `unit/kernels/run_context_kernels.py`、`kernel_context_driver.cpp` | L0 | 手写 Context kernel 数值与路径验证；CTest 名称 `KernelContext.ProductionKernels` |
@@ -137,6 +138,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF1.15 Grappler 融合执行；JIT 预打包接入、同模板节点的权重隔离、重复执行及准入失败后的普通执行 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
