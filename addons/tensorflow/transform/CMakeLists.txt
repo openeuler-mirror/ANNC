@@ -169,7 +169,8 @@ add_library(pb2_transform_objs OBJECT
   graph/pb2_graph_pass.cpp
   graph/pb2_infer.cpp
   graph/pb2_official_infer.cpp
-  passes/pb2_tf_rank_infer.cpp)
+  passes/pb2_tf_rank_infer.cpp
+  passes/pb2_mlir_passes.cpp)
 
 # The import TU references T4/T5 implementation symbols; OBJECT libraries
 # have no link check, but folding it into pb2_transform_objs would break the
