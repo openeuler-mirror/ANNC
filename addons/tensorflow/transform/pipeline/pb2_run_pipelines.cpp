@@ -11,8 +11,13 @@ int RunPipelines(const Options& opt, const BuildCtx& ctx,
                  const tensorflow::GraphDef& graph, mlir::MLIRContext& context,
                  mlir::ModuleOp& module) {
   std::optional<tensorflow::Session*> no_session;
+  // Only freeze shapes when EVERY entry has one: an entry without a shape
+  // would arrive as an empty dims list, which TF hard-freezes as a rank-0
+  // scalar (no unranked spelling exists on this channel) -- silently
+  // corrupting the signature. Unshaped entries skip freezing entirely.
   llvm::SmallVector<std::vector<int64_t>> arg_shapes_hold;
   llvm::SmallVector<llvm::ArrayRef<int64_t>> arg_shapes;
+  bool allShaped = true;
   for (auto& s : opt.inputs) {
     std::string name = s.substr(0, s.find(':'));
     auto it = ctx.entries.find(name);
@@ -22,9 +27,15 @@ int RunPipelines(const Options& opt, const BuildCtx& ctx,
                    "signature)\n";
       return 1;
     }
+    if (!it->second.has_shape) allShaped = false;
     arg_shapes_hold.emplace_back(it->second.dims.begin(),
                                  it->second.dims.end());
     arg_shapes.push_back(arg_shapes_hold.back());
+  }
+  if (!allShaped) {
+    arg_shapes.clear();
+    std::cerr << "[pipeline] unshaped entry present: shape freezing skipped "
+                 "(an empty dims entry would freeze as rank-0)\n";
   }
   // Dump prefix only under an explicit crash-repro request: a fixed
   // world-writable path is a symlink hazard on shared machines.
@@ -66,8 +77,6 @@ int RunPipelines(const Options& opt, const BuildCtx& ctx,
   // tf.residue (sink F1 dispatches by the attr; collect then rewrite).
   pm.addPass(pb_passes::CreateNormalizeShapeVectorsPass());
   pm.addPass(pb_passes::CreateWrapRegisteredResiduePass());
-  // Carrier rename last: the wheel is done, annc.residue is what the sink sees.
-  pm.addPass(pb_passes::CreateRenameResidueCarrierPass());
   if (failed(pm.run(module))) {
     std::cerr << "[FAIL] tf->stablehlo legalize pipeline failed\n";
     return 1;
@@ -88,6 +97,18 @@ int RunPipelines(const Options& opt, const BuildCtx& ctx,
     mpm.addPass(pb_passes::CreatePortTagPass(graph));
     if (failed(mpm.run(module))) {
       std::cerr << "[FATAL] anchor pass failed\n";
+      return 1;
+    }
+  }
+  // Carrier rename strictly last: the source-loc passes above identify TF
+  // carrier hosts by the tf.residue name, so the rename must not run
+  // between wrap and them. annc.residue is what the sink finally sees.
+  {
+    mlir::PassManager rpm(&context);
+    rpm.enableVerifier(false);
+    rpm.addPass(pb_passes::CreateRenameResidueCarrierPass());
+    if (failed(rpm.run(module))) {
+      std::cerr << "[FATAL] carrier rename failed\n";
       return 1;
     }
   }
