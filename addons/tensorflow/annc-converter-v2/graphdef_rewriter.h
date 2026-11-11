@@ -2,9 +2,10 @@
 #define ANNC_TOOLS_ANNC_CONVERTER_V2_GRAPH_DEF_REWRITER_H
 
 // ANNCFused node assembly for the standalone GraphDef rewriter (std-only,
-// protos from the pip TF wheel). The emitted node attributes are the runtime
-// contract of tensorflow_addons/annc_fused_op*.cc; keep in sync with the v1
-// tool. The file-level flow joins the CLI batch.
+// TensorFlow dependency like tensorflow_addons). The emitted node attributes
+// are the runtime contract of tensorflow_addons/annc_fused_op*.cc; keep in
+// sync with the v1 tool. The in-process rewrite entry lives in
+// graph_rewriter_core.h.
 
 #include <string>
 #include <unordered_map>

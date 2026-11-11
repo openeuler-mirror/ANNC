@@ -220,6 +220,9 @@ ninja -C <ANNC_ROOT>/build install
 | `ANNC_KEEP_TEMPS` | 保留 pipeline 中间文件 | 关闭 |
 | `ANNC_VERBOSE` | 打印 pipeline 命令与诊断 | 关闭 |
 | `ANNC_TIMEOUT` | pipeline 超时（秒） | 300 |
+| `ANNC_V2_REWRITE_INPROC` | 置 `1` 时改用 `libannc_graph_rewriter` 进程内改写（v2；任何失败自动回退上方 pipeline 路径） | 关闭 |
+| `ANNC_V2_FUSION_METADATA` | v2 进程内改写的 `fusion_metadata.json` 路径 | 无 |
+| `ANNC_V2_SHARED_LIB` / `ANNC_V2_ATIR_MODULE` / `ANNC_V2_KERNEL_NAME` | v2 进程内改写的 kernel 产物路径（AOT 库 / JIT ATIR / kernel 名覆盖） | 无 |
 
 要点：
 
