@@ -49,6 +49,8 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`）。当前只被透传为 `annc-tf-pipeline --backend`，而该工具不解析此参数（静默忽略）；实际生效处只有 `ANNCFused` 运行时的 `openblas` 判断，且该 MatMul 直通路径未实现，设置后融合 MatMul 会报 `Unimplemented` |
 | `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | 图改写工具 `annc-tf-pipeline` 的调用超时（参数名：`timeout_seconds`）；JIT 编译工具 `annc-asm`、`annc` 也使用此环境变量，每次调用单独计时 |
+| `ANNC_NO_OFFICIAL_INFER` | pb2stablehlo：关闭 pb 域官方 shape 富化（grappler GraphProperties），图保持原样；A/B 量测用，此时 MLIR 侧 rank 规则引擎兜底注册 op |
+| `ANNC_NO_TF_RANK_INFER` | pb2stablehlo：关闭 MLIR 侧 tf 方言 rank 规则引擎（legalize 前）；A/B 量测用，残差载体将无 rank 来源 |
 | `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
 | `ANNC_V2_REWRITE_INPROC` | `1` | 未设置 | 置 `1` 时 Grappler 改写走 v2 进程内路径：`dlopen` 加载 `libannc_graph_rewriter.so` 并调用其 C 入口；任何失败向 stderr 告警并自动回退 v1 pipeline 路径 |

@@ -26,3 +26,20 @@ target_compile_definitions(pb2_common_test PRIVATE
 target_link_libraries(pb2_common_test PRIVATE pb2_wheel_env)
 
 add_test(NAME Pb2CommonTest COMMAND pb2_common_test)
+
+# T2 suites: the pb-domain inference chain and the tf-rank pass. Same
+# borrowing pattern as above (include/flags from the object library, link
+# env from pb2_wheel_env).
+foreach(_suite pb2_infer pb2_tf_rank_infer)
+  add_executable(${_suite}_test
+    ${_suite}_test.cpp
+    $<TARGET_OBJECTS:pb2_transform_objs>)
+  target_include_directories(${_suite}_test BEFORE PRIVATE
+    $<TARGET_PROPERTY:pb2_transform_objs,INCLUDE_DIRECTORIES>)
+  target_compile_options(${_suite}_test PRIVATE
+    $<TARGET_PROPERTY:pb2_transform_objs,COMPILE_OPTIONS>)
+  target_compile_definitions(${_suite}_test PRIVATE
+    $<TARGET_PROPERTY:pb2_transform_objs,COMPILE_DEFINITIONS>)
+  target_link_libraries(${_suite}_test PRIVATE pb2_wheel_env)
+  add_test(NAME ${_suite}_test COMMAND ${_suite}_test)
+endforeach()
