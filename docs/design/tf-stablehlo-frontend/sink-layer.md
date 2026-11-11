@@ -9,6 +9,7 @@
 ```
 TF GraphDef / SavedModel
   └─ stablehlo 前端产物（stablehlo 主图 + TF 残差能力 op + shape/arith 脚手架）
+     └─ 生产端：[pb2stablehlo 前端](frontend-transform.md)（同目录 HLD）
        └─ [residue-sink]  ← 本层
             └─ ATIR 混合 IR（atir.*_v2 + 保留的 stablehlo/其他方言）
                  └─ V2 fusion / ATIR 下游 lowering / TF 运行时分区回退
