@@ -96,10 +96,20 @@ bash tests/FileCheck/run.sh
   `integration/fusion/test_gemm_epilogue_kernel_compile.py` 覆盖请求编译、旧对象隔离
   与真实生成链接，`integration/cmake/test_gemm_codegen_package.py` 覆盖包发现
   和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
-- TF 普通 MatMul 的生成式端到端用例和 TF1.15 验收 runner 默认使用
+- TF 普通 MatMul 的生成式端到端用例和 TF 验收 runner 默认使用
   `FileCheck/Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json`，可通过
-  `ANNC_GEMM_CONFIG` 指定其他调优配置。验收 runner 显式关闭 MatMul 系列
-  KDNN outlining，保证 KDNN 与非 KDNN 构建均验证生成式 GEMM 路径。
+  `ANNC_GEMM_CONFIG` 指定其他调优配置。生成式 GEMM 用例显式关闭 MatMul 系列
+  KDNN outlining；KDNN 用例要求 `ANNC_ENABLE_KDNN_ADAPTOR=ON`。
+- TF 验收入口 `integration/tensorflow/test_tf_acceptance.py` 从构建时生成的
+  `build/tests/tensorflow-runtime.json` 读取 SDK Python 和插件目标路径，
+  不按版本猜测目录。SDK Python 也需要 pytest，以复用 `e2e/kernel_context/`
+  中的构图函数；原有逐算子测试保留。设置 `ANNC_REQUIRE_E2E=1` 后缺依赖报错。
+  MatMul、tensordot 用例经过 Grappler；复用的逐算子图经过
+  pipeline 重写后在 TF Session 执行，保留原输入、输出和数值容差。
+  TF1.15 无原生 int64 SparseSegment CPU kernel；该两项保留 int64 被测输入，
+  用已有 int32 场景的相同索引值计算参考输出，不覆盖超出 int32 范围的索引。
+  用例的 ABI、AOT/JIT 和环境参数在登记处指定，runner 不根据名称推断。
+  `--basetemp` 下按用例及输入序号保留运行元数据、参考输出和实际输出。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若默认解释器没有这两个包，configure 时用
@@ -138,7 +148,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
-| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF1.15 Grappler 融合执行；JIT 预打包接入、同模板节点的权重隔离、重复执行及准入失败后的普通执行 |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件验收：MatMul/tensordot、JIT 预打包及复用的逐算子融合图 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
