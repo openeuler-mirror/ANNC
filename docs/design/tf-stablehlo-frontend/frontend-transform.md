@@ -26,6 +26,36 @@ GraphDef / SavedModel
 `custom_op`/`custom_attrs`）。形态细节与两形态定义见
 [sink-layer.md](sink-layer.md)「残差形态」。
 
+## 推导层职责矩阵（T2）
+
+三层推导，重叠区是**有意的分层兜底**而非冗余：
+
+| 层 | 域 | 覆盖对象 | 推断内容 | 开关 |
+| --- | --- | --- | --- | --- |
+| `pb2_infer` | pb | 全部节点 | dtype | 无（必经，fail-closed） |
+| `pb2_official_infer` | pb | 注册 op（改写后图） | shape/rank（`_output_shapes`） | `ANNC_NO_OFFICIAL_INFER` |
+| `pb2_tf_rank_infer` | MLIR | 注册 `tf.*` + **残差载体** | rank only（规则引擎） | `ANNC_NO_TF_RANK_INFER` |
+
+- **残差载体是 rank 引擎的第一价值面**：official 层只看注册 op，`tf.residue`
+  载体里的 KP/TF op 对它不可见——只有规则引擎能给它们 rank；
+- **注册 op 是互补关系**：official 成功时规则引擎对注册 op 空转无害；official
+  被关闭/失败（best-effort）时规则引擎兜底（组合语义有测试：
+  `TestTwoHopWithoutOfficialInference`，多跳链在无 official 世界仍传 rank）；
+- `GraphPassManager`（pb 域编排框架）本批仅测试消费，T3/T5 接线。
+
+### 与 V1 RankInference 的 parity（审计结论）
+
+规则引擎语义移植自 V1 `annc/lib/Dialect/Atir/Passes/RankInference.cpp`
+（**annc_1030 @ c754092**，ATIR 域 484 行）。逐项审计结论：
+
+- **机制一致**：propose/commit 定点、只升 unranked、冲突永久冻结、
+  StridedSlice 双向 rank 方程、MatMul rank-2 硬约束、Unique/SparseSegment/
+  Shape/Rank/Size 输出约束、同形类 unify；
+- **三处有意差异**：①V1 equality 类复制**实际维**（ATIR 同形契约保证维同），
+  tf 域只推 rank（无维相同保证）；②V1 附带 dtype 反推，tf 域 dtype 归
+  `pb2_infer`（分层）；③防御迭代上限 V1=1000、本实现=100；
+- V1 侧改规则时以此清单为对照（迁移期双实现，长期以本实现为准）。
+
 ## 双 MLIR 世界隔离（核心架构约束）
 
 本组件**不与项目 LLVM/MLIR 20 工具链共享任何头文件或库**：
@@ -57,7 +87,7 @@ GraphDef / SavedModel
 | 批 | 内容 | 行数量级 | 状态 |
 | --- | --- | --- | --- |
 | T1 | common 层（节点索引/输入引用/OpDef 加载/dtype 推导/attr 与 JSON 通道）+ 构建骨架 + 单测 | ~1070 | 已合入 |
-| T2 | shape 推导层（graph pass / infer / official infer / tf rank infer） | ~840 | 待迁 |
+| T2 | shape 推导层（graph pass / infer / official infer / tf rank infer） | ~840 | 本批 |
 | T3 | GraphDef 导入（functionalize 控制流） | ~810 | 待迁 |
 | T4 | MLIR pass 集（pb2_mlir_passes） | ~1570 | 待迁 |
 | T5 | restore + emit（残差载体改名 `annc.residue` 的落点） | ~730 | 待迁 |
