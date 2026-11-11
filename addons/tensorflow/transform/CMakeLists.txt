@@ -87,6 +87,21 @@ if(NOT EXISTS "${_tf_lib}/libtensorflow_cc.so.2")
     "ANNC_ENABLE_TF2ATIR_V2=ON: missing ${_tf_lib}/libtensorflow_cc.so.2.")
 endif()
 
+# Pin the wheel's libstdc++ ABI: a mismatch fails at link/load time with
+# relocation errors far from the cause.
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c
+          "import tensorflow as tf; print([f for f in tf.sysconfig.get_compile_flags() if '_GLIBCXX_USE_CXX11_ABI=' in f][0].split('=')[1])"
+  OUTPUT_VARIABLE _tf_cxx11_abi
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE _tf_abi_rc
+  ERROR_QUIET)
+if(NOT _tf_abi_rc EQUAL 0 OR NOT _tf_cxx11_abi MATCHES "^[01]$")
+  message(FATAL_ERROR
+    "pb2stablehlo: the TF wheel does not report a valid _GLIBCXX_USE_CXX11_ABI.")
+endif()
+message(STATUS "pb2stablehlo CXX11 ABI: ${_tf_cxx11_abi} (wheel-pinned)")
+
 # ---- llvm header root (the three-level chain above) ----
 set(_llvm_snapshot "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llvm-include")
 set(_llvm_source "local snapshot")
@@ -156,6 +171,20 @@ add_library(pb2_transform_objs OBJECT
   graph/pb2_official_infer.cpp
   passes/pb2_tf_rank_infer.cpp)
 
+# The import TU references T4/T5 implementation symbols; OBJECT libraries
+# have no link check, but folding it into pb2_transform_objs would break the
+# test binaries. T5 completes the link closure and folds it back.
+add_library(pb2_import_objs OBJECT graph/pb2_import.cpp)
+target_include_directories(pb2_import_objs BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${_tf_include}
+  ${_tf_mlir_include}
+  ${_llvm_snapshot})
+target_compile_features(pb2_import_objs PRIVATE cxx_std_17)
+target_compile_options(pb2_import_objs PRIVATE -O1 -g -pthread)
+target_compile_definitions(pb2_import_objs PRIVATE
+  NDEBUG "_GLIBCXX_USE_CXX11_ABI=${_tf_cxx11_abi}")
+
 # BEFORE: the project-level global include_directories() (third_party/llvm,
 # build-llvm20, stablehlo, ...) would otherwise precede these paths and the
 # llvm/ headers would silently resolve to the project LLVM 20 toolchain
@@ -170,7 +199,8 @@ target_include_directories(pb2_transform_objs BEFORE PRIVATE
 # otherwise split ODR across the .so boundary).
 target_compile_features(pb2_transform_objs PRIVATE cxx_std_17)
 target_compile_options(pb2_transform_objs PRIVATE -O1 -g -pthread)
-target_compile_definitions(pb2_transform_objs PRIVATE NDEBUG)
+target_compile_definitions(pb2_transform_objs PRIVATE
+  NDEBUG "_GLIBCXX_USE_CXX11_ABI=${_tf_cxx11_abi}")
 
 # Shared wheel link environment for executables consuming the object library
 # (the final tool binary and the tests/unit/transform suite): the TF wheel
