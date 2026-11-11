@@ -4,13 +4,6 @@
 // 0 ok; 1 usage; 2 arg parsing; 3 OpDef/MLIR-context init failure
 // (LoadOpSpecs and SetupMlirContext share 3 -- historical;
 // disambiguate via logs); 4 GraphDef structure failure (bad input ref).
-enum ExitCode {
-  kExitOk = 0,
-  kExitUsage = 1,
-  kExitArgs = 2,
-  kExitInit = 3,
-  kExitGraphStructure = 4,
-};
 
 // Global state: written only during single-threaded init (LoadOpSpecs/
 // LoadGraph); read-only afterwards. Never mutate these tables from parallel walks.
@@ -26,28 +19,8 @@ struct TF_Buffer {
 };
 extern "C" TF_Buffer* TF_GetAllOpList();
 
-// Loads OpDefs: --op_list first (predictor registry incl. unregistered custom
-// ops), else the in-process TF registry. Called exactly once from main;
-// g_opspecs is never reloaded on top.
-void LoadOpSpecs(const std::string& external_path) {
-  if (!external_path.empty()) {
-    std::ifstream in(external_path, std::ios::binary);
-    if (!in) {
-      std::cerr << "[warn] cannot open OpList file: " << external_path
-                << " -> falling back to the in-process TF registry\n";
-    } else {
-      std::string data(std::istreambuf_iterator<char>(in), {});
-      tensorflow::OpList ops;
-      if (ops.ParseFromString(data)) {
-        for (const OpDef& def : ops.op()) g_opspecs[def.name()] = def;
-        std::cerr << "[opspec] loaded " << g_opspecs.size()
-                  << " op defs from " << external_path << "\n";
-        return;
-      }
-      std::cerr << "[warn] OpList proto parse failed: " << external_path
-                << " -> falling back to the in-process TF registry\n";
-    }
-  }
+// Loads OpDefs from the in-process (wheel) TF registry.
+void LoadOpSpecs() {
   TF_Buffer* buf = TF_GetAllOpList();
   if (buf == nullptr || buf->data == nullptr) {
     std::cerr << "[FATAL] TF_GetAllOpList returned empty (libtensorflow_cc too old?)\n";
@@ -64,7 +37,7 @@ void LoadOpSpecs(const std::string& external_path) {
   }
   for (const OpDef& def : ops.op()) g_opspecs[def.name()] = def;
   std::cerr << "[opspec] loaded " << g_opspecs.size()
-            << " op defs (in-process TF registry fallback)\n";
+            << " op defs (in-process wheel TF registry)\n";
 }
 
 // strtol with overflow clamp (atoi on overflowing digit strings is UB).
@@ -79,31 +52,37 @@ int ParseSlot(const char* s) {
 
 // Only the three standard GraphDef encodings are accepted; anything else is
 // fatal (e.g. FunctionDef-style "a:b:0" would parse into a garbage InputRef
-// and silently corrupt structure downstream).
+// and silently corrupt structure downstream); TryResolveRef is the
+// non-fatal scan variant declared in pb2_common.h.
 InputRef ResolveRef(const std::string& s) {
-  InputRef r;
-  auto fatal = [&](const char* why) {
-    std::cerr << "[FATAL] invalid input encoding \"" << s << "\": " << why
-              << "\n";
+  auto r = TryResolveRef(s);
+  if (!r.has_value()) {
+    std::cerr << "[FATAL] invalid input encoding " << s
+              << ": expected node / node:slot / ^node\n";
     exit(kExitGraphStructure);
-  };
+  }
+  return *r;
+}
+
+std::optional<InputRef> TryResolveRef(const std::string& s) {
+  InputRef r;
   if (!s.empty() && s[0] == '^') {  // "^node" control edge
     if (s.size() == 1 || s.find(':', 1) != std::string::npos)
-      fatal("control edge must be ^node");
+      return std::nullopt;
     r.control = true;
     r.node = s.substr(1);
     return r;
   }
   size_t colon = s.find(':');
   if (colon == std::string::npos) {  // "node"
-    if (s.empty()) fatal("empty");
+    if (s.empty()) return std::nullopt;
     r.node = s;
     return r;
   }
   std::string slot = s.substr(colon + 1);  // "node:digits"
   if (colon == 0 || slot.empty() ||
       slot.find_first_not_of("0123456789") != std::string::npos)
-    fatal("slot must be all digits");
+    return std::nullopt;
   r.node = s.substr(0, colon);
   r.slot = ParseSlot(slot.c_str());
   return r;
@@ -135,6 +114,18 @@ int VerifyBuiltModule(mlir::MLIRContext& context, mlir::ModuleOp module) {
     std::cerr << "[build] verify ok\n";
   }
   return verify_fails;
+}
+
+std::optional<DataType> AttrTypeOrSpecDefault(const NodeDef& nd,
+                                              const OpDef& spec,
+                                              const std::string& attr_name) {
+  if (const AttrValue* av = FindAttr(nd, attr_name))
+    if (av->value_case() == AttrValue::kType) return av->type();
+  for (const auto& ad : spec.attr())
+    if (ad.name() == attr_name && ad.has_default_value() &&
+        ad.default_value().value_case() == AttrValue::kType)
+      return ad.default_value().type();
+  return std::nullopt;
 }
 
 std::optional<long> AttrIntOrSpecDefault(const NodeDef& nd, const OpDef& spec,
