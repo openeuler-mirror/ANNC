@@ -134,7 +134,10 @@ void TrimParametrizedVars(const std::map<std::string, const NodeDef*>& fmain,
     if (git == fmain.end()) continue;
     for (auto& in : git->second->input()) {
       InputRef r = ResolveRef(in);
-      if (!r.control && ctx->var_arg.count(r.node)) keep_whole.insert(r.node);
+      // Control consumers count as direct: the data-side rewrite renames
+      // the placeholder to the read-chain tensor name, so a renamed root
+      // would leave "^root" dangling in gp.
+      if (ctx->var_arg.count(r.node)) keep_whole.insert(r.node);
     }
   }
   for (auto& root : keep_whole) {
@@ -214,13 +217,19 @@ int RewriteFunctionDomain(GraphDef* gp, const BuildCtx& ctx,
       // find guards against operator[] silently inserting an empty NodeInfo.
       auto nit = g_nodes.find(nd.name());
       if (nit == g_nodes.end()) {
-        std::cerr << "[FATAL] func-domain custom op '" << nd.name()
-                  << "' not in the node index\n";
+        // Functionalization-created branch functions keep raw-graph names;
+        // a miss means a PRE-EXISTING library FunctionDef (function-local
+        // names never enter the main-graph index) -- unsupported input,
+        // not a broken invariant.
+        std::cerr << "[FATAL] custom op '" << nd.name()
+                  << "' in function '" << fdef.signature().name()
+                  << "' has no main-graph node entry; pre-existing library "
+                     "functions carrying unregistered ops are unsupported\n";
         return kExitGraphStructure;
       }
       NodeInfo& ni = nit->second;
       int n = (int)ni.out_dtypes.size();
-      if (n < 1) {  // 中-6: empty out_dtypes would index [0] below
+      if (n < 1) {  // empty out_dtypes would index [0] below
         std::cerr << "[FATAL] func-domain custom op '" << nd.name()
                   << "' has no dtype slots\n";
         return kExitGraphStructure;
@@ -488,6 +497,10 @@ int RewriteMainDomainStage(const Options& opt, BuildCtx& ctx, RewriteView& view,
             nn = root;
             slot = 0;
           }
+          if (r.control) {  // keep "^": the function domain archives raw
+            norm.add_input("^" + nn);  // NodeDefs; one table, one encoding
+            continue;
+          }
           norm.add_input(slot == 0 ? nn : nn + ":" + std::to_string(slot));
         }
         custom_ops.emplace(name, std::move(norm));
@@ -593,8 +606,11 @@ int ImportOfficial(const Options& opt, const GraphDef& gp,
     in_dtypes += (i ? "," : "") + tensorflow::DataType_Name(f.dt);
     // "*": the legal unknown-shape spelling; an empty entry makes the
     // spec parser drop the whole list and silently unrank every entry.
+    // Rank-0 scalars (has_shape && empty dims) have no legal spelling in
+    // this syntax; they degrade to "*" rather than emitting an empty
+    // segment that would unrank every OTHER entry too.
     std::string sh = "*";
-    if (f.has_shape) {
+    if (f.has_shape && !f.dims.empty()) {
       sh.clear();
       for (size_t d = 0; d < f.dims.size(); ++d)
         sh +=
@@ -673,8 +689,10 @@ int FunctionalizeGraphDefControlFlow(const GraphDef& src, GraphDef& out) {
               << "\n";
     return kExitInternal;
   }
-  tensorflow::FunctionLibraryDefinition flib(tensorflow::OpRegistry::Global(),
-                                             src.library());
+  // Same synthetic registry the Graph was built with: SynthOpRegistry is a
+  // strict superset of Global, so registered ops resolve unchanged and
+  // branch-body custom ops resolve through the synthetic OpDefs.
+  tensorflow::FunctionLibraryDefinition flib(&reg, src.library());
   auto st = tensorflow::FunctionalizeControlFlow(&tgraph, &flib,
                                                  tensorflow::NodeFilter{},
                                                  /*include_functions=*/false);
@@ -770,9 +788,10 @@ int RunOfficialRoute(const Options& opt, BuildCtx& ctx, const GraphDef& graph,
   if (int rc = pb_passes::RunRestoreOpsPass(*module, opt, feeds, custom_ops, b,
                                             context))
     return rc;
-  if (std::getenv("PB_VERIFY_STAGES") != nullptr)
+  if (std::getenv("PB_VERIFY_STAGES") != nullptr) {
     std::cerr << "[verify-stage] after restore:\n";
-  VerifyBuiltModule(context, *module);
+    VerifyBuiltModule(context, *module);
+  }
   {
     mlir::PassManager mpm(&context);
     mpm.enableVerifier(false);
