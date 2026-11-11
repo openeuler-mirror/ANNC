@@ -260,7 +260,14 @@ int RestoreOneCustomOp(const std::string& name, const tensorflow::NodeDef& nd,
       break;
     }
   }
-  if (host == nullptr) return 1;  // stand-in lives in no scanned block
+  if (host == nullptr) {
+    // Legal when an upstream pass already dropped the stand-in; a miss on
+    // a live stand-in (unsuported nesting, non-Name loc) leaves the custom
+    // op unrestored, so make the skip visible instead of silent.
+    std::cerr << "[restore-miss] custom-op '" << name
+              << "' stand-in not found in any scanned block\n";
+    return 1;
+  }
   BodyScope& sc = *host;
   auto git = g_nodes.find(pb_name);
   int n = git != g_nodes.end() ? (int)git->second.out_dtypes.size() : 1;
@@ -460,18 +467,26 @@ int RestoreOpsImpl(mlir::ModuleOp module, const Options& opt,
   }
   BindBranchCarriers(module, rc);
 
-  int restored = 0;
+  int restored = 0, skipped = 0;
   for (auto& kv : custom_ops) {
     int r = RestoreOneCustomOp(kv.first, kv.second, rc, b, context);
     if (r == 4) return 4;
-    if (r == 0) ++restored;
+    if (r == 0)
+      ++restored;
+    else
+      ++skipped;
   }
+  if (skipped)
+    std::cerr << "[restore-miss] WARNING: " << skipped
+              << " custom ops left unrestored (stand-ins stay as "
+                 "placeholders)\n";
   int n_wrapped = WrapNonNumericOps(module, b, context);
   AlignCastIdentity(module);
   RewriteEntryContract(rc.func_op, opt, feeds, b, context);
   WrapIfAsFallbackCall(module);
   std::cerr << "[import-route] restored: custom_ops=" << custom_ops.size()
-            << " (" << restored << " ops, " << rc.scopes.size() << " scopes)"
+            << " (" << restored << " ops, " << skipped << " skipped, "
+            << rc.scopes.size() << " scopes)"
             << " fallback_wrapped=" << n_wrapped << "\n";
   return 0;
 }
