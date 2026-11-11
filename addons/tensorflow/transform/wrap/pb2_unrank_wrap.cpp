@@ -72,8 +72,6 @@ class UnrankWrap {
 
   std::string rewritePack(Operation* op);
 
-  std::string rewriteFill(Operation* op);
-
   int encoders() const { return encoders_; }
 
  private:
@@ -116,9 +114,9 @@ std::string UnrankWrap::rewrite(Operation* op, const std::string& cls) {
   if (cls == "Pack") {
     return rewritePack(op);
   }
-  if (cls == "Fill") {
-    return rewriteFill(op);
-  }
+  // Fill: no specialization -- its unranked shape is the RESULT (dims and
+  // value are always ranked), and this pass dispatches on unranked
+  // operands, so a Fill rewrite is unreachable by construction.
 
   if (op->getNumResults() != 1 || op->getNumOperands() == 0) {
     return "shape(numResults/Operands)";
@@ -255,43 +253,6 @@ std::string UnrankWrap::rewritePack(Operation* op) {
   op->erase();
   return "";
 }
-
-std::string UnrankWrap::rewriteFill(Operation* op) {
-  if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
-    return "shape(arity)";
-  }
-  auto dimsTy = llvm::dyn_cast<mlir::TensorType>(op->getOperand(0).getType());
-  if (!dimsTy || !dimsTy.getElementType().isSignlessInteger()) {
-    return "fill-dims";
-  }
-  if (!dimsTy.hasRank()) {
-    return "fill-dims-unranked";
-  }
-  auto valTy = llvm::dyn_cast<mlir::TensorType>(op->getOperand(1).getType());
-  auto resTy = llvm::dyn_cast<mlir::TensorType>(op->getResult(0).getType());
-  if (!valTy || !resTy || !resTy.hasRank() ||
-      valTy.getElementType() != resTy.getElementType())
-    return "fill-elem";
-  // dynamic_broadcast_in_dim with empty broadcast_dimensions demands a
-  // rank-0 operand; anything else would only fail at the sink.
-  if (!valTy.hasRank() || valTy.getRank() != 0) return "fill-value-rank";
-
-  b_.setInsertionPoint(op);
-  OperationState st(mlir::UnknownLoc::get(b_.getContext()),
-                    mlir::OperationName("stablehlo.dynamic_broadcast_in_dim",
-                                        b_.getContext()));
-  st.addOperands({op->getOperand(1), op->getOperand(0)});
-  st.addTypes(resTy);
-  st.addAttribute("broadcast_dimensions",
-                  mlir::DenseIntElementsAttr::get(
-                      RankedTensorType::get({0}, b_.getI64Type()),
-                      llvm::ArrayRef<int64_t>{}));
-  Value out = b_.create(st)->getResult(0);
-  op->getResult(0).replaceAllUsesWith(out);
-  op->erase();
-  return "";
-}
-
 
 struct EncodeUnrankWrapPass
     : public mlir::PassWrapper<EncodeUnrankWrapPass,

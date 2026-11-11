@@ -146,9 +146,13 @@ std::string StridedSliceDyn::rewrite(Operation* op) {
   if (ends.size() != begins.size() || strides.size() != begins.size() ||
       specSize > rank)
     return "spec-size";
+  // "Taken to the dimension end" rides a parallel flag, not a sentinel in
+  // ends: kDynamic overlaps TF's legal negative indices (x[0:-1]).
+  llvm::SmallVector<bool, 4> takeToEnd(begins.size(), false);
   while ((int64_t)begins.size() < rank) {
     begins.push_back(0);
-    ends.push_back(mlir::ShapedType::kDynamic);  // taken in full
+    ends.push_back(0);
+    takeToEnd.push_back(true);
     strides.push_back(1);
   }
 
@@ -181,17 +185,22 @@ std::string StridedSliceDyn::rewrite(Operation* op) {
       // A runtime-clamped start with a constant begin+1 limit can place
       // the window past the dimension end; shrink needs a static dim.
       if (!dimStatic) return "shrink-dynamic";
-      // [begin, begin+1, 1] regardless of the declared end.
+      if (dimSize <= 0) return "shrink-empty-dim";
+      // Clamp begin into the dimension (x[10] on a dim of 4 is empty-ish
+      // in TF; clamp keeps the [begin, begin+1] window in range).
+      dim.begin = std::min(std::max(dim.begin, int64_t{0}), dimSize - 1);
       dim.limitStatic = dim.begin + 1;
       dims.push_back(dim);
       continue;
     }
     int64_t end = ends[d];
-    const bool toEnd = end == mlir::ShapedType::kDynamic ||
-                       ((endMask >> d) & 1);
+    const bool toEnd = takeToEnd[d] || ((endMask >> d) & 1);
     if (toEnd) {
-      // Padded spec entry or end_mask: taken to the dimension end.
+      // Padded spec entry or end_mask: taken to the dimension end. begin
+      // still needs the constant-end clamp, or x[10:] on a shorter dim
+      // yields a negative span.
       if (dimStatic) {
+        dim.begin = std::min(std::max(dim.begin, int64_t{0}), dimSize);
         dim.limitStatic = dimSize;
       } else {
         dim.limitIsRuntime = true;
@@ -199,7 +208,11 @@ std::string StridedSliceDyn::rewrite(Operation* op) {
       }
     } else if (end < 0) {
       if (!dimStatic) return "neg-end-dynamic-dim";
-      end += dimSize;
+      // x[:-100] must be empty, not a negative span: normalize and clamp
+      // exactly like the constant-end path below.
+      dim.begin = std::min(std::max(dim.begin, int64_t{0}), dimSize);
+      end = std::min(std::max(end + dimSize, int64_t{0}), dimSize);
+      end = std::max(end, dim.begin);
       dim.limitStatic = end;
     } else if (dimStatic) {
       // Static clamp, mirroring the tf2xla constant-begin path.
