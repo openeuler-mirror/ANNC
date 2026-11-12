@@ -1,4 +1,5 @@
 #include "Conversion/Passes.h"
+#include "Support/ContextABISwitch.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Target/aarch64/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -37,7 +38,10 @@ namespace annc
                                          StringRef jitInputsPath = {})
     {
         passManager.addPass(createAArch64AtirGemmEpilogueCommit());
-        passManager.addPass(atir::createLowerContextKernelEntriesPass());
+        if (annc::loweringContextABIEnabled())
+            passManager.addPass(atir::createConvertContextKernelABIPass());
+        else
+            passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
         passManager.addPass(createAArch64ExtractGemmProblem());

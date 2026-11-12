@@ -87,7 +87,7 @@ void* accessMemRef(const AnncKernelContext* abi, Task task) {
 extern "C" const void* annc_context_get_input_memref(
     const AnncKernelContext* context, uint32_t input_index) {
   return accessMemRef(context, [&](KernelContext& accessor) -> void* {
-    const auto* input = accessor.getStridedInput(input_index);
+    const auto* input = accessor.getInput(input_index);
     return input ? exportMemRef(accessor, *input, *context->services) : nullptr;
   });
 }
