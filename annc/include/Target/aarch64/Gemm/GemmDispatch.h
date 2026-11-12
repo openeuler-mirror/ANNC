@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "Context/KernelContext.h"
 #include "Kernel/MemRefTypes.h"
 
 // This is the default FuncToLLVM ABI of a private task with signature:
@@ -56,6 +57,25 @@ void _mlir_ciface_annc_threadpool_parallel_for_gemm(
 
 void _mlir_ciface_annc_threadpool_parallel_for_gemm_epilogue(
     int64_t total, AnncAArch64GemmEpilogueTask task,
+    const AnncMemRef2DF32* lhs, const AnncMemRef2DF32* rhs,
+    const AnncMemRef2DF32* out, const AnncUnrankedMemRefF32* epilogue0,
+    const AnncUnrankedMemRefF32* epilogue1,
+    const AnncUnrankedMemRefF32* epilogue2,
+    const AnncUnrankedMemRefF32* epilogue3,
+    const AnncUnrankedMemRefF32* epilogue4,
+    const AnncUnrankedMemRefF32* epilogue5,
+    const AnncUnrankedMemRefF32* epilogue6,
+    const AnncUnrankedMemRefF32* epilogue7);
+
+void _mlir_ciface_annc_context_parallel_for_gemm(AnncKernelContext* context,
+                                                 int64_t total,
+                                                 AnncAArch64GemmTask task,
+                                                 const AnncMemRef2DF32* lhs,
+                                                 const AnncMemRef2DF32* rhs,
+                                                 const AnncMemRef2DF32* out);
+
+void _mlir_ciface_annc_context_parallel_for_gemm_epilogue(
+    AnncKernelContext* context, int64_t total, AnncAArch64GemmEpilogueTask task,
     const AnncMemRef2DF32* lhs, const AnncMemRef2DF32* rhs,
     const AnncMemRef2DF32* out, const AnncUnrankedMemRefF32* epilogue0,
     const AnncUnrankedMemRefF32* epilogue1,
