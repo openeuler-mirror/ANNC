@@ -24,7 +24,7 @@ struct Allocation {
   std::vector<uint64_t> storage;
 };
 
-struct Host {
+struct Host : annc::threadpool::AnncThreadPool {
   AnncStatusCode error = ANNC_STATUS_OK;
   std::vector<std::unique_ptr<Allocation>> allocations;
   std::vector<uint32_t> outputOrder;
@@ -74,38 +74,27 @@ struct Host {
   static AnncStatusCode status(void* opaque) {
     return static_cast<Host*>(opaque)->error;
   }
-  static int32_t threads(void*) { return 2; }
-
-  static AnncStatusCode parallel(void* opaque, int64_t total, int64_t,
-                                 AnncContextTask task, void* data) {
-    const int64_t middle = total / 2;
-    task(data, 0, middle);
-    task(data, middle, total);
-    return static_cast<Host*>(opaque)->error;
-  }
-
-  static AnncStatusCode shard(void* opaque, int32_t maxParallelism,
-                              int64_t total, int64_t,
-                              AnncContextTask task, void* data) {
-    auto& host = *static_cast<Host*>(opaque);
-    ++host.shardCalls;
-    if (total <= 1 || maxParallelism <= 1) {
-      task(data, 0, total);
-      return host.error;
+  int num_threads() const override { return 2; }
+  bool in_parallel_region() const override { return false; }
+  void parallel_for(int64_t total,
+                    const annc::threadpool::ParallelForOptions& options,
+                    const std::function<void(int64_t, int64_t)>& task) override {
+    if (options.max_parallelism) ++shardCalls;
+    if (total <= 1 || options.max_parallelism.value_or(2) <= 1) {
+      if (total) task(0, total);
+      return;
     }
     const int64_t middle = total / 2;
-    auto worker = std::async(std::launch::async,
-                             [=] { task(data, 0, middle); });
-    task(data, middle, total);
+    auto worker = std::async(std::launch::async, [&] { task(0, middle); });
+    task(middle, total);
     worker.get();
-    return host.error;
   }
 
   AnncRuntimeServices services() {
-    return {sizeof(AnncRuntimeServices), ANNC_CONTEXT_ABI_VERSION, this,
-            output, allocate, report, status, parallel, threads, shard,
-            nullptr};
+    return {sizeof(AnncRuntimeServices), ANNC_CONTEXT_ABI_VERSION,
+            this, output, allocate, report, status, this};
   }
+
 };
 
 template <typename T, size_t Rank>
@@ -148,7 +137,7 @@ void testHostServices() {
               host.outputOrder.size() == 1,
           "bound output was not reused");
   int64_t count = 0;
-  require(view.getThreadPool().parallelFor(
+  require(view.getKernelThreadPool().parallelFor(
               3, [&](int64_t first, int64_t last) { count += last - first; }) ==
               ANNC_STATUS_OK &&
               count == 3,

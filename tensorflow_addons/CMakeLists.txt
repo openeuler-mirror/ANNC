@@ -190,6 +190,7 @@ target_include_directories(annc_optimizer PRIVATE
 add_library(annc_fused_op SHARED ${ANNC_FUSED_OP_SOURCES})
 target_link_libraries(annc_fused_op PRIVATE ANNCCheckpoint)
 target_link_libraries(annc_fused_op PRIVATE annc_jit_cache ANNCContext)
+target_sources(annc_fused_op PRIVATE $<TARGET_OBJECTS:ANNCContextMemRefObjects>)
 if(TARGET nlohmann_json::nlohmann_json)
     target_link_libraries(annc_fused_op PRIVATE nlohmann_json::nlohmann_json)
 else()

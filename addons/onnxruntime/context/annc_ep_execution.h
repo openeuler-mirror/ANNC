@@ -69,6 +69,7 @@ class OrtThreadPool final : public annc::threadpool::AnncThreadPool {
   // the version-gated native path vouches for the layout the kernel would
   // touch.
   void* native_pool() const override;
+  void* native_pool(const char* provider) const override;
 
  private:
   const OrtApi* api_;
@@ -124,16 +125,6 @@ class OnnxExecutionContext {
   static void ReportError(void* opaque, AnncStatusCode status,
                           const char* message);
   static AnncStatusCode GetStatus(void* opaque);
-  static int32_t NumThreads(void* opaque);
-  static void* NativePool(void* opaque, const char* provider);
-  static AnncStatusCode ParallelFor(void* opaque, int64_t total, int64_t grain,
-                                    AnncContextTask task, void* task_data);
-  static AnncStatusCode Shard(void* opaque, int32_t max_parallelism,
-                              int64_t total, int64_t cost,
-                              AnncContextTask task, void* task_data);
-  AnncStatusCode Dispatch(int64_t total,
-                           const annc::threadpool::ParallelForOptions& options,
-                           AnncContextTask task, void* task_data);
   bool BindView(const AnncTensorDesc& request, void* data,
                 AnncTensorView* result);
 

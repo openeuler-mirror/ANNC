@@ -146,7 +146,7 @@ AnncStatusCode kp_fused_action_id_gather_typed(
                          "ActionIdGather data is null");
 
   try {
-    auto workers = context.getThreadPool();
+    auto workers = context.getKernelThreadPool();
     const int maxParallelism = workers.numThreads();
     const size_t embedding_bytes =
         static_cast<size_t>(embeddingDim) * sizeof(float);

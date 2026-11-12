@@ -11,6 +11,7 @@
 | [environment-variables.md](environment-variables.md) | 面向用户/运维的环境变量参考 |
 | [python-binding.md](python-binding.md) | Python 绑定（`annc.builder` / `annc.ops` / `annc.types`）用法 |
 | [troubleshooting.md](troubleshooting.md) | 常见故障与排障 |
+| [tf-onnx-local-dev-validation-20261112.md](tf-onnx-local-dev-validation-20261112.md) | TF / ONNX 工作区与 dev 的融合、数值和执行验证（2026-11-12） |
 
 ## 规划内容
 

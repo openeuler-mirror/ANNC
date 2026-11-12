@@ -19,7 +19,7 @@ AnncStatusCode matmul_aarch64_impl(annc::kernels::KernelContext& context) {
   int64_t N = output->sizes[1];
   int64_t K = lhs->sizes[1];
 
-  auto workers = context.getThreadPool();
+  auto workers = context.getKernelThreadPool();
   return annc::kernels::Shard(workers.numThreads(), workers, M,
                               annc::threadpool::cost::dotRow(K, N),
                               [&](int64_t begin, int64_t end) {

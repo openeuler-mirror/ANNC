@@ -128,7 +128,7 @@ AnncStatusCode batchedMatMulAddRank4Impl(annc::kernels::KernelContext& context) 
   const auto* weight = context.getInput(1);
   const auto* bias = context.getInput(2);
   if (!data || !weight || !bias) return context.status();
-  auto thread_pool = context.getThreadPool();
+  auto thread_pool = context.getKernelThreadPool();
 
   const int64_t d0 = data->sizes[0];
   const int64_t d1 = data->sizes[1];
@@ -290,7 +290,7 @@ AnncStatusCode batchedMatMulAddImpl(annc::kernels::KernelContext& context) {
   const auto* weight = context.getInput(1);
   const auto* bias = context.getInput(2);
   if (!data || !weight || !bias) return context.status();
-  auto thread_pool = context.getThreadPool();
+  auto thread_pool = context.getKernelThreadPool();
 
   const int64_t dataBatch = data->sizes[0];
   const int64_t weightBatch = weight->sizes[0];

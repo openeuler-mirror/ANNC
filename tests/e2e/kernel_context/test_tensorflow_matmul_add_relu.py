@@ -1,4 +1,4 @@
-"""Context V3 MatMul+Add+Relu multi-output fusion through TensorFlow."""
+"""Context V3 AOT MatMul+Add+Relu multi-output fusion through TensorFlow."""
 
 import pytest
 
@@ -10,7 +10,7 @@ CASES = {
     "matmul_add_relu_v3": kernel_spec(
         "matmul_add_relu",
         "MatMulAddReluWithAddOutput",
-        mode="jit",
+        mode="aot",
         env={"ANNC_GEMM": "2"},
     ),
 }
