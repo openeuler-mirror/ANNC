@@ -70,15 +70,6 @@ class OutputBuffers {
     return ANNC_STATUS_OK;
   }
 
-  static AnncStatusCode ParallelFor(void*, int64_t total, int64_t,
-                                    AnncContextTask task, void* task_data) {
-    if (task == nullptr || total < 0) return ANNC_STATUS_INVALID_ARGUMENT;
-    if (total != 0) task(task_data, 0, total);
-    return ANNC_STATUS_OK;
-  }
-
-  static int32_t NumThreads(void*) { return 1; }
-
   AnncKernelContext context() {
     services = {};
     services.struct_size = sizeof(services);
@@ -97,8 +88,6 @@ class OutputBuffers {
     services.get_status = [](void* handle) {
       return static_cast<OutputBuffers*>(handle)->last_error_status;
     };
-    services.parallel_for = ParallelFor;
-    services.num_threads = NumThreads;
     AnncKernelContext c{};
     c.struct_size = sizeof(c);
     c.abi_version = ANNC_CONTEXT_ABI_VERSION;

@@ -28,6 +28,24 @@ add_library(annc_fused_op_1_15 SHARED
 target_link_libraries(annc_fused_op_1_15 PRIVATE
   annc_jit_cache_1_15 Threads::Threads dl)
 
+# Embed the C accessors without applying the TF SDK's C++14/ABI settings.
+if(TARGET ANNCContextMemRefObjects)
+  target_sources(annc_fused_op_1_15 PRIVATE
+    $<TARGET_OBJECTS:ANNCContextMemRefObjects>)
+else()
+  add_library(annc_context_memref_1_15 OBJECT
+    "${_annc_root}/context/lib/MemRef.cpp")
+  target_include_directories(annc_context_memref_1_15 PRIVATE
+    "${_annc_root}/context/include")
+  set_target_properties(annc_context_memref_1_15 PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET default)
+  target_compile_definitions(annc_context_memref_1_15 PRIVATE
+    _GLIBCXX_USE_CXX11_ABI=1)
+  target_sources(annc_fused_op_1_15 PRIVATE
+    $<TARGET_OBJECTS:annc_context_memref_1_15>)
+endif()
+
 add_library(annc_optimizer_1_15 SHARED
   "${_plugin}/optimizer.cc" "${_plugin}/optimizer_register.cc")
 target_link_libraries(annc_optimizer_1_15 PRIVATE Threads::Threads dl)

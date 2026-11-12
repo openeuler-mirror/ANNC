@@ -32,6 +32,18 @@ GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运�
 见[JIT 代码与预打包权重分离实现契约](../design/jit-constant-folding/cache-separation.md)。
 `ANNC_GEMM`、JIT 缓存和快速路径开关的默认值及生效时机见[环境变量参考](../guides/environment-variables.md)。
 
+TF 的 V3 调用路径使用已有的 `jit_mode` 选择函数签名：JIT 入口按
+`void(AnncKernelContext*)` 调用，非 JIT 入口按
+`AnncStatusCode(AnncKernelContext*)` 调用，不新增 Op 属性。
+两条分支都检查宿主错误状态和输出绑定，并使用现有异常捕获边界。
+该约定要求所有 JIT V3 入口实际返回 void；不能用于返回状态码或计算值的入口。
+当前工作区的双输出 MatMul+Add+Relu 仍存在 JIT builtin 分流，
+该入口的返回约定尚需配套修复；本次不修改它的执行模式。
+TF 1.15 的 Context 服务借用现有 support 层的线程池适配器指针；
+TF SDK 一侧不解引用 C++ 线程池对象，维持原有 C++ ABI 隔离；
+memref C 访问器作为独立的 C++17 对象嵌入插件，不继承 TF 1.15 的 C++14/ABI 设置。
+旧 `mlir_ciface` 路径和 ORT 的状态码调用方式保持不变；生成式 V3 入口生成仍需单独实现。
+
 ### 图重写与形状推导
 
 多 fusion 的 GraphDef 重写会为每个 fusion 生成一个独立的 `ANNCFused` 节点。`fusion_metadata.json` 中如果某个 fusion 带有 `dynamic_dims`，`annc-converter` 写入 `ANNCFused.output_shapes` 时会把这些维度保留为 `?`，由 `ANNCFused` 在运行时根据动态输入的实际维度推导输出形状，避免 Serving 请求 batch 与编译样例 batch 不一致时按固定维度分配输出。
@@ -92,3 +104,24 @@ ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ...
 ## ONNX Runtime 接入
 
 ONNX Runtime 侧通过 EP 插件（`addons/onnxruntime/`）在 `GetCapability` 内导出整图、调用 [`annc-onnx-pipeline`](../guides/cli-workflows.md) 编译，并按站点报告 `sites.json` 精确申报融合区域。接入契约、缓存与降级设计见 [ONNX Runtime EP 接入设计](../design/onnx-support/ep-design.md)，编译侧见 [ONNX 前端设计](../design/onnx-support/frontend-design.md)。
+
+### Context memref 访问器
+
+`annc_context_get_input_memref` 导出输入的标准 actual-rank memref 描述符；
+`annc_context_alloc_output_memref` 按输出槽位、rank 和 dims 分配或复用输出，再导出描述符。
+原有 `AnncTensorView` 不变。描述符元数据复制到宿主临时空间，tensor 数据不复制；
+指针仅在本次同步执行期间有效。宿主需预填输出 dtype；失败返回空指针并记录 Context 错误。
+
+### Context 线程池对象
+
+`AnncRuntimeServices::thread_pool` 借用现有 `AnncThreadPool` 适配器对象，替代四个 C 调度回调。
+`KernelContext::getThreadPool()` 直接返回 services 中的线程池指针，可为空，不查询 TLS。
+`getKernelThreadPool()` 返回使用同一线程池的 `KernelThreadPool` 包装，保留现有 kernel 的调度和错误处理，空池串行执行。
+TF V3 执行内部创建适配器并将其指针绑定到 Context；外层生成式兼容桥接保持原有适配器。
+两者借用同一个 TF 线程池；ORT Context 指向本次执行的 `pool_`。
+生成式代码当前仍使用原 TLS 获取方式，迁移到显式 Context 是后续工作。
+
+入口仍是 `annc_context_v3`，Context 与服务结构共用版本号 3；本次不单独升级服务版本。
+服务布局已经改变，版本号不提供新旧布局区分，不能混用旧产物。
+线程池虚表及 `std::function` 依赖匹配的 C++ ABI，宿主与 kernel 须使用相同接口和兼容的
+工具链/标准库重编译。本次未同步修改所有宿主的缓存指纹；部署时应清理旧 JIT 缓存并重建 AOT 库。

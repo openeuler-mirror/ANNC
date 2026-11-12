@@ -143,3 +143,4 @@ install(TARGETS annc_ep DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 # Framework-neutral kernel context definitions and runtime services.
 target_link_libraries(annc_ep PRIVATE ANNCContext)
+target_sources(annc_ep PRIVATE $<TARGET_OBJECTS:ANNCContextMemRefObjects>)
