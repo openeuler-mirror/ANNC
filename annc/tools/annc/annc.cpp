@@ -721,6 +721,7 @@ private:
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
+        command += " -L" + config.kernelLibPath + " -lANNCContextMemRef";
         command += " -L\"" + getLlvmLibDir() + "\"";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
@@ -776,6 +777,7 @@ private:
         command += " -Wl,--whole-archive -L" + config.kernelLibPath +
                    " -lANNCThreadPool -Wl,--no-whole-archive";
         command += " -L" + config.kernelLibPath + " -lANNCGemmSupport";
+        command += " -L" + config.kernelLibPath + " -lANNCContextMemRef";
         command += " -L\"" + getLlvmLibDir() + "\"";
         command += " -L" + config.kernelLibPath +
                    " -lLLVMSupport -lLLVMDemangle";
