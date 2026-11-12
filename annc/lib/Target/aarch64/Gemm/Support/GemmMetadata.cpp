@@ -570,6 +570,8 @@ void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing) {
       intern(metadataOwner(op), kStrategiesAttrName, "s", strategyAttr);
   mlir::NamedAttrList attrs(input);
   attrs.set("strategy", reference);
+  // The task grid depends on the packing cost of the selected strategy.
+  attrs.set("planning_state", builder.getStringAttr("input"));
   op->setAttr(kCandidateAttrName, attrs.getDictionary(op->getContext()));
 }
 

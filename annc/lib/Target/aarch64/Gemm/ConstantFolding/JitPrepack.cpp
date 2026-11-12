@@ -84,6 +84,7 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
           inputs.count(argument.getArgNumber());
       if (!eligible) {
         setCandidateRhsPacking(op, RhsPacking::kPacked);
+        if (failed(planGemmThreads(op))) failedPack = true;
         return;
       }
       const auto& strategy = candidate->strategy;
