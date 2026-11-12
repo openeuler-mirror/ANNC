@@ -251,8 +251,9 @@ static void TestFlattenExecutorIslandControlEdges() {
   PB2_CHECK(islands.size() == 2);
   mlir::Operation* src_island = islands[0];
   mlir::Operation* cons_island = islands[1];
-  cons_island->setOperands(
-      {src_island->getResult(0), src_island->getResult(1)});  // data + control
+  // Control token only: the island operand slot is control-typed by ODS;
+  // the data edge already exists as a body capture of src#0.
+  cons_island->setOperands({src_island->getResult(1)});
   mlir::PassManager pm(&ctx, "builtin.module");
   pm.addPass(pb_passes::CreateFlattenExecutorPass());
   PB2_CHECK(mlir::succeeded(pm.run(module.get())));
