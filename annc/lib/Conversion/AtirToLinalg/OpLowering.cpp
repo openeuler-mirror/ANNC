@@ -3,6 +3,7 @@
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/Common/CustomizeCallLowering.h"
+#include "Support/ContextABISwitch.h"
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -161,8 +162,9 @@ void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter,
                                        patterns.getContext());
   patterns.add<ReshapeLoweringToLinalg>(atirTypeConverter,
                                         patterns.getContext());
-  patterns.add<CustomizeLoweringToLinalg>(inputTypeConverter,
-                                          patterns.getContext());
+  if (!annc::loweringContextABIEnabled())
+    patterns.add<CustomizeLoweringToLinalg>(inputTypeConverter,
+                                            patterns.getContext());
   patterns.add<FuncReturnOpLowering>(inputTypeConverter, patterns.getContext());
   populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
       patterns, inputTypeConverter);
@@ -294,7 +296,9 @@ void ConstantLoweringToLinalg::Lowering(PatternRewriter& rewriter,
                 memrefType, type.getCacheData(), /*constant=*/false,
                 IntegerAttr());
           }
-          if (op->hasAttr("annc.effective_weight"))
+          if (op->hasAttr("annc.effective_weight") &&
+              !(annc::loweringContextABIEnabled() &&
+                parentFunc->hasAttr("annc.effective_weight_global")))
             parentFunc->setAttr("annc.effective_weight_global",
                                rewriter.getStringAttr(global.getSymName()));
           rewriter.setInsertionPoint(op);
@@ -484,7 +488,12 @@ LogicalResult DotLoweringToLinalg::matchAndRewrite(
   return success();
 }
 
-void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter& rewriter,
+LogicalResult ContextCustomizeLoweringToLinalg::matchAndRewrite(
+    atir::CustomizeOp op, PatternRewriter &rewriter) const {
+  return lowerCustomizeOpToContextCall(rewriter, op);
+}
+
+void CustomizeLoweringToLinalg::Lowering(mlir::PatternRewriter &rewriter,
                                          atir::CustomizeOpAdaptor adaptor,
                                          atir::CustomizeOp op) const {
   lowerCustomizeOpToFuncCall(rewriter, adaptor, op);

@@ -8,9 +8,11 @@
 #include "Conversion/AtirToLinalg/AtirTypeConverter.h"
 #include "Conversion/Passes.h"
 #include "Conversion/AtirToLinalg/OpLowering.h"
+#include "Support/ContextABISwitch.h"
 #include "Support/Log.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 
@@ -24,20 +26,33 @@ namespace atir {
 
         void runOnOperation() override {
             ANNC_LOG_DEBUG("atir-to-linalg") << "this is ConvertAtirToLinalg\n";
+            if (annc::loweringContextABIEnabled()) {
+                RewritePatternSet customizePatterns(&getContext());
+                customizePatterns.add<ContextCustomizeLoweringToLinalg>(
+                    &getContext());
+                if (failed(applyPatternsGreedily(
+                        getOperation(), std::move(customizePatterns)))) {
+                    signalPassFailure();
+                    return;
+                }
+            }
             ConversionTarget target(getContext());
             target.addLegalDialect<linalg::LinalgDialect,
                                    arith::ArithDialect,
                                    bufferization::BufferizationDialect,
                                    memref::MemRefDialect,
                                    tensor::TensorDialect,
+                                   LLVM::LLVMDialect,
                                    func::FuncDialect>();
             target.addIllegalOp<atir::AddOp, atir::BufferOp, atir::DotOp,
                                 atir::MatMulOp, atir::ReluOp>();
+            target.addIllegalOp<atir::CustomizeOp>();
             target.addDynamicallyLegalOp<atir::ReshapeOp>(
                 [](atir::ReshapeOp op) {
                   return !isSupportedInsertUnitDimensionBeforeN(op);
                 });
             target.addIllegalOp<atir::ConstantOp>();
+            target.addLegalOp<UnrealizedConversionCastOp>();
             AtirTypeToLinalgConverter atirTypeConverter;
             InputTypeConverter inputTypeConverter;
             RewritePatternSet patterns(&getContext());
