@@ -113,6 +113,8 @@ ONNX Runtime 侧通过 EP 插件（`addons/onnxruntime/`）在 `GetCapability` �
 
 `annc_context_get_input_memref` 导出输入的标准 actual-rank memref 描述符；
 `annc_context_alloc_output_memref` 按输出槽位、rank 和 dims 分配或复用输出，再导出描述符。
+该访问器保证返回的输出元素初始为零：新分配请求携带 `ANNC_ALLOCATION_ZERO`，
+复用已绑定输出时由访问器清零；普通手写 kernel 的分配接口不受此约定影响。
 原有 `AnncTensorView` 不变。描述符元数据复制到宿主临时空间，tensor 数据不复制；
 指针仅在本次同步执行期间有效。宿主需预填输出 dtype；失败返回空指针并记录 Context 错误。
 
