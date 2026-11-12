@@ -33,6 +33,7 @@ static int ParseArgs(int argc, char** argv, Options& opt) {
   static const Opt kOpts[] = {
       {"--input", true, [](Options& o, const char* v) { o.inputs.push_back(v); }},
       {"--output", true, [](Options& o, const char* v) { o.outputs.push_back(v); }},
+      {"-o", true, [](Options& o, const char* v) { o.out_path = v; }},
       {"--dump", false, [](Options& o, const char*) { o.dump_tfmlir = true; }},
       {"--no-dump-out", false, [](Options& o, const char*) { o.dump_out = false; }},
       // --parametrize deprecated: variable parametrization is now
@@ -50,7 +51,7 @@ static int ParseArgs(int argc, char** argv, Options& opt) {
   auto usage = [&argv](llvm::StringRef why) {
     std::cerr << why.str() << "\nusage: " << argv[0]
               << " <graph.pb> [--input name:DT:dims]... [--output name]... "
-                 "[--dump] [--no-dump-out] "
+                 "[-o <file>] [--dump] [--no-dump-out] "
                  "[--skip-preprocess] [--assume-opaque-i8] "
                  "[--crash_repro <file>]\n";
     return 2;

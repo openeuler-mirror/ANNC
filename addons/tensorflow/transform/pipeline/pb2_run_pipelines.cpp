@@ -2,6 +2,9 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include "common/pb2_common.h"
 #include "passes/pb2_mlir_passes.h"
 
@@ -112,7 +115,17 @@ int RunPipelines(const Options& opt, const BuildCtx& ctx,
       return 1;
     }
   }
-  if (opt.dump_out) {
+  if (!opt.out_path.empty()) {
+    std::error_code ec;
+    llvm::raw_fd_ostream out(opt.out_path, ec, llvm::sys::fs::OF_None);
+    if (ec) {
+      std::cerr << "[FATAL] cannot open output file: " << opt.out_path
+                << " (" << ec.message() << ")\n";
+      return 1;
+    }
+    module.print(out, mlir::OpPrintingFlags().enableDebugInfo());
+    out.flush();
+  } else if (opt.dump_out) {
     module.print(llvm::outs(), mlir::OpPrintingFlags().enableDebugInfo());
     llvm::outs().flush();
   }

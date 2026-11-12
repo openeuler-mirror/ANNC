@@ -270,13 +270,17 @@ void FlattenExecutorImpl(mlir::ModuleOp module) {
         return;
       }
 
-      // 1. Collect islands, then preflight before any mutation: zip()
-      //    would silently truncate on mismatches and erase() would dangle
-      //    results -- bail out whole (same policy as hasOneBlock).
+      // 1. Preflight island shape and fetch arity before mutation -- bail
+      //    leaves the graph untouched. Control results are unchecked:
+      //    strip_ctrl drops their only users (carriers take none).
       llvm::SmallVector<mlir::tf_executor::IslandOp> islands;
       for (auto island : gb.getOps<mlir::tf_executor::IslandOp>())
         islands.push_back(island);
-      if (graph->getNumResults() != fetch.getNumOperands()) return;
+      unsigned fetchDataOps = 0;
+      for (mlir::Value v : fetch.getOperands())
+        if (!llvm::isa<mlir::tf_executor::ControlType>(v.getType()))
+          ++fetchDataOps;
+      if (graph->getNumResults() != fetchDataOps) return;
       for (auto island : islands) {
         mlir::Region& ibody = island.getBody();
         if (!ibody.hasOneBlock()) return;
@@ -289,8 +293,6 @@ void FlattenExecutorImpl(mlir::ModuleOp module) {
                    island.getResult(nData - 1).getType()))
           --nData;
         if (y.getNumOperands() != nData) return;
-        for (unsigned i = nData; i < island.getNumResults(); ++i)
-          if (!island.getResult(i).use_empty()) return;
       }
 
       // 2. strip all control dependencies of the graph.
@@ -307,7 +309,8 @@ void FlattenExecutorImpl(mlir::ModuleOp module) {
       for (auto island : islands) strip_ctrl(island);
       strip_ctrl(fetch);
 
-      // 3. graph results <- fetch operands.
+      // 3. graph results <- fetch operands; arity was preflighted above
+      //    (strip only removed control inputs, never data operands).
       for (unsigned i = 0; i < graph->getNumResults(); ++i)
         graph->getResult(i).replaceAllUsesWith(fetch.getOperand(i));
 
