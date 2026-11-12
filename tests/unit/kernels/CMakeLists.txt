@@ -90,6 +90,9 @@ function(annc_add_kernel_gtest target)
     gtest_discover_tests(${target})
 endfunction()
 
+annc_add_kernel_gtest(context_memref_output_test context_memref_output_test.cpp)
+target_link_libraries(context_memref_output_test PRIVATE ANNCContextMemRef)
+
 annc_add_kernel_gtest(masked_mul_context_test masked_mul_context_test.cpp)
 target_link_libraries(masked_mul_context_test PRIVATE
     ANNCThreadPool LLVMSupport LLVMDemangle)
@@ -156,6 +159,11 @@ if(ANNC_GEMM_PACKAGE_AVAILABLE)
     target_link_libraries(gemm_smallshape_microkernel_test
         PRIVATE ANNC::AArch64GemmMicrokernels)
 endif()
+
+annc_add_kernel_gtest(gemm_context_dispatch_test
+    gemm_context_dispatch_test.cpp
+)
+target_link_libraries(gemm_context_dispatch_test PRIVATE ANNCGemmSupport)
 
 # The planner is deliberately separated from the handwritten execution leaf;
 # cover its static-grid invariants without requiring a generated kernel.
