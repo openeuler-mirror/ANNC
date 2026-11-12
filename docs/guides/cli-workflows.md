@@ -66,6 +66,43 @@ annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
 部署形态见
 [addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
 
+## `pb2stablehlo`（V2 路线前端）
+
+TF GraphDef → StableHLO 的 V2 前端（wheel 隔离编译，TF 2.20 + 独立
+llvm 快照；构建开关同 `ANNC_ENABLE_TF2ATIR_V2`，TF 2.20 分支可达）。
+读入 GraphDef pb，产出 **stablehlo 主图 + 残差载体** 的 `.mlir`（即
+`annc-tf2atir-v2` 消费的前端产物）。
+
+```shell
+pb2stablehlo graph.pb --input x:DT_STRING --output y \
+  -o stablehlo.mlir
+```
+
+产物（stablehlo 主图 + 残差载体）默认写 **stdout**，`-o <file>` 改为写入
+文件（两者互斥）；`--output` 是图输出名（fetches）而非路径。示例中的
+`x`/`y` 按图内入口/输出节点名替换。
+
+| 选项 | 作用 |
+| --- | --- |
+| `--input name[:DT[:dims]]` | 入口声明（可多次；dtype 缺省从图推导，无法推导即拒绝；`dims` 为逗号分隔整数如 `2,3`，省略则从图推导或视为未知 shape） |
+| `--output name` | 输出名（可多次；决定 `tf.entry_function`） |
+| `-o <file>` | 产物写入文件（不给则写 stdout） |
+| `--dump` | 打印导入/改写后的 tf MLIR 后直接退出（诊断用，不产 stablehlo） |
+| `--no-dump-out` | 不向 stdout 输出最终产物（对 `-o` 无影响） |
+| `--skip-preprocess` | 跳过官方 preprocess/freeze（诊断 A/B） |
+| `--assume-opaque-i8` | 无 dtype 槽标记 DT_INT8 哨兵（回归辅助） |
+| `--crash_repro <file>` | crash reproducer 路径 |
+
+退出码：0 成功；1 IO/导入失败；2 用法；3 方言注册；4 类型/不变量；
+5 内部阶段（管线失败）；6 图结构。A/B 开关（`ANNC_NO_*`）见
+[环境变量参考](environment-variables.md)。产出交由
+`annc-tf2atir-v2`（见上）完成残差下沉。
+
+行为契约与阶段失败语义见
+[前端设计](../design/tf-stablehlo-frontend/frontend-transform.md)；
+端到端行为由 `tests/integration/tf_transform/`（30 用例）锚定，改动
+pipeline 或 wrap 层后应回归该目录。
+
 ## 分步编译命令
 
 以下命令是手动执行一次 GraphDef 到 `ANNCFused` GraphDef 的**最小序列**。它与 `annc-tf-pipeline` 不等价：pipeline 会在 `ANNC_GEMM=2` 时运行 `--atir-gemm-epilogue-fusion`，按需要追加 KDNN fast-codegen 与常量折叠，并在没有任何 AOT kernel 时跳过 `annc-asm`/`annc`（`--atir-rank-inference` 已包含在下面的第 2 步中）。
