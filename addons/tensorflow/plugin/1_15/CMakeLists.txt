@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(annc_tensorflow_1_15 LANGUAGES CXX)
+  include(GNUInstallDirs)
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/TensorFlowPluginConfig.cmake")
@@ -68,5 +69,5 @@ foreach(_name annc_fused_op annc_optimizer)
     set_target_properties(${_target} PROPERTIES
       BUILD_RPATH "${_tf_rpath_dirs}" INSTALL_RPATH "${_tf_rpath_dirs}")
   endif()
-  install(TARGETS ${_target} LIBRARY DESTINATION lib/tensorflow/1.15)
+  install(TARGETS ${_target} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endforeach()

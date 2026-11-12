@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 namespace fs = std::filesystem;
 namespace annc {
 namespace constant_folding {
@@ -42,6 +43,27 @@ bool skipField(const uint8_t *buf, size_t len, size_t &pos, int wireType) {
   default:
     return false;
   }
+}
+
+std::optional<int32_t> parseBundleShardCount(const uint8_t *buf, size_t len) {
+  size_t pos = 0;
+  int32_t shardCount = 0;
+  while (pos < len) {
+    uint64_t tag = 0;
+    if (!decodeVarint(buf, len, pos, tag)) return std::nullopt;
+    const int wireType = static_cast<int>(tag & 7);
+    // The empty key stores BundleHeaderProto, including a nested VersionDef.
+    if ((tag >> 3) == 1) {
+      uint64_t value = 0;
+      if (wireType != 0 || !decodeVarint(buf, len, pos, value) ||
+          value > std::numeric_limits<int32_t>::max())
+        return std::nullopt;
+      shardCount = static_cast<int32_t>(value);
+    } else if (!skipField(buf, len, pos, wireType)) {
+      return std::nullopt;
+    }
+  }
+  return shardCount;
 }
 
 struct BundleEntry {
@@ -172,11 +194,6 @@ bool CheckpointReader::parseIndexFile(const std::string &index_path) {
         blockRangeOk(data, blockOffset, blockSize))
       parseDataBlock(data, blockOffset, blockSize);
   }
-  auto header = entries_.find("");
-  if (header != entries_.end()) {
-    num_shards_ = header->second.dtype;
-    entries_.erase(header);
-  }
   if (num_shards_ <= 0) num_shards_ = 1;
   return !entries_.empty();
 }
@@ -203,9 +220,8 @@ void CheckpointReader::parseDataBlock(const std::vector<uint8_t> &file_data,
     if (!nextBlockEntry(block, end, pos, lastKey, key, value, valueLen)) break;
 
     if (key.empty()) {
-      BundleEntry header;
-      if (parseBundleEntry(value, valueLen, header))
-        entries_[""] = Entry{header.dtype, 0, 0, 0};
+      if (auto shardCount = parseBundleShardCount(value, valueLen))
+        num_shards_ = *shardCount;
       continue;
     }
     BundleEntry proto;
