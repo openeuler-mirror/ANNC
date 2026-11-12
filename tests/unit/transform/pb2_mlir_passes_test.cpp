@@ -1,6 +1,7 @@
 // Unit tests for the MLIR-domain passes (T4): suffix strip, executor
-// flattening (positive + count-mismatch bail-out), residue wrap, carrier
-// rename. Quoted generic IR; g_opspecs preloaded where the wrap gate needs it.
+// flattening (positive, island control edges, count-mismatch bail-out),
+// residue wrap, carrier rename. Quoted generic IR; g_opspecs preloaded
+// where the wrap gate needs it.
 
 #include "pb2_test_harness.h"
 #include <memory>
@@ -217,6 +218,92 @@ static void TestFlattenExecutorInterleavedDominance() {
   PB2_CHECK(succeeded(mlir::verify(*module)));  // dominance holds
 }
 
+// Island-to-island control edges are the importer's norm and must not
+// bail the flatten out. Regression: a pre-strip use_empty() guard used to
+// reject such graphs, leaving stand-ins unreachable by the restore scan.
+static void TestFlattenExecutorIslandControlEdges() {
+  mlir::MLIRContext ctx;
+  loadExecutorDialects(ctx);
+  // Generic text cannot spell island operands (IslandOp::parse derives
+  // them from results): parsed operand-less, edges added in C++, matching
+  // the importer shape.
+  auto module = parse(ctx, R"mlir(
+    module {
+      func.func @main(%arg0: tensor<f32>) -> tensor<f32> {
+        %g = "tf_executor.graph"() ({
+          %src:2 = "tf_executor.island"() ({
+            %v0 = "some.op"(%arg0) {test.tag = "src"} : (tensor<f32>) -> tensor<f32>
+            "tf_executor.yield"(%v0) : (tensor<f32>) -> ()
+          }) : () -> (tensor<f32>, !tf_executor.control)
+          %cons:2 = "tf_executor.island"() ({
+            %v1 = "some.op"(%src#0) {test.tag = "cons"} : (tensor<f32>) -> tensor<f32>
+            "tf_executor.yield"(%v1) : (tensor<f32>) -> ()
+          }) : () -> (tensor<f32>, !tf_executor.control)
+          "tf_executor.fetch"(%cons#0) : (tensor<f32>) -> ()
+        }) : () -> tensor<f32>
+        func.return %g : tensor<f32>
+      }
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  // Block order is source order: islands[0] produces, islands[1] consumes.
+  llvm::SmallVector<mlir::Operation*> islands;
+  module->walk([&](mlir::tf_executor::IslandOp io) { islands.push_back(io); });
+  PB2_CHECK(islands.size() == 2);
+  mlir::Operation* src_island = islands[0];
+  mlir::Operation* cons_island = islands[1];
+  // Control token only: the island operand slot is control-typed by ODS;
+  // the data edge already exists as a body capture of src#0.
+  cons_island->setOperands({src_island->getResult(1)});
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb_passes::CreateFlattenExecutorPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(findOp(*module, "tf_executor.graph") == nullptr);
+  PB2_CHECK(findOp(*module, "tf_executor.island") == nullptr);
+  PB2_CHECK(findOp(*module, "tf_executor.fetch") == nullptr);
+  auto* src = findOp(*module, "some.op", "src");
+  auto* cons = findOp(*module, "some.op", "cons");
+  PB2_CHECK(src && cons);
+  // The consumer now takes the producer payload directly (control edge gone).
+  PB2_CHECK(cons->getOperand(0).getDefiningOp() == src);
+  PB2_CHECK(mlir::succeeded(mlir::verify(*module)));
+}
+
+// Arity mismatch (graph results != fetch data operands) must bail BEFORE
+// strip_ctrl: a post-strip bail would leave control edges already stripped.
+// The fetch's trailing control operand (still present after the bail) is
+// the witness of a pre-mutation bail.
+static void TestFlattenExecutorArityBailsBeforeMutation() {
+  mlir::MLIRContext ctx;
+  loadExecutorDialects(ctx);
+  auto module = parse(ctx, R"mlir(
+    module {
+      func.func @main(%arg0: tensor<f32>) -> tensor<f32> {
+        %g = "tf_executor.graph"() ({
+          %i:2 = "tf_executor.island"() ({
+            %v = "some.op"(%arg0) {test.tag = "p"} : (tensor<f32>) -> tensor<f32>
+            "tf_executor.yield"(%v) : (tensor<f32>) -> ()
+          }) : () -> (tensor<f32>, !tf_executor.control)
+          "tf_executor.fetch"(%i#0) : (tensor<f32>) -> ()
+        }) : () -> tensor<f32>
+        func.return %g : tensor<f32>
+      }
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::Operation* island = findOp(*module, "tf_executor.island");
+  mlir::Operation* fetch = findOp(*module, "tf_executor.fetch");
+  PB2_CHECK(island && fetch);
+  // Two data operands + one control on a one-result graph: the ODS-illegal
+  // intermediate the rewrite paths can produce, verified off.
+  fetch->setOperands({island->getResult(0), island->getResult(0),
+                      island->getResult(1)});
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.enableVerifier(false);  // results-vs-fetch mismatch is the point
+  pm.addPass(pb_passes::CreateFlattenExecutorPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(findOp(*module, "tf_executor.graph") != nullptr);  // bailed
+  PB2_CHECK(fetch->getNumOperands() == 3);  // control edge not stripped
+}
+
 // Registered tf.* leftovers become tf.residue carriers: attrs ride along,
 // call_target_name keeps the op name, and the reason distinguishes
 // static-gated classes from plain no-pattern ones.
@@ -281,6 +368,8 @@ int main() {
   TestFlattenExecutorPositive();
   TestFlattenExecutorCountMismatchBailsOut();
   TestFlattenExecutorInterleavedDominance();
+  TestFlattenExecutorIslandControlEdges();
+  TestFlattenExecutorArityBailsBeforeMutation();
   TestWrapRegisteredResidue();
   TestRenameResidueCarrier();
   PB2_TEST_SUMMARY("mlir-passes-test");
