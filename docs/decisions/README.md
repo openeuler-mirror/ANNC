@@ -52,6 +52,7 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-019 | annc-partition 的版本化输入与整包原子发布 | proposed | [decisions.md#adr-019](decisions.md#adr-019) |
 | ADR-022 | Kernel Context 与统一 Runtime ABI | proposed | [decisions.md#adr-022](decisions.md#adr-022) |
 | ADR-023 | pb2stablehlo 前端的 wheel 隔离构建域 | accepted | [decisions.md#adr-023](decisions.md#adr-023) |
+| ADR-024 | Context 融合函数的手写 Customize 与 codegen 路线互斥 | accepted（既有架构变更追记） | [decisions.md#adr-024](decisions.md#adr-024) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

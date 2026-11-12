@@ -270,8 +270,11 @@ return annc::kernels::Shard(workers.numThreads(), workers, rows, costPerRow,
 
 Context 不会回退到 TLS 获取线程池。TF V3 执行在内部创建适配器并绑定其指针，
 外层 TLS 桥接保持原有适配器创建方式；两者借用同一个 TF 线程池。
-ORT 借用执行 owner 的 `pool_`。当前生成式 GEMM 仍保留旧 TLS 获取路径，迁移生成式
-入口到显式 Context 是后续工作，本次不宣称已完成。C 入口保持统一状态码和异常边界。
+ORT 借用执行 owner 的 `pool_`。启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 后，生成式 GEMM
+通过带 Context 参数的 dispatcher 获取同一 `services->thread_pool`，沿用公共
+`parallel_for` 和 `grain_size = 1` 固定块调度；空池串行执行，不回退查询 TLS。
+默认旧 dispatcher 仍从 TLS 获取线程池。普通生成式入口返回 void，线程调度不新增状态
+返回或异常处理包装；真实宿主端到端验证仍需配套构建产物。C 入口保持统一状态码和异常边界。
 
 ### 3.5 线程池与行任务调度
 
@@ -280,7 +283,8 @@ ORT 借用执行 owner 的 `pool_`。当前生成式 GEMM 仍保留旧 TLS 获�
 `Context/Parallel.h` 或 `Context/RowParallel.h`，不保留旧路径的转发头。
 
 Context kernel 使用已有的 `annc::threadpool::AnncThreadPool` 虚函数接口；
-生成式 GEMM 当前仍经 TLS 桥接访问同一类接口，原有 TLS 函数和计算参数 ABI 保留。
+生成式 GEMM 默认仍经 TLS 桥接访问同一类接口，启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI`
+后改由带 Context 参数的 dispatcher 取得宿主线程池；原有 TLS 函数和计算参数 ABI 保留。
 `getThreadPool()` 返回可为空的借用指针；`getKernelThreadPool()` 返回的包装在空池时串行执行，不创建线程，也不查询 TLS。
 
 `AnncThreadPool::parallel_for` 接收 `ParallelForOptions`，其中包含成本、粒度和最大
