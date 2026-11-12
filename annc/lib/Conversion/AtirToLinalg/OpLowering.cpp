@@ -229,12 +229,18 @@ LogicalResult BufferLoweringToLinalg::matchAndRewrite(
   if (!rankedType || !rankedType.hasStaticShape())
     return rewriter.notifyMatchFailure(
         op, "BufferOp lowering requires a statically shaped tensor");
-  auto memrefType =
-      MemRefType::get(rankedType.getShape(), rankedType.getElementType());
-  auto alloc = rewriter.create<memref::AllocaOp>(op.getLoc(), memrefType);
-  auto tensor = rewriter.create<bufferization::ToTensorOp>(
-      op.getLoc(), rankedType, alloc, /*restrict=*/true, /*writable=*/true);
-  rewriter.replaceOp(op, tensor.getResult());
+  if (annc::loweringContextABIEnabled()) {
+    rewriter.replaceOpWithNewOp<tensor::EmptyOp>(op, rankedType.getShape(),
+                                                 rankedType.getElementType());
+  } else {
+    auto memrefType =
+        MemRefType::get(rankedType.getShape(), rankedType.getElementType());
+    auto alloc = rewriter.create<memref::AllocaOp>(op.getLoc(), memrefType);
+    auto tensor = rewriter.create<bufferization::ToTensorOp>(
+        op.getLoc(), rankedType, alloc, /*restrict=*/true,
+        /*writable=*/true);
+    rewriter.replaceOp(op, tensor.getResult());
+  }
   return success();
 }
 
