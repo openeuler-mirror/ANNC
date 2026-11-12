@@ -225,7 +225,7 @@ FATAL 门禁（含修复指引）。
 
 | 层 | 资产 | 覆盖 | 命令 |
 | --- | --- | --- | --- |
-| 单元 | 7 套件（common/infer/tf_rank_infer/mlir_passes/t5/wrap/string），~190 断言 | 推导规则、12 pass 的正反例、wrap 边界、编解码包裹结构与回滚 | `ctest --test-dir build -R pb2_` |
+| 单元 | 7 套件（common/infer/tf_rank_infer/mlir_passes/t5/wrap/string），~190 断言 | 推导规则、已覆盖 pass 的正反例（覆盖范围见 GAP-3）、wrap 边界、编解码包裹结构与回滚 | `ctest --test-dir build -R pb2_` |
 | 集成 | `tests/integration/tf_transform/` 5 文件 30 用例（手工 GraphDef → 可执行 → 产物断言） | rank 恢复、切片直译与 killswitch、包裹结构端到端、unrank 边界、StringUnwrap | `python3 -m pytest tests/integration/tf_transform/` |
 | FileCheck | `tests/FileCheck/Conversion/tf-residue-v2-sink.mlir` | sink 侧消费本组件产物形态 | `bash tests/FileCheck/run.sh Conversion` |
 

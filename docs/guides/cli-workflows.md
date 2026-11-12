@@ -93,8 +93,8 @@ pb2stablehlo graph.pb --input x:DT_STRING --output y \
 | `--assume-opaque-i8` | 无 dtype 槽标记 DT_INT8 哨兵（回归辅助） |
 | `--crash_repro <file>` | crash reproducer 路径 |
 
-退出码：0 成功；1 IO/pipeline；2 用法；3 方言注册；4 图结构/类型不变量；
-5 内部阶段；6 图结构。A/B 开关（`ANNC_NO_*`）见
+退出码：0 成功；1 IO/导入失败；2 用法；3 方言注册；4 类型/不变量；
+5 内部阶段（管线失败）；6 图结构。A/B 开关（`ANNC_NO_*`）见
 [环境变量参考](environment-variables.md)。产出交由
 `annc-tf2atir-v2`（见上）完成残差下沉。
 
