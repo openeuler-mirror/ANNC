@@ -198,6 +198,7 @@ struct BuildCtx {  // cross-stage state (the five sets route every node)
 };
 struct Options {
   std::string graph_path;        // graph pb
+  std::string out_path;          // -o <file>: artifact sink; empty = stdout
   std::string crash_repro_path;  // --crash_repro; empty = disabled
                                  // (dump prefix then falls back to /tmp)
   std::vector<std::string> inputs, outputs;  // raw: name[:DT[:dims]] / name
