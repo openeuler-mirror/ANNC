@@ -28,7 +28,7 @@ struct Host : annc::threadpool::AnncThreadPool {
   AnncStatusCode error = ANNC_STATUS_OK;
   std::vector<std::unique_ptr<Allocation>> allocations;
   std::vector<uint32_t> outputOrder;
-  int shardCalls = 0;
+  int parallelCalls = 0;
 
   static AnncStatusCode allocate(void* opaque, const AnncTensorDesc* request,
                                  AnncTensorView* result) {
@@ -79,7 +79,7 @@ struct Host : annc::threadpool::AnncThreadPool {
   void parallel_for(int64_t total,
                     const annc::threadpool::ParallelForOptions& options,
                     const std::function<void(int64_t, int64_t)>& task) override {
-    if (options.max_parallelism) ++shardCalls;
+    ++parallelCalls;
     if (total <= 1 || options.max_parallelism.value_or(2) <= 1) {
       if (total) task(0, total);
       return;
@@ -136,12 +136,22 @@ void testHostServices() {
   require(view.allocateOutput<float>(0, {2}, ANNC_ALLOCATION_ZERO) == bound &&
               host.outputOrder.size() == 1,
           "bound output was not reused");
-  int64_t count = 0;
-  require(view.getKernelThreadPool().parallelFor(
-              3, [&](int64_t first, int64_t last) { count += last - first; }) ==
-              ANNC_STATUS_OK &&
-              count == 3,
+  std::array<int, 3> visits{};
+  auto visit = [&](int64_t first, int64_t last) {
+    for (int64_t i = first; i < last; ++i) ++visits[i];
+  };
+  const std::array<int, 3> expected{1, 1, 1};
+  require(view.getKernelThreadPool().parallelFor(3, visit) == ANNC_STATUS_OK &&
+              visits == expected && host.parallelCalls == 1,
           "parallel service failed");
+  visits.fill(0);
+  require(view.getKernelThreadPool().shard(1, 3, 1, visit) == ANNC_STATUS_OK &&
+              visits == expected && host.parallelCalls == 1,
+          "serial shard service failed");
+  visits.fill(0);
+  require(view.getKernelThreadPool().shard(2, 3, 1, visit) == ANNC_STATUS_OK &&
+              visits == expected && host.parallelCalls == 2,
+          "parallel shard service failed");
 }
 
 void testMatMul(AnncKernelFn kernel) {
@@ -156,9 +166,8 @@ void testMatMul(AnncKernelFn kernel) {
   auto services = host.services();
   auto raw = context(inputs, 2, &output, 1, &services);
   require(kernel(&raw) == ANNC_STATUS_OK &&
-              values<float>(output) == std::vector<float>({58, 64, 139, 154}) &&
-              host.shardCalls > 0,
-          "MatMul result or shard service failed");
+              values<float>(output) == std::vector<float>({58, 64, 139, 154}),
+          "MatMul result failed");
   require(kernel(&raw) == ANNC_STATUS_OK && host.outputOrder.size() == 1,
           "MatMul output was not reused");
 

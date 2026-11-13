@@ -115,13 +115,13 @@ target_link_libraries(annc_ep PRIVATE
     "${ANNC_EP_ORT_COMMON_ARCHIVE}"
     "${ANNC_EP_ORT_CPUINFO_ARCHIVE}"
     "-Wl,--end-group")
-# Keep the archives' ORT symbols out of the plugin's dynamic symbol table:
-# the host resolves exactly two entry points from this library
-# (onnxruntime/core/session/plugin_ep/ep_library_plugin.cc), and an
-# exported copy of ORT's thread pool could interpose on other dynamically
-# loaded libraries binding the same names.
+# Export only the ORT factory entries and generated-kernel memref accessors.
+# The archives' ORT symbols must remain local to prevent thread-pool symbol
+# interposition on other dynamically loaded libraries.
 target_link_options(annc_ep PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/annc_ep.map")
+set_property(TARGET annc_ep APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/annc_ep.map")
 
 set_target_properties(annc_ep PROPERTIES
     PREFIX "lib"

@@ -28,7 +28,8 @@ add_library(annc_fused_op_1_15 SHARED
 target_link_libraries(annc_fused_op_1_15 PRIVATE
   annc_jit_cache_1_15 Threads::Threads dl)
 
-# Embed the C accessors without applying the TF SDK's C++14/ABI settings.
+# The accessors use the kernel/support-side C++17 ABI, including its thread-pool
+# interface. Only C types cross into the TF SDK side, which may use ABI=0.
 if(TARGET ANNCContextMemRefObjects)
   target_sources(annc_fused_op_1_15 PRIVATE
     $<TARGET_OBJECTS:ANNCContextMemRefObjects>)

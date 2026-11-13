@@ -325,6 +325,10 @@ def run_test(args):
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
+    plugin = ctypes.CDLL(args.ep_library)
+    for symbol in ("annc_context_get_input_memref",
+                   "annc_context_alloc_output_memref"):
+        getattr(plugin, symbol)
     rtpy.register_execution_provider_library("AnncExecutionProvider",
                                              args.ep_library)
     os.environ.update({
