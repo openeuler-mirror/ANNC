@@ -111,6 +111,12 @@ typedef struct {
 `AnncTensorView` 表达分配得到或预先绑定的实际 tensor，二者职责不同。
 `AnncStringRef` 只包含字符串指针和长度，不拥有字符数据。
 
+生成代码可通过 `annc_context_get_input_memref` 和
+`annc_context_alloc_output_memref` 获取标准 ranked memref descriptor；实现位于
+`context/lib/MemRef.cpp`，宿主插件嵌入对应对象。ORT 的 `annc_ep.map` 须公开这两个
+C 符号，同时继续隐藏所链接 ORT 静态库的内部符号。手写 kernel 的头文件访问器
+直接读取 Context 或调用服务表中的函数指针，不依赖这两个符号。
+
 layout 与 dtype/rank 分开。已有 packed RHS 按既有格式、元数据和消费规则处理，不能仅凭二维 F32 就作为普通 dense 矩阵读取。一般 view 不承担整个预打包元数据，相关契约继续由已有 GEMM plan/权重元数据管理。
 
 ### 3.2 属性 payload
