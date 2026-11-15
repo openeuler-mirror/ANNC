@@ -9,9 +9,11 @@
 namespace atir {
 
 llvm::SmallVector<mlir::Value> collectEscapingResults(
-    llvm::ArrayRef<mlir::Operation *> fusedOps) {
+    llvm::ArrayRef<mlir::Operation *> fusedOps,
+    const llvm::SmallDenseSet<mlir::Operation *> *extraFused) {
   llvm::SmallPtrSet<mlir::Operation *, 16> fusedSet(fusedOps.begin(),
                                                     fusedOps.end());
+  if (extraFused) fusedSet.insert(extraFused->begin(), extraFused->end());
   llvm::SmallVector<mlir::Value> outputs;
   for (mlir::Operation *op : fusedOps) {
     for (mlir::Value result : op->getResults()) {
@@ -26,10 +28,16 @@ llvm::SmallVector<mlir::Value> collectEscapingResults(
 }
 
 llvm::SmallVector<mlir::Value> collectBoundaryInputs(
-    llvm::ArrayRef<mlir::Operation *> fusedOps) {
+    llvm::ArrayRef<mlir::Operation *> fusedOps,
+    const llvm::SmallDenseSet<mlir::Operation *> *extraFused) {
   llvm::SmallPtrSet<mlir::Operation *, 16> fusedSet(fusedOps.begin(),
                                                     fusedOps.end());
+  if (extraFused) fusedSet.insert(extraFused->begin(), extraFused->end());
   llvm::SetVector<mlir::Value> inputs;
+  // The fusedOps order fixes the ABI slot order (first occurrence).
+  // extraFused only suppresses false boundaries here (region-internal defs
+  // are no longer misread as inputs); collecting region free variables is
+  // NOT implemented — it lands with the first augmentFusedSet consumer.
   for (mlir::Operation *op : fusedOps) {
     for (mlir::Value operand : op->getOperands()) {
       if (!fusedSet.contains(operand.getDefiningOp())) inputs.insert(operand);
