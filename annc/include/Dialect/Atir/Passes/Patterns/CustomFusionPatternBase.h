@@ -68,12 +68,31 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
   virtual void getOrderedBoundaryInputs(
       AnchorOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
       llvm::SmallVectorImpl<mlir::Value> &inputs) const {
-    for (mlir::Value input : collectBoundaryInputs(fusedOps)) {
+    // Region members count as fused here too (via augmentFusedSet), which
+    // suppresses false boundaries; collecting their free variables is not
+    // implemented yet. Patterns overriding this hook own their ABI order.
+    llvm::SmallDenseSet<mlir::Operation *> fusedSet(fusedOps.begin(),
+                                                    fusedOps.end());
+    augmentFusedSet(anchor, fusedOps, fusedSet);
+    for (mlir::Value input : collectBoundaryInputs(fusedOps, &fusedSet)) {
       mlir::Operation *defOp = input.getDefiningOp();
       if (defOp && mlir::isa<BufferOp, ConstantOp>(defOp)) continue;
       inputs.push_back(input);
     }
   }
+
+  // Patterns whose kernels are compiled on demand (no registered builtin)
+  // override this to opt out of the builtin-availability guard; such Customize
+  // ops are consumed by the V2 codegen path instead of context entry
+  // forwarding.
+  virtual bool allowMissingBuiltin() const { return false; }
+
+  // Region-internal ops (assuming / reduce bodies) count as fused, not
+  // escaping (default: no extras). Const, idempotent: the base calls it from
+  // matchAndRewrite and getOrderedBoundaryInputs alike.
+  virtual void augmentFusedSet(
+      AnchorOp anchor, llvm::ArrayRef<mlir::Operation *> fusedOps,
+      llvm::SmallDenseSet<mlir::Operation *> &fusedSet) const {}
 
  public:
   mlir::LogicalResult matchAndRewrite(
@@ -96,13 +115,15 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
     bool usesOutputBuffers = schema.results().empty();
 
     llvm::SmallDenseSet<Operation *> fusedSet(fusedOps.begin(), fusedOps.end());
+    augmentFusedSet(anchor, fusedOps, fusedSet);
 
     // Step 1: identify escaping SSA results and v1 output-buffer owners.
     //
     // Escaping results are collected independently of internal users.  For
     // the legacy buffer ABI, a leaf op's first operand is also retained as
     // the output buffer.  Result-based v2 schemas omit these buffer operands.
-    SmallVector<Value> outputValues = collectEscapingResults(fusedOps);
+    SmallVector<Value> outputValues =
+        collectEscapingResults(fusedOps, &fusedSet);
     llvm::SmallDenseSet<Operation *> outputOps;
     for (Operation *op : fusedOps) {
       bool hasInternalUser = false;
@@ -200,7 +221,8 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
             anchor->template getAttrOfType<mlir::StringAttr>("rhs_format")) {
       req.rhs_format = rhsFormat.getValue().str();
     }
-    if (!annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
+    if (!allowMissingBuiltin() &&
+        !annc::kernels::hasAnyAvailableKernel(req, enableKdnn)) {
       ANNC_LOG_WARN("fusion-pattern")
           << "No builtin kernel available for '" << customOpName
           << "', skipping CustomizeOp rewrite\n";
