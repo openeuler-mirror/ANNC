@@ -354,7 +354,13 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
       AnncToolPath("annc-asm"),
       request.atir_module_path,
       "--annc-select-kernel=kernel-name=" + request.kernel_name,
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+      "--shape-legalize-to-stablehlo",
+      "--reconcile-unrealized-casts",
+      "--annc-specialize-shapes=shape-spec=" + shape_spec,
+#else
       "--atir-specialize-shapes=shape-spec=" + shape_spec,
+#endif
       fast_codegen_arg,
       gemm_pipeline_arg,
       "-o",

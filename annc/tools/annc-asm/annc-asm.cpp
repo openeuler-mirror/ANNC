@@ -22,6 +22,9 @@
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+#include "stablehlo/transforms/Passes.h"
+#endif
 
 using namespace mlir;
 
@@ -29,6 +32,16 @@ int main(int argc, char **argv) {
   atir::registerAllAtirPasses();
   atir::registerAtirConversionPasses();
   annc::registerAllTargetPasses();
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+  mlir::stablehlo::registerShapeLegalizeToStablehloPass();
+  mlir::registerReconcileUnrealizedCastsPass();
+#endif
+#ifdef ANNC_ASM_ENABLE_SHAPE_LEGALIZE
+  // Register the upstream pass under its native option name. ANNC owns the
+  // pipeline boundary, while StableHLO owns the Shape-to-StableHLO rewrite.
+  mlir::stablehlo::registerShapeLegalizeToStablehloPass();
+  mlir::registerReconcileUnrealizedCastsPass();
+#endif
 
   DialectRegistry registry;
   registry.insert<
