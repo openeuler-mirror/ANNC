@@ -1,4 +1,4 @@
-// RUN: annc-asm --atir-fast-codegen %s | FileCheck %s
+// RUN: annc-asm --annc-fast-codegen %s | FileCheck %s
 // KP-style sparse dynamic stitch fusion, second level: inside the kernel
 // func extracted by OpFusion (args = x, v0, v1, output), the
 // Range/Size/Cast/FloorMod/FloorDiv/DynamicPartition/Gather subgraph folds

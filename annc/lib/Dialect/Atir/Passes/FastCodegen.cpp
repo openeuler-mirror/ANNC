@@ -15,10 +15,10 @@ using namespace mlir;
 
 namespace atir {
 
-class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
+class AnncFastCodegenPass : public AnncFastCodegenBase<AnncFastCodegenPass> {
  public:
-  AtirFastCodegenPass() = default;
-  AtirFastCodegenPass(const AtirFastCodegenPass &) = default;
+  AnncFastCodegenPass() = default;
+  AnncFastCodegenPass(const AnncFastCodegenPass &) = default;
 
   void runOnOperation() override {
     auto m = getOperation();
@@ -59,7 +59,7 @@ class AtirFastCodegenPass : public AtirFastCodegenBase<AtirFastCodegenPass> {
   }
 };
 
-std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass() {
-  return std::make_unique<AtirFastCodegenPass>();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncFastCodegenPass() {
+  return std::make_unique<AnncFastCodegenPass>();
 }
 }  // namespace atir

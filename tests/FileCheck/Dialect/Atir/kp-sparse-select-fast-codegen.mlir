@@ -1,4 +1,4 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s
 // KP-style sparse select fusion, second level, Context V3: inside the
 // kernel func (signature !llvm.ptr + 7 inputs, 3 results) the chain folds
 // into a single KPFusedSparseSelect CustomizeOp; the three .Result() entries

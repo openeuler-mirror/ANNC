@@ -137,7 +137,7 @@ def run_pipeline(spec, make_graph, case, tmp_path):
         gemm = "--annc-aarch64-gemm-pipeline"
         if config:
             gemm += f"=config-path={config}"
-        fast_codegen = "--atir-fast-codegen"
+        fast_codegen = "--annc-fast-codegen"
         if spec.get("fast_codegen"):
             fast_codegen += f'={spec["fast_codegen"]}'
         _run(

@@ -145,7 +145,7 @@ def test_gather_graphdef_fusion_compile_and_execute(tmp_path):
         [
             tools["annc-asm"],
             pruned,
-            "--atir-fast-codegen",
+            "--annc-fast-codegen",
             "--annc-aarch64-gemm-pipeline",
             "-o",
             lowered,

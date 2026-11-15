@@ -10,7 +10,7 @@ PYBIND11_MODULE(_annc, m) {
   atir::populateAttributeModule(m);
   atir::populateTypesModule(m);
 
-  atir::registerAtirFastCodegenPass();
+  atir::registerAnncFastCodegenPass();
   atir::registerAtirOpFusionPass();
   atir::registerConvertAtirToLinalgPass();
   atir::registerLowerContextKernelEntriesPass();

@@ -67,9 +67,9 @@ def AtirConfigFusion : Pass<"atir-config-fusion", "ModuleOp"> {
 }
 
 /* matmul add relu Fusion */
-def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
+def AnncFastCodegen : Pass<"annc-fast-codegen", "ModuleOp"> {
   let summary = "fast codegen";
-  let constructor = "createAtirFastCodegenPass()";
+  let constructor = "createAnncFastCodegenPass()";
   let dependentDialects = [
     "AtirDialect"
   ];
@@ -100,14 +100,14 @@ def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
 }
 
 /* Select one fused kernel from a fusion-only runtime template. */
-def AtirSelectKernel : Pass<"atir-select-kernel", "ModuleOp"> {
+def AnncSelectKernel : Pass<"annc-select-kernel", "ModuleOp"> {
   let summary = "select one fused kernel function for runtime compilation";
-  let constructor = "createAtirSelectKernelPass()";
+  let constructor = "createAnncSelectKernelPass()";
   let options = [
     Option<"kernelName", "kernel-name", "std::string", "",
            "Symbol name of the fused kernel to retain">
   ];
-  let dependentDialects = ["AtirDialect"];
+  let dependentDialects = ["mlir::func::FuncDialect"];
 }
 
 /* Bind runtime argument shapes before lowering. */
