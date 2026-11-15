@@ -10,9 +10,9 @@ void registerAllAtirPasses() {
     atir::registerAtirRankInferencePass();
     atir::registerAtirOpFusionPass();
     atir::registerAtirConfigFusionPass();
-    atir::registerAtirFastCodegenPass();
+    atir::registerAnncFastCodegenPass();
     atir::registerAtirPruneFuncPass();
-    atir::registerAtirSelectKernelPass();
+    atir::registerAnncSelectKernelPass();
     atir::registerAtirSpecializeShapesPass();
 }
 }  // namespace atir

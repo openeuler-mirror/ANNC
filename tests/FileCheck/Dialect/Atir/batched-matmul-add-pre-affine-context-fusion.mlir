@@ -1,6 +1,6 @@
 // RUN: annc-opt --atir-op-fusion %s | FileCheck %s
-// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | annc-asm --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER
-// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | env ANNC_ENABLE_LOWERING_CONTEXT_ABI=1 annc-asm --atir-fast-codegen --convert-context-kernel-abi --convert-atir-to-linalg --verify-each | FileCheck %s --check-prefix=CONTEXT
+// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | annc-asm --annc-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER
+// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | env ANNC_ENABLE_LOWERING_CONTEXT_ABI=1 annc-asm --annc-fast-codegen --convert-context-kernel-abi --convert-atir-to-linalg --verify-each | FileCheck %s --check-prefix=CONTEXT
 
 // Pre-affine form: MatMul(X * scale + offset, W) + bias.  The fold must expose
 // X as the dynamic kernel input; keeping the affine Add as the input is not
