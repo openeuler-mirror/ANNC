@@ -177,7 +177,7 @@ class TfTypeCompatDialect : public Dialect {
         shape.getShape(), printer,
         [&](int64_t dim) {
           if (dim < 0)
-            printer << '?';
+            printer << "?";
           else
             printer << dim;
         },
