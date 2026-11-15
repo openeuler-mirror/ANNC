@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "tensorflow/core/lib/core/threadpool.h"
+#include "tensorflow/core/util/work_sharder.h"
 
 namespace annc {
 namespace tensorflow {
@@ -19,14 +20,21 @@ int InParallelRegion(void* context) {
 }
 
 int ParallelFor(void* context, std::int64_t total, std::int64_t block_size,
-                std::int64_t cost_per_unit, AnncThreadPoolTask task,
-                void* task_context) {
+                std::int64_t cost_per_unit, int max_parallelism,
+                AnncThreadPoolTask task, void* task_context) {
   auto& pool = *static_cast<TfPool*>(context);
   try {
     const auto fn = [task, task_context](std::int64_t begin, std::int64_t end) {
       task(task_context, begin, end);
     };
-    if (block_size > 0) {
+    if (max_parallelism > 0) {
+      const int limit = std::max(1, std::min(max_parallelism, pool.NumThreads()));
+      if (limit == 1 || InParallelRegion(context)) {
+        fn(0, total);
+      } else {
+        ::tensorflow::Shard(limit, &pool, total, cost_per_unit, fn);
+      }
+    } else if (block_size > 0) {
       pool.TransformRangeConcurrently(std::min(block_size, total), total, fn);
     } else {
       pool.ParallelFor(total, cost_per_unit, fn);
