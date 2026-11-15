@@ -141,6 +141,18 @@ TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeAttr) {
   EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[3,,4]>} { return })mlir"));
 }
 
+// The dynamic dimension must print as `?` verbatim and round-trip; a char
+// glued to the integer overload would silently print 63 and re-parse as a
+// static dim (regression guard for the printer path).
+TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeDynamicDim) {
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[?, 32]>} { return })mlir"));
+  std::string printed;
+  llvm::raw_string_ostream os(printed);
+  module_->print(os);
+  EXPECT_NE(printed.find("#tf_type.shape<[?, 32]>"), std::string::npos);
+  EXPECT_EQ(printed.find("#tf_type.shape<[63, 32]>"), std::string::npos);
+}
+
 // Provenance edge cases: empty node, negative/overflow/non-numeric ports,
 // and the source_ports-wins port resolution with its bail-out entries.
 TEST_F(StablehloSinkComponentTest, ProvenanceHelpers) {
