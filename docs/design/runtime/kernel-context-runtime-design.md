@@ -289,6 +289,11 @@ Context kernel 使用已有的 `annc::threadpool::AnncThreadPool` 虚函数接�
 转换为状态码，且所有任务必须同步完成。原有 `annc::threadpool::parallel_for` 与 TLS
 桥接接口保持不变；直接调用它的旧生成式代码行为不变。
 
+TF 1.15 的 support→SDK C 回调显式传递 `max_parallelism`，零表示未指定上限。
+指定上限时优先于固定块选项，按线程池大小截断后调用 `tensorflow::Shard`；
+上限为 1 或已在池内执行时串行调用。该回调属于配套构建的插件内部接口，
+support 层与 TF SDK 侧须同步重编。
+
 原生池采用 `native_pool(provider)` 虚函数，默认返回空指针；ORT 仅识别
 `"onnxruntime"`。保留旧的无参数 `native_pool()`，以兼容现有源码调用，不能用它
 绕过 Context 消费方的 provider 检查。宿主与 kernel 必须使用同一版类定义重编译。

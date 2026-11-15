@@ -37,11 +37,15 @@ TF 的 V3 调用路径使用已有的 `jit_mode` 选择函数签名：JIT 入口
 `AnncStatusCode(AnncKernelContext*)` 调用，不新增 Op 属性。
 两条分支都检查宿主错误状态和输出绑定，并使用现有异常捕获边界。
 该约定要求所有 JIT V3 入口实际返回 void；不能用于返回状态码或计算值的入口。
-当前工作区的双输出 MatMul+Add+Relu 仍存在 JIT builtin 分流，
-该入口的返回约定尚需配套修复；本次不修改它的执行模式。
+双输出 `MatMulAddReluWithAddOutput` 的执行模式已由 JIT 调整为 AOT，
+与手写 builtin 的 `AnncStatusCode(AnncKernelContext*)` 返回约定一致。
+对应 fusion 元数据和端到端测试同步使用 AOT；模型编译时生成共享库，
+运行时按状态码入口加载调用。普通生成式 GEMM 的 JIT 路径保持不变。
 TF 1.15 的 Context 服务借用现有 support 层的线程池适配器指针；
 TF SDK 一侧不解引用 C++ 线程池对象，维持原有 C++ ABI 隔离；
 memref C 访问器作为独立的 C++17 对象嵌入插件，不继承 TF 1.15 的 C++14/ABI 设置。
+support 层的 C 调度回调保留 `max_parallelism`；指定上限时 TF 1.15 调用
+`tensorflow::Shard`，未指定时沿用成本或固定块调度。
 旧 `mlir_ciface` 路径和 ORT 的状态码调用方式保持不变；生成式 V3 入口生成仍需单独实现。
 
 ### 图重写与形状推导
