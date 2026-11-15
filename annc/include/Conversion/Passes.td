@@ -7,12 +7,12 @@ def ConvertContextKernelABI : Pass<"convert-context-kernel-abi", "ModuleOp"> {
   let summary = "Convert context-v3 kernel entry inputs to context slots";
   let description = [{
     Run after fusion pruning and shape specialization, before ATIR-to-Linalg
-    conversion. The pass unpacks ranked tensor arguments from context memref
-    descriptors and preserves function results and returns.
+    conversion. The pass accepts only builtin ranked tensor arguments, unpacks
+    their context memref descriptors in function argument order, and preserves
+    function results and returns. Legacy ATIR tensor arguments are rejected.
   }];
   let constructor = "createConvertContextKernelABIPass()";
   let dependentDialects = [
-    "AtirDialect",
     "mlir::func::FuncDialect",
     "mlir::LLVM::LLVMDialect",
     "mlir::bufferization::BufferizationDialect",
