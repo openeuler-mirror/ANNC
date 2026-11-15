@@ -2,8 +2,8 @@
 // CHECK: context Customize entry must contain only input unpacking, constants, one CustomizeOp, and return
 module @main attributes {module.state = "atir"} {
   func.func private @fused_tensordot_matmul(
-      %input: !atir.tensor<4x5x32xf32, name = "input">,
-      %weight: !atir.tensor<32x16xf32, name = "weight">)
+      %input_tensor: tensor<4x5x32xf32>,
+      %weight_tensor: tensor<32x16xf32>)
       -> !atir.tensor<4x5x16xf32, name = "output">
       attributes {
         annc.kernel,
@@ -20,6 +20,8 @@ module @main attributes {module.state = "atir"} {
           outputs = [{dtype = "f32", rank = 3 : i64, role = "output", shape = [4, 5, 16], tf_name = "output"}]
         }
       } {
+    %input = builtin.unrealized_conversion_cast %input_tensor : tensor<4x5x32xf32> to !atir.tensor<4x5x32xf32, name = "input">
+    %weight = builtin.unrealized_conversion_cast %weight_tensor : tensor<32x16xf32> to !atir.tensor<32x16xf32, name = "weight">
     %tmp = "atir.buffer"() : () -> !atir.tensor<4x5x32xf32, name = "input">
     %computed = "atir.Add"(%tmp, %input, %input) <{do_relu = false, relu_limit = -1.0 : f32}> : (!atir.tensor<4x5x32xf32, name = "input">, !atir.tensor<4x5x32xf32, name = "input">, !atir.tensor<4x5x32xf32, name = "input">) -> !atir.tensor<4x5x32xf32, name = "input">
     %result = "atir.Customize"(%computed, %weight) {

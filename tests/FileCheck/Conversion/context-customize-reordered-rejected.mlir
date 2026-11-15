@@ -3,10 +3,12 @@
 
 module @main attributes {module.state = "atir"} {
   func.func private @fused_tensordot_matmul(
-      %input: !atir.tensor<4x5x32xf32, name = "input">,
-      %weight: !atir.tensor<32x16xf32, name = "weight">)
+      %input_tensor: tensor<4x5x32xf32>,
+      %weight_tensor: tensor<32x16xf32>)
       -> !atir.tensor<4x5x16xf32, name = "output">
       attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
+    %input = builtin.unrealized_conversion_cast %input_tensor : tensor<4x5x32xf32> to !atir.tensor<4x5x32xf32, name = "input">
+    %weight = builtin.unrealized_conversion_cast %weight_tensor : tensor<32x16xf32> to !atir.tensor<32x16xf32, name = "weight">
     %result = "atir.Customize"(%weight, %input) {
       opType = "TensordotMatMul",
       metadata = {

@@ -1,35 +1,25 @@
-#include "Conversion/Passes.h"
+#include <memory>
+
 #include "Support/ContextABISwitch.h"
-#include "Dialect/Atir/AtirOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/Pass.h"
 
 using namespace mlir;
 
 namespace atir {
-namespace {
 
-MemRefType getBoundaryMemRefType(Type type) {
-  ArrayRef<int64_t> shape;
-  Type elementType;
-  if (auto shaped = dyn_cast<ShapedType>(type)) {
-    if (!shaped.hasRank()) return {};
-    shape = shaped.getShape();
-    elementType = shaped.getElementType();
-  } else if (auto tensor = dyn_cast<atir::TensorType>(type)) {
-    if (!tensor.hasKnownRank()) return {};
-    shape = tensor.getShape();
-    elementType = tensor.getElementType();
-  } else {
-    return {};
-  }
-  return MemRefType::get(shape, elementType);
-}
+#define GEN_PASS_DEF_CONVERTCONTEXTKERNELABI
+#include "Conversion/Passes.h.inc"
+
+namespace {
 
 Value loadContextMemRef(OpBuilder &builder, Location loc, Value context,
                         int64_t slot, MemRefType memrefType,
@@ -56,6 +46,10 @@ LogicalResult convertEntry(func::FuncOp function,
   if (!abi || abi.getValue() != "annc_context_v3") return success();
   if (!function->hasAttr("annc.kernel") || function.getBody().empty())
     return function.emitError("context ABI entry must have a function body");
+  for (Type type : function.getArgumentTypes())
+    if (!isa<RankedTensorType>(type))
+      return function.emitError(
+          "context ABI arguments must be builtin ranked tensors");
 
   Block &entry = function.front();
   SmallVector<BlockArgument> oldArguments(entry.getArguments());
@@ -83,22 +77,14 @@ LogicalResult convertEntry(func::FuncOp function,
     }
   }
   for (auto [index, argument] : llvm::enumerate(oldArguments)) {
-    MemRefType memrefType =
-        getBoundaryMemRefType(argument.getType());
-    if (!memrefType)
-      return function.emitError("context ABI arguments must be ranked tensors");
-    Value memref = loadContextMemRef(builder, loc, context, index,
-                                     memrefType, converter);
-    auto tensorType = RankedTensorType::get(memrefType.getShape(),
-                                            memrefType.getElementType());
+    auto tensorType = cast<RankedTensorType>(argument.getType());
+    auto memrefType =
+        MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+    Value memref =
+        loadContextMemRef(builder, loc, context, index, memrefType, converter);
     Value tensor = builder.create<bufferization::ToTensorOp>(
         loc, tensorType, memref, true, true);
-    Value replacement =
-        builder
-            .create<UnrealizedConversionCastOp>(
-                loc, TypeRange{argument.getType()}, ValueRange{tensor})
-            .getResult(0);
-    argument.replaceAllUsesWith(replacement);
+    argument.replaceAllUsesWith(tensor);
   }
 
   function.setType(FunctionType::get(function.getContext(), {ptr}, oldResults));
@@ -109,7 +95,7 @@ LogicalResult convertEntry(func::FuncOp function,
 }
 
 class ConvertContextKernelABIPass
-    : public ConvertContextKernelABIBase<ConvertContextKernelABIPass> {
+    : public impl::ConvertContextKernelABIBase<ConvertContextKernelABIPass> {
  public:
   void runOnOperation() override {
     if (!annc::loweringContextABIEnabled()) return;
