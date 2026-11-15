@@ -14,5 +14,8 @@ void registerAllAtirPasses() {
     atir::registerAtirPruneFuncPass();
     atir::registerAnncSelectKernelPass();
     atir::registerAtirSpecializeShapesPass();
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+    atir::registerAnncSpecializeShapesPass();
+#endif
 }
 }  // namespace atir

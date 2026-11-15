@@ -24,6 +24,9 @@ list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceRewrite.
 list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseSelectRewrite.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingTargetBehaviorInteractionRewrite.cpp)
 list(APPEND _srcs Patterns/FusionBoundaryUtils.cpp)
+if(ANNC_ENABLE_TF2ATIR_V2)
+  list(APPEND _srcs V2/SpecializeShapes.cpp)
+endif()
 list(REMOVE_DUPLICATES _srcs)
 
 add_mlir_library(AtirPasses
@@ -55,12 +58,31 @@ add_mlir_library(AtirPasses
     AtirInterpretIntfc
 )
 
-# The register bundle carries the stablehlo dialect symbols into every
-# consumer of AtirPasses (annc-opt / annc-asm grow accordingly: L1 change).
 if(ANNC_ENABLE_TF2ATIR_V2)
+  # Compile only the upstream StableHLO pass sources used by this route. The
+  # aggregate target widens the build to VHLO and unrelated conversions; this
+  # source selection avoids those dependencies but does not make the selected
+  # passes independent of ANNC's LLVM/MLIR API version. If a required upstream
+  # pass is incompatible, use a compatible toolchain or provide an ANNC-local
+  # implementation instead of expecting the aggregate or a prebuilt library
+  # to resolve the API mismatch.
+  add_mlir_library(ANNCStablehloShapePasses
+    ${CMAKE_SOURCE_DIR}/third_party/stablehlo/stablehlo/transforms/ShapeLegalizeToStablehlo.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/stablehlo/stablehlo/transforms/StablehloRefineArguments.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/stablehlo/stablehlo/transforms/optimization/StablehloAggressiveFolder.cpp
+    DEPENDS PassesIncGen OptimizationPassesIncGen
+    LINK_LIBS PUBLIC
+    ChloOps StablehloOps MLIRArithDialect MLIRAsmParser MLIRDialectUtils
+    MLIRFuncDialect MLIRInferTypeOpInterface MLIRReconcileUnrealizedCasts
+    MLIRTensorDialect
+    MLIRRewrite MLIRTransformUtils MLIRTransforms
+  )
+  target_link_libraries(AtirPasses PUBLIC ANNCStablehloShapePasses)
   target_link_libraries(AtirPasses PUBLIC StablehloRegister)
   # Directory scope: the obj.AtirPasses sub-target created by add_mlir_library
   # does not inherit target_compile_definitions, and Initialize.cpp needs the
   # macro for the gated registration hook.
   add_compile_definitions(ANNC_ENABLE_TF2ATIR_V2=1)
+  target_compile_definitions(obj.AtirPasses PRIVATE ANNC_ENABLE_TF2ATIR_V2)
 endif()

@@ -121,4 +121,17 @@ def AtirSpecializeShapes : Pass<"atir-specialize-shapes", "ModuleOp"> {
   let dependentDialects = ["AtirDialect"];
 }
 
+/* StableHLO runtime shape specialization. */
+def AnncSpecializeShapes : Pass<"annc-specialize-shapes", "ModuleOp"> {
+  let summary = "specialize StableHLO kernel arguments with runtime shapes";
+  let constructor = "createAnncSpecializeShapesPass()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+  let options = [
+    Option<"shapeSpec", "shape-spec", "std::string", "",
+           "Path to the runtime shape specification JSON">
+  ];
+}
+
 #endif // ATIR_ALL_PASSES_TD

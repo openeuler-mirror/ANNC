@@ -21,6 +21,7 @@ std::unique_ptr<OperationPass<ModuleOp>> createAnncFastCodegenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirPruneFuncPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAnncSelectKernelPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSpecializeShapesPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncSpecializeShapesPass();
 void populateAtirOpFusionPatterns(RewritePatternSet &patterns);
 
 #define GEN_PASS_REGISTRATION
