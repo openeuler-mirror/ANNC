@@ -25,7 +25,7 @@ list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingSparseSelectRewrite.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KpEmbeddingTargetBehaviorInteractionRewrite.cpp)
 list(APPEND _srcs Patterns/FusionBoundaryUtils.cpp)
 if(ANNC_ENABLE_TF2ATIR_V2)
-  list(APPEND _srcs V2/SpecializeShapes.cpp)
+  list(APPEND _srcs V2/SpecializeShapes.cpp V2/AnncGemmEpilogueCommit.cpp)
 endif()
 list(REMOVE_DUPLICATES _srcs)
 

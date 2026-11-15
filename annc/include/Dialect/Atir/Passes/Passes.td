@@ -134,4 +134,12 @@ def AnncSpecializeShapes : Pass<"annc-specialize-shapes", "ModuleOp"> {
   ];
 }
 
+/* Commit StableHLO GEMM epilogue chains to a bufferless ATIR operation. */
+def AnncGemmEpilogueCommit
+    : Pass<"annc-gemm-epilogue-commit", "ModuleOp"> {
+  let summary = "commit StableHLO GEMM epilogues without candidate metadata";
+  let constructor = "createAnncGemmEpilogueCommitPass()";
+  let dependentDialects = ["AtirDialect"];
+}
+
 #endif // ATIR_ALL_PASSES_TD
