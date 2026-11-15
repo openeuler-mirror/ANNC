@@ -82,6 +82,8 @@ ninja && ninja install
 
 | CMake 选项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
+| `LLVM_ENABLE_EH` | `ON`/`OFF` | `ON`（首配默认，缓存值可 `-D` 覆盖） | ANNC 自有代码使用 C++ 异常；源码构建的 LLVM 默认 `OFF` 并注入 `-fno-exceptions`，此处对齐两种工具链。配置为 `OFF` 时直接报错退出。注意该开关同样作用于 `third_party/stablehlo` 等经 `add_mlir_library` 构建的目标（去掉 `-fno-exceptions/-fno-unwind-tables`）。异常不得跨越 MLIR 库栈帧（MLIR 以无 EH 构建），`try/catch` 仅限 ANNC 代码内 |
+| `LLVM_ENABLE_RTTI` | `ON`/`OFF` | `ON`（首配默认，缓存值可 `-D` 覆盖） | 与 EH 同步；配置为 `OFF` 时同样报错退出。MLIR 的 `TypeID` 不依赖 C++ RTTI |
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并编译预生成的 TF proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-tensorflow` |
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
