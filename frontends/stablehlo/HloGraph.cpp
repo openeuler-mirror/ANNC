@@ -66,10 +66,19 @@ bool HloGraph::shapeBoundaryUse(Operation *op, ValueRange inputs) {
 
 bool HloGraph::fuse(StringRef pattern, StringRef builtin, ValueRange inputs,
                     ValueRange outputs, ArrayRef<int64_t> attrs,
-                    SmallVectorImpl<Attribute> &rejections) {
+                    SmallVectorImpl<Attribute> &rejections,
+                    ArrayRef<DenseElementsAttr> inputOverrides) {
   OpBuilder b(module.getContext());
   auto schema = atir::getContextKernelSchema(builtin, attrs);
   if (!schema || outputs.empty()) return false;
+  if (!inputOverrides.empty() && inputOverrides.size() != inputs.size())
+    return false;
+  for (auto [input, payload] : llvm::zip(inputs, inputOverrides)) {
+    if (payload && (!input.getDefiningOp<mlir::stablehlo::ConstantOp>() ||
+                    payload.getType() != input.getType() ||
+                    !payload.getElementType().isF32()))
+      return false;
+  }
   auto record = [&](Value v, bool output) -> Attribute {
     auto t = dyn_cast<RankedTensorType>(v.getType());
     if (!t || name(v).empty()) return {};
@@ -121,7 +130,16 @@ bool HloGraph::fuse(StringRef pattern, StringRef builtin, ValueRange inputs,
            b.getNamedAttr("outputs", b.getArrayAttr(results))}));
   b.setInsertionPointToStart(kernel.addEntryBlock());
   OperationState state(kernel.getLoc(), "stablehlo.custom_call");
-  state.addOperands(kernel.getArguments());
+  SmallVector<Value> callInputs(kernel.getArguments());
+  for (auto [slot, payload] : llvm::enumerate(inputOverrides)) {
+    if (!payload) continue;
+    auto constant =
+        b.create<mlir::stablehlo::ConstantOp>(kernel.getLoc(), payload);
+    if (pattern == "batched_matmul_add" && slot == 1)
+      constant->setAttr("annc.effective_weight", b.getUnitAttr());
+    callInputs[slot] = constant;
+  }
+  state.addOperands(callInputs);
   state.addTypes(outputs.getTypes());
   state.addAttribute("call_target_name", b.getStringAttr(builtin));
   state.addAttribute("backend_config", b.getStringAttr(""));

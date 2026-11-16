@@ -30,7 +30,8 @@ struct HloGraph {
   bool fuse(llvm::StringRef pattern, llvm::StringRef builtin,
             mlir::ValueRange inputs, mlir::ValueRange outputs,
             llvm::ArrayRef<int64_t> attrs,
-            mlir::SmallVectorImpl<mlir::Attribute> &rejections);
+            mlir::SmallVectorImpl<mlir::Attribute> &rejections,
+            llvm::ArrayRef<mlir::DenseElementsAttr> inputOverrides = {});
   bool publish(mlir::func::FuncOp kernel,
                mlir::SmallVectorImpl<mlir::Attribute> &rejections);
   static bool shapeUse(mlir::Operation *op);
