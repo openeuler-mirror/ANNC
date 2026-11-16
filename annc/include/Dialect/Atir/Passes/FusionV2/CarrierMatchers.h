@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 
@@ -94,6 +95,23 @@ struct FillLike {
   mlir::Value result() const { return op->getResult(0); }
 };
 
+// 1:N DynamicPartition view (residue form or the expanded sort-based form):
+// buckets in port order, data/partitions as external inputs.
+struct PartitionLike {
+  bool residue = false;
+  mlir::Operation *op = nullptr;
+  llvm::SmallVector<mlir::Value, 4> buckets;
+  mlir::Value data;
+  mlir::Value partitions;
+  llvm::SmallVector<mlir::Operation *, 8> members;
+
+  static PartitionLike match(mlir::Operation *op);
+
+  explicit operator bool() const { return op != nullptr; }
+
+  int64_t count() const { return static_cast<int64_t>(buckets.size()); }
+};
+
 // Semantic groups (1:N expansion): non-legalizable TF ops expand into N
 // stablehlo ops tagged annc.source_op / annc.source_node / annc.source_ports
 // (resultNo, -1 unknown) by the FE; matchers only read and bail out when
@@ -123,19 +141,6 @@ struct UniqueLike {
 // DynamicPartition views (buckets in port order): the Unsupported residue
 // maps results to ports; the 1:N expansion recovers ids from per-bucket
 // count chains (must form 0..n-1), data/partitions from the sort inputs.
-struct PartitionLike {
-  llvm::SmallVector<mlir::Operation *, 8> members;
-  llvm::SmallVector<mlir::Value, 8> buckets;  // in port order
-  mlir::Value data, partitions;
-  bool residue = false;
-
-  static PartitionLike match(mlir::Operation *op);
-
-  explicit operator bool() const {
-    return data && partitions && !buckets.empty();
-  }
-  int64_t count() const { return static_cast<int64_t>(buckets.size()); }
-};
 
 }  // namespace fusionv2
 }  // namespace atir
