@@ -1,3 +1,5 @@
+#include "Dialect/Atir/AtirOps.h"
+#include "framework_fallback.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Quant/IR/QuantTypes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -27,7 +29,8 @@ class FrameworkVerifyPass
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FrameworkVerifyPass)
   StringRef getArgument() const final { return "verify-framework-stablehlo"; }
   StringRef getDescription() const final {
-    return "Reject operations and types outside the StableHLO output contract";
+    return "Reject operations and types outside the StableHLO/framework "
+           "fallback contract";
   }
   void runOnOperation() override {
     getOperation().walk([&](Operation *op) {
@@ -48,9 +51,28 @@ class FrameworkVerifyPass
         for (Block &block : region)
           for (BlockArgument arg : block.getArguments()) checkType(arg.getType());
       if (isa<ModuleOp, func::FuncOp, func::ReturnOp, func::CallOp>(op)) return;
+      if (isa<atir::OpaqueOp>(op)) {
+        auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
+        auto domain =
+            metadata ? metadata.getAs<StringAttr>("domain_name") : StringAttr();
+        auto name = metadata ? metadata.getAs<StringAttr>("function_name")
+                             : StringAttr();
+        auto kind = op->getAttrOfType<StringAttr>("opType");
+        if (!domain || !name || !kind ||
+            kind.getValue() !=
+                (domain.getValue() + "::" + name.getValue()).str() ||
+            !annc::isSupportedOnnxFallback(domain.getValue(), name.getValue(),
+                                           op->getNumOperands(),
+                                           op->getNumResults())) {
+          op->emitError("unsupported framework fallback");
+          signalPassFailure();
+        }
+        return;
+      }
       if (op->getName().getDialectNamespace() != "stablehlo") {
-        op->emitError("framework output must contain only StableHLO operations "
-                       "and module/function structure");
+        op->emitError(
+            "framework output must contain only StableHLO operations, "
+            "supported ATIR fallbacks and module/function structure");
         signalPassFailure();
       }
     });

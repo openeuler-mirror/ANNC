@@ -1,3 +1,5 @@
+#include "Dialect/Atir/AtirOps.h"
+#include "framework_fallback.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -212,13 +214,22 @@ class ModPattern : public RewritePattern {
     Location loc = op->getLoc();
     Value lhs = op->getOperand(0);
     Value rhs = op->getOperand(1);
-    SmallVector<int64_t> dims;
-    for (int64_t i = 0; i < rhsType.getRank(); ++i)
-      dims.push_back(resultType.getRank() - rhsType.getRank() + i);
-    if (rhs.getType() != resultType)
-      rhs = dynamicBroadcast(rewriter, loc, rhs,
-                             shapeOf(rewriter, loc, lhs, resultType.getRank()),
-                             resultType, dims);
+    Value shape = createOp(
+                      rewriter, "shape.broadcast", loc,
+                      RankedTensorType::get({resultType.getRank()},
+                                            rewriter.getIndexType()),
+                      {shapeOf(rewriter, loc, lhs, lhsType.getRank()),
+                       shapeOf(rewriter, loc, rhs, rhsType.getRank())})
+                      ->getResult(0);
+    auto broadcast = [&](Value value, RankedTensorType type) {
+      if (type == resultType && resultType.hasStaticShape()) return value;
+      SmallVector<int64_t> dims;
+      for (int64_t i = 0; i < type.getRank(); ++i)
+        dims.push_back(resultType.getRank() - type.getRank() + i);
+      return dynamicBroadcast(rewriter, loc, value, shape, resultType, dims);
+    };
+    lhs = broadcast(lhs, lhsType);
+    rhs = broadcast(rhs, rhsType);
     Value remainder =
         createOp(rewriter, "stablehlo.remainder", loc, resultType, {lhs, rhs})
             ->getResult(0);
@@ -230,9 +241,7 @@ class ModPattern : public RewritePattern {
     }
     Type elementType = resultType.getElementType();
     Value zero = scalarConstant(rewriter, loc, elementType, 0);
-    zero = dynamicBroadcast(rewriter, loc, zero,
-                            shapeOf(rewriter, loc, lhs, resultType.getRank()),
-                            resultType, {});
+    zero = dynamicBroadcast(rewriter, loc, zero, shape, resultType, {});
     auto boolType =
         RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
     auto compare = [&](Value a, Value b, stablehlo::ComparisonDirection dir) {
@@ -549,12 +558,46 @@ class DynamicTilePattern : public RewritePattern {
   }
 };
 
+// Framework-owned operations keep their original attributes and tensor edges.
+// They are never decomposed into numerical operations that ANNC might absorb.
+class FrameworkFallbackPattern : public RewritePattern {
+ public:
+  explicit FrameworkFallbackPattern(MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", 1, ctx) {}
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto domain = op->getAttrOfType<StringAttr>("domain_name");
+    auto function = op->getAttrOfType<StringAttr>("function_name");
+    if (!domain || !function ||
+        !annc::isSupportedOnnxFallback(domain.getValue(), function.getValue(),
+                                       op->getNumOperands(),
+                                       op->getNumResults()))
+      return rewriter.notifyMatchFailure(op,
+                                         "unsupported ONNX framework fallback");
+    ensureSourceNameLoc(op);
+    OperationState state(op->getLoc(), atir::OpaqueOp::getOperationName());
+    state.addOperands(op->getOperands());
+    state.addTypes(op->getResultTypes());
+    state.addAttribute(
+        "opType", rewriter.getStringAttr(
+                      (domain.getValue() + "::" + function.getValue()).str()));
+    state.addAttribute("metadata", rewriter.getDictionaryAttr(op->getAttrs()));
+    Operation *fallback = rewriter.create(state);
+    copySourceIds(rewriter, op, fallback);
+    if (!fallback->hasAttr("source_ids"))
+      if (auto node = op->getAttrOfType<StringAttr>("onnx_node_name"))
+        fallback->setAttr("source_ids", rewriter.getArrayAttr({node}));
+    rewriter.replaceOp(op, fallback->getResults());
+    return success();
+  }
+};
+
 class ExternalLoweringPass
     : public PassWrapper<ExternalLoweringPass, OperationPass<ModuleOp>> {
  public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ExternalLoweringPass)
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, shape::ShapeDialect,
+    registry.insert<atir::AtirDialect, arith::ArithDialect, shape::ShapeDialect,
                     stablehlo::StablehloDialect>();
   }
   StringRef getArgument() const final { return "onnx-external-to-stablehlo"; }
@@ -569,6 +612,7 @@ class ExternalLoweringPass
     patterns.add<ReciprocalPattern, ReduceProdPattern, ModPattern,
                  ConcatShapeTransposePattern, EntryPointPattern,
                  DynamicTilePattern>(&getContext());
+    patterns.add<FrameworkFallbackPattern>(&getContext());
     walkAndApplyPatterns(getOperation(), std::move(patterns));
     materializeNestedProvenance(getOperation());
     getOperation()->walk([&](Operation *op) {

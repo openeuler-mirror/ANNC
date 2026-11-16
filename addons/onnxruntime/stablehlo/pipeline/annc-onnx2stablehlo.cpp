@@ -33,10 +33,7 @@ llvm::cl::opt<std::string> outputFile("o", llvm::cl::desc("StableHLO MLIR"),
 llvm::cl::opt<std::string> metadataFile(
     "metadata", llvm::cl::desc("Boundary metadata JSON"), llvm::cl::Required);
 llvm::cl::opt<std::string> toolDir(
-    "tool-dir",
-    llvm::cl::desc("Directory containing external ONNX-MLIR tools"));
-llvm::cl::opt<std::string> onnxMlir(
-    "onnx-mlir", llvm::cl::desc("Path to the external ONNX-MLIR importer"));
+    "tool-dir", llvm::cl::desc("Directory containing onnx-mlir-opt"));
 llvm::cl::opt<std::string> onnxMlirOpt(
     "onnx-mlir-opt",
     llvm::cl::desc("Path to the external ONNX-MLIR optimizer"));
@@ -147,7 +144,7 @@ Counts countText(llvm::StringRef text) {
     }
     for (llvm::StringRef dialect :
          {llvm::StringRef("stablehlo."), llvm::StringRef("arith."),
-          llvm::StringRef("shape.")}) {
+          llvm::StringRef("shape."), llvm::StringRef("atir.")}) {
       if (line.contains('"') && line.find(dialect) != llvm::StringRef::npos)
         continue;
       size_t pos = line.find(dialect);
@@ -197,24 +194,30 @@ llvm::json::Object stageRecord(llvm::StringRef program,
 
 bool writeMetadata(
     const std::filesystem::path &path, const std::filesystem::path &model,
-    const std::filesystem::path &output, const std::filesystem::path &imported,
-    const std::filesystem::path &lowered, llvm::StringRef importer,
-    llvm::StringRef optimizer, llvm::StringRef helper, llvm::StringRef producer,
-    llvm::StringRef stablehlo, const std::vector<std::string> &importArgs,
+    const std::filesystem::path &output, const std::filesystem::path &frontend,
+    const std::filesystem::path &lowered, llvm::StringRef optimizer,
+    llvm::StringRef helper, llvm::StringRef producer, llvm::StringRef stablehlo,
+    const std::vector<std::string> &frontendArgs,
+    const std::vector<std::string> &optimizeArgs,
     const std::vector<std::string> &preprocessArgs,
     const std::vector<std::string> &lowerArgs,
-    const std::vector<std::string> &residualArgs, int importCode,
-    int preprocessCode, int lowerCode, int residualCode, bool helperAvailable,
-    const Counts &counts) {
+    const std::vector<std::string> &residualArgs,
+    const std::vector<std::string> &finalizeArgs, int finalizeCode,
+    int frontendCode, int optimizeCode, int preprocessCode, int lowerCode,
+    int residualCode, bool helperAvailable, const Counts &counts) {
   llvm::json::Object stages;
-  stages["onnx_import"] = stageRecord(importer, importArgs, importCode);
-    stages["preprocessing_passes"] =
+  stages["source_import"] = stageRecord(helper, frontendArgs, frontendCode);
+  stages["onnx_ir_optimization"] =
+      stageRecord(optimizer, optimizeArgs, optimizeCode);
+  stages["preprocessing_passes"] =
       helperAvailable ? stageRecord(helper, preprocessArgs, preprocessCode)
                       : stageRecord("copy", {}, preprocessCode);
   stages["onnx_to_stablehlo"] = stageRecord(optimizer, lowerArgs, lowerCode);
   stages["residual_lowering"] =
       helperAvailable ? stageRecord(helper, residualArgs, residualCode)
                       : stageRecord("none", {}, residualCode);
+  stages["source_finalization"] =
+      stageRecord(helper, finalizeArgs, finalizeCode);
   llvm::json::Object root{
       {"schema", "annc-stablehlo-boundary/1"},
       {"producer",
@@ -226,7 +229,7 @@ bool writeMetadata(
       {"driver_llvm_version", ANNC_LLVM_VERSION},
       {"source_model", model.string()},
       {"stablehlo_file", output.string()},
-      {"imported_onnx_mlir", imported.string()},
+      {"imported_onnx_mlir", frontend.string()},
       {"lowered_intermediate", lowered.string()},
       {"stages", std::move(stages)},
       {"dialect_counts", jsonCounts(counts.dialects)},
@@ -272,7 +275,15 @@ int main(int argc, char **argv) {
     llvm::errs() << "annc-onnx2stablehlo: output directories must exist\n";
     return 1;
   }
-  if (output == metadata || output == model || metadata == model ||
+  auto sameDestination = [](const std::filesystem::path &lhs,
+                            const std::filesystem::path &rhs) {
+    std::error_code error;
+    return std::filesystem::equivalent(lhs, rhs, error) ||
+           std::filesystem::weakly_canonical(lhs) ==
+               std::filesystem::weakly_canonical(rhs);
+  };
+  if (sameDestination(output, metadata) || sameDestination(output, model) ||
+      sameDestination(metadata, model) ||
       (std::filesystem::exists(output) &&
        !std::filesystem::is_regular_file(output)) ||
       (std::filesystem::exists(metadata) &&
@@ -301,19 +312,50 @@ int main(int argc, char **argv) {
       argv[0], reinterpret_cast<void *>(&main));
   const std::string tools =
       toolDir.empty() ? executable.parent_path().string() : toolDir.getValue();
-  const std::string importer = executablePath(onnxMlir, "onnx-mlir", tools);
   const std::string optimizer =
       executablePath(onnxMlirOpt, "onnx-mlir-opt", tools);
-  const std::filesystem::path importedBase = temporary / "imported";
-  const std::filesystem::path imported = temporary / "imported.onnx.mlir";
+  const std::string helper =
+      executablePath(frameworkOpt, "annc-onnx-framework-opt",
+                     executable.parent_path().string());
+  const bool helperAvailable =
+      !frameworkOpt.empty() || std::filesystem::is_regular_file(helper);
+  if (!helperAvailable) {
+    llvm::errs() << "annc-onnx2stablehlo: framework optimizer is required; use "
+                    "--framework-opt\n";
+    cleanup();
+    return 1;
+  }
+  const std::filesystem::path frontend = temporary / "frontend.mlir";
+  const std::vector<std::string> frontendArgs{
+      "--annc-import-onnx", "--mlir-print-debuginfo", model.string(), "-o",
+      frontend.string()};
+  const int frontendCode =
+      runStage("ONNX import", helper, frontendArgs, temporary);
+  if (frontendCode != 0 || !std::filesystem::is_regular_file(frontend)) {
+    cleanup();
+    return frontendCode == 0 ? 1 : frontendCode;
+  }
+  const std::filesystem::path optimized = temporary / "optimized.onnx.mlir";
   const std::filesystem::path preprocessed = temporary / "preprocessed.mlir";
   const std::filesystem::path lowered = temporary / "stablehlo.mlir";
   const std::filesystem::path residual = temporary / "stablehlo.residual.mlir";
   const std::filesystem::path stagedOutput = temporary / "publish.mlir";
   const std::filesystem::path stagedMetadata = temporary / "boundary.json";
-  const std::vector<std::string> importArgs{
-      "--EmitONNXIR", "--mlir-print-debuginfo", "-o", importedBase.string(),
-      model.string()};
+  // Preserve the MatMul -> Reshape -> Add boundary. Moving the Add before
+  // Reshape lets ONNX canonicalization absorb a nonzero bias into Gemm and
+  // loses the deployable output of the independently matched Tensordot region.
+  // Keep the remaining canonicalization and shape inference enabled.
+  const std::vector<std::string> optimizeArgs{
+      frontend.string(), "--decompose-onnx", "--shape-inference",
+      "--canonicalize=disable-patterns=PropagateReshapeThroughBinaryOpPattern<"
+      "mlir::ONNXAddOp>",
+      "--shape-inference",
+      // Keep consecutive Mul boundaries and their separate FP32 rounding.
+      // Reassociation erases the input of a deployable Mul+BMMAdd region.
+      "--onnx-const-prop-disable-pattern=MulConstAssociative1",
+      "--constprop-onnx", "--shape-inference", "--standard-func-return",
+      "--set-onnx-node-name", "--scrub-disposable", "--mlir-print-debuginfo",
+      "-o", optimized.string()};
   const std::vector<std::string> preprocessArgs{
       "--allow-unregistered-dialect",
       "--mlir-print-op-generic",
@@ -321,7 +363,7 @@ int main(int argc, char **argv) {
       "--onnx-string-to-framework-custom-call",
       "--onnx-slice-preprocess",
       "--onnx-dynamic-tile-preprocess",
-      imported.string(),
+      optimized.string(),
       "-o",
       preprocessed.string()};
   const std::vector<std::string> lowerArgs{"--allow-unregistered-dialect",
@@ -344,24 +386,14 @@ int main(int argc, char **argv) {
       "-o",
       residual.string()};
 
-  const int importCode =
-      runStage("ONNX import", importer, importArgs, temporary);
-  if (importCode != 0 || !std::filesystem::is_regular_file(imported)) {
-    if (importCode == 0)
-      llvm::errs() << "annc-onnx2stablehlo: ONNX importer did not create "
-                   << imported << "\n";
+  const int optimizeCode =
+      runStage("ONNX IR optimization", optimizer, optimizeArgs, temporary);
+  if (optimizeCode != 0 || !std::filesystem::is_regular_file(optimized)) {
+    if (optimizeCode == 0)
+      llvm::errs() << "annc-onnx2stablehlo: ONNX IR optimization did not create "
+                   << optimized << "\n";
     cleanup();
-    return importCode == 0 ? 1 : importCode;
-  }
-  const std::string helper =
-      executablePath(frameworkOpt, "annc-onnx-framework-opt", tools);
-  const bool helperAvailable =
-      !frameworkOpt.empty() || std::filesystem::is_regular_file(helper);
-  if (!helperAvailable) {
-    llvm::errs() << "annc-onnx2stablehlo: framework optimizer is required; use "
-                    "--framework-opt\n";
-    cleanup();
-    return 1;
+    return optimizeCode == 0 ? 1 : optimizeCode;
   }
   int preprocessCode = 0;
   if (helperAvailable) {
@@ -379,7 +411,7 @@ int main(int argc, char **argv) {
   } else {
     std::error_code ec;
     std::filesystem::copy_file(
-        imported, preprocessed,
+        optimized, preprocessed,
         std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
       llvm::errs() << "annc-onnx2stablehlo: cannot stage importer output: "
@@ -425,18 +457,46 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  const Counts counts = countText(cleaned);
+  const std::filesystem::path finalized = temporary / "finalized.mlir";
+  const std::vector<std::string> finalizeArgs{stagedOutput.string(),
+                                              "--annc-finalize-source-map",
+                                              "--verify-framework-stablehlo",
+                                              "--mlir-print-debuginfo",
+                                              "--mlir-print-op-generic",
+                                              "-o",
+                                              finalized.string()};
+  const int finalizeCode =
+      runStage("source finalization", helper, finalizeArgs, temporary);
+  if (finalizeCode != 0 || !std::filesystem::is_regular_file(finalized)) {
+    if (finalizeCode == 0)
+      llvm::errs() << "annc-onnx2stablehlo: finalizer did not create output\n";
+    cleanup();
+    return finalizeCode == 0 ? 1 : finalizeCode;
+  }
+  std::error_code finalizeError;
+  std::filesystem::rename(finalized, stagedOutput, finalizeError);
+  if (finalizeError) {
+    llvm::errs() << "annc-onnx2stablehlo: cannot stage finalized output: "
+                 << finalizeError.message() << "\n";
+    cleanup();
+    return 1;
+  }
+  std::ifstream finalText(stagedOutput);
+  const Counts counts =
+      countText(std::string(std::istreambuf_iterator<char>(finalText),
+                            std::istreambuf_iterator<char>()));
   const std::string producer = producerVersion.empty()
                                    ? envOrUnknown("ANNC_ONNX_MLIR_VERSION")
                                    : producerVersion.getValue();
   const std::string stablehlo =
       stablehloVersion.empty() ? envOrUnknown("ANNC_STABLEHLO_PRODUCER_VERSION")
                                : stablehloVersion.getValue();
-  if (!writeMetadata(stagedMetadata, model, output, imported, finalInput,
-                     importer, optimizer, helper, producer, stablehlo,
-                     importArgs, preprocessArgs, lowerArgs, residualArgs,
-                     importCode, preprocessCode, lowerCode, residualCode,
-                     helperAvailable, counts)) {
+  if (!writeMetadata(stagedMetadata, model, output, frontend, finalInput,
+                     optimizer, helper, producer, stablehlo, frontendArgs,
+                     optimizeArgs, preprocessArgs, lowerArgs, residualArgs,
+                     finalizeArgs, finalizeCode, frontendCode, optimizeCode,
+                     preprocessCode, lowerCode, residualCode, helperAvailable,
+                     counts)) {
     llvm::errs() << "annc-onnx2stablehlo: cannot stage boundary artifacts\n";
     cleanup();
     return 1;

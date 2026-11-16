@@ -22,15 +22,7 @@ def _tools(tmp_path: Path, *, fail_optimizer: bool = False):
     stage = f"""#!/bin/sh
 set -eu
 printf '%s\\n' "$0 $*" >> "{log}"
-if [ "$0" = "{tools / 'onnx-mlir'}" ]; then
-  output=''
-  previous=''
-  for arg in "$@"; do
-    if [ "$previous" = '-o' ]; then output="$arg"; fi
-    previous="$arg"
-  done
-  printf 'module {{\\n  func.func @main(%%arg0: tensor<2xf32>) -> tensor<2xf32> {{\\n    %%0 = "stablehlo.add"(%%arg0, %%arg0) : (tensor<2xf32>, tensor<2xf32>) -> tensor<2xf32>\\n    return %%0 : tensor<2xf32>\\n  }}\\n}}\\n' > "$output.onnx.mlir"
-elif [ "{str(fail_optimizer).lower()}" = true ] && [ "$0" = "{tools / 'onnx-mlir-opt'}" ]; then
+if [ "{str(fail_optimizer).lower()}" = true ] && [ "$0" = "{tools / 'onnx-mlir-opt'}" ]; then
   exit 17
 else
   output=''
@@ -42,7 +34,7 @@ else
   printf 'module {{\\n  func.func @main(%%arg0: tensor<2xf32>) -> tensor<2xf32> {{\\n    %%0 = "stablehlo.add"(%%arg0, %%arg0) : (tensor<2xf32>, tensor<2xf32>) -> tensor<2xf32>\\n    return %%0 : tensor<2xf32>\\n  }}\\n}}\\n' > "$output"
 fi
 """
-    for name in ("onnx-mlir", "onnx-mlir-opt", "annc-onnx-hybrid-opt", "annc-onnx-framework-opt"):
+    for name in ("onnx-mlir-opt", "annc-onnx-framework-opt"):
         path = tools / name
         path.write_text(stage)
         path.chmod(0o755)
@@ -59,8 +51,10 @@ def _run(tmp_path: Path, *, fail_optimizer: bool = False):
                ANNC_STABLEHLO_PRODUCER_VERSION="1.8.9",
                ANNC_LLVM_MLIR_VERSION="20.1.8")
     result = subprocess.run(
-        [str(DRIVER), str(model), "-o", str(output), "--metadata", str(metadata),
-         "--tool-dir", str(tools)],
+        [
+            str(tools / DRIVER.name), str(model), "-o", str(output),
+            "--metadata", str(metadata), "--tool-dir", str(tools),
+        ],
         text=True, capture_output=True, timeout=30, env=env,
     )
     return result, output, metadata, log
@@ -73,13 +67,15 @@ def test_external_tools_publish_stablehlo_and_metadata(tmp_path):
     report = json.loads(metadata.read_text())
     assert report["schema"] == "annc-stablehlo-boundary/1"
     assert report["producer"]["tool"] == "onnx-mlir"
-    assert report["stages"]["onnx_import"]["exit_code"] == 0
+    assert report["stages"]["source_import"]["exit_code"] == 0
+    assert report["stages"]["onnx_ir_optimization"]["exit_code"] == 0
     assert report["stages"]["onnx_to_stablehlo"]["exit_code"] == 0
     assert report["stages"]["preprocessing_passes"]["exit_code"] == 0
     assert report["stages"]["residual_lowering"]["exit_code"] == 0
+    assert report["stages"]["source_finalization"]["exit_code"] == 0
     assert report["op_counts"]["stablehlo.add"] == 1
     assert report["dialect_counts"]["stablehlo"] == 1
-    assert "onnx-mlir" in log.read_text()
+    assert log.read_text().count("--annc-import-onnx") == 1
     assert "onnx-mlir-opt" in log.read_text()
     assert "annc-onnx-hybrid-opt" not in log.read_text()
     assert "framework-protect-custom-calls" not in log.read_text()
@@ -102,17 +98,19 @@ def test_failed_external_stage_preserves_existing_output(tmp_path):
     metadata = tmp_path / "boundary.json"
     output.write_text("previous output\n")
     result = subprocess.run(
-        [str(DRIVER), str(model), "-o", str(output), "--metadata", str(metadata),
-         "--tool-dir", str(tools)],
+        [
+            str(tools / DRIVER.name), str(model), "-o", str(output),
+            "--metadata", str(metadata), "--tool-dir", str(tools),
+        ],
         text=True, capture_output=True, timeout=30,
     )
     assert result.returncode != 0
-    assert "StableHLO lowering" in result.stderr
+    assert "ONNX IR optimization" in result.stderr
     assert output.read_text() == "previous output\n"
     assert not metadata.exists()
     failure = json.loads(Path(str(metadata) + ".failure.json").read_text())
     assert failure["exit_code"] == 17
-    assert failure["stage"] == "StableHLO lowering"
+    assert failure["stage"] == "ONNX IR optimization"
 
 
 def test_metadata_publication_failure_restores_output(tmp_path):
@@ -124,9 +122,13 @@ def test_metadata_publication_failure_restores_output(tmp_path):
     helper = tools / "annc-onnx-framework-opt"
     helper.write_text(helper.read_text() + f'\nmkdir -p "{metadata}"\n')
     result = subprocess.run(
-        [str(DRIVER), str(model), "-o", str(output), "--metadata", str(metadata),
-         "--tool-dir", str(tools)],
+        [
+            str(tools / DRIVER.name), str(model), "-o", str(output),
+            "--metadata", str(metadata), "--tool-dir", str(tools),
+        ],
         text=True, capture_output=True, timeout=30,
     )
     assert result.returncode != 0
+    assert f"cannot publish {metadata}" in result.stderr
+    assert metadata.is_dir()
     assert output.read_text() == "previous output\n"

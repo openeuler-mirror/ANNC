@@ -97,6 +97,8 @@ bash tests/FileCheck/run.sh
 - `integration/onnx2stablehlo/` 需要构建 addon 的
   `annc-onnx2stablehlo` / `annc-onnx-framework-opt`；真实 ORT 导出模型和
   StableHLO portable serializer 仅在设置对应环境变量时执行。
+  真实导出图使用 `ANNC_FRAMEWORK_OPT` 指定的配套工具校验并往返读取，保留
+  ATIR fallback 和来源属性；纯 StableHLO 的 portable 序列化单独验证。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。
