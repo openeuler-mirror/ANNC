@@ -107,7 +107,9 @@ struct PartitionLike {
 
   static PartitionLike match(mlir::Operation *op);
 
-  explicit operator bool() const { return op != nullptr; }
+  explicit operator bool() const {
+    return data && partitions && !buckets.empty();
+  }
 
   int64_t count() const { return static_cast<int64_t>(buckets.size()); }
 };

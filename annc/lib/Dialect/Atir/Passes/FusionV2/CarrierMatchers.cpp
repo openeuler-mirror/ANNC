@@ -176,7 +176,9 @@ Value FillLike::value() const {
 }
 
 Value FillLike::shape() const {
-  return isa<atir::UnsupportedOp>(op) ? op->getOperand(0) : op->getOperand(1);
+  if (isa<atir::UnsupportedOp>(op)) return op->getOperand(0);
+  if (op->getNumOperands() < 2) return Value();
+  return op->getOperand(1);
 }
 
 namespace {
@@ -246,6 +248,7 @@ PartitionLike PartitionLike::match(Operation *op) {
     view.members = {op};
     for (unsigned i = 0; i < op->getNumResults(); ++i)
       view.buckets.push_back(op->getResult(i));
+    view.op = op;
     view.data = op->getOperand(0);
     view.partitions = op->getOperand(1);
     view.residue = true;
@@ -254,6 +257,7 @@ PartitionLike PartitionLike::match(Operation *op) {
   if (semanticOf(op) != "tf.DynamicPartition") return PartitionLike();
   view.members = semanticGroup(op);
   if (view.members.empty()) return PartitionLike();
+  view.op = op;
 
   Operation *sort = nullptr;
   for (Operation *member : view.members)
