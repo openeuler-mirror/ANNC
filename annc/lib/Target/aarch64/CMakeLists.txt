@@ -83,6 +83,7 @@ add_mlir_library(AArch64Codegen
         MLIRMemRefDialect
         MLIRFuncDialect
         MLIRBufferizationTransforms
+        MLIRBufferizationPipelines
         MLIRLinalgDialect
         MLIRLinalgTransforms
         MLIRLLVMDialect

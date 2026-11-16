@@ -337,7 +337,13 @@ flowchart LR
 
 > **路径说明**：GEMM 类融合函数走 `annc-opt → FastCodegen → ATIR→Linalg → AArch64 GEMM pipeline`。其他融合函数也由同一 `annc-asm` 命令处理，非 GEMM 自定义调用由 FastCodegen 与对应 lowering 处理。启用同步 JIT 时，fusion-only ATIR 在运行时按实际 shape 编译；进程内缓存按 Grappler 生成的 template fingerprint 和实际 shape 复用已加载产物，工具链、GEMM 配置和 ABI 固定于进程上下文。
 
-Context v3 手写 builtin 的入口改写由独立的 `--lower-context-kernel-entries` 模块 pass 负责，实现在 `annc/lib/Conversion/Context/`：校验单 builtin 融合边界、解析 kernel，并将入口转换为 `(!llvm.ptr) -> i32`。AArch64 pipeline 在形状特化、FastCodegen 与输入常量折叠之后、ATIR→Linalg 之前显式执行此 pass。普通生成式 GEMM 继续使用原有调用路径，ATIR→Linalg 本身不再隐式改写 context 入口。
+Context v3 导出函数的新输入 ABI 转换由 `--convert-context-kernel-abi` 模块 pass 负责，实现在 `annc/lib/Conversion/Context/`：按槽位生成对 `annc_context_get_input_memref` 的调用，加载返回的 ranked memref descriptor 并替换原函数参数；函数结果、返回操作与输出内存均不由此 pass 修改。该路线由临时环境变量 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 显式启用，默认 AArch64 pipeline 仍使用 `--lower-context-kernel-entries` 旧路线。启用新路线时，AArch64 pipeline 在形状特化与 FastCodegen 之后、ATIR→Linalg 之前执行此 pass。同一开关控制后续 lowering：ATIR→Linalg 采用 v3 Customize 调用转换并让导出函数返回调用状态码，普通函数的 `atir.buffer` 转为 `tensor.empty`；`--annc-one-shot-bufferize` 将返回的分配改为调用 `annc_context_alloc_output_memref` 获取宿主输出 descriptor，并将普通 context kernel 的函数结果及其返回操作改为 void；Customize 函数的 i32 状态返回保持不变。静态、非循环内且不超过 64 KiB 的非返回分配改为栈内存；其他中间分配由后续 MLIR `buffer-deallocation-pipeline` 插入释放。两个非模板访问接口由生成的 IR 声明，实现在 `context/lib/MemRef.cpp`；生成代码直接使用其返回的 descriptor，不插入状态码分支。当前接口失败时仍返回空指针，与后端约定的失败即中止执行尚未对齐，端到端调用前需由接入层负责人完成。关闭开关时，Customize、Buffer 与 OSB 均沿用旧行为。
+
+当前新路线将静态、非循环内且不超过 64 KiB 的临时 `memref.alloc` 改为 `memref.alloca`；动态形状、大尺寸及循环内临时量保持堆分配，由 OSB 后的 MLIR `buffer-deallocation-pipeline` 负责释放。返回结果仍绑定 Context 输出槽位，不由此释放流程管理。
+
+手写 Customize 与 codegen 的函数级执行边界见 §4.2.3；这项既有架构变更的追记见 [ADR-024](../decisions/decisions.md#adr-024)。
+
+**Context ABI 同步规则**：`annc-asm` 正常 lowering 路径中的 `--convert-context-kernel-abi` 与 `--annc-one-shot-bufferize` 依赖 `annc_context_get_input_memref`、`annc_context_alloc_output_memref` 的 ABI 约定及标准 ranked memref descriptor 布局。修改 `context/include/Context/KernelContext.h`、访问接口或相关 descriptor 布局时，必须分析这两个 pass 的接口签名、descriptor 布局及输出绑定时机是否仍正确；受影响时同步更新两个 pass 及对应的 FileCheck。
 
 普通二维 MatMul 的 JIT 融合保留 `atir.MatMul` 计算体和 `mlir_ciface` ABI，供后续 GEMM pipeline 选择优化实现；不能仅因存在兼容的 Context builtin 就优先替换为手写 MatMul。此约束同样适用于 epilogue 模式下没有匹配到尾算子融合的 MatMul。显式 Context builtin 和满足既有条件的 KDNN、多输出融合继续沿用各自路径。
 
@@ -376,6 +382,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - ADR-010：TF 控制流镜像转换（mirror，不做语义重建）
 - ADR-011：ONNX 前端接入与"不可表达即降级"契约
 - ADR-013：ONNX EP 执行上下文——线程池入上下文、TF/ONNX 共用 ABI v3
+- ADR-024：Context 融合函数的手写 Customize 与 codegen 路线互斥（既有架构变更追记）
 
 #### 4.1.5 关键接口契约
 
@@ -406,7 +413,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | 图重写           | 根据切分决策将融合子图替换为 ANNCFused 节点 | GraphDef + Fusion Metadata + shared library | 重写后 GraphDef |
 | ANNCOptimizer | Grappler 插件，编排编译 pipeline 并触发三层流水线        | GraphDef                          | 重写后 GraphDef              |
 | ANNCFusedOp   | 运行时加载 `.so` 并执行 kernel                    | TF Tensor                         | TF Tensor                 |
-| 线程池桥接         | Context 借用 AnncThreadPool*；现有生成代码暂保留 TLS 桥接 | TF ThreadPool | AnncThreadPool |
+| 线程池桥接         | Context 借用 AnncThreadPool*；生成式 GEMM 由临时开关选择 Context 或 TLS | TF ThreadPool | AnncThreadPool |
 
 **关键设计要点**：
 
@@ -414,7 +421,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 - ATIR TensorType 区分三种情况：空 shape 是标量，shape 中的 `-1` 是已知 rank 下的动态维度，`rank_known = false` 是真正的 unknown rank；unknown rank 不再编码成一维动态张量。未知元素类型使用 `!atir.unknown`，仅允许 opaque 节点保留；TensorFlow `DT_RESOURCE` 句柄使用独立的 `!atir.resource`，不伪装成数值 TensorType。标准后端 type converter 遇到未知 rank、未知元素类型或 resource handle 时拒绝 numeric lowering。dtype resolver 只使用 GraphDef 自身记录的类型事实和已有的标准节点规则，无法证明时保留 unknown，不根据消费者属性或自定义 op 名称猜测。
 - 图重写消费工具链前端产出的 Fusion Metadata，将可融合子图替换为 `ANNCFused` 节点，并在节点属性中记录 `shared_lib_path`。
 - `ANNCOptimizer` 通过 `fork/exec` 子进程调用 `annc-tf-pipeline`，实现 MLIR/LLVM 与 TF 的 ABI 隔离；任何阶段失败均返回原始 GraphDef，保证推理服务可用性。
-- `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；通过 TLS 桥接 TF ThreadPool：`Compute()` 经 `ScopedAnncThreadPool`（位于 tensorflow_addons）在调用 kernel 前执行 `annc_set_current_threadpool()` 设置，kernel 内部通过 `getCurrentThreadPool()` 获取，调用后由其析构恢复 previous threadpool（`annc_set_current_threadpool(previous_)`）。该 TLS 桥接供现有生成代码使用；TF 的 Context V3 在执行函数内部创建 AnncThreadPool 适配器，外层 TLS 保持原来的适配器创建方式，两者借用同一个 TF 线程池。手写 builtin 通过 `context.getKernelThreadPool()` 获取调度包装，也可通过 `getThreadPool()` 获取同一 V3 适配器的指针；ONNX builtin 同样借用 ORT adapter，Context 不回退查询 TLS（ADR-022）。生成式显式 Context 获取仍待迁移。
+- `ANNCFusedOp` 对同一 `.so` 做进程级句柄缓存；`Compute()` 通过 `ScopedAnncThreadPool` 在调用 kernel 前设置 TLS，调用后恢复原线程池。TF 的 Context V3 执行在内部创建 `AnncThreadPool` 适配器；手写 builtin 经 `getThreadPool()` 或 `getKernelThreadPool()` 使用该适配器，ONNX builtin 同样借用 ORT adapter，Context 不回退查询 TLS（ADR-022）。启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 时，生成式 GEMM 的普通及 epilogue dispatcher 接收入口 Context 指针，通过 `getThreadPool()` 使用宿主线程池，保留 `grain_size = 1`，空池串行执行；默认旧 dispatcher 保持 TLS 路径。
 
 #### 4.2.2 ANNC 工具链前端
 
@@ -462,6 +469,8 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | AArch64 后端  | GEMM 规划、分块和微内核 lowering       | Lowered MLIR     | 优化后 Lowered MLIR |
 | annc driver | 调用 LLVM 工具链编译 `.so`           | Lowered MLIR     | 共享库 `.so`        |
 
+**Context 执行边界（现状）**：在当前 Context 调用约定下，一个融合函数由手写 Customize kernel 接管完整区域，或由 codegen 执行完整区域；两条路线在同一导出函数内互斥。手写路线将 kernel 的 i32 status 用作导出函数返回值，codegen 路线将结果绑定到 context 输出槽位并返回 void。Context 的输入、输出槽位按整个融合函数边界编号，不为内部 Customize 子算子建立局部槽位映射。这项架构边界是既有变更的补记，并非临时开关 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 引入；参见 [ADR-024](../decisions/decisions.md#adr-024)。当前 Customize lowering 校验其结果直接流向 return，且输入来自函数边界或常量；仍需完整区域的宿主槽位约定。
+
 **关键设计要点**：
 
 - Kernel 优先级链为 `kdnn_packed > kdnn > aarch64`（受 `enableKdnn`/packed-RHS/已注册的 KDNN 能力与 ANNC_GEMM 预打包模式门控）；不存在"手动 vs 自动"之分，所有 builtin kernel 经 `ANNC_KERNEL` 宏注册，同签名 last-registered-wins。
@@ -492,11 +501,11 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 
 **关键设计要点**：
 
-- **统一调用入口**：手写 builtin 使用 `annc_context_v3`，函数签名为 `AnncStatusCode (*)(AnncKernelContext*)`。公共层位于根目录 `context/`，不依赖 TensorFlow、ONNX Runtime、LLVM/MLIR 或 kernel registry；分配/错误使用 C 回调；线程池指针复用既有 C++ 虚函数接口，宿主与 kernel 必须匹配工具链、标准库和类定义。`ANNCContext` 提供头文件，`ANNCThreadPool` 提供静态线程池桥接库。
+- **统一调用入口**：手写 builtin 使用 `annc_context_v3`，函数签名为 `AnncStatusCode (*)(AnncKernelContext*)`。公共层位于根目录 `context/`，不依赖 TensorFlow、ONNX Runtime、LLVM/MLIR 或 kernel registry；分配/错误使用 C 回调，线程池指针复用既有 C++ 虚函数接口，宿主与 kernel 必须匹配工具链、标准库和类定义。`ANNCContext` 提供头文件，`ANNCThreadPool` 提供静态线程池桥接库。
 - **按槽位传参**：编译期共享 schema 确定输入、输出和整数属性的规范顺序；kernel 通过 `getInput(index)`、`getI64Attr(index)` 访问，运行时不传递 schema 或参数名称。TF 使用 `context_input_order` 将输入传输顺序映射为规范槽位，并在 JIT shape 收集中应用相同映射。字符串输入由 TF 适配为借用的 `AnncStringRef`。
 - **统一输出与分配**：tensor view 保留数据指针、offset、sizes、strides、dtype、rank 和 layout。输出可预绑定，也可由 kernel 经 `allocateOutput` 请求宿主分配；分配结果须绑定到对应输出槽位，TF/ORT 在返回后校验输出绑定。临时内存经 `allocateTemp` 申请，由宿主管理，只在本次同步调用期间有效。
 - **独立实例资源**：`resources` 与标量属性分别传递。ORT 节点实例持有可选的 packed-B，执行时向 Context 绑定只读资源引用，kernel 按资源类型和版本读取；通用 ABI 不设置 `packed_b` 专用字段，IR 与 JSON 不保存运行时指针。
-- **复用宿主线程池**：服务结构用一个借用的 `AnncThreadPool*` 替换四个调度回调，`getThreadPool()` 直接返回该指针。`getKernelThreadPool()` 返回 `KernelThreadPool` 错误处理包装，空指针时串行执行。包装内部沿用已有调度入口及 TLS 的嵌套保护，通过虚函数调用宿主，捕获任务异常并记录 Context 错误。原生池采用带 provider 的 `native_pool`，TF 默认不提供；ORT 仅接受 `onnxruntime`。继续共用 V3 版本号；布局变更要求宿主、kernel、AOT 库配套重编译，部署时需清理旧 JIT 缓存。
+- **复用宿主线程池**：服务结构借用 `AnncThreadPool*`，`getThreadPool()` 直接返回该指针；`getKernelThreadPool()` 返回处理异常及 Context 错误的包装，空池串行执行。启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 时，生成式 GEMM dispatcher 通过 Context 指针取宿主线程池；默认旧 dispatcher 仍使用 TLS。宿主、kernel、AOT 库需配套重编译并清理旧 JIT 缓存。
 - **错误与生命周期**：kernel 返回状态码，宿主同时检查服务记录的错误并转换为框架状态。Context 借用张量、元数据与资源，宿主须保证它们在同步调用期间有效；跨调用复用的资源由节点实例持有，待调用结束后再释放。
 - **迁移与兼容边界**：手写 MatMul builtin、KP 融合、多输出、KDNN/packed GEMM 及四类 ONNX 融合 builtin 已迁移。普通 MatMul 的生成式 GEMM 和其他普通生成代码保留 `mlir_ciface` 路径，多个 builtin 的组合尚未整体统一为 Context。配置融合与 TF runtime 接受 `mlir_ciface` 和 `annc_context_v3`；旧 V2 产物须配套重新生成，不能只修改元数据 ABI 名称。
 

@@ -3,6 +3,23 @@
 
 include "mlir/Pass/PassBase.td"
 
+def ConvertContextKernelABI : Pass<"convert-context-kernel-abi", "ModuleOp"> {
+  let summary = "Convert context-v3 kernel entry inputs to context slots";
+  let description = [{
+    Run after fusion pruning and shape specialization, before ATIR-to-Linalg
+    conversion. The pass unpacks ranked tensor arguments from context memref
+    descriptors and preserves function results and returns.
+  }];
+  let constructor = "createConvertContextKernelABIPass()";
+  let dependentDialects = [
+    "AtirDialect",
+    "mlir::func::FuncDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerContextKernelEntries : Pass<"lower-context-kernel-entries", "ModuleOp"> {
   let summary = "Lower closed single-builtin context-v3 entries to pointer/status calls";
   let description = [{
