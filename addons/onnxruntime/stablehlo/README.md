@@ -61,8 +61,9 @@ broadcasting because their concrete shapes can differ.
 The supported framework-owned `com.microsoft.FusedTensordotMatMul` remains an
 `atir.opaque` with its original attributes and identities. Use the paired
 `annc-onnx-framework-opt` to read or round-trip mixed IR; portable StableHLO
-serialization applies to pure HLO. This addon ends at conversion and provenance
-publication; it does not add ANNC fusion, backend compilation or EP execution.
+serialization applies to pure HLO. The addon produces the converted IR with
+source attributes. For fusion, backend compilation and ORT execution, see the
+[ONNX pipeline workflow](../../../docs/guides/cli-workflows.md#onnx-的-stablehlo-前端).
 
 ONNX-MLIR v0.5.0.2 is pinned as the `third-party/onnx-mlir` Git submodule at
 `128f8b716fdbed4ff05a5ba493ac48fcac761b40`. Its nested StableHLO submodule is
@@ -94,7 +95,7 @@ The script checks out the llvm-project revision paired with the ONNX-MLIR
 submodule (`b270525f730be6e7196667925f5a9bfa153262e9`) and caches its source
 and build under `build/third-party/`. `--llvm-source` can point to an existing
 checkout of that exact revision when network access is unavailable. The
-producer is opt-in and does not alter the ONNX Runtime EP execution path.
+producer can also be used independently to inspect the converted IR.
 
 Producer tests are in `tests/integration/onnx2stablehlo/`. They exercise the
 pipeline boundary, preprocessing/postprocessing passes, and (when supplied)

@@ -111,6 +111,7 @@ export ANNC_DEMO_CHECKPOINT_DIR=/path/to/checkpoint
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
 | `ANNC_EP_PIPELINE` | 可执行文件路径 | 本 `.so` 同目录 → `../bin` → `PATH` | `annc-onnx-pipeline` 路径；设置但文件不存在时直接禁用运行时编译，不回退 |
+| `ANNC_ONNX_USE_STABLEHLO` | `0` / `1` | `0` | 为 `1` 时让 `annc-onnx-pipeline` 通过 StableHLO 转换和融合。各算子的融合开关独立生效 |
 | `ANNC_EP_CACHE_DIR` | 目录路径 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` | 运行时编译缓存根 |
 | `ANNC_EP_COMPILE` | `0` 关闭 | 启用 | 关闭运行时编译，模型整体回落 CPU |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 正整数（秒） | `600` | 单次编译超时 |
@@ -124,7 +125,7 @@ export ANNC_DEMO_CHECKPOINT_DIR=/path/to/checkpoint
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedBatchedMatmulAdd 站点申报 |
 | `ANNC_EP_PACKED_B` | 非空且非 `0` 开启（如 `1`）；`0`/空字符串/未设置关闭 | 关闭 | session 创建时为 MLAS 的固定 f32 B 权重打包，适用于 BMM / FTDMM；关闭保留融合并使用 raw-B。修改后须新建 session，详见[部署手册](../../tests/ort-ep-build-and-deploy.md#37-packed-b-特性) |
 
-四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0` 关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。关闭只影响该特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
+四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0` 关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，所选前端在编译期跳过关闭的融合模式；开关进入 EP 缓存指纹。关闭只影响该特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
 
 EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
 

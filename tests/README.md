@@ -97,6 +97,10 @@ bash tests/FileCheck/run.sh
 - `integration/onnx2stablehlo/` 需要构建 addon 的
   `annc-onnx2stablehlo` / `annc-onnx-framework-opt`；真实 ORT 导出模型和
   StableHLO portable serializer 仅在设置对应环境变量时执行。
+  来源与绑定用例通过 `ANNC_SOURCE_MAP_REAL_E2E=1` 启用，需指定
+  `ANNC_SOURCE_MAP_PRODUCER`、`ANNC_SOURCE_MAP_FRAMEWORK_OPT` 和 `ANNC_ONNX_MLIR_OPT`。
+  绑定还需 `ANNC_STABLEHLO_READER`，开关测试通过 `ANNC_STABLEHLO_PIPELINE` 指定 `annc-onnx-pipeline`。
+  动态 BMMAdd 的真实 EP 执行和缓存切换入口为 `integration/ort_ep/stablehlo_context_e2e.py`。
   真实导出图使用 `ANNC_FRAMEWORK_OPT` 指定的配套工具校验并往返读取，保留
   ATIR fallback 和来源属性；纯 StableHLO 的 portable 序列化单独验证。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。

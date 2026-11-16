@@ -15,6 +15,19 @@ annc-partition --version
 
 因此当前不能把该工具用于真实模型切分；下列其他既有工作流不受骨架接入影响。
 
+## ONNX 的 StableHLO 前端
+
+`annc-onnx-pipeline` 默认走 ATIR。部署配套转换和匹配工具后，设置 `ANNC_ONNX_USE_STABLEHLO=1` 选择 StableHLO，并按需启用算子融合。下面以 BMMAdd 为例。工具安装见 [从源码构建](build-from-source.md#onnx-的-stablehlo-前端)。
+
+```sh
+ANNC_ONNX_USE_STABLEHLO=1 ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1 \
+  annc-onnx-pipeline --model model.onnx --out-dir output --keep-temps
+```
+
+输出目录保存 `model.fused.mlir`，有融合站点时同时生成 `libannc_kernels.so`。`--keep-temps` 保留转换、匹配和绑定的中间 IR。可用 `annc-fusion-metadata output/model.fused.mlir -o metadata.json` 查看交给 EP 的公共元数据。
+
+在 ORT 中运行时，注册原有的 `libannc_ep.so`，并在创建会话前设置相同的前端和融合开关。EP 调用同一个 pipeline，从 kernel IR 读取站点并在会话内接管执行，输入 ONNX 文件保持原样。[接入设计](../design/onnx-support/stablehlo-integration.md) · [ORT EP 使用说明](../../addons/onnxruntime/README.md)
+
 ## 端到端 GraphDef 重写
 
 `annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
