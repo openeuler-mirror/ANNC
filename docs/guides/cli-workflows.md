@@ -62,6 +62,16 @@ debug 信息的 ATIR。随 `ANNC_ENABLE_TF2ATIR_V2=ON` 构建（默认 OFF），
 annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
 ```
 
+在启用 `ANNC_ENABLE_TF2ATIR_V2` 的 `annc-asm` 构建中，可以复用
+StableHLO 官方的 Shape dialect 规范化 pass：
+
+```shell
+annc-asm input.mlir --shape-legalize-to-stablehlo -o normalized.mlir
+```
+
+该选项直接注册上游 `shape-legalize-to-stablehlo`，只负责把 Shape/相关
+辅助方言转换为 StableHLO 表达；运行时 shape 特化由后续专用化 pass 负责。
+
 工具本身前端无关（sink 只认残差载体）；`ANNC_V2_REWRITE_INPROC=1` 的
 部署形态见
 [addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
@@ -127,7 +137,7 @@ annc-fusion-metadata fused.mlir \
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 annc-opt fused.mlir --atir-prune-func=execution-mode=aot -o aot.mlir
 annc-asm aot.mlir \
-  --atir-fast-codegen \
+  --annc-fast-codegen \
   --annc-aarch64-gemm-pipeline \
   -o lowered.mlir
 
@@ -249,29 +259,46 @@ annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
 
 `annc-asm` 是注册了 ATIR、转换 pass 和 AArch64 target pass 的 `mlir-opt` 风格工具，用于将 ATIR lowering 到低层 MLIR。
 
+`--atir-fast-codegen` 与 `--atir-select-kernel` 已分别更名为
+`--annc-fast-codegen` 与 `--annc-select-kernel`，旧选项不再注册。升级外部
+命令、pipeline 字符串和脚本时，将旧选项名替换为对应的新名称即可；原有
+pass 参数保持不变。
+
+`--convert-atir-v2-to-linalg` 是 ATIR V2 的独立 conversion 入口。当前支持
+`atir.fused_matmul` 到 Linalg 的 lowering，并在 context ABI 路径复用
+`CustomizeOp` 的 V3 lowering。`atir.fused_matmul` 有 epilogue 输入时必须带
+`annc.gemm.epilogue` 描述，输入数量须与描述中的二元步骤数量一致；非法描述
+会报错，不会退化为普通矩阵乘。函数返回边界会把 builtin tensor 转为
+memref；其他尚未支持的 V2 Op 会保留，旧版 `--convert-atir-to-linalg`
+路径不受影响。AArch64 GEMM pipeline 在构建时启用
+`ANNC_ENABLE_TF2ATIR_V2` 且运行时启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI`
+时，依次运行 V2 `AnncGemmEpilogueCommit`、`ConvertContextKernelABI` 和
+`ConvertAtirV2ToLinalg`。两个开关都关闭时走旧路线；只开启其中一个时
+pipeline 会报错，因为两条路线都不支持这种组合。
+
 启用 `--annc-aarch64-gemm-pipeline` 时，若图中存在 GEMM anchor，必须提供调优配置：设置 `ANNC_GEMM_CONFIG=<file>`，或使用 `-annc-aarch64-gemm-pipeline='config-path=<file>'`；否则 GEMM strategy 会报错并使 pass 失败。
 
 ```shell
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 annc-opt model_fused_atir.mlir --atir-prune-func=execution-mode=aot -o model_aot_atir.mlir
 annc-asm model_aot_atir.mlir \
-  --atir-fast-codegen \
+  --annc-fast-codegen \
   --annc-aarch64-gemm-pipeline \
   -o model_lowered.mlir
 ```
 
-`--atir-fast-codegen` 在 allowlist 与 denylist 都为空时改写**所有已注册**的自定义算子类型。GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 只在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建中注册（例外：aarch64 原生的 `MatMulAddReluWithAddOutput` 无条件注册）：默认构建里这些类型一般交给 `--annc-aarch64-gemm-pipeline`；KDNN 构建中还需在 `--atir-fast-codegen` 里加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），默认 `enable-kdnn=false` 时 KDNN-only 的 GEMM kernel 不会被选中。可以按最终生成的 `custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist 优先级更高：
+`--annc-fast-codegen` 在 allowlist 与 denylist 都为空时改写**所有已注册**的自定义算子类型。GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 只在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建中注册（例外：aarch64 原生的 `MatMulAddReluWithAddOutput` 无条件注册）：默认构建里这些类型一般交给 `--annc-aarch64-gemm-pipeline`；KDNN 构建中还需在 `--annc-fast-codegen` 里加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），默认 `enable-kdnn=false` 时 KDNN-only 的 GEMM kernel 不会被选中。可以按最终生成的 `custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist 优先级更高：
 
 ```shell
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 # KDNN 构建下只允许 MatMulAdd，其他自定义算子保持原 ATIR
 annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=enable-custom-ops=MatMulAdd enable-kdnn=true" \
+  "--annc-fast-codegen=enable-custom-ops=MatMulAdd enable-kdnn=true" \
   --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 
 # 禁用 MatMul，MatMulAdd / MatMulAddRelu 等其他类型仍可改写
 annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=disable-custom-ops=MatMul enable-kdnn=true" \
+  "--annc-fast-codegen=disable-custom-ops=MatMul enable-kdnn=true" \
   --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 ```
 
