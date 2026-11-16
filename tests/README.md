@@ -37,7 +37,7 @@ tests/
 │   ├── fusion/             # config fusion 集成 pytest
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
 │   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
-│   ├── tensorflow/         # TF1.15 插件宿主加载与 JIT C 接口 CTest
+│   ├── tensorflow/         # TF 插件测试 pytest、TF1.15 插件加载与 JIT C 接口 CTest
 │   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
 ├── e2e/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
@@ -65,6 +65,11 @@ ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
 python3 -m pytest tests/integration/cmake/test_tf_plugin_sdk.py -q
 ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
 
+# TF 插件融合与计算测试；build 替换为对应 TF 版本的构建目录
+# 包含 KDNN 的 MatMul、MatMulAdd、MatMulAddRelu 用例
+ANNC_BUILD_DIR=build ANNC_REQUIRE_E2E=1 \
+  python3 -m pytest tests/integration/tensorflow/test_tf_acceptance.py -v
+
 # Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
 ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
 ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
@@ -84,12 +89,10 @@ bash tests/FileCheck/run.sh
 - `pytest` 必须安装在所选 Python 解释器中；ONNX 前端用例还需要 `onnx` 包。
 - `integration/onnx2atir/` 需要 Python `onnx` 包与已构建的 `annc-onnx2atir`；
   缺任一条件时模块整体 skip。
-- TF SDK 配置测试使用模拟 SDK，检查 CMake 为插件选择的头文件、库和编译参数。
+- CTest 中的 `TensorFlowPluginLoad` 需要启用 TF1.15 插件和 `annc-tf-pipeline`
+  的构建；任一项未启用时，不注册该测试。
   `tf_threadpool_sdk_limit` 仅在 TF1.15 linked 构建注册，使用真实的 4 线程 TF 池
   验证 1/2 线程上限及其相对固定块选项的优先级；preload 构建不注册该原生宿主用例。
-  TF1.15 宿主测试在 AArch64 上加载真实插件。preload 模式使用所选 SDK 的 Python，
-  linked 模式使用链接到 SDK 两个库的 C++ Session。两种模式执行同一张图，
-  将 `ANNCFused` 输出与原生 `Add` 逐元素比较。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。
@@ -98,20 +101,14 @@ bash tests/FileCheck/run.sh
   `integration/fusion/test_gemm_epilogue_kernel_compile.py` 覆盖请求编译、旧对象隔离
   与真实生成链接，`integration/cmake/test_gemm_codegen_package.py` 覆盖包发现
   和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
-- TF 普通 MatMul 的生成式端到端用例和 TF 验收 runner 默认使用
-  `FileCheck/Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json`，可通过
-  `ANNC_GEMM_CONFIG` 指定其他调优配置。生成式 GEMM 用例显式关闭 MatMul 系列
-  KDNN outlining；KDNN 用例要求 `ANNC_ENABLE_KDNN_ADAPTOR=ON`。
-- TF 验收入口 `integration/tensorflow/test_tf_acceptance.py` 从构建时生成的
-  `build/tests/tensorflow-runtime.json` 读取 SDK Python 和插件目标路径，
-  不按版本猜测目录。SDK Python 也需要 pytest，以复用 `e2e/kernel_context/`
-  中的构图函数；原有逐算子测试保留。设置 `ANNC_REQUIRE_E2E=1` 后缺依赖报错。
-  MatMul、tensordot 和编译失败回退用例经过 Grappler；复用的逐算子图经过
-  pipeline 重写后在 TF Session 执行，保留原输入、输出和数值容差。
-  TF1.15 无原生 int64 SparseSegment CPU kernel；该两项保留 int64 被测输入，
-  用已有 int32 场景的相同索引值计算参考输出，不覆盖超出 int32 范围的索引。
-  用例的 ABI、AOT/JIT 和环境参数在登记处指定，runner 不根据名称推断。
-  `--basetemp` 下按用例及输入序号保留运行元数据、参考输出和实际输出。
+- [test_tensorflow_matmul.py](e2e/kernel_context/test_tensorflow_matmul.py) 和
+  [test_tf_acceptance.py](integration/tensorflow/test_tf_acceptance.py) 默认使用仓库自带的
+  [GEMM 调优配置](FileCheck/Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json)，可通过
+  `ANNC_GEMM_CONFIG` 指定其他调优配置。
+- KDNN 用例要求 `ANNC_ENABLE_KDNN_ADAPTOR=ON`。
+- `integration/tensorflow/test_tf_acceptance.py` 需要与目标 TF 版本匹配的
+  ANNC 构建产物；缺少构建配置或产物时 skip，设置 `ANNC_REQUIRE_E2E=1` 后改为报错。
+  同一源码目录下不要并行运行多组 TF 插件测试，以免覆盖前端临时文件导致测试失败。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若默认解释器没有这两个包，configure 时用
@@ -135,7 +132,7 @@ bash tests/FileCheck/run.sh
 | `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
 | `unit/transform/pb2_common_test.cpp` | L0 | pb2stablehlo common 层纯函数（V2 开关 + TF 2.20 门控；wheel 隔离域，CHECK 宏） |
 | `integration/tf_transform/` | L2 | pb2stablehlo 端到端：手工 GraphDef 经可执行产出断言（wrap/slice/string/rank；未构建则整文件 skip） |
-| `unit/annc/packed_rhs_test.cpp` | L0 | 权重缓存隔离、布局复用、并发准备和生命周期；同一份用例绑定所选插件实现 |
+| `unit/annc/packed_rhs_test.cpp` | L0 | 权重缓存隔离、布局复用、并发准备和生命周期 |
 | `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |
 | `unit/kernels/*_test.cpp` | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
 | `unit/kernels/run_context_kernels.py`、`kernel_context_driver.cpp` | L0 | 手写 Context kernel 数值与路径验证；CTest 名称 `KernelContext.ProductionKernels` |
@@ -152,7 +149,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
-| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件验收：复用逐算子融合图；MatMul/tensordot、GEMM 尾部融合、JIT/AOT 预打包及编译失败回退 |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件测试：算子融合、计算结果、JIT/AOT 预打包及编译失败回退 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
