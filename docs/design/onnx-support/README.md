@@ -21,6 +21,7 @@
 | [ep-design.md](ep-design.md) | ORT EP 接入与执行：插件注册、区域申报、调用计划、执行、缓存、编译子进程与图导出 | `addons/onnxruntime/` |
 | [onnx-frontend-design.md](frontend-design.md) | ONNX 前端：解析、类型与形状推导、常量解码、语义适配、算子映射面、ATIR 产出与端到端编排 | `frontends/onnx/` |
 | [fusion-design.md](fusion-design.md) | 融合优化与算子实现：区域模型、模式目录、元数据契约、实现链路、调用约定、目标后端与编译驱动 | `annc/lib/Dialect/Atir/`、`annc/lib/FusionMetadata/`、`annc/lib/Conversion/`、`annc/lib/Target/aarch64/`、`annc/lib/Kernel/`、`annc/tools/` |
+| [stablehlo-integration.md](stablehlo-integration.md) | 可选 StableHLO 前端：转换、来源映射、融合与 ONNX 绑定，以及共享后端和 EP 执行 | `addons/onnxruntime/stablehlo/`、`frontends/stablehlo/`、`frontends/onnx/` |
 
 ## 2 基线、当前能力与阅读入口
 

@@ -449,6 +449,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 
 - ATIR `TensorType` 类型携带数据（cacheData），使常量折叠和验证无需外部存储。
 - 默认流水线执行 `RankInference`、`IdentityCanonicalize`、`GemmEpilogueFusion` 和 `OpFusion`（含 Embedding Lookup 聚合 `FuseDnnEmbeddingHashBucketAsFuncCallPattern` 与 MatMul 融合）。
+- `annc-onnx-pipeline` 默认使用 ATIR 前端。设置 `ANNC_ONNX_USE_STABLEHLO=1` 后，直接在 StableHLO 上融合，再绑定 ONNX 成员和边界，提取 kernel 并交给公共后端。两条路径都由 ORT EP 在会话内执行融合节点。[ONNX StableHLO 接入设计](../design/onnx-support/stablehlo-integration.md)
 - 算子融合支持多种融合模式：计算密集型融合（如 MatMul+BiasAdd+ReLU 融合为单 kernel，消除中间内存读写）和访存密集型融合（如多个 Embedding Lookup 聚合为融合子图，将 kernel launch 开销从 O(数千) 降至 O(1)）。融合模式由 NodeInfo 和 ATIR Op 语义驱动，新增融合模式仅需扩展 Fusion Pattern。
 - 前端产出的 Fusion Metadata 是与ANNC 框架对接层之间的契约，描述了"切哪些、怎么映射"，ANNC 框架对接层据此执行图重写，两者解耦演进。
 
@@ -476,7 +477,7 @@ GEMM 的 intra 线程数在运行时 JIT 编译时由 `ANNCFusedOp` 从 TensorFl
 | ----------- | ----------------------------- | ---------------- | ---------------- |
 | Kernel 系统   | Kernel 注册、发现、优先级解析            | OpType + Backend | Kernel 符号        |
 | FastCodegen | 已注册自定义算子的代码生成准备             | ATIR MLIR        | 优化后 ATIR MLIR    |
-| Context 入口 pass | 手写 builtin 的 v3 边界校验与入口 ABI 改写 | 融合 ATIR | pointer/status 调用 |
+| Context 入口 pass | 手写 builtin 的 v3 边界校验与入口 ABI 改写 | 融合函数中的 `atir.Customize`，或 StableHLO 提取出的带 `annc.builtin` 标记的 `func.call`（参数为 `tensor<...>`） | pointer/status 调用 |
 | Lowering    | ATIR → Linalg               | ATIR MLIR        | Lowered MLIR     |
 | AArch64 后端  | GEMM 规划、分块和微内核 lowering       | Lowered MLIR     | 优化后 Lowered MLIR |
 | annc driver | 调用 LLVM 工具链编译 `.so`           | Lowered MLIR     | 共享库 `.so`        |
