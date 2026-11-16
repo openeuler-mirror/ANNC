@@ -20,6 +20,8 @@ endif()
 
 if(ANNC_ENABLE_ONNX)
   add_subdirectory(onnx/onnx2atir)
+endif()
+if(ANNC_ENABLE_ONNX OR ANNC_ENABLE_STABLEHLO_FRONTEND)
   # Pipeline orchestrator for the ONNX Runtime EP's runtime-compile mode.
   add_subdirectory(onnx/onnx-pipeline)
 endif()

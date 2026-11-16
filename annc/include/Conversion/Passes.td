@@ -23,10 +23,10 @@ def ConvertContextKernelABI : Pass<"convert-context-kernel-abi", "ModuleOp"> {
 def LowerContextKernelEntries : Pass<"lower-context-kernel-entries", "ModuleOp"> {
   let summary = "Lower closed single-builtin context-v3 entries to pointer/status calls";
   let description = [{
-    Run after fusion pruning, shape specialization, FastCodegen and any input
-    constant folding, before ATIR-to-Linalg conversion. Tensor arguments remain
-    visible to shape inference until this pass replaces the exported entry ABI.
-    Legacy entries are left unchanged.
+    Lower a closed tensor-signature entry containing either a shared ATIR
+    builtin or a schema-checked standard call extracted from StableHLO.
+    Tensor arguments remain visible until this pass replaces the exported
+    entry ABI. Legacy entries are left unchanged.
   }];
   let constructor = "createLowerContextKernelEntriesPass()";
   let dependentDialects = [

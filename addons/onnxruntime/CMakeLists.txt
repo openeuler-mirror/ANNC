@@ -70,6 +70,13 @@ if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
 endif()
 target_link_libraries(annc_ep PRIVATE ${CMAKE_THREAD_LIBS_INIT})
 
+# Read the standard kernel IR's shared FusionMetadata directly. Compiler
+# symbols stay private under annc_ep.map; StableHLO libraries are not needed.
+target_include_directories(annc_ep SYSTEM PRIVATE
+    ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+target_link_libraries(annc_ep PRIVATE
+    ANNCFusionMetadata MLIRParser MLIRArithDialect MLIRLLVMDialect)
+
 # The EP performs the one-time packed-B conversion in CreateState, using the
 # same MLAS headers the builtin kernels compile against. PackB entry points
 # are private to ORT, so link the host build's MLAS/KleidiAI archives into the

@@ -5,7 +5,7 @@
 // sites the toolchain reports. This header covers everything the EP needs for
 // that: turning an OrtGraph into a self-contained ONNX model with deterministic
 // names, fingerprinting it for the disk cache, invoking the compile driver,
-// and reading back its site report.
+// and reading FusionInfo from kernel IR (or the legacy site report).
 #ifndef ANNC_EP_COMPILE_H
 #define ANNC_EP_COMPILE_H
 
@@ -117,7 +117,7 @@ bool FusionPatternEnabled(const std::string& pattern);
 bool SiteNeedsResolvedNames(const Site& site);
 
 // Invokes `annc-onnx-pipeline` (the tool that runs the ANNC stages and writes
-// the site report) and reads its output back.
+// its artifacts) and reads their fusion metadata back.
 //
 // Environment (read once per process):
 //   ANNC_EP_PIPELINE        absolute path to annc-onnx-pipeline; when unset the
@@ -147,7 +147,7 @@ class CompileDriver {
 
  private:
   bool LocateDriver();
-  bool ReadReport(const std::string& path, SiteReport* report,
+  bool ReadReport(const std::string& directory, SiteReport* report,
                   std::string* error) const;
 
   bool located_ = false;
