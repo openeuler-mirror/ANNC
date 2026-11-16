@@ -2,6 +2,7 @@
 #include "Support/ContextABISwitch.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Target/aarch64/Passes.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -44,6 +45,11 @@ namespace annc
             passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
         passManager.addPass(createKPGemmOneShotBufferize());
+        if (annc::loweringContextABIEnabled()) {
+            bufferization::BufferDeallocationPipelineOptions options;
+            bufferization::buildBufferDeallocationPipeline(passManager,
+                                                            options);
+        }
         passManager.addPass(createAArch64ExtractGemmProblem());
         const bool enablePrepack = !packedCPath.empty();
         passManager.addPass(createAArch64SelectGemmStrategy(configPath,

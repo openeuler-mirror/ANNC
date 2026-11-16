@@ -1,3 +1,5 @@
+#include <cstdint>
+
 #include "Support/LLVMCompat.h"
 #include "Support/ContextABISwitch.h"
 #include "Target/aarch64/Passes.h"
@@ -8,6 +10,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 
 using namespace mlir;
 
@@ -77,6 +80,31 @@ Value returnedAllocation(Value value) {
   return value.getDefiningOp<memref::AllocOp>() ? value : Value{};
 }
 
+bool useStackForTemporary(memref::AllocOp allocation) {
+  constexpr uint64_t kMaxStackAllocationBytes = 64 * 1024;
+  MemRefType type = allocation.getType();
+  Type elementType = type.getElementType();
+  if (!type.hasStaticShape() || !elementType.isIntOrFloat()) return false;
+  unsigned bits = elementType.getIntOrFloatBitWidth();
+  if (bits % 8 != 0) return false;
+  uint64_t bytes = bits / 8;
+  bool empty = false;
+  for (int64_t dimension : type.getShape()) {
+    if (dimension == 0) {
+      empty = true;
+      break;
+    }
+    if (bytes > kMaxStackAllocationBytes / dimension) return false;
+    bytes *= dimension;
+  }
+  for (Operation *parent = allocation->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (isa<LoopLikeOpInterface>(parent)) return false;
+    if (isa<func::FuncOp>(parent)) break;
+  }
+  return empty || bytes <= kMaxStackAllocationBytes;
+}
+
 LogicalResult replaceAllocations(func::FuncOp func,
                                  LLVMTypeConverter &converter) {
   auto metadata = func->getAttrOfType<DictionaryAttr>("fusion.metadata");
@@ -138,10 +166,12 @@ LogicalResult replaceAllocations(func::FuncOp func,
       if (replacement.getType() != alloc.getType())
         replacement = builder.create<memref::CastOp>(
             alloc.getLoc(), alloc.getType(), replacement);
-    } else {
+    } else if (useStackForTemporary(alloc)) {
       replacement = builder.create<memref::AllocaOp>(
           alloc.getLoc(), alloc.getType(), alloc.getDynamicSizes(),
           alloc.getAlignmentAttr());
+    } else {
+      continue;
     }
     alloc.replaceAllUsesWith(replacement);
     alloc.erase();
