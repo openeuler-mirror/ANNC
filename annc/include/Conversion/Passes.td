@@ -50,4 +50,24 @@ def ConvertAtirToLinalg : Pass<"convert-atir-to-linalg", "ModuleOp"> {
   ];
 }
 
+def ConvertAtirV2ToLinalg : Pass<"convert-atir-v2-to-linalg", "ModuleOp"> {
+  let summary = "convert atir v2 ops to linalg ops";
+  let description = [{
+    Lower ATIR V2 operations to the Linalg and builtin dialects. The pass is
+    currently a conversion entry point; V2 operation patterns will be added
+    incrementally without changing the legacy ATIR lowering pass.
+  }];
+  let constructor = "createConvertAtirV2ToLinalg()";
+  let dependentDialects = [
+    "AtirDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 #endif // ATIR_MLIR_CONVERSION_PASSES_TD

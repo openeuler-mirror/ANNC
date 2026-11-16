@@ -35,6 +35,27 @@ FILECHECK="${FILECHECK:-$ANNC_LLVM_BIN/FileCheck}"
 export PATH="$ANNC_LLVM_BIN:$PATH"
 FILTER='grep -vE "^\[ANNC "'
 
+# The AArch64 GEMM pipeline has no valid legacy route when either the V2
+# frontend is compiled in or the context ABI switch is enabled. The V2 tool
+# may be unavailable in partial builds, so use the build configuration rather
+# than its presence as the route selector.
+ANNC_V2_BUILD=0
+if [ -r "$REPO_ROOT/build/CMakeCache.txt" ] &&
+   grep -q '^ANNC_ENABLE_TF2ATIR_V2:BOOL=ON$' "$REPO_ROOT/build/CMakeCache.txt"; then
+    ANNC_V2_BUILD=1
+elif [ -x "$ANNCTF2ATIRV2" ]; then
+    ANNC_V2_BUILD=1
+fi
+ANNC_CONTEXT_ABI=0
+case "${ANNC_ENABLE_LOWERING_CONTEXT_ABI:-}" in
+    1|ON|TRUE|YES|on|true|yes) ANNC_CONTEXT_ABI=1 ;;
+esac
+ANNC_LEGACY_AARCH64_PIPELINE=1
+if [ "$ANNC_V2_BUILD" -eq 1 ] || [ "$ANNC_CONTEXT_ABI" -eq 1 ]; then
+    ANNC_LEGACY_AARCH64_PIPELINE=0
+fi
+export ANNC_LEGACY_AARCH64_PIPELINE
+
 for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK" \
          "$ANNC_LLVM_BIN/not" "$ANNC_LLVM_BIN/split-file"; do
     [ -x "$t" ] || { echo "ERROR: $t 不存在或不可执行" >&2; exit 1; }
@@ -59,6 +80,13 @@ for f in $FILES; do
 
     mapfile -t runs < <(sed -n 's/^\/\/ RUN: //p' "$f")
     [ "${#runs[@]}" -eq 0 ] && { echo SKIP; continue; }
+
+    # These fixtures specifically cover the legacy AArch64 route.
+    if grep -q '^// REQUIRES: legacy-aarch64-pipeline$' "$f" &&
+       [ "$ANNC_LEGACY_AARCH64_PIPELINE" -eq 0 ]; then
+        echo SKIP
+        continue
+    fi
 
     temp_file="$TMP_DIR/test-$file_index.tmp"
     file_index=$((file_index + 1))
