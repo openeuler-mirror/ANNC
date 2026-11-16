@@ -47,6 +47,7 @@ else()
 endif()
 option(ANNC_ENABLE_TF2ATIR_V2 "Build the TensorFlow stablehlo V2 route (sink layer and V2 tools)" ${_annc_tf2atir_v2_default})
 option(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO "Build the ONNX-to-StableHLO generation pipeline (addons/onnxruntime/stablehlo); does not change EP execution" OFF)
+option(ANNC_ENABLE_STABLEHLO_FRONTEND "Build the StableHLO/ATIR reader using the paired ONNX-MLIR StableHLO libraries" OFF)
 set(ANNC_ONNX_MLIR_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir" CACHE PATH
     "Pinned ONNX-MLIR source submodule")
 set(ANNC_ONNX_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/third-party/onnx-mlir-build" CACHE PATH
