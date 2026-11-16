@@ -326,6 +326,23 @@ include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
+# ANNC sources use try/catch; a source-built toolchain exports EH=OFF and
+# injects -fno-exceptions. Clear LLVMConfig's plain variables so the cached
+# values take effect (-D can override, but OFF is rejected by the guard
+# below); keep exceptions inside ANNC code (MLIR frames are built without EH).
+unset(LLVM_ENABLE_EH)
+unset(LLVM_ENABLE_RTTI)
+set(LLVM_ENABLE_EH ON CACHE BOOL "ANNC requires exceptions")
+set(LLVM_ENABLE_RTTI ON CACHE BOOL "ANNC requires RTTI")
+# A stale cache (OFF from an earlier toolchain) would fail the build without
+# context; fail loud with the fix instead.
+if(NOT LLVM_ENABLE_EH OR NOT LLVM_ENABLE_RTTI)
+  message(FATAL_ERROR
+      "ANNC requires LLVM_ENABLE_EH=ON and LLVM_ENABLE_RTTI=ON (ANNC sources "
+      "use C++ exceptions); reconfigure with -DLLVM_ENABLE_EH=ON "
+      "-DLLVM_ENABLE_RTTI=ON.")
+endif()
+
 # Entered only with ANNC_ENABLE_TF2ATIR_V2=ON; the default build never touches it.
 #
 # stablehlo registers its libraries into the MLIR_DIALECT_LIBS /

@@ -91,7 +91,9 @@ TF GraphDef / SavedModel
 
 ### 3.4 兼容方言 `tf_type`
 
-仅使携带 TF 类型的产物无损解析：任意 `!tf_type.<tag>`（含 `resource<tensor<...>>` 等参数化形态）可 parse，功能上只识别 `string`（`isTfStringType`）。不参与语义，类型归一化由 sink 类型转换器完成。`#tf_type.shape` 属性解析按需补（当前产物不携带）。
+仅使携带 TF 类型的产物无损解析：任意 `!tf_type.<tag>`（含 `resource<tensor<...>>` 等参数化形态）可 parse，功能上只识别 `string`（`isTfStringType`）。不参与语义，类型归一化由 sink 类型转换器完成。
+
+`#tf_type.shape` 属性已落地，采用列表拼写（逗号分隔，避免紧凑 `d1x…dN` 拼写与 MLIR 十六进制词法冲突）：`#tf_type.shape<[3, 16]>`、`#tf_type.shape<[?]>`（未知维）、`#tf_type.shape<*>`（未知秩）、`#tf_type.shape<[]>`（rank-0，别名 `<>` 亦接受）；负数字面量与多写逗号在解析期报错；紧凑拼写 `d1x…dN` 不受支持（与 MLIR 十六进制词法冲突，见上文）。
 
 ## 4 核心机制
 
