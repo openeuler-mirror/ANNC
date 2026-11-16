@@ -6,6 +6,10 @@
 #include "Conversion/Passes.h"
 #include "Target/Passes.h"
 #include "Dialect/Atir/AtirOps.h"
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+#include "Conversion/StablehloToAtir/StablehloSink.h"
+#include "stablehlo/dialect/StablehloOps.h"
+#endif
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -38,8 +42,17 @@ int main(int argc, char **argv) {
           mlir::scf::SCFDialect,
           mlir::tensor::TensorDialect,
           mlir::ub::UBDialect,
+          mlir::shape::ShapeDialect,
           atir::AtirDialect
+#if ANNC_ENABLE_TF2ATIR_V2
+          , mlir::stablehlo::StablehloDialect
+#endif
           >();
+#if ANNC_ENABLE_TF2ATIR_V2
+  // V2 sink artifacts may carry tf_type compat types (resource etc.); the
+  // compat dialect must be registered for parsing.
+  annc::tfcompat::registerTfTypeCompatDialect(registry);
+#endif
   linalg::registerBufferizableOpInterfaceExternalModels(registry);
   arith::registerBufferizableOpInterfaceExternalModels(registry);
   tensor::registerBufferizableOpInterfaceExternalModels(registry);

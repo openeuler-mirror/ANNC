@@ -27,14 +27,25 @@ std::string stripAnchorSuffixes(llvm::StringRef name);
 // when none.
 std::string anchorFromLoc(mlir::Location loc);
 
+// Single-name anchor: only a lone NameLoc is trusted (a CSE FusedLoc names
+// an arbitrary use point and must not be wired back to the pb).
+std::string singleAnchorName(mlir::Location loc);
+mlir::Value peelAssumingYield(mlir::Value v);
+
 // Single-name anchor: only a plain NameLoc ('@'/':' suffixes allowed). A
 // CSE-shared constant's FusedLoc would yield an arbitrary use name (the
 // adx_1 mis-wiring), so contract naming validates via this; FusedLoc = unnamed.
-std::string singleAnchorName(mlir::Location loc);
-mlir::Value peelAssumingYield(mlir::Value v);  // unwrap assuming-region yield
 
 // Canonical FusionArg.dtype spelling; empty for unknown element types (bail).
 std::string dtypeOf(mlir::Type elem);
+
+// The shape dialect is broadcast/shape scaffolding: never a site member nor
+// a boundary input.
+bool isShapeScaffolding(mlir::Operation *op);
+
+// Sole data user once shape-scaffolding users are ignored; null if not
+// unique.
+mlir::Operation *singleDataUser(mlir::Value value);
 
 struct ProbeArg {
   mlir::RankedTensorType type;
@@ -45,10 +56,8 @@ struct ProbeArg {
 
 // shape-dialect ops are broadcast/shape scaffolding: never site members or
 // boundary inputs.
-bool isShapeScaffolding(mlir::Operation *op);
 
 // The sole data user after ignoring shape scaffolding; null if not unique.
-mlir::Operation *singleDataUser(mlir::Value value);
 
 // Entry input-name table: prefer tf.arg_names, fall back to
 // tf.entry_function.inputs.
@@ -103,6 +112,19 @@ class RewireGuard {
 // Collect site boundary inputs: chain-member operands not produced inside
 // the chain. promotedConstants become role-"dynamic" boundaries (V1 stack
 // args); fixedValues are pattern-designated fixed boundaries (semantic role).
+// Whitelist closure over a legalize-expansion chain (stablehlo/shape/
+// arith/tensor plus named atir interior ops); boundary = block args,
+// unnamed atir carriers and constants; anything else returns false.
+bool collectArithClosure(
+    mlir::Value root, llvm::SmallPtrSetImpl<mlir::Operation *> &closure,
+    llvm::DenseSet<mlir::Value> &boundary,
+    llvm::ArrayRef<llvm::StringRef> atirInteriorOps);
+
+// Members of a data-producing chain in post-order.
+void collectDataMembers(mlir::Value root,
+                        llvm::SmallPtrSetImpl<mlir::Operation *> &seen,
+                        llvm::SmallVectorImpl<mlir::Operation *> &out);
+
 mlir::LogicalResult collectBoundary(
     mlir::func::FuncOp main, mlir::ArrayRef<mlir::Operation *> members,
     llvm::SmallVectorImpl<ProbeArg> &args,
@@ -112,17 +134,10 @@ mlir::LogicalResult collectBoundary(
 // Whitelisted closure from an arith root: stablehlo/shape/arith/tensor plus
 // atirInteriorOps-named carrier ops may be traversed; block params, other
 // atir results and constants are boundaries; anything else fails (bail).
-bool collectArithClosure(
-    mlir::Value root, llvm::SmallPtrSetImpl<mlir::Operation *> &closure,
-    llvm::DenseSet<mlir::Value> &boundary,
-    llvm::ArrayRef<llvm::StringRef> atirInteriorOps = {});
 
 // Data-member closure: collect defining ops backwards (region internals
 // included), stopping at block params, constants (aux clones) and non-Reshape
 // atir residues (a Reshape residue is a member). Post-ordered results.
-void collectDataMembers(mlir::Value root,
-                        llvm::SmallPtrSetImpl<mlir::Operation *> &seen,
-                        llvm::SmallVectorImpl<mlir::Operation *> &out);
 
 // Land one site (V1 tri-partition: move / recreate / boundary args, all via
 // the rewriter). outputs give the site results; tailOps move into the kernel
