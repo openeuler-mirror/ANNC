@@ -5,11 +5,12 @@ kept separate by responsibility:
 
 ```text
 ONNX model
-  -> ONNX-MLIR import
-  -> preprocessing passes (string boundary adaptation, ONNX canonicalization)
+  -> framework-opt: import ONNX once and retain the original graph index
+  -> ONNX IR optimization (decomposition, shape inference, canonicalization)
+  -> preprocessing passes (string boundary adaptation, Slice, dynamic Tile)
   -> ONNX-MLIR StableHLO lowering
   -> postprocessing passes (residual ONNX and shape legalization)
-  -> StableHLO MLIR + boundary metadata
+  -> StableHLO / supported ATIR fallbacks + boundary metadata
 ```
 
 `passes/preprocessing/` contains transformations that prepare imported ONNX
@@ -28,18 +29,23 @@ After that, the addon pass executable runs
 `framework-custom-call-to-stablehlo`, `onnx-external-to-stablehlo`,
 `framework-shape-to-stablehlo`, canonicalization, and
 `verify-framework-stablehlo`. The last stage rejects any operation or type that
-is outside the published StableHLO boundary.
+is outside the published StableHLO / supported ATIR fallback boundary.
 
 `pipeline/` contains two executable programs because they do different jobs.
-`annc-onnx2stablehlo` is the outer process driver: it validates files, invokes
-the ONNX-MLIR tools in order, publishes the final StableHLO file, and writes
-metadata. `annc-onnx-framework-opt` is the command-line entry point for the
-addon passes: it registers those passes and calls `MlirOptMain` to read an MLIR
-file and run the pass flags supplied by the driver. The pass code itself lives
-under `passes/`. The upstream `onnx-mlir-opt` executable does not register
-these ANNC passes, so the driver invokes this addon executable for preprocessing
-and postprocessing; ONNX-MLIR remains responsible for its own StableHLO
-conversion stage.
+`annc-onnx2stablehlo` validates files, imports the original model once through
+`annc-onnx-framework-opt --annc-import-onnx`, and passes the indexed ONNX IR to
+`onnx-mlir-opt`. It then runs preprocessing, StableHLO lowering, postprocessing
+and source finalization before publishing the IR and required `--metadata`
+diagnostics. The input model, IR output and metadata must refer to different
+files. Path checks identify `..`, directory symlinks and existing hard links;
+rejected destinations leave existing files unchanged. Both output parent
+directories must already exist.
+
+`annc-onnx-framework-opt` registers the addon import and passes. Outside import
+mode, it calls `MlirOptMain` to read MLIR and run the supplied pass flags. The
+upstream `onnx-mlir-opt` executable does not register these ANNC passes, so the
+driver invokes the addon tool for preprocessing and postprocessing. ONNX-MLIR
+owns its StableHLO conversion stage.
 
 `annc-onnx-framework-opt` links ONNX-MLIR's `OMCompilerOptions` library. The
 ONNX dialect libraries reference compiler-option definitions from that library,
@@ -47,8 +53,16 @@ including `disableMemRefPrefetch` and `getZArchNum`.
 `passes/postprocessing/onnx_external_to_stablehlo.cpp` owns residual ONNX
 lowering, including the patterns and the pass that applies them. The pass runs
 once after the upstream StableHLO conversion.
-This refactor ends at the framework-facing StableHLO artifact boundary; it does
-not contain an ANNC reader or ATIR conversion.
+Residual `Mod` computes a joint ONNX broadcast shape and broadcasts either
+input as needed. It reuses shape legalization and preserves integer modulo
+and floating remainder sign rules. Equal dynamic tensor types still require
+broadcasting because their concrete shapes can differ.
+
+The supported framework-owned `com.microsoft.FusedTensordotMatMul` remains an
+`atir.opaque` with its original attributes and identities. Use the paired
+`annc-onnx-framework-opt` to read or round-trip mixed IR; portable StableHLO
+serialization applies to pure HLO. This addon ends at conversion and provenance
+publication; it does not add ANNC fusion, backend compilation or EP execution.
 
 ONNX-MLIR v0.5.0.2 is pinned as the `third-party/onnx-mlir` Git submodule at
 `128f8b716fdbed4ff05a5ba493ac48fcac761b40`. Its nested StableHLO submodule is

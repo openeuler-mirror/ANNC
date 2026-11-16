@@ -1,5 +1,8 @@
+#include "Dialect/Atir/AtirOps.h"
 // Legalize the shape/index plumbing emitted by upstream ONNX-MLIR without
 // lowering to buffers or depending on the ANNC compiler.
+#include <algorithm>
+
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -149,6 +152,17 @@ class ShapeLegalizer {
       if (op->getName().getStringRef() == "shape.from_extents")
         return RankedTensorType::get(
             {static_cast<int64_t>(op->getNumOperands())}, builder.getI64Type());
+      if (op->getName().getStringRef() == "shape.broadcast") {
+        int64_t rank = 0;
+        for (Value operand : op->getOperands()) {
+          auto shape = dyn_cast<RankedTensorType>(operand.getType());
+          if (!shape || !shape.hasStaticShape() ||
+              shape.getElementType() != builder.getI64Type())
+            return type;
+          rank = std::max(rank, shape.getNumElements());
+        }
+        return RankedTensorType::get({rank}, builder.getI64Type());
+      }
     }
     return type;
   }
@@ -161,7 +175,9 @@ class ShapeLegalizer {
     }
     for (Operation *op : ops) {
       StringRef ns = op->getName().getDialectNamespace();
-      if (ns == "builtin" || ns == "func" || ns == "stablehlo") continue;
+      if (ns == "builtin" || ns == "func" || ns == "stablehlo" ||
+          isa<atir::OpaqueOp>(op))
+        continue;
       source = op;
       builder.setInsertionPoint(op);
       StringRef name = op->getName().getStringRef();
