@@ -84,7 +84,7 @@ ONNX .onnx
 ATIR MLIR
   ├─→ annc-opt（--atir-rank-inference、--atir-identity-canonicalize、--atir-op-fusion；epilogue 融合仅在 ANNC_GEMM=2 时启用）→ 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
-  ├─→ annc-asm（--atir-fast-codegen、--annc-aarch64-gemm-pipeline）
+  ├─→ annc-asm（--annc-fast-codegen、--annc-aarch64-gemm-pipeline）
   │     └─→ lowered MLIR（linalg/affine/scf）
   ├─→ annc → .so / 可执行文件（driver：mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证
