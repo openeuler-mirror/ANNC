@@ -40,6 +40,10 @@ class AnncThreadPool {
   // appended at the end of the vtable, which the same-tree build rule for
   // host and kernel already covers.
   virtual void* native_pool() const { return nullptr; }
+
+  // Context consumers must identify the native provider before interpreting
+  // its pointer. Unknown providers cannot use the untagged legacy hook.
+  virtual void* native_pool(const char*) const { return nullptr; }
 };
 
 void setCurrentThreadPool(AnncThreadPool* thread_pool);

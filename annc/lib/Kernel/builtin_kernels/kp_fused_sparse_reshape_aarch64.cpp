@@ -22,7 +22,7 @@ AnncStatusCode RunByRows(annc::kernels::KernelContext& context,
                          int64_t row_count, int64_t cost_per_row,
                          const Work& work) {
   if (row_count >= kParallelRowThreshold) {
-    const auto workers = context.getThreadPool();
+    const auto workers = context.getKernelThreadPool();
     if (workers.numThreads() > 1) {
       return annc::kernels::Shard(workers.numThreads(), workers, row_count,
                                   cost_per_row, work);

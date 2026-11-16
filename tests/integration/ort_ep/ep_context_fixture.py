@@ -117,7 +117,7 @@ AnncStatusCode FixtureMatmul(annc::kernels::KernelContext& context) {
     return context.status();
   float* scratch = annc::kernels::contextData<float>(temp);
   if (m && n) std::fill_n(scratch, m * n, 0.0f);
-  auto pool = context.getThreadPool();
+  auto pool = context.getKernelThreadPool();
 
   std::mutex mutex;
   std::vector<std::thread::id> workers;
@@ -250,7 +250,9 @@ def run_pipeline(args):
     subprocess.run(["c++", "-std=c++17", "-shared", "-fPIC", "-O2",
                     "-I", str(include_dir),
                     "-I", str(include_dir.parents[1] / "context" / "include"), "-o",
-                    str(output / "libannc_kernels.so"), str(source)],
+                    str(output / "libannc_kernels.so"), str(source),
+                    str(include_dir.parents[1] / "context/lib/ThreadPool.cpp"),
+                    str(include_dir.parents[1] / "context/lib/Parallel.cpp")],
                    check=True)
     columns = model.graph.initializer[0].dims[1]
     # The fusion-toggle tests reuse this fixture as their pipeline; the
@@ -323,6 +325,10 @@ def run_test(args):
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
+    plugin = ctypes.CDLL(args.ep_library)
+    for symbol in ("annc_context_get_input_memref",
+                   "annc_context_alloc_output_memref"):
+        getattr(plugin, symbol)
     rtpy.register_execution_provider_library("AnncExecutionProvider",
                                              args.ep_library)
     os.environ.update({

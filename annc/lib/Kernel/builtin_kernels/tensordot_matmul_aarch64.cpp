@@ -42,7 +42,7 @@ AnncStatusCode tensordotMatMulImpl(annc::kernels::KernelContext& context) {
   const auto* input = context.getInput(0);
   const auto* weight = context.getInput(1);
   if (!input || !weight) return context.status();
-  auto thread_pool = context.getThreadPool();
+  auto thread_pool = context.getKernelThreadPool();
 
   const int64_t d0 = input->sizes[0];
   const int64_t d1 = input->sizes[1];

@@ -111,6 +111,12 @@ typedef struct {
 `AnncTensorView` 表达分配得到或预先绑定的实际 tensor，二者职责不同。
 `AnncStringRef` 只包含字符串指针和长度，不拥有字符数据。
 
+生成代码可通过 `annc_context_get_input_memref` 和
+`annc_context_alloc_output_memref` 获取标准 ranked memref descriptor；实现位于
+`context/lib/MemRef.cpp`，宿主插件嵌入对应对象。ORT 的 `annc_ep.map` 须公开这两个
+C 符号，同时继续隐藏所链接 ORT 静态库的内部符号。手写 kernel 的头文件访问器
+直接读取 Context 或调用服务表中的函数指针，不依赖这两个符号。
+
 layout 与 dtype/rank 分开。已有 packed RHS 按既有格式、元数据和消费规则处理，不能仅凭二维 F32 就作为普通 dense 矩阵读取。一般 view 不承担整个预打包元数据，相关契约继续由已有 GEMM plan/权重元数据管理。
 
 ### 3.2 属性 payload
@@ -162,10 +168,7 @@ typedef struct {
   AnncContextAllocateTemp allocate_temp;
   AnncContextReportError report_error;
   AnncContextGetStatus get_status;
-  AnncContextParallelFor parallel_for;
-  AnncContextNumThreads num_threads;
-  AnncContextShard shard;
-  AnncContextNativeThreadPool native_thread_pool;
+  void* thread_pool;  /* AnncThreadPool* in C++; opaque in C. */
 } AnncRuntimeServices;
 
 typedef struct {
@@ -190,28 +193,18 @@ typedef AnncStatusCode (*AnncKernelFn)(AnncKernelContext*);
 - allocate_temp 接收分配请求并返回 view；临时张量由 opaque 指向的执行 owner 保管，kernel 不自行释放。
 - 分配回调复制必要的 shape/stride 元数据，不能保留指向 kernel 栈上 dims 的指针。返回 view 的元数据在约定执行期间有效。
 - get_status 用于检查共享的首次执行错误；report_error 同步复制消息，不保留传入 char*。
-- parallel_for 接收工作量、粒度/成本提示、C callback 和 task opaque；返回前全部任务完成，null callback 或非法范围应明确失败。
-- num_threads 查询宿主线程数；嵌套并行保护由宿主回调处理。
-- shard 与 native_thread_pool 为可选尾部服务，分别提供限并行度调度和原生线程池互操作。
+- thread_pool 借用已有 `AnncThreadPool` 对象，执行期间由宿主保证其存活；不是 TF/ORT 原生池的指针。空指针表示串行执行。
 
-服务表用 C callbacks 隔离框架和 C++ ABI。TF adapter 内部继续复用 AnncThreadPool；KDNN adapter 可用一个实现既有 AnncThreadPool 接口的服务代理，继承其 vendor virtual 接口，不把 virtual 对象当作新 C ABI 的必需字段。
+`opaque` 仍只用于分配和错误回调。线程池通过 C++ 虚函数调用，Context 与服务结构继续共用
+`ANNC_CONTEXT_ABI_VERSION = 3`，入口名仍是 `annc_context_v3`，不单独升级服务版本。
+服务布局已经改变，版本号不区分新旧布局，宿主与 kernel 不能混用旧产物。
+各宿主的缓存指纹尚未全部同步更新；部署时必须清理旧 JIT 缓存并重建 AOT 库。
+宿主、kernel 和线程池支持库必须配套重编译。
 
-有效 context 的分配、错误、`parallel_for` 和 `num_threads` 服务必须存在；standalone driver 和测试提供自己的服务实现。串行执行可以由 parallel_for 的串行实现提供。kernel 实现不重复核对输入、输出和属性总数；访问参数与申请输出时仍检查槽位边界，并校验对应的 view 或分配请求。
-
-`AnncRuntimeServices` 的 `opaque` 指向宿主私有状态，回调通过它找到分配器、
-框架执行上下文和错误记录；公共层不解释该对象的类型。
-
-| 服务 | 用途 | 是否必需 |
-| --- | --- | --- |
-| `allocate_output` | 按局部输出槽位分配并返回视图 | 必需 |
-| `allocate_temp` | 分配临时 tensor 并返回视图 | 必需 |
-| `report_error` / `get_status` | 记录错误 / 查询执行状态 | 必需 |
-| `parallel_for` / `num_threads` | 同步并行执行 / 查询线程数 | 必需 |
-| `shard` | 传递最大并行度和单位工作成本 | 可选 |
-| `native_thread_pool` | 按 provider 借用兼容的原生线程池 | 可选 |
-
-通过版本和结构大小检查基础前缀，访问可选字段前检查 `struct_size` 是否覆盖该字段。
-这允许同版本服务表追加可选尾字段，不允许任意改变已有字段布局或含义。
+此设计显式依赖匹配的 C++ ABI：类声明、虚表、标准库和工具链必须一致。
+C 头文件用 `void*` 表示同一位置，C++ 头文件为有类型的对象指针；不是框架无关的
+纯 C 调度协议。分配和错误回调保持原有 C 形式。版本和基础前缀检查覆盖 pool 指针，
+不再存在可选 shard/native 回调的逐字段大小检查。
 
 ### 3.4 C++ 开发接口
 
@@ -224,7 +217,8 @@ typedef AnncStatusCode (*AnncKernelFn)(AnncKernelContext*);
 | `numInputs()` | 查询输入数量 |
 | `allocateOutput<T>(slot, dims, flags)` | 分配或复用输出，rank 从 dims 数量推导 |
 | `allocateTemp<T, Rank>(dims, &view)` | 请求临时 tensor |
-| `getThreadPool()` | 获取借用的调度句柄 |
+| `getThreadPool()` | 直接返回 services 中借用的 `AnncThreadPool*`，可为空，不查询 TLS；直接调度时由调用方负责异常和错误处理 |
+| `getKernelThreadPool()` | 返回使用同一线程池的 `KernelThreadPool` 包装，保留空池串行、Context 状态和异常处理 |
 | `error(code, message)` / `status()` | 上报错误并返回错误码 / 查询状态 |
 
 `allocateOutput` 对未绑定槽位调用宿主分配，对已绑定槽位检查类型、shape、连续布局
@@ -257,30 +251,27 @@ auto code = context.allocateTemp<int64_t, 1>(&scratchSize, &scratch);
 线程池也从 context 获取，调用形式参考 TensorFlow kernel 的 `Shard`：
 
 ```cpp
-auto workers = context.getThreadPool();
+auto workers = context.getKernelThreadPool();
 return annc::kernels::Shard(workers.numThreads(), workers, rows, costPerRow,
                            [&](int64_t begin, int64_t end) {
                              // 处理 [begin, end)，返回前所有任务完成。
                            });
 ```
 
-`KernelThreadPool` 是借用 C 服务表的轻量句柄，不创建线程或传递框架 C++ 对象。
-普通区间任务也可调用 `workers.parallelFor(total, fn)`。
-服务表尾部追加可选 `shard`，传递最大并行度和单位成本；读取可选字段前检查
-对应的 `struct_size`。TF adapter 复用 `AnncThreadPool`，在框架边界调用 TensorFlow
-`Shard`；嵌套并行由 runtime 串行处理。旧 runtime 缺少新服务时 shard 串行回退，
-已有 `parallel_for` 仍保留调度能力；仅有分配/错误前缀的 runtime 会被拒绝。
-2026-10-26 检视调整将调度加入必需前缀，相关宿主和 kernel 需配套重编译。
-线程池抽象与 TLS 桥接集中在根目录 `context/`，框架 adapter 提供实际线程池；
-通用层不创建线程，嵌套调用由 adapter 串行处理。
-Gather、Padding、SparseReshape 的并行阈值参考下载 kernel，ActionIdGather 使用输出行宽作为成本。
-DynamicStitch 按下载参考实现使用 `Shard`，最大并行度取宿主线程数，单位成本固定为 120；
-单线程及缺少 shard 服务时串行执行。性能仍需目标平台实测。
+`getThreadPool()` 直接返回 `services->thread_pool`，调用方可在非空时通过
+`pool->num_threads()`、`pool->native_pool(provider)` 等虚函数访问宿主线程池。
+`annc::threadpool::num_threads(pool)` 可处理空指针并将线程数归一化为至少 1。
+需要 Context 错误处理的调度通过 `getKernelThreadPool()` 获取 `KernelThreadPool`
+包装，继续使用 `workers.parallelFor(total, work)` 或
+`Shard(maxParallelism, workers, total, costPerUnit, work)`。包装使用相同的线程池指针，
+借用 Context 并捕获任务和调度异常；空池、嵌套、单线程或限并行度为 1 时串行执行。
+分片上限和成本提示通过原来的 `ParallelForOptions` 传给宿主实现。
+直接调用 `pool->parallel_for(...)` 不经过该错误处理包装。
 
-extern C wrapper 负责版本/基础协议校验、创建 C++ view、异常边界和返回码转换。
-输入、输出和属性由实现按槽位校验；builtin 执行路径不扫描名称 schema。新 ABI 的 wrapper 无需再恢复旧的多个形参。内部 SIMD、hash、GEMM helper 仍可使用紧凑的显式参数。
-
-统一使用 AnncStatusCode 作为新入口返回类型。旧 KernelStatus 在迁移期显式转换；数值 2/3 的含义不同，不能强转。LLVM/MLIR、STL、std::function、Expected 和 C++ class 不出现在公开 C struct 中。
+Context 不会回退到 TLS 获取线程池。TF V3 执行在内部创建适配器并绑定其指针，
+外层 TLS 桥接保持原有适配器创建方式；两者借用同一个 TF 线程池。
+ORT 借用执行 owner 的 `pool_`。当前生成式 GEMM 仍保留旧 TLS 获取路径，迁移生成式
+入口到显式 Context 是后续工作，本次不宣称已完成。C 入口保持统一状态码和异常边界。
 
 ### 3.5 线程池与行任务调度
 
@@ -288,33 +279,25 @@ extern C wrapper 负责版本/基础协议校验、创建 C++ view、异常边�
 `context/lib/`；所有调用方（包括生成式 GEMM）直接引用 `Context/ThreadPool.h`、
 `Context/Parallel.h` 或 `Context/RowParallel.h`，不保留旧路径的转发头。
 
-两类调用共用宿主调度能力，但入口不同：
+Context kernel 使用已有的 `annc::threadpool::AnncThreadPool` 虚函数接口；
+生成式 GEMM 当前仍经 TLS 桥接访问同一类接口，原有 TLS 函数和计算参数 ABI 保留。
+`getThreadPool()` 返回可为空的借用指针；`getKernelThreadPool()` 返回的包装在空池时串行执行，不创建线程，也不查询 TLS。
 
-- Context kernel：`getThreadPool()` 返回 `KernelThreadPool`，通过 C 服务表回调宿主，
-  不需要读取 TLS，也不把 C++ 线程池虚表传入 Context ABI。
-- 生成代码及已有 C++ 调用方：使用 `annc::threadpool::AnncThreadPool` 抽象。
-  宿主设置当前线程的借用池，生成代码通过 `annc_threadpool_*` 桥接函数访问；
-  相关调用方链接 `ANNCThreadPool`。移动这些公共头文件不改变生成式 GEMM 的参数 ABI。
+`AnncThreadPool::parallel_for` 接收 `ParallelForOptions`，其中包含成本、粒度和最大
+并行度。TF/ORT adapter 继续执行原有调度策略。`Shard(max, workers, total, cost, work)`
+把上限和成本打包后调用该虚函数；宿主必须遵守上限。任务和调度异常由 Context helper
+转换为状态码，且所有任务必须同步完成。原有 `annc::threadpool::parallel_for` 与 TLS
+桥接接口保持不变；直接调用它的旧生成式代码行为不变。
 
-对于 `annc::threadpool::parallel_for`，`ParallelForOptions::max_parallelism`
-仅在公共辅助函数中作为串并行开关：值小于等于 1 时串行；大于 1 或未设置时允许并行
-（仍受任务粒度、线程数和嵌套并行检查约束）。选项原样传给宿主的
-`AnncThreadPool::parallel_for`，大于 1 的具体上限需要宿主实现支持；公共辅助函数
-本身不保证该上限。因此，设置为 2 和 4 在未实现限流的宿主上可能使用相同的并行度。
-下述 Context `shard` 接口则要求遵守并行度上限，缺少对应宿主服务时退回串行。
+TF 1.15 的 support→SDK C 回调显式传递 `max_parallelism`，零表示未指定上限。
+指定上限时优先于固定块选项，按线程池大小截断后调用 `tensorflow::Shard`；
+上限为 1 或已在池内执行时串行调用。该回调属于配套构建的插件内部接口，
+support 层与 TF SDK 侧须同步重编。
 
-`KernelThreadPool` 提供以下方法：
+原生池采用 `native_pool(provider)` 虚函数，默认返回空指针；ORT 仅识别
+`"onnxruntime"`。保留旧的无参数 `native_pool()`，以兼容现有源码调用，不能用它
+绕过 Context 消费方的 provider 检查。宿主与 kernel 必须使用同一版类定义重编译。
 
-| 方法 | 行为 |
-| --- | --- |
-| `numThreads()` | 查询线程数，非正值归一为 1 |
-| `parallelFor(total, task)` | 同步处理 `[0, total)`，task 接收 `[begin, end)` |
-| `shard(maxParallelism, total, costPerUnit, task)` | 带并行度上限和成本提示的同步分片 |
-| `nativePool(provider)` | 按 provider 获取兼容的宿主原生池，不可用时返回空句柄 |
-
-`annc::kernels::Shard(...)` 是 `shard` 的便捷函数。服务表缺少可选 `shard` 回调时，
-带并行度上限的请求串行执行；`parallelFor` 的嵌套并行保护由宿主回调负责。
-ORT 使用的原生池 provider 为 `"onnxruntime"`，句柄仅在本次同步调用期间有效。
 
 `RowParallel.h` 只计算调度提示，不执行任务、不持有线程池：
 
@@ -704,23 +687,19 @@ dtype、rank、layout、shape/stride 指针及已绑定、可写标志，与 TF 
 
 ### 9.5 线程服务与 MLAS
 
-kernel 通过 `context.getThreadPool()` 获取借用句柄，使用 `Shard` 或 `parallelFor`。
-ORT 适配层继续负责成本估计、最大并行度、原生 operator pool 与公开 API 调度，嵌套区域串行。
-较小的 maxParallelism 也必须遵守；服务同步返回并传播失败。
-
-为复用 MLAS，在 `AnncRuntimeServices` 尾部追加可选 C 回调 `native_thread_pool`。
-读取前用 `ANNC_RUNTIME_SERVICES_NATIVE_POOL_SIZE` 检查尺寸；旧 runtime 缺字段时返回 null，
-context ABI version 仍为 3。2026-10-26 检视后，必需前缀包含
-`parallel_for` 和 `num_threads`，宿主与 kernel 需配套重编译。调用方式：
+kernel 通过 `context.getThreadPool()` 获取借用的 `AnncThreadPool*`，指向现有 ORT
+适配器。限并行度与成本经 `ParallelForOptions` 进入虚函数，任务同步完成；公共
+Context helper 处理嵌套串行、工作线程异常和执行状态。
 
 ```cpp
-void* pool = context.getThreadPool().nativePool("onnxruntime");
+auto* pool = context.getThreadPool();
+void* native = pool ? pool->native_pool("onnxruntime") : nullptr;
 ```
 
-未知 provider、不可用或版本不匹配返回 null。只有 ONNX kernel 与 ORT 适配层理解该原生句柄，
-通用层不依赖 ORT，不传递 ANNC C++ 线程池虚表。FTDMM/BMM 在 MLAS 已启用且句柄非空时
-沿用 MLAS 路径，否则使用原有计算路径。原生布局与链接归档仍须来自匹配的宿主 ORT 构建；
-provider 字符串和版本字符串本身不能证明私有 ABI 兼容。TF 的可选回调保持为空。
+ORT 只对匹配的 provider 返回经过版本检查的原生 operator pool；未知 provider、
+不可用或版本不匹配返回空指针。FTDMM/BMM 在 MLAS 已启用且句柄非空时沿用 MLAS
+路径，否则使用原有计算路径。TF 使用默认空实现。Context 与服务结构共用版本号 3，入口仍为 v3；
+此处指针指向 C++ `AnncThreadPool` 对象，宿主与 kernel 必须配套构建。
 
 通用服务表不包含 `packed_b`。`ANNC_EP_PACKED_B` 在会话初始化时控制可选准备：
 Compile 按准确的输入名称、f32 rank/shape、constant initializer 属性与字节数构造

@@ -82,9 +82,11 @@ def main():
         objects = compile_entries(args, root, build) if args.annc_asm else []
         library = build / "libcontext_kernels.so"
         driver = build / "context_kernels"
-        subprocess.run(common + ["-shared", "-fPIC"] + wrappers + objects +
+        pool_sources = [str(root / "context/lib/ThreadPool.cpp"),
+                        str(root / "context/lib/Parallel.cpp")]
+        subprocess.run(common + ["-shared", "-fPIC"] + wrappers + objects + pool_sources +
                        ["-o", str(library)], check=True)
-        command = common + [str(root / "tests/unit/kernels/kernel_context_driver.cpp"),
+        command = common + pool_sources + [str(root / "tests/unit/kernels/kernel_context_driver.cpp"),
                             "-o", str(driver)]
         if os.uname().sysname != "Darwin":
             command += ["-ldl"]
