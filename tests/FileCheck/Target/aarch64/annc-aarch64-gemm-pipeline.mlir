@@ -10,7 +10,7 @@
 // RUN: env ANNC_GEMM=2 annc-opt %t.dir/neon-vecmat-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.neon-vecmat.mlir
 // RUN: env ANNC_GEMM=2 annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
 // RUN: env ANNC_GEMM=2 annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
-// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
 // Euler dev selects direct/packed/prepacked from the target plan; the legacy
 // ANNC_GEMM_RHS_PACKING override is intentionally not part of this contract.
 // RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
@@ -560,12 +560,9 @@ func.func @main(
 
 //--- threaded-epilogue.mlir
 
-// The thread planner must keep the ordinary dispatcher ABI unchanged while
-// transporting binary epilogue inputs through the epilogue-aware task ABI.
+// hip12 keeps this GEMM serial despite the four-thread budget, while still
+// generating the fused epilogue kernel.
 // THREAD-EPILOGUE-LABEL: func.func @threaded_add_relu(
-// THREAD-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
-// THREAD-EPILOGUE: func.func private @__annc_gemm_thread_task_
-// THREAD-EPILOGUE-SAME: memref<*xf32>
 // THREAD-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
 // THREAD-EPILOGUE-NOT: arith.addf
 func.func @threaded_add_relu(
