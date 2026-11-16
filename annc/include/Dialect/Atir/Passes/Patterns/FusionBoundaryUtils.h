@@ -3,6 +3,7 @@
 
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
@@ -15,11 +16,16 @@ class MatMulOp;
 class AddOp;
 class ReluOp;
 
+// extraFused: ops behaving as fused though unlisted (container region
+// bodies); must cover the whole scanned body. Here it only suppresses false
+// boundaries — free-variable collection lands with its first consumer.
 llvm::SmallVector<mlir::Value> collectEscapingResults(
-    llvm::ArrayRef<mlir::Operation *> fusedOps);
+    llvm::ArrayRef<mlir::Operation *> fusedOps,
+    const llvm::SmallDenseSet<mlir::Operation *> *extraFused = nullptr);
 
 llvm::SmallVector<mlir::Value> collectBoundaryInputs(
-    llvm::ArrayRef<mlir::Operation *> fusedOps);
+    llvm::ArrayRef<mlir::Operation *> fusedOps,
+    const llvm::SmallDenseSet<mlir::Operation *> *extraFused = nullptr);
 
 // Returns the bias operand of `add` when it feeds from `matmul` with a
 // rank-1 tensor bias (the builtin kernels take AnncMemRef1DF32), otherwise
