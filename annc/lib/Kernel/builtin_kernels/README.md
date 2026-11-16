@@ -83,10 +83,11 @@ AnncStatusCode matmul_example_impl(annc::kernels::KernelContext& context) {
 | 临时空间 | `allocateTemp<T, Rank>(dims, &view)`：检查返回码，空间仅在本次同步调用有效 |
 | 整数属性 | `getI64Attr(index)`：返回 optional，使用前检查；编译器及宿主通过 context_i64_attrs 传递 |
 | 实例资源 | `getResource(type, version, bytes)`：按资源协议读取借用的只读 payload；可选资源缺失时按该特性的约定处理 |
-| 线程调度 | `getThreadPool()` 取得借用句柄，使用 workers.parallelFor；或引入 Context/RowParallel.h 后调用 Shard(maxParallelism, workers, total, costPerUnit, fn)，cost 为每单位工作成本估计 |
+| 线程调度 | `getKernelThreadPool()` 取得借用包装，使用 workers.parallelFor 或 Shard(maxParallelism, workers, total, costPerUnit, fn)，保留 Context 错误处理，cost 为每单位工作成本估计 |
+| 线程池指针 | `getThreadPool()` 直接返回 services 中借用的 `AnncThreadPool*`，可用 `pool->num_threads()` 查询；使用前检查空指针，直接调度时由调用方负责异常和错误处理 |
 | 错误传播 | `error(code, message)` 记录错误，`status()` 查询宿主状态；调度等接口返回的失败码也须向上传播 |
 
-输出应通过分配 helper 绑定到对应槽位，不能替换宿主返回的数据或形状指针。线程调度同步完成；parallel_for/num_threads 是必需服务，串行宿主提供串行实现。可选 shard 服务缺失时 Shard 串行执行。kernel 不创建备用线程池，不保存超出调用生命周期的 Context、临时空间或线程池句柄。
+输出应通过分配 helper 绑定到对应槽位，不能替换宿主返回的数据或形状指针。线程调度同步完成；`getThreadPool()` 直接返回服务表中的 `AnncThreadPool*`，可为空。`getKernelThreadPool()` 返回使用同一线程池的 `KernelThreadPool` 包装，负责调度错误处理，空池串行执行。`Shard` 将上限和成本放入 `ParallelForOptions`，公共 helper 记录任务异常；kernel 不创建工作线程，不保存超出调用生命周期的 Context、临时空间或线程池对象。沿用 V3 版本号，宿主与 kernel 需使用匹配的 C++ ABI 配套构建。
 
 ## 4. 声明并注册 kernel
 

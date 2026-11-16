@@ -1109,7 +1109,8 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
 
   if (abi_ == ANNC_CONTEXT_ABI_NAME) {
     auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
-    execute_status = ExecuteContextV3Kernel(context, kernel_function);
+    execute_status = ExecuteContextV3Kernel(
+        context, kernel_function, jit_mode, adapter.get());
     if (profile_enabled) {
       profile_sample.kernel_us = ElapsedUs(t_kernel_start);
     }

@@ -67,8 +67,9 @@ class ANNCFusedOp : public OpKernel {
                                  bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample,
                                  const AnncJitBinding* binding = nullptr);
-  Status ExecuteContextV3Kernel(OpKernelContext* context,
-                                void* kernel_function);
+  Status ExecuteContextV3Kernel(
+      OpKernelContext* context, void* kernel_function, bool jit_mode,
+      annc::threadpool::AnncThreadPool* thread_pool);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;

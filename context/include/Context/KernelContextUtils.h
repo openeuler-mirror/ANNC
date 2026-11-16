@@ -12,8 +12,23 @@
 #include <utility>
 
 #include "Context/KernelContext.h"
+#include "Context/Parallel.h"
+#include "Context/ThreadPool.h"
 
 namespace annc::kernels {
+
+// The caller must select the loaded entry's actual return convention.
+// Exceptions propagate to the host, which checks reported errors and outputs.
+inline AnncStatusCode callContextKernel(void* function,
+                                       AnncKernelContext* context,
+                                       bool returnsVoid) {
+  if (!function || !context) return ANNC_STATUS_INVALID_ARGUMENT;
+  if (returnsVoid) {
+    reinterpret_cast<void (*)(AnncKernelContext*)>(function)(context);
+    return ANNC_STATUS_OK;
+  }
+  return reinterpret_cast<AnncKernelFn>(function)(context);
+}
 
 inline bool validContext(const AnncKernelContext* context) {
   if (!context || context->struct_size < ANNC_CONTEXT_BASE_SIZE ||
@@ -24,7 +39,6 @@ inline bool validContext(const AnncKernelContext* context) {
          services->abi_version == ANNC_CONTEXT_ABI_VERSION &&
          services->allocate_output && services->allocate_temp &&
          services->report_error && services->get_status &&
-         services->parallel_for && services->num_threads &&
          (!context->num_inputs || context->inputs) &&
          (!context->num_outputs || context->outputs) &&
          (!context->num_attrs || context->attrs) &&
@@ -188,7 +202,11 @@ class KernelContext {
     return nullptr;
   }
 
-  KernelThreadPool getThreadPool() const;
+  annc::threadpool::AnncThreadPool* getThreadPool() const {
+    return context_->services->thread_pool;
+  }
+
+  KernelThreadPool getKernelThreadPool() const;
 
   // Dimensions are borrowed only for the synchronous allocation callback.
   // The runtime owns the returned view's shape, strides and storage.
@@ -287,82 +305,69 @@ class KernelContext {
 // The context must remain alive until all synchronous calls return.
 class KernelThreadPool {
  public:
+  explicit KernelThreadPool(const KernelContext& context) : context_(context) {}
+
   void* nativePool(const char* provider) const {
-    if (services_->struct_size < ANNC_RUNTIME_SERVICES_NATIVE_POOL_SIZE ||
-        !services_->native_thread_pool)
-      return nullptr;
-    return services_->native_thread_pool(services_->opaque, provider);
+    auto* pool = context_.getThreadPool();
+    return pool ? pool->native_pool(provider) : nullptr;
   }
 
   int32_t numThreads() const {
-    const int32_t count = services_->num_threads(services_->opaque);
-    return count > 0 ? count : 1;
+    return annc::threadpool::num_threads(context_.getThreadPool());
   }
 
   template <typename Task>
   AnncStatusCode parallelFor(int64_t total, Task&& task) const {
-    return run(total, 0, 0, std::forward<Task>(task));
+    return run(total, {}, std::forward<Task>(task));
   }
 
   template <typename Task>
   AnncStatusCode shard(int32_t maxParallelism, int64_t total,
                        int64_t costPerUnit, Task&& task) const {
-    if (maxParallelism < 1 || costPerUnit < 0)
-      return context_.error(ANNC_STATUS_INVALID_ARGUMENT,
-                            "invalid shard scheduling options");
-    return run(total, maxParallelism, costPerUnit, std::forward<Task>(task));
+    annc::threadpool::ParallelForOptions options;
+    options.max_parallelism = maxParallelism;
+    options.cost_per_unit = costPerUnit;
+    return run(total, options, std::forward<Task>(task));
   }
 
  private:
-  friend class KernelContext;
-  KernelThreadPool(const KernelContext& context,
-                   const AnncRuntimeServices* services)
-      : context_(context), services_(services) {}
-
   template <typename Task>
-  AnncStatusCode run(int64_t total, int32_t maxParallelism, int64_t costPerUnit,
+  AnncStatusCode run(int64_t total,
+                     const annc::threadpool::ParallelForOptions& options,
                      Task&& task) const {
-    if (total < 0)
-      return context_.error(ANNC_STATUS_INVALID_ARGUMENT, "negative work size");
     if (context_.status() != ANNC_STATUS_OK) return context_.status();
-    if (total == 0) return context_.status();
-    auto callback = [](void* opaque, int64_t first, int64_t last) {
-      (*static_cast<typename std::remove_reference<Task>::type*>(opaque))(first,
-                                                                          last);
-    };
-    AnncStatusCode code;
-    if (maxParallelism == 1) {
-      task(0, total);
-      return context_.status();
-    }
-    if (maxParallelism > 0 &&
-        services_->struct_size >= ANNC_RUNTIME_SERVICES_SHARD_SIZE &&
-        services_->shard) {
-      code = services_->shard(
-          services_->opaque, maxParallelism, total, costPerUnit, callback,
-          const_cast<void*>(static_cast<const void*>(&task)));
-    } else {
-      if (maxParallelism > 0) {
-        // Older runtimes cannot honor a parallelism limit; run serially.
-        task(0, total);
-        return context_.status();
+    if (total < 0 || options.cost_per_unit.value_or(0) < 0 ||
+        options.grain_size.value_or(0) < 0 ||
+        options.max_parallelism.value_or(1) < 1)
+      return context_.error(ANNC_STATUS_INVALID_ARGUMENT,
+                            "invalid parallel request");
+    if (!total) return context_.status();
+    auto invoke = [&](int64_t first, int64_t last) {
+      try {
+        task(first, last);
+      } catch (const std::bad_alloc&) {
+        context_.error(ANNC_STATUS_ALLOCATION_FAILED,
+                       "parallel task allocation failed");
+      } catch (...) {
+        context_.error(ANNC_STATUS_INTERNAL,
+                       "parallel task raised an exception");
       }
-      code = services_->parallel_for(
-          services_->opaque, total, 0, callback,
-          const_cast<void*>(static_cast<const void*>(&task)));
+    };
+    try {
+      annc::threadpool::parallel_for(context_.getThreadPool(), total, options,
+                                     invoke);
+    } catch (const std::bad_alloc&) {
+      return context_.error(ANNC_STATUS_ALLOCATION_FAILED,
+                            "parallel dispatch allocation failed");
+    } catch (...) {
+      return context_.error(ANNC_STATUS_INTERNAL,
+                            "parallel dispatch raised an exception");
     }
-    if (code != ANNC_STATUS_OK)
-      return context_.error(code, "parallel execution failed");
     return context_.status();
   }
 
   KernelContext context_;
-  const AnncRuntimeServices* services_;
 };
-
-inline KernelThreadPool KernelContext::getThreadPool() const {
-  return KernelThreadPool(*this, context_->services);
-}
 
 // Same scheduling inputs as TensorFlow Shard, with a framework-neutral handle.
 template <typename Task>
@@ -370,6 +375,10 @@ AnncStatusCode Shard(int32_t maxParallelism, const KernelThreadPool& workers,
                      int64_t total, int64_t costPerUnit, Task&& task) {
   return workers.shard(maxParallelism, total, costPerUnit,
                        std::forward<Task>(task));
+}
+
+inline KernelThreadPool KernelContext::getKernelThreadPool() const {
+  return KernelThreadPool(*this);
 }
 
 template <typename Implementation>

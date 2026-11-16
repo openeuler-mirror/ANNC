@@ -248,12 +248,12 @@
 
 ## ADR-022：Kernel Context 与统一 Runtime ABI
 
-状态：**手写 builtin 迁移已实现；整体统一 ABI 仍为 proposed**，更新 2026-10-24。详细边界见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。
+状态：**手写 builtin 迁移已实现；整体统一 ABI 仍为 proposed**，更新 2026-11-11。详细边界见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。
 
 | 项目 | 内容 |
 | --- | --- |
 | **决策** | 新产物使用版本化 `annc_context_v3`，kernel 与融合函数外部入口统一为 `AnncStatusCode (*)(AnncKernelContext*)`。Context 包含借用的 tensor view、typed attrs 和 C 服务表；输出预绑定与执行时分配属于同一 slot 协议。复用现有 registry/backend 选择、分配实现、线程池和公共 lowering，在临近 LLVM 调用时封装 payload。 |
-| **线程池调用** | kernel 使用 `context.getThreadPool()` 获取借用句柄，以 `Shard(maxParallelism, workers, total, costPerUnit, work)` 分片。服务表追加可选 C `shard` 回调并逐字段检查 `struct_size`；旧服务表缺少 shard 时串行回退。 |
+| **线程池调用** | 服务结构用 `AnncThreadPool*` 替换四个调度回调，复用原有虚函数接口。kernel 通过 `getThreadPool()` 获取 services 中的借用指针；`getKernelThreadPool()` 返回使用同一线程池的 `KernelThreadPool` 包装；分片沿用 `Shard(maxParallelism, workers, total, costPerUnit, work)`，包装调用线程池虚函数并处理 Context 错误与任务异常。空池不查询 TLS；生成式代码的旧 TLS 路径暂时保留，显式 Context 获取仍待迁移。Context 和服务结构继续共用版本号 3，入口名仍为 v3；版本号不区分本次布局变更。宿主与 kernel 必须匹配 C++ ABI 并配套重编译。 |
 | **后果** | 调用签名、动态输出和错误契约统一，输入数量不再受旧参数 switch 限制；需要协调 schema、fusion、lowering、运行时和测试迁移，并验证 C/LLVM 布局与生命周期。 |
 
 <a id="adr-023"></a>

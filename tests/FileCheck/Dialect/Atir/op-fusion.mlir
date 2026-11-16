@@ -60,8 +60,10 @@ func.func @main(
 // CHECK-SAME: !atir.tensor<3x4xf32, name = "rhs:0">,
 // CHECK-SAME: !atir.tensor<4xf32, name = "bias:0">)
 // CHECK-SAME: -> (!atir.tensor<2x4xf32, name = "bias_add:0">, !atir.tensor<2x4xf32, name = "relu:0">)
-// CHECK: fusion.metadata = {
+// CHECK: annc.execution_mode = "aot"
+// CHECK-SAME: fusion.metadata = {
 // CHECK-SAME: abi = "annc_context_v3"
+// CHECK-SAME: execution_mode = "aot"
 // CHECK-SAME: kernel_arg_order = []
 // CHECK-SAME: tf_name = "bias_add:0"
 // CHECK-SAME: tf_name = "relu:0"

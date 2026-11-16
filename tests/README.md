@@ -85,6 +85,8 @@ bash tests/FileCheck/run.sh
 - `integration/onnx2atir/` 需要 Python `onnx` 包与已构建的 `annc-onnx2atir`；
   缺任一条件时模块整体 skip。
 - TF SDK 配置测试使用模拟 SDK，检查 CMake 为插件选择的头文件、库和编译参数。
+  `tf_threadpool_sdk_limit` 仅在 TF1.15 linked 构建注册，使用真实的 4 线程 TF 池
+  验证 1/2 线程上限及其相对固定块选项的优先级；preload 构建不注册该原生宿主用例。
   TF1.15 宿主测试在 AArch64 上加载真实插件。preload 模式使用所选 SDK 的 Python，
   linked 模式使用链接到 SDK 两个库的 C++ Session。两种模式执行同一张图，
   将 `ANNCFused` 输出与原生 `Add` 逐元素比较。

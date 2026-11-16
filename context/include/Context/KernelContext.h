@@ -7,6 +7,11 @@
 #include "Context/StringRef.h"
 
 #ifdef __cplusplus
+namespace annc {
+namespace threadpool {
+class AnncThreadPool;
+}
+}
 extern "C" {
 #endif
 
@@ -98,26 +103,6 @@ typedef AnncStatusCode (*AnncContextAllocateTemp)(void* opaque,
 typedef void (*AnncContextReportError)(void* opaque, AnncStatusCode status,
                                        const char* message);
 typedef AnncStatusCode (*AnncContextGetStatus)(void* opaque);
-typedef void (*AnncContextTask)(void* task, int64_t begin, int64_t end);
-// Synchronous: all task invocations finish before this callback returns.
-typedef AnncStatusCode (*AnncContextParallelFor)(void* opaque, int64_t total,
-                                                 int64_t grain_size,
-                                                 AnncContextTask callback,
-                                                 void* task);
-typedef int32_t (*AnncContextNumThreads)(void* opaque);
-// Optional synchronous sharding service. max_parallelism >= 1, total >= 0,
-// cost_per_unit >= 0; all task invocations finish before returning.
-typedef AnncStatusCode (*AnncContextShard)(void* opaque,
-                                           int32_t max_parallelism,
-                                           int64_t total, int64_t cost_per_unit,
-                                           AnncContextTask callback,
-                                           void* task);
-
-// Optional host-native interoperability. The provider tag identifies the
-// library ABI; an unknown tag or unavailable/version-incompatible pool yields
-// null. The borrowed handle is valid only during this synchronous kernel call.
-typedef void* (*AnncContextNativeThreadPool)(void* opaque, const char* provider);
-
 typedef struct {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -126,26 +111,19 @@ typedef struct {
   AnncContextAllocateTemp allocate_temp;
   AnncContextReportError report_error;
   AnncContextGetStatus get_status;
-  AnncContextParallelFor parallel_for;
-  AnncContextNumThreads num_threads;
-  AnncContextShard shard;
-  AnncContextNativeThreadPool native_thread_pool;
+  // Borrowed for the synchronous call; null selects serial execution. This
+  // points to an AnncThreadPool adapter, never to a framework-native pool.
+  // Host and kernel must share the C++ interface/toolchain ABI.
+#ifdef __cplusplus
+  annc::threadpool::AnncThreadPool* thread_pool;
+#else
+  void* thread_pool;
+#endif
 } AnncRuntimeServices;
 
-// Allocation, error, and scheduling callbacks form the required prefix.
-// Optional services may be read only when struct_size covers the complete
-// field.
-#define ANNC_RUNTIME_SERVICES_BASE_SIZE                   \
-  ((uint32_t)(offsetof(AnncRuntimeServices, num_threads) + \
-              sizeof(((AnncRuntimeServices*)0)->num_threads)))
-
-#define ANNC_RUNTIME_SERVICES_SHARD_SIZE             \
-  ((uint32_t)(offsetof(AnncRuntimeServices, shard) + \
-              sizeof(((AnncRuntimeServices*)0)->shard)))
-
-#define ANNC_RUNTIME_SERVICES_NATIVE_POOL_SIZE \
-  ((uint32_t)(offsetof(AnncRuntimeServices, native_thread_pool) + \
-              sizeof(((AnncRuntimeServices*)0)->native_thread_pool)))
+#define ANNC_RUNTIME_SERVICES_BASE_SIZE                    \
+  ((uint32_t)(offsetof(AnncRuntimeServices, thread_pool) + \
+              sizeof(((AnncRuntimeServices*)0)->thread_pool)))
 
 // LLVM mirror: annc/lib/Conversion/Common/ContextInputOverrides.cpp (contextType).
 // Changes to field types/order or packing/alignment require updating the
@@ -170,6 +148,22 @@ typedef struct {
   ((uint32_t)(offsetof(AnncKernelContext, services) + \
               sizeof(((AnncKernelContext*)0)->services)))
 typedef AnncStatusCode (*AnncKernelFn)(AnncKernelContext* context);
+
+// Export a standard ranked memref descriptor (native 64-bit pointers/index).
+// Descriptors borrow tensor data and live in host allocate_temp storage until
+// this synchronous execution ends. Each call allocates a new descriptor;
+// sizes/strides are copied inline, tensor elements are never copied.
+// Failure returns null and records a context error when the context is valid.
+const void* annc_context_get_input_memref(
+    const AnncKernelContext* context, uint32_t input_index);
+
+// The host must initialize outputs[output_index].element_type before calling
+// the kernel, even for an unbound output. Reuses a matching writable bound
+// output or allocates/binds one through allocate_output. The caller may write
+// tensor elements through the descriptor, but must not modify its metadata.
+void* annc_context_alloc_output_memref(
+    AnncKernelContext* context, uint32_t output_index, uint32_t rank,
+    const int64_t* dims);
 
 #ifdef __cplusplus
 }

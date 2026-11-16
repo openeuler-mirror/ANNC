@@ -78,9 +78,11 @@ typedef struct {
   int (*in_parallel_region)(void*);
   // All tasks finish before returning. Return zero on success. block_size == 0
   // selects cost-based scheduling; a positive value selects fixed blocks.
+  // A positive max_parallelism takes precedence over block_size; zero leaves
+  // scheduling unrestricted by the caller.
   int (*parallel_for)(void*, int64_t total, int64_t block_size,
-                      int64_t cost_per_unit, AnncThreadPoolTask task,
-                      void* task_context);
+                      int64_t cost_per_unit, int max_parallelism,
+                      AnncThreadPoolTask task, void* task_context);
 } AnncThreadPoolCallbacks;
 
 // Copies the callbacks, but borrows context. Null means invalid callbacks or
