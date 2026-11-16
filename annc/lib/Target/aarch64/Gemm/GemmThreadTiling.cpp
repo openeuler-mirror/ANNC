@@ -2,6 +2,7 @@
 
 #include "GemmPlan.h"
 #include "GemmTilingUtils.h"
+#include "Support/ContextABISwitch.h"
 #include "Target/aarch64/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -18,12 +19,20 @@ constexpr llvm::StringLiteral kGemmParallelFor =
     "annc_threadpool_parallel_for_gemm";
 constexpr llvm::StringLiteral kGemmParallelForEpilogue =
     "annc_threadpool_parallel_for_gemm_epilogue";
+constexpr llvm::StringLiteral kContextGemmParallelFor =
+    "annc_context_parallel_for_gemm";
+constexpr llvm::StringLiteral kContextGemmParallelForEpilogue =
+    "annc_context_parallel_for_gemm_epilogue";
 
 func::FuncOp getOrCreateGemmParallelForDeclaration(ModuleOp module,
                                                    FunctionType taskType,
-                                                   bool withEpilogueInputs) {
+                                                   bool withEpilogueInputs,
+                                                   bool withContext) {
   StringRef name =
-      withEpilogueInputs ? kGemmParallelForEpilogue : kGemmParallelFor;
+      withContext
+          ? (withEpilogueInputs ? kContextGemmParallelForEpilogue
+                                : kContextGemmParallelFor)
+          : (withEpilogueInputs ? kGemmParallelForEpilogue : kGemmParallelFor);
   if (auto declaration = module.lookupSymbol<func::FuncOp>(name))
     return declaration;
 
@@ -34,6 +43,9 @@ func::FuncOp getOrCreateGemmParallelForDeclaration(ModuleOp module,
       {ShapedType::kDynamic, ShapedType::kDynamic}, builder.getF32Type());
   SmallVector<Type> inputs = {i64, taskType, dynamicF32MemRef, dynamicF32MemRef,
                               dynamicF32MemRef};
+  if (withContext)
+    inputs.insert(inputs.begin(),
+                  LLVM::LLVMPointerType::get(module.getContext()));
   if (withEpilogueInputs) {
     Type unrankedF32MemRef = UnrankedMemRefType::get(builder.getF32Type(), 0);
     inputs.append(aarch64::gemm::kEpilogueArgsPointerSlots,
@@ -246,6 +258,16 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
   }
 
   ModuleOp module = gemm->getParentOfType<ModuleOp>();
+  const bool withContext = annc::loweringContextABIEnabled();
+  Value context;
+  if (withContext) {
+    auto function = gemm->getParentOfType<func::FuncOp>();
+    if (!function || function.getNumArguments() != 1 ||
+        !isa<LLVM::LLVMPointerType>(function.getArgument(0).getType()))
+      return gemm->emitOpError(
+          "context GEMM dispatch requires one context pointer argument");
+    context = function.getArgument(0);
+  }
   OpBuilder builder(gemm);
   Location loc = gemm->getLoc();
   Type i64 = builder.getI64Type();
@@ -265,9 +287,8 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
   func::FuncOp task;
   if (failed(createThreadTask(module, gemm, *problem, *candidate, taskType, task)))
     return failure();
-  func::FuncOp dispatcher =
-      getOrCreateGemmParallelForDeclaration(module, taskType,
-                                             withEpilogueInputs);
+  func::FuncOp dispatcher = getOrCreateGemmParallelForDeclaration(
+      module, taskType, withEpilogueInputs, withContext);
 
   OperationState state(loc, func::ConstantOp::getOperationName());
   state.addTypes(taskType);
@@ -281,6 +302,7 @@ LogicalResult materializeThreadTiling(Operation *gemm) {
   Value rhs = builder.create<memref::CastOp>(
       loc, dynamicF32MemRef, aarch64::gemm::getGemmInput(gemm, 1));
   SmallVector<Value> callOperands = {workCount, taskReference, lhs, rhs};
+  if (withContext) callOperands.insert(callOperands.begin(), context);
   Value out = builder.create<memref::CastOp>(
       loc, dynamicF32MemRef, aarch64::gemm::getGemmOutput(gemm, 0));
   callOperands.push_back(out);

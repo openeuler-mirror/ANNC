@@ -2,7 +2,9 @@
 
 #include <array>
 #include <cstdint>
+#include <exception>
 
+#include "Context/KernelContextUtils.h"
 #include "Context/Parallel.h"
 
 namespace {
@@ -111,6 +113,55 @@ extern "C" void _mlir_ciface_annc_threadpool_parallel_for_gemm_epilogue(
   annc::threadpool::parallel_for(
       annc::threadpool::getCurrentThreadPool(), total, options,
       [&context](std::int64_t begin, std::int64_t end) {
+        runGemmEpilogueTasks(context, begin, end);
+      });
+}
+
+extern "C" void _mlir_ciface_annc_context_parallel_for_gemm(
+    AnncKernelContext* kernelContext, std::int64_t total,
+    AnncAArch64GemmTask task, const AnncMemRef2DF32* lhs,
+    const AnncMemRef2DF32* rhs, const AnncMemRef2DF32* out) {
+  if (!kernelContext || !kernelContext->services || !task || !lhs || !rhs ||
+      !out)
+    return;
+  const GemmDispatchContext context{task, *lhs, *rhs, *out};
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = 1;
+  annc::threadpool::parallel_for(
+      annc::kernels::KernelContext(kernelContext).getThreadPool(), total,
+      options, [&context](std::int64_t begin, std::int64_t end) {
+        runGemmTasks(context, begin, end);
+      });
+}
+
+extern "C" void _mlir_ciface_annc_context_parallel_for_gemm_epilogue(
+    AnncKernelContext* kernelContext, std::int64_t total,
+    AnncAArch64GemmEpilogueTask task, const AnncMemRef2DF32* lhs,
+    const AnncMemRef2DF32* rhs, const AnncMemRef2DF32* out,
+    const AnncUnrankedMemRefF32* epilogue0,
+    const AnncUnrankedMemRefF32* epilogue1,
+    const AnncUnrankedMemRefF32* epilogue2,
+    const AnncUnrankedMemRefF32* epilogue3,
+    const AnncUnrankedMemRefF32* epilogue4,
+    const AnncUnrankedMemRefF32* epilogue5,
+    const AnncUnrankedMemRefF32* epilogue6,
+    const AnncUnrankedMemRefF32* epilogue7) {
+  if (!kernelContext || !kernelContext->services || !task || !lhs || !rhs ||
+      !out || !epilogue0 || !epilogue1 || !epilogue2 || !epilogue3 ||
+      !epilogue4 || !epilogue5 || !epilogue6 || !epilogue7)
+    return;
+  const GemmEpilogueDispatchContext context{
+      task,
+      *lhs,
+      *rhs,
+      *out,
+      {*epilogue0, *epilogue1, *epilogue2, *epilogue3, *epilogue4, *epilogue5,
+       *epilogue6, *epilogue7}};
+  annc::threadpool::ParallelForOptions options;
+  options.grain_size = 1;
+  annc::threadpool::parallel_for(
+      annc::kernels::KernelContext(kernelContext).getThreadPool(), total,
+      options, [&context](std::int64_t begin, std::int64_t end) {
         runGemmEpilogueTasks(context, begin, end);
       });
 }

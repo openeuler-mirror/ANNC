@@ -9,6 +9,8 @@ namespace atir {
 void lowerCustomizeOpToFuncCall(mlir::PatternRewriter &rewriter,
                                 atir::CustomizeOpAdaptor adaptor,
                                 atir::CustomizeOp op);
+mlir::LogicalResult lowerCustomizeOpToContextCall(
+    mlir::PatternRewriter &rewriter, atir::CustomizeOp op);
 
 } // namespace atir
 

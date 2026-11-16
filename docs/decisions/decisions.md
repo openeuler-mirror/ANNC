@@ -270,3 +270,16 @@
 | **备选方案** | 与项目工具链混编（ABI 不可行）；宿主源码树自建 TF C++ SDK（成本远超收益，且 odml passes 需要 wheel 的完整符号面）；vendored 头整体入库（体积与漂移成本高，仅保留 1 个生成头为构建资产）。 |
 | **后果** | ✅ 前端与 v1/V2 其余组件解耦，默认构建零影响；✅ host 侧可用官方 llvm-project 源复现。❌ 构建需可 `import tensorflow` 的 2.20 wheel（配置期强门禁）；❌ 前端工具不可用项目 GTest/工具链调试设施；❌ llvm 头来源依赖网络或本地预置（FATAL 信息含三条出路）。 |
 | **详细设计** | [frontend-transform.md](../design/tf-stablehlo-frontend/frontend-transform.md) |
+
+<a id="adr-024"></a>
+
+## ADR-024：Context 融合函数的手写 Customize 与 codegen 路线互斥
+
+状态：**accepted（既有架构变更追记）**；本条记录当前调用边界，不追认变更发生时间或引入提交。
+
+| 项目 | 内容 |
+| --- | --- |
+| **历史背景** | 早期逐算子 Customize pattern 可以只替换融合函数体中的部分算子，与其他 codegen 计算共存；当前 Context 调用约定下，该组合已不属于同一导出函数的执行模型。原架构文档未明确记录这一变化，故在此补记。 |
+| **当前边界** | 一个融合函数由手写 Customize kernel 接管完整区域，或由 codegen 执行完整区域；两条路线在同一导出函数内互斥。Context 的输入、输出槽位按整个融合函数边界编号，不提供内部子算子的局部槽位映射。 |
+| **调用协议** | 手写 Customize 路线将 kernel 返回的 i32 status 用作融合函数返回值；普通 codegen 路线把计算结果绑定到 Context 输出槽位，函数返回 void。部分替换的 Customize 调用不能直接借用整个融合函数的槽位与返回协议。 |
+| **实现现状** | 后端 Customize lowering 校验其结果直接流向函数 return；尚未另行校验函数体是否完全由 Customize 接管。`ANNC_ENABLE_LOWERING_CONTEXT_ABI` 是后续增量实现的临时开关，不是函数级互斥架构的来源。 |

@@ -16,6 +16,7 @@ namespace atir {
 
 std::unique_ptr<mlir::Pass> createConvertAtirToLinalg();
 std::unique_ptr<mlir::Pass> createLowerContextKernelEntriesPass();
+std::unique_ptr<mlir::Pass> createConvertContextKernelABIPass();
 
 #define GEN_PASS_REGISTRATION
 #define GEN_PASS_CLASSES
