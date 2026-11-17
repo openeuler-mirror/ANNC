@@ -280,7 +280,9 @@ flowchart TB
 [pb2stablehlo 前端](../design/tf-stablehlo-frontend/frontend-transform.md)
 转为 stablehlo 主图 + 残差载体（`annc.residue` / `stablehlo.custom_call`），
 再由 [residue-sink](../design/tf-stablehlo-frontend/sink-layer.md) 落到 ATIR
-混合 IR，供 V2 融合与下游 lowering 使用。该路线的前端在独立的 wheel 构建域
+混合 IR，供 V2 融合与下游 lowering 使用。V2 融合由 `annc-opt`
+的 `-atir-op-fusion-v2` 执行：pattern 匹配后把站点切出为 kernel 函数
+（`fusion.metadata` 契约与 V1 对齐），主图以 call 回接。该路线的前端在独立的 wheel 构建域
 （TF 2.20 wheel 的 vendored MLIR/LLVM，隔离决策见
 [ADR-023](../decisions/decisions.md#adr-023)），与 v1 工具链互不混链。
 
