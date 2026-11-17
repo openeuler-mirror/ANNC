@@ -1,5 +1,5 @@
 // RUN: annc-opt %s -atir-op-fusion-v2 | FileCheck %s --check-prefix=FUSE
-// RUN: annc-opt %s -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen | FileCheck %s --check-prefix=CODEGEN
+// RUN: annc-opt %s -atir-op-fusion-v2 | annc-asm - --annc-fast-codegen | FileCheck %s --check-prefix=CODEGEN
 //
 // op-fusion-v2 pattern: kp_gather over the static 1:N carrier (the second
 // carrier of the same pattern; complements the residue form in
