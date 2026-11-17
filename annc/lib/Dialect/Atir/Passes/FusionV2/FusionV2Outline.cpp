@@ -142,7 +142,7 @@ SmallVector<std::string> entryInputNames(func::FuncOp main) {
         entryInputs.push_back(stripAnchorSuffixes(str.getValue()));
   } else if (auto entry =
                  main->getAttrOfType<DictionaryAttr>("tf.entry_function")) {
-    if (auto inputs = entry.get("inputs").dyn_cast<StringAttr>()) {
+    if (auto inputs = dyn_cast<StringAttr>(entry.get("inputs"))) {
       SmallVector<StringRef, 8> parts;
       llvm::SplitString(inputs.getValue(), parts, ",");
       for (StringRef part : parts)

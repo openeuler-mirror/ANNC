@@ -36,13 +36,6 @@ int main(int argc, char **argv) {
   mlir::stablehlo::registerShapeLegalizeToStablehloPass();
   mlir::registerReconcileUnrealizedCastsPass();
 #endif
-#ifdef ANNC_ASM_ENABLE_SHAPE_LEGALIZE
-  // Register the upstream pass under its native option name. ANNC owns the
-  // pipeline boundary, while StableHLO owns the Shape-to-StableHLO rewrite.
-  mlir::stablehlo::registerShapeLegalizeToStablehloPass();
-  mlir::registerReconcileUnrealizedCastsPass();
-#endif
-
   DialectRegistry registry;
   registry.insert<
           mlir::func::FuncDialect,
