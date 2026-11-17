@@ -94,35 +94,6 @@ static bool isColumnFlatten(Operation *op, Value &src, Value &beginConst,
   return true;
 }
 
-// Picks the untagged indices slot: a same-shaped i32 1-D group value whose
-// users all sit inside the site (the rewrite is a no-op for main); static
-// lengths must agree with the input (avoids n-1 compare intermediates).
-static Value pickIndicesSlot(const UniqueLike &unique,
-                             ArrayRef<Operation *> siteOps, Value input) {
-  int64_t wantLen = -1;
-  if (auto ty = dyn_cast<RankedTensorType>(input.getType()))
-    if (ty.getRank() == 1 && !ty.isDynamicDim(0)) wantLen = ty.getDimSize(0);
-  Value best;
-  for (Operation *op : unique.members) {
-    for (Value r : op->getResults()) {
-      auto ty = dyn_cast<RankedTensorType>(r.getType());
-      if (!ty || ty.getRank() != 1 ||
-          !ty.getElementType().isSignlessInteger(32))
-        continue;
-      if (wantLen >= 0 && (ty.isDynamicDim(0) || ty.getDimSize(0) != wantLen))
-        continue;
-      bool inside = true;
-      for (Operation *u : r.getUsers())
-        if (!llvm::is_contained(siteOps, u)) {
-          inside = false;
-          break;
-        }
-      if (inside) best = r;
-    }
-  }
-  return best;
-}
-
 struct GatherMatch {
   UniqueLike outer;             // outer Unique (result-replacement target)
   UniqueLike unique;            // the fused Unique (anchor / inner)
@@ -141,6 +112,8 @@ struct GatherMatch {
 // Fail-closed kp_gather match: single (flatten) or double layer (inner
 // Unique, outer re-uniques idempotently); keys2d rank2 i64 needs dim1==1
 // unless a begin selects the column (static slice: col 0 + begin_source).
+// The indices slot takes only the anchor group's port-1 (annc.source_ports)
+// value - expansion intermediates are indistinguishable, so no tag = drop.
 LogicalResult matchKpGather(Operation *anchorOp, GatherMatch &m) {
   UniqueLike outer = UniqueLike::match(anchorOp);
   if (!outer) return failure();
@@ -216,7 +189,7 @@ LogicalResult matchKpGather(Operation *anchorOp, GatherMatch &m) {
     fused = inner;
     m.doubleLayer = true;
   }
-  const bool realIndices = static_cast<bool>(fused.indices);
+  const bool realIndices = static_cast<bool>(outer.indices);
   if (beginConst && !m.doubleLayer) {
     m.beginConst = beginConst;
     m.beginSourceName = beginSource;
@@ -262,6 +235,7 @@ LogicalResult matchKpGather(Operation *anchorOp, GatherMatch &m) {
     return failure();
 
   if (realIndices) {
+    fused.indices = outer.indices;
     if (!outer.indices) return failure();
     auto restore = soleUser(outer.indices);
     m.restore = GatherLike::match(restore);
@@ -269,11 +243,7 @@ LogicalResult matchKpGather(Operation *anchorOp, GatherMatch &m) {
         m.restore.indices() != outer.indices)
       return failure();
   } else {
-    SmallVector<Operation *, 16> siteOps(fused.members.begin(),
-                                         fused.members.end());
-    siteOps.push_back(m.gather.op);
-    fused.indices = pickIndicesSlot(fused, siteOps, fused.input);
-    if (!fused.indices) return failure();
+    return failure();
   }
   const int64_t resultWidths[] = {64, 32};
   Value fusedResults[] = {fused.values, fused.indices};
@@ -294,6 +264,8 @@ LogicalResult matchKpGather(Operation *anchorOp, GatherMatch &m) {
 // Site fusion body for the residue and 1:N forms; rewires roll back on
 // failure. ABI = (data, keys, begin) with a promoted or synthesized [0,0]
 // begin; double layer re-binds gather indices to the inner unique_values.
+// 1:N sites absorb the anchor group's cast/gte shell so the port-1 value
+// becomes an in-site output; main keeps only the restore gather.
 static LogicalResult fuseKpGather(Operation *anchorOp,
                                   PatternRewriter &rewriter,
                                   fusionv2::CallPortTable *portTable) {
@@ -366,6 +338,7 @@ static LogicalResult fuseKpGather(Operation *anchorOp,
 
   SmallPtrSet<Operation *, 16> memberSet(m.unique.members.begin(),
                                          m.unique.members.end());
+  memberSet.insert(m.outer.members.begin(), m.outer.members.end());
   memberSet.insert(m.gather.op);
   SmallVector<Operation *, 16> members;
   for (Operation &op : main.getBody().front().getOperations())
@@ -417,6 +390,7 @@ static LogicalResult fuseKpGather(Operation *anchorOp,
 
   SmallVector<Operation *, 16> tailOps(m.unique.members.begin(),
                                        m.unique.members.end());
+  tailOps.append(m.outer.members.begin(), m.outer.members.end());
   tailOps.push_back(m.gather.op);
   Value outputs[] = {m.uniqValues, m.uniqIndices, m.gatherOut};
   // DotGemmV2-style naming: anchor-derived hash is stable across runs in
