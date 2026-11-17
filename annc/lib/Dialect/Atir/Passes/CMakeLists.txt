@@ -13,11 +13,13 @@ if(ANNC_ENABLE_TF2ATIR_V2)
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/FusionV2Outline.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/KpGatherV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/DotGemmV2.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/ActionIdGatherV2.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/ActionIdGatherV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/DnnEmbeddingHashBucketV2.cpp)
 else()
   list(REMOVE_ITEM _srcs
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingGatherV2Rewrite.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingActionIdGatherV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpDnnEmbeddingHashBucketV2Rewrite.cpp)
 endif()
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherMatch.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherRewrite.cpp)
