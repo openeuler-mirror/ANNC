@@ -519,6 +519,9 @@ static void attachFusionMetadata(PatternRewriter &rewriter, func::FuncOp fn,
       rewriter.getNamedAttr("abi", rewriter.getStringAttr("annc_context_v3")),
       rewriter.getNamedAttr("args", rewriter.getArrayAttr(argAttrs)),
       rewriter.getNamedAttr("outputs", rewriter.getArrayAttr(outputAttrs)),
+      // No GEMM-style dynamic-dim marker here: real dynamic dims surface
+      // as -1 in the arg/output shapes; the field is read but not consumed
+      // by the host op and passed through verbatim by the converter.
       rewriter.getNamedAttr("dynamic_dims", rewriter.getI64ArrayAttr({})),
       rewriter.getNamedAttr("fallback_function",
                             rewriter.getStringAttr("original_subgraph")),
