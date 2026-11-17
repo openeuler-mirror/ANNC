@@ -1,7 +1,7 @@
 // RUN: annc-asm %s -convert-atir-to-linalg -o %t
 // RUN: FileCheck %s --input-file=%t --check-prefix=VIEW
 // RUN: FileCheck %s --input-file=%t --check-prefix=STORAGE
-// RUN: annc-asm %s -annc-aarch64-gemm-pipeline='config-path=%S/../Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %s --check-prefix=GEMM
+// RUN: if [ "${ANNC_LEGACY_AARCH64_PIPELINE:-1}" -eq 1 ]; then annc-asm %s -annc-aarch64-gemm-pipeline='config-path=%S/../Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %s --check-prefix=GEMM; fi
 
 // Both reshapes are descriptor views of the caller's buffers. GEMM writes
 // directly to the rank-3 output, without an allocation or copy.

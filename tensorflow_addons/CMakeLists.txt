@@ -209,6 +209,10 @@ foreach(_target annc_optimizer annc_fused_op)
     target_compile_options(${_target} PRIVATE ${ANNC_TF_COMPILE_OPTIONS})
 endforeach()
 
+if(ANNC_ENABLE_TF2ATIR_V2)
+    target_compile_definitions(annc_fused_op PRIVATE ANNC_ENABLE_TF2ATIR_V2)
+endif()
+
 if(ANNC_TENSORFLOW_PRELOAD)
     string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS
         "${CMAKE_SHARED_LINKER_FLAGS}")

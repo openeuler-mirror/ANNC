@@ -11,6 +11,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
@@ -154,15 +155,16 @@ Value createCustomizeContext(PatternRewriter &rewriter, CustomizeOp op,
   SmallVector<DenseElementsAttr> overrides(operands.size());
   std::optional<size_t> effectiveWeightSlot;
   for (auto [index, operand] : llvm::enumerate(operands)) {
-    auto constant = operand.getDefiningOp<ConstantOp>();
-    if (!constant) continue;
-    auto tensorType = dyn_cast<atir::TensorType>(operand.getType());
-    if (!tensorType) {
-      op.emitError("context constant input must be an atir tensor");
-      return {};
+    Operation *constant = operand.getDefiningOp();
+    if (!constant || (!isa<ConstantOp>(constant) &&
+                      !constant->hasTrait<OpTrait::ConstantLike>()))
+      continue;
+    DenseElementsAttr payload;
+    if (!matchPattern(operand, m_Constant(&payload))) {
+      // Legacy ATIR/ONNX entries still share this context ABI lowering.
+      if (auto tensorType = dyn_cast<atir::TensorType>(operand.getType()))
+        payload = dyn_cast_or_null<DenseElementsAttr>(tensorType.getCacheData());
     }
-    auto payload =
-        dyn_cast_or_null<DenseElementsAttr>(tensorType.getCacheData());
     if (!payload || !payload.getType().hasStaticShape() ||
         !payload.getElementType().isF32()) {
       op.emitError("context constant inputs must be dense f32 tensors");
@@ -235,7 +237,8 @@ std::optional<int64_t> boundaryInputSlot(Value value, Block &entry) {
       value = cast.getInputs().front();
     } else if (auto tensor = dyn_cast<bufferization::ToTensorOp>(op)) {
       value = tensor.getOperand();
-    } else if (isa<ConstantOp>(op)) {
+    } else if (isa<ConstantOp>(op) ||
+               op->hasTrait<OpTrait::ConstantLike>()) {
       return -1;
     } else if (auto accessor = dyn_cast<func::CallOp>(op)) {
       if (accessor.getCallee() != "annc_context_get_input_memref" ||
@@ -282,10 +285,10 @@ LogicalResult lowerCustomizeOpToContextCall(PatternRewriter &rewriter,
     return failure();
   }
   for (Operation &operation : parentFunc.front()) {
-    if (&operation == op.getOperation() || isa<func::ReturnOp, ConstantOp,
-                                             LLVM::ConstantOp, LLVM::LoadOp,
-                                             UnrealizedConversionCastOp,
-                                             bufferization::ToTensorOp>(operation) ||
+    if (&operation == op.getOperation() ||
+        operation.hasTrait<OpTrait::ConstantLike>() ||
+        isa<func::ReturnOp, ConstantOp, LLVM::ConstantOp, LLVM::LoadOp,
+            UnrealizedConversionCastOp, bufferization::ToTensorOp>(operation) ||
         (isa<BufferOp>(operation) && operation.use_empty()))
       continue;
     if (auto call = dyn_cast<func::CallOp>(operation);

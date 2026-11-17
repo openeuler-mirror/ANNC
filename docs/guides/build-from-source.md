@@ -175,6 +175,19 @@ stablehlo 以 `EXCLUDE_FROM_ALL` 子目录加入构建，并通过全局属性�
 sink 转换层的方言依赖，要求外部工具链为 LLVM/MLIR 20.1.8（stablehlo
 v1.9.x 的配套版本）。
 
+V2 pass 复用采用源码级定向集成：`ANNCStablehloShapePasses` 只编译当前路线
+调用的 StableHLO pass 源文件，不链接聚合的 `StablehloPasses` target，以免
+把 VHLO 和无关转换一并纳入 ANNC 构建。这个选择只缩小构建范围，不提供
+LLVM/MLIR API 兼容层：被选中的 pass 仍须能针对 ANNC 使用的工具链编译。
+若某个必需的上游 pass 本身不兼容，改为链接整个 pass target 或使用另一套
+工具链编译的预构建库都不能消除它与本地 MLIR C++ API 的接口约束；应使用
+兼容的 StableHLO/LLVM 组合，或在 ANNC 中实现所需逻辑并针对 IR 行为补测试。
+当前定向编译的具体源码列表以
+[`annc/lib/Dialect/Atir/Passes/CMakeLists.txt`](../../annc/lib/Dialect/Atir/Passes/CMakeLists.txt)
+为准。MLIR 与 StableHLO 均不承诺跨版本的 C++ API 源码兼容，详见
+[MLIR Developer Guide](https://mlir.llvm.org/getting_started/DeveloperGuide/#breaking-changes)
+和 [StableHLO compatibility](https://github.com/openxla/stablehlo/blob/main/docs/compatibility.md)。
+
 依赖获取（不入库，`third_party/*` 已被忽略）：
 
 ```shell

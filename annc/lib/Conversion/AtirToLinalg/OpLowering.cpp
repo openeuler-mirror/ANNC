@@ -4,6 +4,7 @@
 #include "Conversion/Common/AtirLowering.h"
 #include "Conversion/Common/CustomizeCallLowering.h"
 #include "Support/ContextABISwitch.h"
+#include "Support/LLVMCompat.h"
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -64,7 +65,7 @@ void preserveRhsCheckpointName(Operation* target, Value rhs) {
 }
 
 FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
-                                        atir::MatMulOp op, Value lhs, Value rhs,
+                                        Operation* op, Value lhs, Value rhs,
                                         Value output,
                                         llvm::ArrayRef<Value> epilogueInputs,
                                         const atir::EpilogueProgram& epilogue) {
@@ -73,22 +74,22 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
   auto outputType = llvm::dyn_cast<RankedTensorType>(output.getType());
   if (!lhsType || !rhsType || !outputType || lhsType.getRank() != 2 ||
       rhsType.getRank() != 2 || outputType.getRank() != 2)
-    return op.emitOpError(
+    return op->emitOpError(
                "fused linalg.generic lowering requires rank-2 tensors"),
            failure();
   int64_t reductionSize = lhsType.getDimSize(1);
   int64_t rhsReductionSize = rhsType.getDimSize(0);
   if (ShapedType::isDynamic(reductionSize) || reductionSize <= 0)
-    return op.emitOpError(
+    return op->emitOpError(
                "fused linalg.generic lowering requires a static positive K "
                "dimension"),
            failure();
   if (!ShapedType::isDynamic(rhsReductionSize) &&
       rhsReductionSize != reductionSize)
-    return op.emitOpError("has inconsistent lhs/rhs K dimensions"), failure();
+    return op->emitOpError("has inconsistent lhs/rhs K dimensions"), failure();
   Type elementType = outputType.getElementType();
   if (!llvm::isa<FloatType>(elementType))
-    return op.emitOpError(
+    return op->emitOpError(
                "fused linalg.generic lowering requires a floating-point "
                "element type"),
            failure();
@@ -99,7 +100,7 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
   for (const atir::EpilogueStep& step : epilogue.steps)
     if (atir::isBinaryEpilogueOpcode(step.opcode)) ++binaryInputCount;
   if (epilogueInputs.size() != binaryInputCount) {
-    return op.emitOpError(
+    return op->emitOpError(
                "fused epilogue inputs do not match the ordered binary steps"),
            failure();
   }
@@ -110,11 +111,16 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
     auto biasType =
         llvm::dyn_cast<RankedTensorType>(epilogueInputs[inputIndex].getType());
     if (!biasType)
-      return op.emitOpError("epilogue input must be a ranked tensor"),
+      return op->emitOpError("epilogue input must be a ranked tensor"),
+             failure();
+    if (step.broadcast == atir::BroadcastKind::kM && biasType.getRank() == 1)
+      return op->emitOpError(
+                 "rank-1 M-axis epilogue vectors are unsupported; use a "
+                 "rank-2 Mx1 tensor"),
              failure();
     auto map = addBroadcastMap(biasType, outputType, m, n, 3, ctx);
     if (failed(map))
-      return op.emitOpError("epilogue input has an invalid broadcast shape"),
+      return op->emitOpError("epilogue input has an invalid broadcast shape"),
              failure();
     epilogueMaps.push_back(*map);
     ++inputIndex;
@@ -132,7 +138,7 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
       utils::IteratorType::reduction};
   const unsigned accumulatorIndex = 2 + binaryInputCount;
   auto generic = rewriter.create<linalg::GenericOp>(
-      op.getLoc(), TypeRange{output.getType()}, inputs, ValueRange{output},
+      op->getLoc(), TypeRange{output.getType()}, inputs, ValueRange{output},
       indexingMaps, iteratorTypes,
       [accumulatorIndex](OpBuilder& builder, Location loc, ValueRange args) {
         Value product = builder.create<arith::MulFOp>(loc, args[0], args[1]);
@@ -143,7 +149,7 @@ FailureOr<Value> createFusedGemmGeneric(PatternRewriter& rewriter,
   for (NamedAttribute attr : op->getAttrs())
     generic->setAttr(attr.getName(), attr.getValue());
   generic->setAttr(kGemmAttrName, UnitAttr::get(ctx));
-  preserveRhsCheckpointName(generic, op.getRhs());
+  preserveRhsCheckpointName(generic, rhs);
   return generic.getResult(0);
 }
 }  // namespace
@@ -168,6 +174,13 @@ void populateAtirToLinalgConversionPatterns(TypeConverter& inputTypeConverter,
   patterns.add<FuncReturnOpLowering>(inputTypeConverter, patterns.getContext());
   populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
       patterns, inputTypeConverter);
+}
+
+void populateAtirV2ToLinalgConversionPatterns(RewritePatternSet& patterns) {
+  // V2 operations use builtin tensor types. Keep this hook separate from the
+  // legacy patterns so their type conversion and legality rules do not mix.
+  patterns.add<FusedMatMulLoweringToLinalg>(patterns.getContext());
+  patterns.add<V2FuncReturnLoweringToLinalg>(patterns.getContext());
 }
 
 bool isSupportedInsertUnitDimensionBeforeN(atir::ReshapeOp op) {
@@ -444,8 +457,9 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter,
           atir::parseEpilogueCandidatePlan(attr);
       if (failed(epilogue)) return;
       FailureOr<Value> fused = createFusedGemmGeneric(
-          rewriter, op, lhs, rhs, c, epilogueInputs, *epilogue);
+          rewriter, op.getOperation(), lhs, rhs, c, epilogueInputs, *epilogue);
       if (failed(fused)) return;
+      preserveRhsCheckpointName(fused->getDefiningOp(), op.getRhs());
       rewriter.replaceOp(op, *fused);
       return;
     }
@@ -454,6 +468,103 @@ void MatMulLoweringToLinalg::Lowering(PatternRewriter& rewriter,
     preserveRhsCheckpointName(linalgMatmul, op.getRhs());
     rewriter.replaceOp(op, linalgMatmul.getResult(0));
   }
+}
+
+LogicalResult FusedMatMulLoweringToLinalg::matchAndRewrite(
+    atir::FusedMatMulOp op, atir::FusedMatMulOp::Adaptor adaptor,
+    ConversionPatternRewriter& rewriter) const {
+  auto lhs = dyn_cast<RankedTensorType>(adaptor.getLhs().getType());
+  auto rhs = dyn_cast<RankedTensorType>(adaptor.getRhs().getType());
+  auto result = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!lhs || !rhs || !result || lhs.getRank() != 2 || rhs.getRank() != 2 ||
+      result.getRank() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "requires ranked rank-2 lhs, rhs, and result tensors");
+  if (!ShapedType::isDynamic(lhs.getDimSize(1)) &&
+      !ShapedType::isDynamic(rhs.getDimSize(0)) &&
+      lhs.getDimSize(1) != rhs.getDimSize(0))
+    return rewriter.notifyMatchFailure(
+        op, "has inconsistent lhs/rhs K dimensions");
+  if (lhs.getElementType() != rhs.getElementType() ||
+      lhs.getElementType() != result.getElementType() ||
+      !isa<FloatType>(result.getElementType()))
+    return rewriter.notifyMatchFailure(
+        op, "requires matching floating-point element types");
+
+  SmallVector<Value> dynamicDims;
+  for (auto dim : llvm::enumerate(result.getShape())) {
+    if (!ShapedType::isDynamic(dim.value())) continue;
+    if (dim.index() == 0)
+      dynamicDims.push_back(rewriter.create<tensor::DimOp>(
+          op.getLoc(), adaptor.getLhs(), 0));
+    else if (dim.index() == 1)
+      dynamicDims.push_back(rewriter.create<tensor::DimOp>(
+          op.getLoc(), adaptor.getRhs(), 1));
+    else
+      return rewriter.notifyMatchFailure(
+          op, "only matrix dimensions can be inferred dynamically");
+  }
+  auto output = rewriter.create<tensor::EmptyOp>(
+      op.getLoc(), result.getShape(), result.getElementType(), dynamicDims);
+  SmallVector<Value> epilogueInputs(adaptor.getEpilogueInputs().begin(),
+                                    adaptor.getEpilogueInputs().end());
+  if (auto attr = op->getAttrOfType<DictionaryAttr>(atir::kGemmEpilogueAttr)) {
+    FailureOr<atir::EpilogueProgram> epilogue =
+        atir::parseEpilogueCandidatePlan(attr);
+    if (failed(epilogue))
+      return op.emitOpError("invalid GEMM epilogue attribute");
+    FailureOr<Value> fused = createFusedGemmGeneric(
+        rewriter, op.getOperation(), adaptor.getLhs(), adaptor.getRhs(),
+        output, epilogueInputs, *epilogue);
+    if (failed(fused)) return failure();
+    rewriter.replaceOp(op, *fused);
+    return success();
+  }
+
+  auto linalgMatmul = rewriter.create<linalg::MatmulOp>(
+      op.getLoc(), result, ValueRange{adaptor.getLhs(), adaptor.getRhs()},
+      ValueRange{output.getResult()}, op->getAttrs());
+  preserveRhsCheckpointName(linalgMatmul, adaptor.getRhs());
+  rewriter.replaceOp(op, linalgMatmul.getResult(0));
+  return success();
+}
+
+LogicalResult V2FuncReturnLoweringToLinalg::matchAndRewrite(
+    func::ReturnOp op, func::ReturnOp::Adaptor adaptor,
+    ConversionPatternRewriter& rewriter) const {
+  auto parent = op->getParentOfType<func::FuncOp>();
+  if (!parent)
+    return rewriter.notifyMatchFailure(op, "must be nested in a function");
+  auto functionType = parent.getFunctionType();
+  if (functionType.getNumResults() != adaptor.getOperands().size())
+    return rewriter.notifyMatchFailure(op, "return/result count mismatch");
+
+  SmallVector<Type> resultTypes(functionType.getResults());
+  SmallVector<Value> returnOperands;
+  returnOperands.reserve(adaptor.getOperands().size());
+  bool changed = false;
+  for (auto [index, operand] : llvm::enumerate(adaptor.getOperands())) {
+    auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+    if (!tensorType) {
+      returnOperands.push_back(operand);
+      continue;
+    }
+    auto memrefType = MemRefType::get(tensorType.getShape(),
+                                      tensorType.getElementType());
+    returnOperands.push_back(rewriter
+                                 .create<annc::ToBufferOp>(
+                                     op.getLoc(), memrefType, operand)
+                                 .getResult());
+    resultTypes[index] = memrefType;
+    changed = true;
+  }
+  if (!changed)
+    return rewriter.notifyMatchFailure(op, "has no ranked tensor result");
+
+  parent.setType(FunctionType::get(parent.getContext(), functionType.getInputs(),
+                                   resultTypes));
+  rewriter.replaceOpWithNewOp<func::ReturnOp>(op, returnOperands);
+  return success();
 }
 
 LogicalResult DotLoweringToLinalg::matchAndRewrite(

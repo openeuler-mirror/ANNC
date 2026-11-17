@@ -1,10 +1,9 @@
 //===----------------------------------------------------------------------===//
 // ATIR V2 — complement dialect (only ops stablehlo cannot express)
 //
-// Admission rule: only capability domains stablehlo cannot express (string /
-// resource / sparse / top_k / constant_v2 / view); expressible ops fall back
-// to atir.unsupported. Values are builtin tensors (`AnyTensor`); strings use
-// `!atir.string` elements. Decision log: schema-evolution.md.
+// Admission rule: StableHLO-unexpressible capabilities and fused composites
+// whose boundary must survive sinking. Values are builtin tensors (`AnyTensor`);
+// strings use `!atir.string` elements. Decision log: schema-evolution.md.
 //===----------------------------------------------------------------------===//
 #ifndef ATIR_OPS_V2_TD
 #define ATIR_OPS_V2_TD
@@ -13,6 +12,27 @@ def Atir_ResourceIdentityV2Op : Atir_Op<"resource_identity_v2"> {
   let summary = "forwards an opaque resource handle";
   let arguments = (ins Atir_Resource:$input);
   let results = (outs Atir_Resource:$result);
+}
+
+def Atir_FusedMatMulOp : Atir_Op<"fused_matmul"> {
+  let summary = "matrix multiplication with an ordered elementwise epilogue";
+  let description = [{
+    Computes a matrix product and carries the external tensor inputs and
+    ordered epilogue description as one operation. Tensor values use builtin
+    MLIR tensor types; `epilogueInputs` contains one value for each binary
+    epilogue step, in step order. `annc.gemm.epilogue` must describe those
+    steps whenever epilogue inputs are present.
+  }];
+  let arguments = (ins
+    AnyTensor:$lhs,
+    AnyTensor:$rhs,
+    Variadic<AnyTensor>:$epilogueInputs
+  );
+  let results = (outs AnyTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $lhs `,` $rhs (`,` $epilogueInputs^)? attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 def Atir_ResourceVariableV2Op : Atir_Op<"resource_variable_v2"> {
