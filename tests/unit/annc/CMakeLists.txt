@@ -90,6 +90,22 @@ if(ANNC_ENABLE_TF2ATIR_V2)
         GTest::gtest_main Threads::Threads StablehloToAtirConversion AtirDialect)
     gtest_discover_tests(stablehlo_sink_component_test
         TEST_PREFIX "StablehloSinkComponent.")
+    add_executable(fusionv2_matchers_test fusionv2_matchers_test.cpp)
+    target_include_directories(fusionv2_matchers_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")
+    target_link_libraries(fusionv2_matchers_test PRIVATE
+        GTest::gtest_main Threads::Threads AtirPasses StablehloRegister
+        StablehloToAtirConversion AtirDialect)
+    gtest_discover_tests(fusionv2_matchers_test
+        TEST_PREFIX "FusionV2Matchers.")
+    add_executable(fusionv2_outline_test fusionv2_outline_test.cpp)
+    target_include_directories(fusionv2_outline_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")
+    target_link_libraries(fusionv2_outline_test PRIVATE
+        GTest::gtest_main Threads::Threads AtirPasses StablehloRegister
+        StablehloToAtirConversion AtirDialect)
+    gtest_discover_tests(fusionv2_outline_test
+        TEST_PREFIX "FusionV2Outline.")
     add_executable(stablehlo_sink_pass_test stablehlo_sink_pass_test.cpp)
     target_include_directories(stablehlo_sink_pass_test PRIVATE
         "${PROJECT_SOURCE_DIR}/annc/include" "${PROJECT_BINARY_DIR}/annc/include")

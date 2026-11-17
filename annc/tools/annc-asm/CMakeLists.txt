@@ -38,6 +38,14 @@ target_link_libraries(annc-asm PRIVATE
   ContextConversion
   AArch64Codegen
 )
+# V2-route parsing needs the stablehlo and tf_type compat dialects; follows
+# the global ANNC_ENABLE_TF2ATIR_V2 switch (default OFF).
+if(ANNC_ENABLE_TF2ATIR_V2)
+  target_compile_definitions(annc-asm PRIVATE ANNC_ENABLE_TF2ATIR_V2=1)
+  target_link_libraries(annc-asm PRIVATE
+    StablehloRegister
+    StablehloToAtirConversion)
+endif()
 llvm_update_compile_flags(annc-asm)
 mlir_check_all_link_libraries(annc-asm)
 install(TARGETS annc-asm DESTINATION bin)
