@@ -38,6 +38,7 @@ tests/
 │   ├── jit/                # JIT 缓存与预打包权重 pytest
 │   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
 │   ├── tensorflow/         # TF 插件测试 pytest、TF1.15 插件加载与 JIT C 接口 CTest
+│   ├── onnx2stablehlo/     # ONNX-MLIR 预处理、StableHLO 生成与后处理 pytest
 │   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
 ├── e2e/
 │   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
@@ -93,6 +94,11 @@ bash tests/FileCheck/run.sh
   的构建；任一项未启用时，不注册该测试。
   `tf_threadpool_sdk_limit` 仅在 TF1.15 linked 构建注册，使用真实的 4 线程 TF 池
   验证 1/2 线程上限及其相对固定块选项的优先级；preload 构建不注册该原生宿主用例。
+- `integration/onnx2stablehlo/` 需要构建 addon 的
+  `annc-onnx2stablehlo` / `annc-onnx-framework-opt`；真实 ORT 导出模型和
+  StableHLO portable serializer 仅在设置对应环境变量时执行。
+  真实导出图使用 `ANNC_FRAMEWORK_OPT` 指定的配套工具校验并往返读取，保留
+  ATIR fallback 和来源属性；纯 StableHLO 的 portable 序列化单独验证。
 - `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
 - `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
   `annc`/`annc-asm`；缺任一条件时 skip。
