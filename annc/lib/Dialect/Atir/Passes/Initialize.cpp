@@ -9,6 +9,9 @@ void registerAllAtirPasses() {
     atir::registerAtirFoldBatchNormPass();
     atir::registerAtirRankInferencePass();
     atir::registerAtirOpFusionPass();
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+    atir::registerAtirOpFusionV2Pass();
+#endif
     atir::registerAtirConfigFusionPass();
     atir::registerAtirFastCodegenPass();
     atir::registerAtirPruneFuncPass();
