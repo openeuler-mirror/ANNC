@@ -15,11 +15,6 @@ LogicalResult aarch64::gemm::planGemmThreads(Operation *op) {
   if (failed(problem) || failed(policy)) return failure();
 
   const aarch64::gemm::GemmTuningStrategy &strategy = policy->strategy;
-  // Avoid the model-zoo multithreading regression on Kunpeng 950 (hip12).
-  if (strategy.target == aarch64::gemm::GemmTarget::kHip12) {
-    aarch64::gemm::writeCandidate(op, GemmThreadPlanningResult{1, 1, 1, false});
-    return success();
-  }
   // Keep this capability gate in sync with new strategy kinds. The current
   // tuning-config parser registers only fixed strategies; this fallback
   // handles metadata from future strategies until they provide planner inputs.
