@@ -9,6 +9,12 @@ namespace atir {
 void addActionIdGatherV2Pattern(mlir::RewritePatternSet &patterns,
                                  fusionv2::CallPortTable *portTable);
 
+// dnn_embedding_hash_bucket: string_to_hash_bucket_fast_v2 anchor; the
+// string domain behind the hash stays opaque.
+void addDnnEmbeddingHashBucketV2Pattern(
+    mlir::RewritePatternSet &patterns,
+    fusionv2::CallPortTable *portTable);
+
 // kp_gather (KPFusedGather): Unique residue anchor, promoted mode
 // (data/keys/begin).
 void addKpGatherV2Pattern(mlir::RewritePatternSet &patterns,
@@ -25,8 +31,6 @@ void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns);
 // kp_embedding_padding_fast: StridedSlice anchor (or the scalar reshape
 // folded at import); shares the padding kernel family (dual rank-0 outputs).
 void addEmbeddingPaddingFastV2Pattern(mlir::RewritePatternSet &patterns);
-// dnn_embedding_hash_bucket: string_to_hash_bucket_fast_v2 anchor, ABI
-// (input:string, embedding_weight) -> output; num_buckets via schema attr.
 
 // dot GEMM: stablehlo.dot anchor (TF MatMul legalized shape), matching and
 // outlining only (pre-lowering, native carrier ops moved verbatim); the
