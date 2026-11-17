@@ -64,6 +64,7 @@ class AtirOpFusionV2Pass
 void populateAtirOpFusionV2Patterns(RewritePatternSet &patterns,
                                     fusionv2::CallPortTable *portTable) {
   addKpGatherV2Pattern(patterns, portTable);
+  addDotGemmV2Pattern(patterns);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> createAtirOpFusionV2Pass() {
