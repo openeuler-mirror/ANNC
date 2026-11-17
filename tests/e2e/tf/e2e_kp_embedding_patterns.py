@@ -181,11 +181,13 @@ def _build_sparse_reshape_case():
         begin = tf.compat.v1.placeholder(tf.int32, [2], name="begin")
         pack_const = tf.compat.v1.placeholder(tf.int64, [], name="pack_const")
         new_shape = tf.compat.v1.placeholder(tf.int64, [2], name="new_shape")
-        keys_shape = tf.shape(keys, out_type=tf.int32, name="keys_shape")
+        keys_shape = tf.shape(keys, out_type=tf.int64, name="keys_shape")
         rows = tf.strided_slice(keys_shape, [0], [1], [1], shrink_axis_mask=1,
                                 name="rows")
         packed_shape = tf.stack([rows, pack_const], axis=0, name="packed_shape")
-        input_shape = tf.cast(packed_shape, tf.int64, name="input_shape")
+        # The fusion pattern requires an explicit Cast even for equal dtypes.
+        input_shape = tf.raw_ops.Cast(
+            x=packed_shape, DstT=tf.int64, name="input_shape")
         keys_slice = tf.strided_slice(keys, begin, [0, 0], [1, 1],
                                       begin_mask=1, end_mask=1,
                                       shrink_axis_mask=2, name="keys_slice")
