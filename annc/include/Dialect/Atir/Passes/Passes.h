@@ -28,5 +28,9 @@ void populateAtirOpFusionPatterns(RewritePatternSet &patterns);
 #include "Dialect/Atir/Passes/Passes.h.inc"
 
 void registerAllAtirPasses();
+
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+void registerAtirOpFusionV2Pass();
+#endif
 }  // namespace atir
 #endif // ATIR_PASS_H
