@@ -28,6 +28,11 @@ void addEmbeddingPaddingFastV2Pattern(mlir::RewritePatternSet &patterns);
 // (input:string, embedding_weight) -> output; num_buckets via schema attr.
 void addDnnEmbeddingHashBucketV2Pattern(mlir::RewritePatternSet &patterns);
 
+// dot GEMM: stablehlo.dot anchor (TF MatMul legalized shape), matching and
+// outlining only (pre-lowering, native carrier ops moved verbatim); the
+// fusion.metadata follows the context v3 contract (outlineContextBuiltin
+// line); gated by annc::gemmConfig (env ANNC_GEMM).
+void addDotGemmV2Pattern(mlir::RewritePatternSet &patterns);
 
 }  // namespace atir
 
