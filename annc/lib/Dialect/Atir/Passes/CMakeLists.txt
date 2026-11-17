@@ -11,7 +11,8 @@ if(ANNC_ENABLE_TF2ATIR_V2)
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/OpFusionV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/CarrierMatchers.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/FusionV2Outline.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/KpGatherV2.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/KpGatherV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/DotGemmV2.cpp)
 else()
   list(REMOVE_ITEM _srcs
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingGatherV2Rewrite.cpp)
