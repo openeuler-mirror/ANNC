@@ -222,7 +222,7 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
 // FUSE: func.func private @KPFusedGather
 // The synthesized begin reuses the FE-recorded pb node name (a made-up
 // FUSE-SAME: tf_name = "keys_slice/begin"
-// FUSE-SAME: tf_name = "unique_1:1"
+// FUSE-SAME: tf_name = "uniq:1"
 // FUSE-SAME: fusion.pattern = "kp_gather"
 // Kernel body: the flatten chain (slice/reshape) moves with the site;
 // the Unique group stays inside.
