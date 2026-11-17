@@ -140,7 +140,7 @@ sink 结束后遍历统计三类去向：sunk（已映射下沉）、unsupported
 | --- | --- | --- | --- |
 | GAP-1 | `detail` 恒空（provider 接口不回传拒绝原因） | 排障只到 `reason` 粒度 | provider 扩展拒绝原因查询后回填 |
 | GAP-2 | `#tf_type.shape` 属性解析未实现 | 携带该属性的产物无法解析（当前产物不携带） | 按需补 |
-| GAP-3 | `--op-fusion-v2` 未接（V2 融合线范围） | 工具不能驱动 V2 融合 | 随 V2 融合批次 |
+| GAP-3 | `annc-tf2atir-v2` pipeline 未编排 V2 融合 pass（`annc-asm`/`annc-opt` 的 `-atir-op-fusion-v2` 已落地） | pipeline 单命令尚不能产出融合后的 ATIR，需手动跑 pass | 随 V2 融合 pipeline 批次 |
 
 ## 附录 A 源码位置索引（文件级）
 

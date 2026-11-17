@@ -77,9 +77,11 @@ func.func @main(%arg0: tensor<8xf32>) -> tensor<2xf32> {
       probeArg(arg0, "table", "dynamic"),
       probeArg(cst, "idx", "constant")};
   llvm::SmallVector<std::string> tailAnchors{"sel:0"};
+  atir::fusionv2::CallPortTable portTable;
   LogicalResult status = atir::fusionv2::outlineSite(
       main, rewriter, args, {select.getOperation()}, {select.getOperation()},
-      {select.getResult()}, "TestKernel", "unit_test", tailAnchors);
+      {select.getResult()}, "TestKernel", "unit_test", tailAnchors, {},
+      portTable);
   ASSERT_TRUE(succeeded(status));
 
   ModuleOp module = main->getParentOfType<ModuleOp>();
@@ -148,9 +150,11 @@ func.func @main(%arg0: tensor<8xf32>) -> (tensor<2xf32>, tensor<2xf32>) {
       probeArg(arg0, "table", "dynamic"),
       probeArg(cst, "idx", "constant")};
   llvm::SmallVector<std::string> tailAnchors{"conv:0"};
+  atir::fusionv2::CallPortTable stayTable;
   LogicalResult status = atir::fusionv2::outlineSite(
       main, rewriter, args, {select.getOperation()}, {convert.getOperation()},
-      {convert.getResult()}, "StayKernel", "unit_test", tailAnchors);
+      {convert.getResult()}, "StayKernel", "unit_test", tailAnchors, {},
+      stayTable);
   ASSERT_TRUE(succeeded(status));
 
   ModuleOp module = main->getParentOfType<ModuleOp>();
@@ -188,9 +192,10 @@ func.func @main(%arg0: tensor<8xf32>) -> tensor<2xf32> {
       probeArg(select->getOperand(1), "idx", "constant")};
   PatternRewriter rewriter(ctx_.get());
   llvm::SmallVector<std::string> tailAnchors{"sel:0"};
+  atir::fusionv2::CallPortTable badTable;
   EXPECT_TRUE(failed(atir::fusionv2::outlineSite(
       main, rewriter, args, {select.getOperation()}, {}, {select.getResult()},
-      "Bad", "unit_test", tailAnchors)));
+      "Bad", "unit_test", tailAnchors, {}, badTable)));
   EXPECT_FALSE(main->getParentOfType<ModuleOp>().lookupSymbol("Bad"));
 }
 

@@ -1,0 +1,235 @@
+// RUN: annc-opt %s -atir-op-fusion-v2 | FileCheck %s --check-prefix=FUSE
+// RUN: annc-opt %s -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen | FileCheck %s --check-prefix=CODEGEN
+//
+// op-fusion-v2 pattern: kp_gather over the static 1:N carrier (the second
+// carrier of the same pattern; complements the residue form in
+// op-fusion-v2-kp-gather.mlir).
+
+#loc = loc(unknown)
+#loc4 = loc("uniq")
+#loc5 = loc("unique_1")
+module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, producer = 2288 : i32}} {
+  func.func @main(%arg0: tensor<8x4xf32> loc(unknown), %arg1: tensor<4x2xi64> loc(unknown)) -> tensor<?x4xf32> attributes {tf.arg_names = ["data", "keys"], tf.entry_function = {control_outputs = "", inputs = "data:0,keys:0", outputs = "restore:0"}} {
+    %c = stablehlo.constant dense<4> : tensor<i32> loc(#loc1)
+    %c_0 = stablehlo.constant dense<1> : tensor<i32> loc(#loc32)
+    %c_1 = stablehlo.constant dense<false> : tensor<i1> loc(#loc33)
+    %c_2 = stablehlo.constant dense<0> : tensor<i32> loc(#loc34)
+    %0 = stablehlo.slice %arg1 [0:4, 0:1] {annc.begin_source = "keys_slice/begin", annc.source_node = "keys_slice", annc.source_op = "tf.StridedSlice"} : (tensor<4x2xi64>) -> tensor<4x1xi64> loc(#loc35)
+    %1 = stablehlo.reshape %0 {annc.source_node = "keys_slice", annc.source_op = "tf.StridedSlice", annc.source_ports = dense<0> : tensor<1xi32>} : (tensor<4x1xi64>) -> tensor<4xi64> loc(#loc35)
+    %2 = stablehlo.transpose %1, dims = [0] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi64>) -> tensor<4xi64> loc(#loc5)
+    %3 = stablehlo.reshape %2 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi64>) -> tensor<4x1xi64> loc(#loc5)
+    %4 = stablehlo.slice %3 [0:4, 0:1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<4x1xi64> loc(#loc5)
+    %5 = stablehlo.reshape %4 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<4xi64> loc(#loc5)
+    %6 = stablehlo.iota dim = 0 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : tensor<4xi32> loc(#loc5)
+    %7:2 = "stablehlo.sort"(%5, %6) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i64> loc("unique_1"), %arg3: tensor<i64> loc("unique_1"), %arg4: tensor<i32> loc("unique_1"), %arg5: tensor<i32> loc("unique_1")):
+      %83 = stablehlo.compare  EQ, %arg2, %arg3 : (tensor<i64>, tensor<i64>) -> tensor<i1> loc(#loc11)
+      %84 = stablehlo.compare  LT, %arg4, %arg5 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc12)
+      %85 = stablehlo.compare  LT, %arg2, %arg3 : (tensor<i64>, tensor<i64>) -> tensor<i1> loc(#loc13)
+      %86 = stablehlo.select %83, %84, %85 : tensor<i1>, tensor<i1> loc(#loc14)
+      stablehlo.return %86 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi64>, tensor<4xi32>) -> (tensor<4xi64>, tensor<4xi32>) loc(#loc5)
+    %8 = stablehlo.tuple %7#0, %7#1 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", xla_shape = "(s64[4]{0}, s32[4]{0})"} : tuple<tensor<4xi64>, tensor<4xi32>> loc(#loc5)
+    %9 = stablehlo.get_tuple_element %8[1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi64>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %10 = "stablehlo.gather"(%3, %9) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 1>}> {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>, tensor<4xi32>) -> tensor<4x1xi64> loc(#loc5)
+    %11 = stablehlo.slice %10 [1:4, 0:1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<3x1xi64> loc(#loc5)
+    %12 = stablehlo.slice %10 [0:3, 0:1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<3x1xi64> loc(#loc5)
+    %13 = stablehlo.compare  NE, %11, %12 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<3x1xi64>, tensor<3x1xi64>) -> tensor<3x1xi1> loc(#loc5)
+    %14 = stablehlo.reduce(%13 init: %c_1) applies stablehlo.or across dimensions = [1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<3x1xi1>, tensor<i1>) -> tensor<3xi1> loc(#loc5)
+    %15 = stablehlo.convert %14 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<3xi1>) -> tensor<3xi32> loc(#loc5)
+    %16 = stablehlo.pad %15, %c_0, low = [1], high = [0], interior = [0] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<3xi32>, tensor<i32>) -> tensor<4xi32> loc(#loc5)
+    %17 = stablehlo.broadcast_in_dim %c_2, dims = [] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<i32>) -> tensor<4xi32> loc(#loc5)
+    %18 = stablehlo.tuple %c_2, %9, %16, %17 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", xla_shape = "(s32[], s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc5)
+    %19 = stablehlo.get_tuple_element %18[0] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<i32> loc(#loc5)
+    %20 = stablehlo.get_tuple_element %18[1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %21 = stablehlo.get_tuple_element %18[2] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %22 = stablehlo.get_tuple_element %18[3] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %23:4 = stablehlo.while(%iterArg = %19, %iterArg_4 = %20, %iterArg_5 = %21, %iterArg_6 = %22) : tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32> attributes {annc.source_node = "unique_1", annc.source_op = "tf.Unique"}
+     cond {
+      %83 = stablehlo.compare  LT, %iterArg, %c : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc1)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    } do {
+      %83 = stablehlo.add %iterArg, %c_0 : tensor<i32> loc(#loc2)
+      %84 = stablehlo.dynamic_slice %iterArg_5, %iterArg, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc15)
+      %85 = stablehlo.reshape %84 : (tensor<1xi32>) -> tensor<i32> loc(#loc16)
+      %86 = stablehlo.compare  NE, %85, %c_2 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc7)
+      %87 = stablehlo.dynamic_slice %iterArg_4, %iterArg, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc17)
+      %88 = stablehlo.reshape %87 : (tensor<1xi32>) -> tensor<i32> loc(#loc18)
+      %89 = stablehlo.compare  EQ, %iterArg, %c_2 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc6)
+      %90 = stablehlo.subtract %iterArg, %c_0 : tensor<i32> loc(#loc3)
+      %91 = stablehlo.select %89, %c_2, %90 : tensor<i1>, tensor<i32> loc(#loc8)
+      %92 = stablehlo.dynamic_slice %iterArg_6, %91, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc19)
+      %93 = stablehlo.reshape %92 : (tensor<1xi32>) -> tensor<i32> loc(#loc20)
+      %94 = stablehlo.select %86, %88, %93 : tensor<i1>, tensor<i32> loc(#loc21)
+      %95 = stablehlo.reshape %94 : (tensor<i32>) -> tensor<1xi32> loc(#loc22)
+      %96 = stablehlo.dynamic_update_slice %iterArg_6, %95, %iterArg : (tensor<4xi32>, tensor<1xi32>, tensor<i32>) -> tensor<4xi32> loc(#loc23)
+      stablehlo.return %83, %iterArg_4, %iterArg_5, %96 : tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32> loc(#loc)
+    } loc(#loc5)
+    %24 = stablehlo.tuple %23#0, %23#1, %23#2, %23#3 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", xla_shape = "(s32[], s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc5)
+    %25 = stablehlo.get_tuple_element %24[3] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %26:3 = "stablehlo.sort"(%25, %16, %9) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i32> loc("unique_1"), %arg3: tensor<i32> loc("unique_1"), %arg4: tensor<i32> loc("unique_1"), %arg5: tensor<i32> loc("unique_1"), %arg6: tensor<i32> loc("unique_1"), %arg7: tensor<i32> loc("unique_1")):
+      %83 = stablehlo.compare  LT, %arg2, %arg3 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc24)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<4xi32>, tensor<4xi32>) -> (tensor<4xi32>, tensor<4xi32>, tensor<4xi32>) loc(#loc5)
+    %27 = stablehlo.tuple %26#0, %26#1, %26#2 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", xla_shape = "(s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc5)
+    %28 = stablehlo.get_tuple_element %27[1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %29 = stablehlo.get_tuple_element %27[2] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %30:2 = "stablehlo.sort"(%28, %29) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i32> loc("unique_1"), %arg3: tensor<i32> loc("unique_1"), %arg4: tensor<i32> loc("unique_1"), %arg5: tensor<i32> loc("unique_1")):
+      %83 = stablehlo.compare  GT, %arg2, %arg3 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc25)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<4xi32>) -> (tensor<4xi32>, tensor<4xi32>) loc(#loc5)
+    %31 = stablehlo.tuple %30#0, %30#1 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", xla_shape = "(s32[4]{0}, s32[4]{0})"} : tuple<tensor<4xi32>, tensor<4xi32>> loc(#loc5)
+    %32 = stablehlo.get_tuple_element %31[1] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc5)
+    %33 = "stablehlo.gather"(%3, %32) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 1>}> {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>, tensor<4xi32>) -> tensor<4x1xi64> loc(#loc5)
+    %34 = stablehlo.reshape %33 {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<4xi64> loc(#loc5)
+    %35 = stablehlo.transpose %34, dims = [0] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi64>) -> tensor<4xi64> loc(#loc5)
+    %36 = stablehlo.reduce(%28 init: %c_2) applies stablehlo.add across dimensions = [0] {annc.source_node = "unique_1", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<i32>) -> tensor<i32> loc(#loc5)
+    %37 = stablehlo.set_dimension_size %35, %36, dim = 0 {annc.source_node = "unique_1", annc.source_op = "tf.Unique", annc.source_ports = dense<0> : tensor<1xi32>} : (tensor<4xi64>, tensor<i32>) -> tensor<?xi64, #stablehlo.bounds<4>> loc(#loc5)
+    %38 = stablehlo.transpose %37, dims = [0] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?xi64, #stablehlo.bounds<4>>) -> tensor<?xi64, #stablehlo.bounds<4>> loc(#loc4)
+    %39 = stablehlo.reshape %38 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?xi64, #stablehlo.bounds<4>>) -> tensor<?x1xi64, #stablehlo.bounds<4, ?>> loc(#loc4)
+    %40 = stablehlo.slice %39 [0:4, 0:1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?x1xi64, #stablehlo.bounds<4, ?>>) -> tensor<?x1xi64, #stablehlo.bounds<4, ?>> loc(#loc4)
+    %41 = stablehlo.reshape %40 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?x1xi64, #stablehlo.bounds<4, ?>>) -> tensor<?xi64, #stablehlo.bounds<4>> loc(#loc4)
+    %42 = stablehlo.iota dim = 0 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : tensor<4xi32> loc(#loc4)
+    %43:2 = "stablehlo.sort"(%41, %42) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i64> loc("uniq"), %arg3: tensor<i64> loc("uniq"), %arg4: tensor<i32> loc("uniq"), %arg5: tensor<i32> loc("uniq")):
+      %83 = stablehlo.compare  EQ, %arg2, %arg3 : (tensor<i64>, tensor<i64>) -> tensor<i1> loc(#loc11)
+      %84 = stablehlo.compare  LT, %arg4, %arg5 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc12)
+      %85 = stablehlo.compare  LT, %arg2, %arg3 : (tensor<i64>, tensor<i64>) -> tensor<i1> loc(#loc13)
+      %86 = stablehlo.select %83, %84, %85 : tensor<i1>, tensor<i1> loc(#loc14)
+      stablehlo.return %86 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?xi64, #stablehlo.bounds<4>>, tensor<4xi32>) -> (tensor<?xi64, #stablehlo.bounds<4>>, tensor<4xi32>) loc(#loc4)
+    %44 = stablehlo.tuple %43#0, %43#1 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s64[<=4]{0}, s32[4]{0})"} : tuple<tensor<?xi64, #stablehlo.bounds<4>>, tensor<4xi32>> loc(#loc4)
+    %45 = stablehlo.get_tuple_element %44[1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<?xi64, #stablehlo.bounds<4>>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %46 = "stablehlo.gather"(%39, %45) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 1>}> {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?x1xi64, #stablehlo.bounds<4, ?>>, tensor<4xi32>) -> tensor<4x1xi64> loc(#loc4)
+    %47 = stablehlo.slice %46 [1:4, 0:1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<3x1xi64> loc(#loc4)
+    %48 = stablehlo.slice %46 [0:3, 0:1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<3x1xi64> loc(#loc4)
+    %49 = stablehlo.compare  NE, %47, %48 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<3x1xi64>, tensor<3x1xi64>) -> tensor<3x1xi1> loc(#loc4)
+    %50 = stablehlo.reduce(%49 init: %c_1) applies stablehlo.or across dimensions = [1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<3x1xi1>, tensor<i1>) -> tensor<3xi1> loc(#loc4)
+    %51 = stablehlo.convert %50 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<3xi1>) -> tensor<3xi32> loc(#loc4)
+    %52 = stablehlo.pad %51, %c_0, low = [1], high = [0], interior = [0] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<3xi32>, tensor<i32>) -> tensor<4xi32> loc(#loc4)
+    %53 = stablehlo.broadcast_in_dim %c_2, dims = [] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<i32>) -> tensor<4xi32> loc(#loc4)
+    %54 = stablehlo.tuple %c_2, %45, %52, %53 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s32[], s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc4)
+    %55 = stablehlo.get_tuple_element %54[0] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<i32> loc(#loc4)
+    %56 = stablehlo.get_tuple_element %54[1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %57 = stablehlo.get_tuple_element %54[2] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %58 = stablehlo.get_tuple_element %54[3] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %59:4 = stablehlo.while(%iterArg = %55, %iterArg_4 = %56, %iterArg_5 = %57, %iterArg_6 = %58) : tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32> attributes {annc.source_node = "uniq", annc.source_op = "tf.Unique"}
+     cond {
+      %83 = stablehlo.compare  LT, %iterArg, %c : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc1)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    } do {
+      %83 = stablehlo.add %iterArg, %c_0 : tensor<i32> loc(#loc2)
+      %84 = stablehlo.dynamic_slice %iterArg_5, %iterArg, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc15)
+      %85 = stablehlo.reshape %84 : (tensor<1xi32>) -> tensor<i32> loc(#loc16)
+      %86 = stablehlo.compare  NE, %85, %c_2 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc7)
+      %87 = stablehlo.dynamic_slice %iterArg_4, %iterArg, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc17)
+      %88 = stablehlo.reshape %87 : (tensor<1xi32>) -> tensor<i32> loc(#loc18)
+      %89 = stablehlo.compare  EQ, %iterArg, %c_2 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc6)
+      %90 = stablehlo.subtract %iterArg, %c_0 : tensor<i32> loc(#loc3)
+      %91 = stablehlo.select %89, %c_2, %90 : tensor<i1>, tensor<i32> loc(#loc8)
+      %92 = stablehlo.dynamic_slice %iterArg_6, %91, sizes = [1] : (tensor<4xi32>, tensor<i32>) -> tensor<1xi32> loc(#loc19)
+      %93 = stablehlo.reshape %92 : (tensor<1xi32>) -> tensor<i32> loc(#loc20)
+      %94 = stablehlo.select %86, %88, %93 : tensor<i1>, tensor<i32> loc(#loc21)
+      %95 = stablehlo.reshape %94 : (tensor<i32>) -> tensor<1xi32> loc(#loc22)
+      %96 = stablehlo.dynamic_update_slice %iterArg_6, %95, %iterArg : (tensor<4xi32>, tensor<1xi32>, tensor<i32>) -> tensor<4xi32> loc(#loc23)
+      stablehlo.return %83, %iterArg_4, %iterArg_5, %96 : tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32> loc(#loc)
+    } loc(#loc4)
+    %60 = stablehlo.tuple %59#0, %59#1, %59#2, %59#3 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s32[], s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc4)
+    %61 = stablehlo.get_tuple_element %60[3] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<i32>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %62:3 = "stablehlo.sort"(%61, %52, %45) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i32> loc("uniq"), %arg3: tensor<i32> loc("uniq"), %arg4: tensor<i32> loc("uniq"), %arg5: tensor<i32> loc("uniq"), %arg6: tensor<i32> loc("uniq"), %arg7: tensor<i32> loc("uniq")):
+      %83 = stablehlo.compare  LT, %arg2, %arg3 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc24)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<4xi32>, tensor<4xi32>) -> (tensor<4xi32>, tensor<4xi32>, tensor<4xi32>) loc(#loc4)
+    %63 = stablehlo.tuple %62#0, %62#1, %62#2 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s32[4]{0}, s32[4]{0}, s32[4]{0})"} : tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>> loc(#loc4)
+    %64 = stablehlo.get_tuple_element %63[1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %65 = stablehlo.get_tuple_element %63[2] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %66:2 = "stablehlo.sort"(%64, %65) <{dimension = 0 : i64, is_stable = true}> ({
+    ^bb0(%arg2: tensor<i32> loc("uniq"), %arg3: tensor<i32> loc("uniq"), %arg4: tensor<i32> loc("uniq"), %arg5: tensor<i32> loc("uniq")):
+      %83 = stablehlo.compare  GT, %arg2, %arg3 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc25)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<4xi32>) -> (tensor<4xi32>, tensor<4xi32>) loc(#loc4)
+    %67 = stablehlo.tuple %66#0, %66#1 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s32[4]{0}, s32[4]{0})"} : tuple<tensor<4xi32>, tensor<4xi32>> loc(#loc4)
+    %68 = stablehlo.get_tuple_element %67[1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %69 = "stablehlo.gather"(%39, %68) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 1>}> {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<?x1xi64, #stablehlo.bounds<4, ?>>, tensor<4xi32>) -> tensor<4x1xi64> loc(#loc4)
+    %70 = stablehlo.reshape %69 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4x1xi64>) -> tensor<4xi64> loc(#loc4)
+    %71 = stablehlo.transpose %70, dims = [0] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi64>) -> tensor<4xi64> loc(#loc4)
+    %72 = stablehlo.reduce(%64 init: %c_2) applies stablehlo.add across dimensions = [0] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<i32>) -> tensor<i32> loc(#loc4)
+    %73 = stablehlo.set_dimension_size %71, %72, dim = 0 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi64>, tensor<i32>) -> tensor<?xi64, #stablehlo.bounds<4>> loc(#loc4)
+    %cast = tensor.cast %73 {annc.source_node = "uniq", annc.source_op = "tf.Unique", annc.source_ports = dense<0> : tensor<1xi32>} : tensor<?xi64, #stablehlo.bounds<4>> to tensor<?xi64> loc(#loc36)
+    %74 = "stablehlo.reduce_window"(%64, %c_2) <{base_dilations = array<i64: 1>, padding = dense<[[3, 0]]> : tensor<1x2xi64>, window_dilations = array<i64: 1>, window_dimensions = array<i64: 4>, window_strides = array<i64: 1>}> ({
+    ^bb0(%arg2: tensor<i32> loc("uniq"), %arg3: tensor<i32> loc("uniq")):
+      %83 = stablehlo.add %arg2, %arg3 : tensor<i32> loc(#loc27)
+      stablehlo.return %83 : tensor<i32> loc(#loc)
+    }) {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<i32>) -> tensor<4xi32> loc(#loc4)
+    %75 = stablehlo.broadcast_in_dim %c_0, dims = [] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<i32>) -> tensor<4xi32> loc(#loc4)
+    %76 = stablehlo.subtract %74, %75 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : tensor<4xi32> loc(#loc4)
+    %77:2 = "stablehlo.sort"(%65, %76) <{dimension = 0 : i64, is_stable = false}> ({
+    ^bb0(%arg2: tensor<i32> loc("uniq"), %arg3: tensor<i32> loc("uniq"), %arg4: tensor<i32> loc("uniq"), %arg5: tensor<i32> loc("uniq")):
+      %83 = stablehlo.compare  LT, %arg2, %arg3 : (tensor<i32>, tensor<i32>) -> tensor<i1> loc(#loc28)
+      stablehlo.return %83 : tensor<i1> loc(#loc)
+    }) {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tensor<4xi32>, tensor<4xi32>) -> (tensor<4xi32>, tensor<4xi32>) loc(#loc4)
+    %78 = stablehlo.tuple %77#0, %77#1 {annc.source_node = "uniq", annc.source_op = "tf.Unique", xla_shape = "(s32[4]{0}, s32[4]{0})"} : tuple<tensor<4xi32>, tensor<4xi32>> loc(#loc4)
+    %79 = stablehlo.get_tuple_element %78[1] {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : (tuple<tensor<4xi32>, tensor<4xi32>>) -> tensor<4xi32> loc(#loc4)
+    %80 = stablehlo.convert %79 {annc.source_node = "uniq", annc.source_op = "tf.Unique"} : tensor<4xi32> loc(#loc4)
+    %cast_3 = tensor.cast %80 {annc.source_node = "uniq", annc.source_op = "tf.Unique", annc.source_ports = dense<1> : tensor<1xi32>} : tensor<4xi32> to tensor<?xi32> loc(#loc36)
+    %81 = "stablehlo.torch_index_select"(%arg0, %cast) <{batch_dims = 0 : i64, dim = 0 : i64}> {annc.source_node = "gather", annc.source_op = "tf.GatherV2", annc.source_ports = dense<0> : tensor<1xi32>} : (tensor<8x4xf32>, tensor<?xi64>) -> tensor<?x4xf32> loc(#loc37)
+    %82 = "stablehlo.torch_index_select"(%81, %cast_3) <{batch_dims = 0 : i64, dim = 0 : i64}> {annc.source_node = "restore", annc.source_op = "tf.GatherV2"} : (tensor<?x4xf32>, tensor<?xi32>) -> tensor<?x4xf32> loc(#loc38)
+    return %82 : tensor<?x4xf32> loc(#loc)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc("compare.80")
+#loc2 = loc("add.103")
+#loc3 = loc("subtract.91")
+#loc6 = loc("compare.93")
+#loc7 = loc("convert.98")
+#loc8 = loc("select.94")
+#loc9 = loc("StridedSlice:")
+#loc10 = loc("keys_slice")
+#loc11 = loc("compare.22")
+#loc12 = loc("compare.23")
+#loc13 = loc("compare.21")
+#loc14 = loc("select.24")
+#loc15 = loc("dynamic-slice.88")
+#loc16 = loc("reshape.89")
+#loc17 = loc("dynamic-slice.85")
+#loc18 = loc("reshape.86")
+#loc19 = loc("dynamic-slice.96")
+#loc20 = loc("reshape.97")
+#loc21 = loc("select.99")
+#loc22 = loc("reshape.100")
+#loc23 = loc("dynamic-update-slice.101")
+#loc24 = loc("compare.122")
+#loc25 = loc("compare.147")
+#loc26 = loc("Unique:")
+#loc27 = loc("add.162")
+#loc28 = loc("compare.178")
+#loc29 = loc("GatherV2:")
+#loc30 = loc("gather")
+#loc31 = loc("restore")
+#loc32 = loc(fused[#loc2, #loc3, #loc4, #loc5])
+#loc33 = loc(fused[#loc4, #loc5])
+#loc34 = loc(fused[#loc6, #loc7, #loc8, #loc4, #loc5])
+#loc35 = loc(fused[#loc9, #loc10])
+#loc36 = loc(fused[#loc26, #loc4])
+#loc37 = loc(fused[#loc29, #loc30])
+#loc38 = loc(fused[#loc29, #loc31])
+
+// FUSE: call @KPFusedGather_{{[0-9a-zA-Z_]+}}(%arg0, %arg1, %{{[0-9a-z_]+}})
+// FUSE-SAME: (tensor<8x4xf32>, tensor<4x2xi64>, tensor<2xi32>)
+// FUSE: func.func private @KPFusedGather
+// The synthesized begin reuses the FE-recorded pb node name (a made-up
+// FUSE-SAME: tf_name = "keys_slice/begin"
+// FUSE-SAME: tf_name = "unique_1:1"
+// FUSE-SAME: fusion.pattern = "kp_gather"
+// Kernel body: the flatten chain (slice/reshape) moves with the site;
+// the Unique group stays inside.
+// FUSE: stablehlo.slice
+// FUSE: stablehlo.reshape
+// FUSE: stablehlo.transpose
+// Second layer: the whole site is replaced by a context builtin call.
+// CODEGEN: atir.Customize
+// CODEGEN-SAME: custom.op_name = "KPFusedGather"
+// CODEGEN: return

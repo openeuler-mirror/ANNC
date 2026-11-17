@@ -33,7 +33,9 @@ MLIROPT="${MLIROPT:-$ANNC_LLVM_BIN/mlir-opt}"
 FILECHECK="${FILECHECK:-$ANNC_LLVM_BIN/FileCheck}"
 # Some RUN lines invoke LLVM's `not` and `split-file` by bare name.
 export PATH="$ANNC_LLVM_BIN:$PATH"
-FILTER='grep -vE "^\[ANNC "'
+# Matches both log prefixes in the tree: the tool-level "[ANNC ..." and the
+# Support/Log.h "[annc:<subsystem>][<level>]" (only relevant at info/debug).
+FILTER='grep -vE "^\[[Aa][Nn][Nn][Cc][ :]"'
 
 for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK" \
          "$ANNC_LLVM_BIN/not" "$ANNC_LLVM_BIN/split-file"; do
