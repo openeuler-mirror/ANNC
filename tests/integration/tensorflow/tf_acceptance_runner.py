@@ -310,6 +310,43 @@ def prepare_fusion(args, graph):
 
 
 def rewrite_graph(args, graph, frontend):
+    checked = None
+    if args.spec.get("fast_codegen") == "enable-kdnn=true":
+        tools = args.work_dir / "tools"
+        tools.mkdir()
+        for name in (
+            "annc-tf-pipeline",
+            "annc-tf2atir",
+            "annc-opt",
+            "annc-asm",
+            "annc-fusion-metadata",
+            "annc-converter",
+        ):
+            (tools / name).symlink_to(args.build_dir / "bin" / name)
+        checked = args.work_dir / "compiled-kernel.json"
+        compiler = tools / "annc"
+        # Check the compiler input used for this library, not a separate lowering.
+        compiler.write_text(
+            f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import json
+            from pathlib import Path
+            import re
+            import subprocess
+            import sys
+
+            source = Path(sys.argv[1])
+            symbol = {args.spec['symbol']!r}
+            assert re.search(r"\\bcall\\s+@" + re.escape(symbol) + r"\\s*\\(",
+                             source.read_text()), "Missing kernel call: " + symbol
+            subprocess.run([{str(args.build_dir / 'bin/annc')!r}] + sys.argv[1:],
+                           check=True)
+            output = Path(sys.argv[sys.argv.index("-o") + 1]).resolve()
+            Path({str(checked)!r}).write_text(json.dumps(
+                dict(library=str(output), symbol=symbol, source=str(source))))
+            """)
+        )
+        compiler.chmod(0o755)
+        args.pipeline = tools / "annc-tf-pipeline"
     pipeline = prepare_fusion(args, graph)
     rewritten_path = args.work_dir / "rewritten.pb"
     command = [
@@ -328,6 +365,14 @@ def rewrite_graph(args, graph, frontend):
     subprocess.run(command, check=True)
     rewritten = tf.GraphDef()
     rewritten.ParseFromString(rewritten_path.read_bytes())
+    if checked is not None:
+        compilation = json.loads(checked.read_text())
+        libraries = {
+            str(Path(node.attr["shared_lib_path"].s.decode()).resolve())
+            for node in rewritten.node
+            if node.op == "ANNCFused"
+        }
+        assert libraries == {compilation["library"]}, "Unchecked kernel library"
     return rewritten
 
 

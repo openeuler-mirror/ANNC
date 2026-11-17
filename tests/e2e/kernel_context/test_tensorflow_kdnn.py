@@ -1,9 +1,6 @@
 """KDNN dense kernels through TensorFlow fusion and AOT execution."""
 
-import pytest
-
 from tf_graph import build_graph, kernel_spec
-from tf_pipeline import run_pipeline
 
 
 CASES = {
@@ -58,8 +55,3 @@ def _build(case, spec, tf, np, input_, feeds, variants):
 
 def make_graph(case):
     return build_graph(case, CASES[case], _build)
-
-
-@pytest.mark.parametrize("case", sorted(CASES))
-def test_kdnn_dense_full_pipeline(case, tmp_path):
-    run_pipeline(CASES[case], make_graph, case, tmp_path)
