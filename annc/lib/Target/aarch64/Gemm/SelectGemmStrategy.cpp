@@ -1,5 +1,6 @@
 #include "GemmPlan.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 
@@ -123,6 +124,8 @@ class AArch64SelectGemmStrategy
           return WalkResult::interrupt();
         }
         config = *loaded;
+        if (config->maxThreadCount)
+          threadCount = std::min(threadCount, *config->maxThreadCount);
       }
       return failed(selectGemmStrategy(op, threadCount, *config, enablePrepack))
                  ? WalkResult::interrupt()
