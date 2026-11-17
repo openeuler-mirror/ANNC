@@ -43,7 +43,6 @@ target_link_libraries(annc-asm PRIVATE
 if(ANNC_ENABLE_TF2ATIR_V2)
   target_compile_definitions(annc-asm PRIVATE ANNC_ENABLE_TF2ATIR_V2=1)
   target_link_libraries(annc-asm PRIVATE
-    StablehloRegister
     StablehloToAtirConversion)
 endif()
 llvm_update_compile_flags(annc-asm)

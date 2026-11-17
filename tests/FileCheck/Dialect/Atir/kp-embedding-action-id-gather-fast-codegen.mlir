@@ -1,4 +1,4 @@
-// RUN: annc-asm --atir-fast-codegen %s | FileCheck %s
+// RUN: annc-asm --annc-fast-codegen %s | FileCheck %s
 // KP-style embedding action-id gather fusion, second level: inside the
 // kernel func extracted by OpFusion (args = params/indices1/indices2/
 // pack_dim/pack; result = output), the Gather->Gather->Reshape(Pack(-1)) +

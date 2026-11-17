@@ -1,4 +1,4 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s
 // KP-style sparse segment reduce fusion, second level, Context V3: inside
 // the kernel func extracted by OpFusion (signature !llvm.ptr + 5 inputs,
 // 2 results), the StridedSlice->SparseSegmentMean->Shape->StridedSlice

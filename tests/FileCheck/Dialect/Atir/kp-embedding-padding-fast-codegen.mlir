@@ -1,4 +1,4 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s
 // KP-style embedding padding fusion, second level, Context V3: inside the
 // kernel func (signature !llvm.ptr + 5 inputs, 2 results) the padding chain
 // folds into a single CustomizeOp; results map to execution slots

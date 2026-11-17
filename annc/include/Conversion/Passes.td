@@ -7,12 +7,12 @@ def ConvertContextKernelABI : Pass<"convert-context-kernel-abi", "ModuleOp"> {
   let summary = "Convert context-v3 kernel entry inputs to context slots";
   let description = [{
     Run after fusion pruning and shape specialization, before ATIR-to-Linalg
-    conversion. The pass unpacks ranked tensor arguments from context memref
-    descriptors and preserves function results and returns.
+    conversion. The pass accepts only builtin ranked tensor arguments, unpacks
+    their context memref descriptors in function argument order, and preserves
+    function results and returns. Legacy ATIR tensor arguments are rejected.
   }];
   let constructor = "createConvertContextKernelABIPass()";
   let dependentDialects = [
-    "AtirDialect",
     "mlir::func::FuncDialect",
     "mlir::LLVM::LLVMDialect",
     "mlir::bufferization::BufferizationDialect",
@@ -47,6 +47,26 @@ def ConvertAtirToLinalg : Pass<"convert-atir-to-linalg", "ModuleOp"> {
     "mlir::memref::MemRefDialect",
     "mlir::bufferization::BufferizationDialect",
     "mlir::LLVM::LLVMDialect"
+  ];
+}
+
+def ConvertAtirV2ToLinalg : Pass<"convert-atir-v2-to-linalg", "ModuleOp"> {
+  let summary = "convert atir v2 ops to linalg ops";
+  let description = [{
+    Lower ATIR V2 operations to the Linalg and builtin dialects. The pass is
+    currently a conversion entry point; V2 operation patterns will be added
+    incrementally without changing the legacy ATIR lowering pass.
+  }];
+  let constructor = "createConvertAtirV2ToLinalg()";
+  let dependentDialects = [
+    "AtirDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect"
   ];
 }
 

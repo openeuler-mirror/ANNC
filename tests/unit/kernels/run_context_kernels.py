@@ -20,7 +20,7 @@ def compile_entries(args, root, build):
         subprocess.run([
             args.annc_asm,
             str(root / "tests/FileCheck/Dialect/Atir" / fixture),
-            "--atir-fast-codegen", "--lower-context-kernel-entries",
+            "--annc-fast-codegen", "--lower-context-kernel-entries",
             "--convert-atir-to-linalg",
             "-o", str(lowered),
         ], check=True)

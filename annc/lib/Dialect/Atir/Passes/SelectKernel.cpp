@@ -6,14 +6,14 @@ using namespace mlir;
 namespace atir {
 namespace {
 
-class AtirSelectKernelPass : public AtirSelectKernelBase<AtirSelectKernelPass> {
+class AnncSelectKernelPass : public AnncSelectKernelBase<AnncSelectKernelPass> {
  public:
   using Base::Base;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (kernelName.empty()) {
-      module.emitError("atir-select-kernel requires kernel-name");
+      module.emitError("annc-select-kernel requires kernel-name");
       signalPassFailure();
       return;
     }
@@ -35,8 +35,8 @@ class AtirSelectKernelPass : public AtirSelectKernelBase<AtirSelectKernelPass> {
 
 }  // namespace
 
-std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectKernelPass() {
-  return std::make_unique<AtirSelectKernelPass>();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncSelectKernelPass() {
+  return std::make_unique<AnncSelectKernelPass>();
 }
 
 }  // namespace atir

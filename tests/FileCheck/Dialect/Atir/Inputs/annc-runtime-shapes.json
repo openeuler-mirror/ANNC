@@ -1,0 +1,8 @@
+{
+  "kernel_name": "fused_matmul_add",
+  "arguments": [
+    {"index": 0, "shape": [5, 4]},
+    {"index": 1, "shape": [4, 3]},
+    {"index": 2, "shape": [3]}
+  ]
+}

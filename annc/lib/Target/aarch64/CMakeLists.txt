@@ -93,6 +93,11 @@ add_mlir_library(AArch64Codegen
         ContextConversion
 )
 
+if(ANNC_ENABLE_TF2ATIR_V2)
+  target_compile_definitions(obj.AArch64Codegen PRIVATE
+    ANNC_ENABLE_TF2ATIR_V2)
+endif()
+
 # This is a dependency capability, not a user-selectable optimization mode.
 # Apply it to the source so it also reaches MLIR's obj.AArch64Codegen target.
 set_property(SOURCE Gemm/ConstantFolding/GemmPrepackRhs.cpp APPEND PROPERTY

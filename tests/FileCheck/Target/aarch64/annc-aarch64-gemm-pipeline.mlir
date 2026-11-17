@@ -1,3 +1,4 @@
+// REQUIRES: legacy-aarch64-pipeline
 // RUN: rm -rf %t.dir && mkdir -p %t.dir && split-file %s %t.dir
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %t.dir/discovery.mlir -atir-gemm-epilogue-fusion -o %t.discovery.mlir
 // RUN: FileCheck %t.dir/discovery.mlir < %t.discovery.mlir

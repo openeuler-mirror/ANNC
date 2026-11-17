@@ -1,5 +1,5 @@
-// RUN: annc-asm %s -atir-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
-// RUN: annc-asm %s -atir-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | mlir-opt -convert-func-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
+// RUN: annc-asm %s -annc-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
+// RUN: annc-asm %s -annc-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | mlir-opt -convert-func-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
 // CHECK: func.func private @ANNCKernel_ContextV3_KPFusedGather_float_int64_t_int32_t_int32_t_auto(!llvm.ptr) -> i32 attributes {llvm.emit_c_interface}
 // CHECK-LABEL: func.func private @fused_kp_fused_gather(
 // CHECK-SAME: %[[CTX:[a-zA-Z0-9_]+]]: !llvm.ptr) -> i32

@@ -39,6 +39,36 @@ void AtirDialect::initialize() {
 #include "Dialect/Atir/AtirTypes.cpp.inc"
 
 namespace atir {
+LogicalResult FusedMatMulOp::verify() {
+  Attribute attribute = (*this)->getAttr("annc.gemm.epilogue");
+  if (!attribute) {
+    if (!getEpilogueInputs().empty())
+      return emitOpError(
+          "requires annc.gemm.epilogue when epilogue inputs are present");
+    return success();
+  }
+  auto epilogue = dyn_cast<DictionaryAttr>(attribute);
+  if (!epilogue)
+    return emitOpError("requires annc.gemm.epilogue to be a dictionary");
+  auto steps = epilogue.getAs<ArrayAttr>("steps");
+  if (!steps || steps.empty())
+    return emitOpError("requires a nonempty epilogue steps array");
+  unsigned binaryInputCount = 0;
+  for (Attribute step : steps) {
+    auto encoded = dyn_cast<DictionaryAttr>(step);
+    auto opcode = encoded ? encoded.getAs<StringAttr>("opcode") : StringAttr{};
+    if (!opcode)
+      return emitOpError("requires an opcode string for each epilogue step");
+    if (opcode.getValue() == "add" || opcode.getValue() == "mul")
+      ++binaryInputCount;
+    else if (opcode.getValue() != "relu" && opcode.getValue() != "sigmoid")
+      return emitOpError("has an unsupported epilogue opcode");
+  }
+  if (getEpilogueInputs().size() != binaryInputCount)
+    return emitOpError("epilogue inputs must match the ordered binary steps");
+  return success();
+}
+
 #define PARSE_TENSOR_ERROR(err) {                              \
   odsParser.emitError(odsParser.getCurrentLocation(),          \
                    std::string(errPrintMsg)+std::string(err)); \

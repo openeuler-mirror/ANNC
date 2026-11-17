@@ -102,7 +102,7 @@ def test_kp_fused_gather_can_be_materialized_from_external_config(tmp_path):
         _binary(build_dir, "annc-asm"),
         fused_atir,
         "--atir-prune-func",
-        "--atir-fast-codegen",
+        "--annc-fast-codegen",
         "-o",
         lowered,
     ])

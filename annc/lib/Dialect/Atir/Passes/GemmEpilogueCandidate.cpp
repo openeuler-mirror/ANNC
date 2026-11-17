@@ -52,10 +52,11 @@ mlir::FailureOr<EpilogueStep> makeStep(EpilogueOpcode opcode,
                                        std::optional<float> reluLimit) {
   const bool unary =
       opcode == EpilogueOpcode::kRelu || opcode == EpilogueOpcode::kSigmoid;
+  // V2 metadata may omit `limit` for an unbounded relu.
   if (inputIndex < 0 || (unary && inputIndex != 0) ||
       (!unary && inputIndex > 1) ||
       (unary && broadcast != BroadcastKind::kScalar) ||
-      (opcode == EpilogueOpcode::kRelu) != reluLimit.has_value())
+      (opcode != EpilogueOpcode::kRelu && reluLimit.has_value()))
     return mlir::failure();
   return EpilogueStep{opcode, static_cast<unsigned>(inputIndex), broadcast,
                       reluLimit};

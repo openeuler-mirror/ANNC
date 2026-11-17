@@ -1,3 +1,4 @@
+// REQUIRES: legacy-aarch64-pipeline
 // RUN: echo '{"kernel_name":"empty_tensordot","arguments":[{"index":0,"shape":[0,3,8]},{"index":1,"shape":[8,4]},{"index":2,"shape":[0,3,4]}]}' > %t.json
 // RUN: annc-asm %s -atir-specialize-shapes='shape-spec=%t.json' -annc-aarch64-gemm-pipeline | FileCheck %s --implicit-check-not=llvm.call --implicit-check-not=memref.alloc --implicit-check-not=memref.copy --implicit-check-not=atir.Dot --implicit-check-not=linalg.matmul
 
