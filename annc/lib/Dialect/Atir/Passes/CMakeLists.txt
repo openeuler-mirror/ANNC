@@ -8,8 +8,10 @@ file(GLOB _srcs *.cpp Patterns/*.cpp Patterns/CustomPatterns/*.cpp Fusion/*.cpp)
 # the V2 second-level rewrite out of the glob (file() returns abs paths).
 if(ANNC_ENABLE_TF2ATIR_V2)
   list(APPEND _srcs
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/OpFusionV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/CarrierMatchers.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/FusionV2Outline.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/FusionV2Outline.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/KpGatherV2.cpp)
 else()
   list(REMOVE_ITEM _srcs
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingGatherV2Rewrite.cpp)
