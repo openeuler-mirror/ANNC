@@ -15,6 +15,12 @@
 // CHECK-NOT: annc.kernel
 // CHECK: return
 module {
+  // The pass skips a module without @main; this empty entry unlocks
+  // probing so the negatives below are truly exercised.
+  func.func @main() {
+    return
+  }
+
   func.func @neg_multicol(%table: tensor<100x4xf32>, %keys: tensor<?x2xi64>) -> tensor<?x4xf32> {
     %cst = stablehlo.constant dense<0> : tensor<i64> loc("Const:_limit")
     %shp = shape.shape_of %keys : tensor<?x2xi64> -> tensor<2xindex> loc(fused["Shape:", "shape_k"])
