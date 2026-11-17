@@ -11,6 +11,7 @@
 // RUN: env ANNC_GEMM=2 annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
 // RUN: env ANNC_GEMM=2 annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
 // RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=HIP09-THREAD-EPILOGUE
 // Euler dev selects direct/packed/prepacked from the target plan; the legacy
 // ANNC_GEMM_RHS_PACKING override is intentionally not part of this contract.
 // RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
@@ -565,6 +566,12 @@ func.func @main(
 // THREAD-EPILOGUE-LABEL: func.func @threaded_add_relu(
 // THREAD-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
 // THREAD-EPILOGUE-NOT: arith.addf
+// HIP09-THREAD-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// HIP09-THREAD-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
+// HIP09-THREAD-EPILOGUE: func.func private @__annc_gemm_thread_task_
+// HIP09-THREAD-EPILOGUE-SAME: memref<*xf32>
+// HIP09-THREAD-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// HIP09-THREAD-EPILOGUE-NOT: arith.addf
 func.func @threaded_add_relu(
     %a: !atir.tensor<128x128xf32>, %b: !atir.tensor<128x128xf32>,
     %out: !atir.tensor<128x128xf32>, %bias: !atir.tensor<128xf32>) {
