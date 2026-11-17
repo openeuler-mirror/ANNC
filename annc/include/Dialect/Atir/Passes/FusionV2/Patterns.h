@@ -6,7 +6,8 @@
 
 namespace atir {
 
-void addActionIdGatherV2Pattern(mlir::RewritePatternSet &patterns);
+void addActionIdGatherV2Pattern(mlir::RewritePatternSet &patterns,
+                                 fusionv2::CallPortTable *portTable);
 
 // kp_gather (KPFusedGather): Unique residue anchor, promoted mode
 // (data/keys/begin).
@@ -26,7 +27,6 @@ void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns);
 void addEmbeddingPaddingFastV2Pattern(mlir::RewritePatternSet &patterns);
 // dnn_embedding_hash_bucket: string_to_hash_bucket_fast_v2 anchor, ABI
 // (input:string, embedding_weight) -> output; num_buckets via schema attr.
-void addDnnEmbeddingHashBucketV2Pattern(mlir::RewritePatternSet &patterns);
 
 // dot GEMM: stablehlo.dot anchor (TF MatMul legalized shape), matching and
 // outlining only (pre-lowering, native carrier ops moved verbatim); the
