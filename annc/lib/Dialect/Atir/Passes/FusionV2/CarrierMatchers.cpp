@@ -197,6 +197,16 @@ Value externalSource(Value v, ArrayRef<Operation *> members) {
   return Value();
 }
 
+// Splat integer constant value; empty for anything else.
+std::optional<int64_t> splatIntConst(Value v) {
+  auto k = v.getDefiningOp<stablehlo::ConstantOp>();
+  if (!k) return std::nullopt;
+  auto d = dyn_cast<DenseElementsAttr>(k.getValue());
+  if (!d || !d.isSplat() || !d.getElementType().isInteger())
+    return std::nullopt;
+  return d.getSplatValue<APInt>().getSExtValue();
+}
+
 // Bucket port of a 1:N DP expansion; the bucket-size chain is
 // divide(reduce(convert(compare EQ, sortedParts, broadcast k))), 1) - read k
 // from the set_dimension_size size operand.
@@ -206,10 +216,19 @@ std::optional<int64_t> bucketPortOf(Value bucket) {
   auto setDim = v.getDefiningOp<stablehlo::SetDimensionSizeOp>();
   if (!setDim) return std::nullopt;
   Value size = setDim->getOperand(1);
-  if (auto div = size.getDefiningOp<stablehlo::DivOp>())
+  if (auto div = size.getDefiningOp<stablehlo::DivOp>()) {
+    auto one = splatIntConst(div->getOperand(1));
+    if (!one || *one != 1) return std::nullopt;
     size = div->getOperand(0);
+  }
   auto reduce = size.getDefiningOp<stablehlo::ReduceOp>();
   if (!reduce) return std::nullopt;
+  auto init = splatIntConst(reduce->getOperand(1));
+  if (!init || *init != 0) return std::nullopt;
+  Block &rbody = reduce.getBody().front();
+  if (&rbody.front() != rbody.getTerminator() ||
+      !isa<stablehlo::AddOp>(rbody.front()))
+    return std::nullopt;
   Value counted = reduce->getOperand(0);
   if (auto convert = counted.getDefiningOp<stablehlo::ConvertOp>())
     counted = convert->getOperand(0);
@@ -217,21 +236,22 @@ std::optional<int64_t> bucketPortOf(Value bucket) {
   if (!compare ||
       compare.getComparisonDirection() != stablehlo::ComparisonDirection::EQ)
     return std::nullopt;
-  for (Value side : {compare->getOperand(0), compare->getOperand(1)}) {
+  // Exactly one side must trace to a splat integer constant: the other
+  // side is the sorted-partitions data; both-constant or both-data is a
+  // degenerate shape and yields nullopt.
+  auto constOf = [](Value side) -> std::optional<int64_t> {
     Value c = side;
     if (auto bcast = c.getDefiningOp<stablehlo::BroadcastInDimOp>())
       c = bcast->getOperand(0);
     else if (auto bcast =
                  c.getDefiningOp<stablehlo::DynamicBroadcastInDimOp>())
       c = bcast->getOperand(0);
-    auto constant = c.getDefiningOp<stablehlo::ConstantOp>();
-    if (!constant) continue;
-    auto dense = dyn_cast<DenseElementsAttr>(constant.getValue());
-    if (!dense || !dense.isSplat() || !dense.getElementType().isInteger())
-      continue;
-    return dense.getSplatValue<APInt>().getSExtValue();
-  }
-  return std::nullopt;
+    return splatIntConst(c);
+  };
+  auto c0 = constOf(compare->getOperand(0));
+  auto c1 = constOf(compare->getOperand(1));
+  if (c0.has_value() == c1.has_value()) return std::nullopt;
+  return c0 ? *c0 : *c1;
 }
 
 }  // namespace
