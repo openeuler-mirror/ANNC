@@ -125,11 +125,21 @@ void collectDataMembers(mlir::Value root,
                         llvm::SmallPtrSetImpl<mlir::Operation *> &seen,
                         llvm::SmallVectorImpl<mlir::Operation *> &out);
 
+// Cascade port registry owned by the pass: call -> (callee, per-output
+// tf_names). Lives exactly one runOnOperation, so stale entries cannot
+// outlive the op set they point into.
+struct CallPortTable {
+  llvm::DenseMap<mlir::Operation *,
+                 std::pair<std::string, llvm::SmallVector<std::string>>>
+      entries;
+};
+
 mlir::LogicalResult collectBoundary(
     mlir::func::FuncOp main, mlir::ArrayRef<mlir::Operation *> members,
     llvm::SmallVectorImpl<ProbeArg> &args,
     llvm::ArrayRef<std::pair<mlir::Value, std::string>> promotedConstants = {},
-    llvm::ArrayRef<mlir::Value> fixedValues = {});
+    llvm::ArrayRef<mlir::Value> fixedValues = {},
+    CallPortTable *portTable = nullptr);
 
 // Whitelisted closure from an arith root: stablehlo/shape/arith/tensor plus
 // atirInteriorOps-named carrier ops may be traversed; block params, other
@@ -151,7 +161,8 @@ mlir::LogicalResult outlineSite(mlir::func::FuncOp main,
                                 const std::string &name,
                                 mlir::StringRef patternName,
                                 mlir::ArrayRef<std::string> tailAnchors,
-                                llvm::ArrayRef<int64_t> contextI64Attrs = {});
+                                llvm::ArrayRef<int64_t> contextI64Attrs,
+                                CallPortTable &portTable);
 
 }  // namespace fusionv2
 }  // namespace atir

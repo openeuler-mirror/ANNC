@@ -158,7 +158,8 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 
 `ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线：stablehlo 方言集成与 sink
 层，以及 V2 工具（`annc-converter-v2`、`annc-tf2atir-v2`，随各自批次
-并入同一开关）。TF 2.20 环境下同一开关还包含 `pb2stablehlo`（GraphDef
+并入同一开关）。V2 融合（`-atir-op-fusion-v2` pass 与配套 FileCheck/单测）
+随同一开关编译，OFF 构建不含任何 V2 源。TF 2.20 环境下同一开关还包含 `pb2stablehlo`（GraphDef
 → StableHLO 前端，`addons/tensorflow/transform/`，增量交付中）：wheel
 隔离编译——需 TF 2.20 pip wheel（配置期门禁版本），llvm 头按
 `third_party/llvm-include` 本地快照 → `ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR`

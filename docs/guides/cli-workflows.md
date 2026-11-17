@@ -66,6 +66,22 @@ annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
 部署形态见
 [addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
 
+### `-atir-op-fusion-v2`（V2 融合）
+
+sink 之后由 `annc-opt` 执行 V2 融合（图优化职责，与 `annc-asm` 无关）：
+在 sink 产物上切分融合站点为 kernel 函数（当前 kp_gather pattern），
+主图以 `func.call` 回接，kernel 带 V1 契约的 `fusion.metadata`。
+
+```shell
+annc-opt sunk.mlir -atir-op-fusion-v2 -o fused.mlir
+```
+
+后续的 fast-codegen（站点 Customize 化）由 `annc-asm` 执行，两段串联：
+
+```shell
+annc-opt sunk.mlir -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen
+```
+
 ## `pb2stablehlo`（V2 路线前端）
 
 TF GraphDef → StableHLO 的 V2 前端（wheel 隔离编译，TF 2.20 + 独立

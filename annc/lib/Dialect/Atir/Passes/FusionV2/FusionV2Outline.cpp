@@ -168,15 +168,12 @@ std::string abiNameFor(func::FuncOp main, Value value, StringRef anchorName,
   return (anchorName + suffix).str();
 }
 
-static thread_local DenseMap<Operation *,
-                             std::pair<std::string, SmallVector<std::string>>>
-    callPortNames;
-
 LogicalResult collectBoundary(
     func::FuncOp main, ArrayRef<Operation *> members,
     SmallVectorImpl<ProbeArg> &args,
     ArrayRef<std::pair<Value, std::string>> promotedConstants,
-    ArrayRef<Value> fixedValues) {
+    ArrayRef<Value> fixedValues,
+    CallPortTable *portTable) {
   DenseSet<Value> produced;
   for (Operation *op : members)
     for (Value r : op->getResults()) produced.insert(r);
@@ -232,9 +229,9 @@ LogicalResult collectBoundary(
             llvm::is_contained(fixedValues, operand) ? "fixed" : "dynamic";
       } else {
         Operation *def = operand.getDefiningOp();
-        if (auto callOp = dyn_cast<func::CallOp>(def)) {
-          auto it = callPortNames.find(callOp.getOperation());
-          if (it != callPortNames.end() &&
+        if (auto callOp = dyn_cast<func::CallOp>(def); def && portTable) {
+          auto it = portTable->entries.find(callOp.getOperation());
+          if (it != portTable->entries.end() &&
               it->second.first == callOp.getCallee().str()) {
             if (auto res = llvm::dyn_cast<OpResult>(operand);
                 res && res.getResultNumber() < it->second.second.size()) {
@@ -554,7 +551,8 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
                           ArrayRef<Value> outputs, const std::string &name,
                           StringRef patternName,
                           ArrayRef<std::string> tailAnchors,
-                          ArrayRef<int64_t> contextI64Attrs) {
+                          ArrayRef<int64_t> contextI64Attrs,
+                          CallPortTable &portTable) {
   ModuleOp module =
       validateSiteInputs(main, tailOps, outputs, tailAnchors);
   if (!module) return failure();
@@ -646,8 +644,8 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
   rewriter.setInsertionPoint(tailOps.front());
   auto call = rewriter.create<func::CallOp>(tailOps.front()->getLoc(), name,
                                             tailTypes, callArgs);
-  callPortNames[call.getOperation()] = {name,
-                                        SmallVector<std::string>(tailAnchors)};
+  portTable.entries[call.getOperation()] = {
+      name, SmallVector<std::string>(tailAnchors)};
   for (Operation *tail : tailOps) {
     SmallVector<Value> tailDeps(tail->getOperands().begin(),
                                 tail->getOperands().end());
