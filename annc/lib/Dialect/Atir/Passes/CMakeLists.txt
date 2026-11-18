@@ -15,7 +15,8 @@ if(ANNC_ENABLE_TF2ATIR_V2)
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/DotGemmV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/ActionIdGatherV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/DnnEmbeddingHashBucketV2.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/EmbeddingPaddingV2.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/EmbeddingPaddingV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/EmbeddingPaddingFastV2.cpp)
 else()
   list(REMOVE_ITEM _srcs
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingGatherV2Rewrite.cpp

@@ -32,8 +32,11 @@ void addEmbeddingPaddingV2Pattern(mlir::RewritePatternSet &patterns,
 void addSparseSelectV2Pattern(mlir::RewritePatternSet &patterns);
 void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns);
 // kp_embedding_padding_fast: StridedSlice anchor (or the scalar reshape
-// folded at import); shares the padding kernel family (dual rank-0 outputs).
-void addEmbeddingPaddingFastV2Pattern(mlir::RewritePatternSet &patterns);
+// folded at import); shares the padding kernel family (dual rank-0
+// outputs). The slow form requires the unranked atir origin carrier, the
+// fast form a plain rank1 i64 vector - the two FE shapes differ by design.
+void addEmbeddingPaddingFastV2Pattern(mlir::RewritePatternSet &patterns,
+                                      fusionv2::CallPortTable *portTable);
 
 // dot GEMM: stablehlo.dot anchor (TF MatMul legalized shape), matching and
 // outlining only (pre-lowering, native carrier ops moved verbatim); the
