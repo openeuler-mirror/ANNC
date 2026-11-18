@@ -43,41 +43,32 @@ bool isResidueOf(Operation *op, llvm::StringRef opType) {
 }
 
 // Walks the string-domain chain back to the single string boundary (block
-// arg or placeholder residue); constants are skipped, other ops are chain
-// members, an unclassifiable 0-operand op invalidates the site.
+// arg or placeholder residue). Only identity wrappers (Cast residues) may
+// sit in between: a real string op would change the hashed value, so it
+// invalidates the site instead of being absorbed as a member.
 Value findStringInput(Value root, bool &invalid) {
-  SmallVector<Value, 16> work{root};
-  SmallPtrSet<Operation *, 32> seen;
-  Value candidate;
-  while (!work.empty()) {
-    Value v = work.pop_back_val();
+  Value v = root;
+  for (int hop = 0; hop < 16; ++hop) {
     Operation *def = v.getDefiningOp();
     if (!def) {
-      if (isStringTensor(v)) {
-        if (candidate) return Value();
-        candidate = v;
-      }
-      continue;
+      if (!isStringTensor(v)) break;
+      return v;
     }
-    if (isa<stablehlo::ConstantOp, arith::ConstantOp>(def)) continue;
     if (auto residue = dyn_cast<atir::UnsupportedOp>(def)) {
       if (residue.getOpType() == "Placeholder") {
-        if (isStringTensor(v)) {
-          if (candidate) return Value();
-          candidate = v;
-        }
+        if (!isStringTensor(v)) break;
+        return v;
+      }
+      if (residue.getOpType() == "Cast" ||
+          residue.getOpType() == "CastV2") {
+        v = def->getOperand(0);
         continue;
       }
     }
-    if (def->getName().getStringRef() == "atir.constant_v2") continue;
-    if (def->getNumOperands() == 0) {
-      invalid = true;
-      return Value();
-    }
-    if (!seen.insert(def).second) continue;
-    for (Value operand : def->getOperands()) work.push_back(operand);
+    break;
   }
-  return candidate;
+  invalid = true;
+  return Value();
 }
 
 // True when from reaches target through a convert/cast-only chain (the
@@ -130,6 +121,14 @@ LogicalResult matchHashBucket(atir::StringToHashBucketFastV2Op anchor,
   if (!weightTy || weightTy.getRank() != 2 ||
       !weightTy.getElementType().isF32())
     return failure();
+  // Row-wise lookup only: the kernel indexes weight rows directly, so the
+  // gather must select along dim 0 (a bare TF Gather residue is row-wise by
+  // definition).
+  if (auto view = GatherLike::match(gather)) {
+    if (!view.axisIsZero()) return failure();
+  } else if (!isResidueOf(gather, "Gather")) {
+    return failure();
+  }
 
   Operation *segMean = nullptr;
   for (Operation *user : gather->getResult(0).getUsers()) {
@@ -141,6 +140,20 @@ LogicalResult matchHashBucket(atir::StringToHashBucketFastV2Op anchor,
   }
   if (!segMean || segMean->getNumResults() != 1) return failure();
   if (!reachesThroughCast(unique->getResult(1), segMean)) return failure();
+  // num_segments must stay inferred (0): the kernel derives the output row
+  // count itself; an explicit count changes the segment semantics (V1
+  // verifyConstants parity). The TF residue form carries no such operand.
+  if (auto ssm = dyn_cast<atir::SparseSegmentMeanV2Op>(segMean)) {
+    Operation *numDef = ssm.getNumSegments().getDefiningOp();
+    auto numConst = dyn_cast_or_null<stablehlo::ConstantOp>(numDef);
+    auto numAttr =
+        numConst ? dyn_cast<DenseElementsAttr>(numConst.getValue())
+                 : DenseElementsAttr();
+    if (!numAttr || !numAttr.isSplat() ||
+        !numAttr.getElementType().isInteger() ||
+        numAttr.getSplatValue<APInt>().getSExtValue() != 0)
+      return failure();
+  }
 
   Operation *outputOp = nullptr;
   for (Operation &op : segMean->getParentOfType<func::FuncOp>()

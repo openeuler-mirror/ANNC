@@ -73,6 +73,16 @@ void orderedBoundaryInputs(func::FuncOp func, SmallVectorImpl<Value> &inputs) {
   for (Value arg : func.getArguments()) inputs.push_back(arg);
 }
 
+constexpr llvm::StringRef kPatternName = "kp_embedding_action_id_gather";
+
+bool isActionIdKernelFunc(func::FuncOp func) {
+  if (!func || !func->hasAttr("annc.kernel")) return false;
+  auto metadata = func->getAttrOfType<DictionaryAttr>("fusion.metadata");
+  if (!metadata) return false;
+  auto pattern = dyn_cast_or_null<StringAttr>(metadata.get("fusion.pattern"));
+  return pattern && pattern.getValue() == kPatternName;
+}
+
 template <typename AnchorOp>
 struct KpEmbeddingActionIdGatherV2RewriteImpl
     : public CustomFusionPatternBase<AnchorOp> {
@@ -85,7 +95,7 @@ struct KpEmbeddingActionIdGatherV2RewriteImpl
     if (!atir::fusionv2::ConcatLike::match(anchor.getOperation()))
       return mlir::failure();
     auto func = anchor->template getParentOfType<func::FuncOp>();
-    if (!func || !func->hasAttr("annc.kernel")) return mlir::failure();
+    if (!isActionIdKernelFunc(func)) return mlir::failure();
     return matchActionIdGatherV2(anchor.getOperation(), func, fusedOps);
   }
 
