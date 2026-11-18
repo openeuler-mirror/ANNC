@@ -41,6 +41,8 @@ GEMM op
 
 调优 JSON v3 提供 target、ISA、数据类型、cache/kernel 策略选择及其策略专属参数，并提供 thread planner cost model。每个策略先由 `strategy` 字段选择，再从同级同名对象读取参数：`cache.strategy` 对应 `cache.fixed`，`kernel.strategy` 对应 `kernel.fixed`。通用配置解析位于 `Support/GemmConfig.cpp`；策略参数的 JSON 与 MLIR metadata 编解码位于 `Support/GemmStrategyConfig.cpp`。当前 cache/kernel 策略 kind 都只有 `fixed`；cost model 用于比较线程任务拓扑，不会动态搜索 microkernel tile。
 
+线程规划默认以编译参数 `intra-thread-count` 为上限。调优配置指定 `max_thread_count`（正整数）时，规划上限取两者的较小值。将 `max_thread_count` 设为 `1` 即可让 GEMM 串行执行。
+
 策略配置字段示例（省略通用字段）：
 
 ```json
