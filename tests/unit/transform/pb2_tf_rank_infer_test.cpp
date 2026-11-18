@@ -194,10 +194,50 @@ static void TestNegativeMaskIsRejected() {
   PB2_CHECK(rankOfTagged(*module, "out") == -1);
 }
 
+// A broadcast binary with one ranked and one unknown operand used to
+// commit the low rank early (scalar seen first) and the commit froze it;
+// the all-known guard must keep the result unranked instead.
+static void TestBroadcastPartialKnownStaysUnranked() {
+  mlir::MLIRContext ctx;
+  auto module = parse(ctx, R"mlir(
+    module {
+      %s = "some.const"() {value = dense<8.640000e+04> : tensor<f64>} : () -> tensor<f64>
+      %x = "some.source"() : () -> tensor<*xf64>
+      %0 = "tf.RealDiv"(%x, %s) {test.tag = "out"} : (tensor<*xf64>, tensor<f64>) -> tensor<*xf64>
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createTfRankInferPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(rankOfTagged(*module, "out") == -1);  // stayed unranked
+}
+
+// FloorDiv/FloorMod ride the broadcast family; once every operand rank is
+// known the result takes max(operand ranks), and the rank-0 scalar operand
+// itself stays untouched.
+static void TestFloorDivFloorModBroadcastFamily() {
+  mlir::MLIRContext ctx;
+  auto module = parse(ctx, R"mlir(
+    module {
+      %x = "some.const"() {value = dense<0.0> : tensor<7xf32>} : () -> tensor<7xf32>
+      %s = "some.const"() {value = dense<0.0> : tensor<f32>} : () -> tensor<f32>
+      %d = "tf.FloorDiv"(%x, %s) {test.tag = "div"} : (tensor<7xf32>, tensor<f32>) -> tensor<*xf32>
+      %m = "tf.FloorMod"(%x, %s) {test.tag = "mod"} : (tensor<7xf32>, tensor<f32>) -> tensor<*xf32>
+    })mlir");
+  PB2_CHECK(static_cast<bool>(module));
+  mlir::PassManager pm(&ctx, "builtin.module");
+  pm.addPass(pb2::createTfRankInferPass());
+  PB2_CHECK(mlir::succeeded(pm.run(module.get())));
+  PB2_CHECK(rankOfTagged(*module, "div") == 1);  // max(1, 0)
+  PB2_CHECK(rankOfTagged(*module, "mod") == 1);  // max(1, 0)
+}
+
 int main() {
   TestNegativeRankProposalDropped();
   TestShortArityReshapeIsIgnored();
   TestNegativeMaskIsRejected();
+  TestBroadcastPartialKnownStaysUnranked();
+  TestFloorDivFloorModBroadcastFamily();
   TestSameShapePropagation();
   TestBroadcastMaxRank();
   TestConflictingProposalsFreeze();
