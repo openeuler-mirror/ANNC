@@ -139,6 +139,7 @@ struct GemmTuningConfig {
   // Execution tiles remain the user configuration. The worker planner consumes
   // these exact values; it does not derive an independent cache-blocking plan.
   GemmThreadPlannerCostModel costModel;
+  std::optional<int64_t> maxThreadCount = std::nullopt;
 };
 
 struct GemmKernelABI {
