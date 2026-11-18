@@ -40,8 +40,10 @@ struct ActionIdGatherMatch {
   SmallVector<Operation *, 16> members;
 };
 
-// Peels a dynamic_broadcast_in_dim wrapper down to its data operand.
+// Peels a dynamic_broadcast_in_dim wrapper down to its data operand; null
+// stays null (callers feed it optional fields).
 Value peelBcast(Value v) {
+  if (!v) return v;
   auto bcast = v.getDefiningOp<stablehlo::DynamicBroadcastInDimOp>();
   return bcast ? bcast.getOperand() : v;
 }
@@ -345,8 +347,15 @@ static LogicalResult fuseActionIdGather(
   args.assign(ordered.begin(), ordered.end());
 
   ModuleOp module = main->getParentOfType<ModuleOp>();
-  auto idx1Ty = cast<RankedTensorType>(m.indices1.getType());
-  auto idx2Ty = cast<RankedTensorType>(m.indices2.getType());
+  auto idx1Ty = dyn_cast<RankedTensorType>(m.indices1.getType());
+  auto idx2Ty = dyn_cast<RankedTensorType>(m.indices2.getType());
+  // Schema names only cover rank 1..2 (BuiltinKernelSchema); unranked or
+  // deeper indices would outline a kernel the second level never lowers.
+  if (!idx1Ty || !idx2Ty || idx1Ty.getRank() < 1 || idx1Ty.getRank() > 2 ||
+      idx2Ty.getRank() < 1 || idx2Ty.getRank() > 2) {
+    cleanup();
+    return failure();
+  }
   std::string name = uniquifySymbolName(
       module, "KPFusedEmbeddingActionIdGatherR" +
                   std::to_string(idx1Ty.getRank()) + "x" +
