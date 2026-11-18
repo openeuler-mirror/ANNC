@@ -25,7 +25,10 @@ void populateAtirOpFusionV2Patterns(mlir::RewritePatternSet &patterns,
 void addSparseDynamicStitchV2Pattern(mlir::RewritePatternSet &patterns);
 void addSparseSegmentReduceV2Pattern(mlir::RewritePatternSet &patterns);
 void addSparseReshapeV2Pattern(mlir::RewritePatternSet &patterns);
-void addEmbeddingPaddingV2Pattern(mlir::RewritePatternSet &patterns);
+// kp_embedding_padding: Reshape-residue anchor with a runtime target over
+// the string-transport carrier chain (concat-with-zeros tail).
+void addEmbeddingPaddingV2Pattern(mlir::RewritePatternSet &patterns,
+                                  fusionv2::CallPortTable *portTable);
 void addSparseSelectV2Pattern(mlir::RewritePatternSet &patterns);
 void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns);
 // kp_embedding_padding_fast: StridedSlice anchor (or the scalar reshape
