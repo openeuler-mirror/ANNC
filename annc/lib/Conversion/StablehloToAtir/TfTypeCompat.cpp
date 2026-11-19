@@ -139,29 +139,72 @@ class TfTypeCompatDialect : public Dialect {
     if (parser.parseLess()) return Attribute();
     SmallVector<int64_t> dims;
     bool unranked = false;
-    if (succeeded(parser.parseOptionalStar())) {
-      unranked = true;
-    } else if (succeeded(parser.parseOptionalLSquare())) {
-      bool closed = succeeded(parser.parseOptionalRSquare());
-      while (!closed) {
-        int64_t dim = -1;
-        if (failed(parser.parseOptionalQuestion())) {
-          if (parser.parseInteger(dim) || dim < 0) {
-            parser.emitError(parser.getCurrentLocation())
-                << "invalid dimension in 'tf_type.shape' attribute";
-            return Attribute();
-          }
-        }
-        dims.push_back(dim);
-        closed = succeeded(parser.parseOptionalRSquare());
-        if (!closed && failed(parser.parseOptionalComma())) {
-          parser.emitError(parser.getCurrentLocation())
-              << "expected ',' or ']' in 'tf_type.shape' attribute";
+    auto parseDimSegment = [&](llvm::StringRef seg) -> bool {
+      int64_t value = -1;
+      if (seg.getAsInteger(10, value) || value < 0) return false;
+      dims.push_back(value);
+      return true;
+    };
+    auto emitInvalid = [&]() {
+      parser.emitError(parser.getCurrentLocation())
+          << "invalid dimension in 'tf_type.shape' attribute";
+    };
+    while (failed(parser.parseOptionalGreater())) {
+      if (succeeded(parser.parseOptionalStar())) {
+        if (unranked || !dims.empty() ||
+            failed(parser.parseOptionalGreater())) {
+          emitInvalid();
           return Attribute();
         }
+        unranked = true;
+        break;
+      }
+      if (succeeded(parser.parseOptionalQuestion())) {
+        dims.push_back(-1);
+      } else {
+        int64_t dim = -1;
+        // MLIR auto-senses the radix, so `0x3` parses as 3 by design;
+        // dimensions are decimal-only at the pb source, and the accepted
+        // spelling is locked by the sink component test.
+        OptionalParseResult parsed = parser.parseOptionalInteger(dim);
+        if (!parsed.has_value() || failed(*parsed) || dim < 0) {
+          emitInvalid();
+          return Attribute();
+        }
+        dims.push_back(dim);
+      }
+      llvm::StringRef sep;
+      if (failed(parser.parseOptionalKeyword(&sep))) {
+        // No keyword: only '>' may follow a dimension. Whitespace- or
+        // comma-separated dims do not belong to the compact spelling.
+        if (succeeded(parser.parseOptionalGreater())) break;
+        emitInvalid();
+        return Attribute();
+      }
+      if (sep.empty() || sep.front() != 'x') {
+        parser.emitError(parser.getCurrentLocation())
+            << "expected 'x' separator in 'tf_type.shape', got '" << sep
+            << "'";
+        return Attribute();
+      }
+      bool dangling = sep.back() == 'x';
+      sep = sep.drop_front();
+      while (!sep.empty()) {
+        size_t x = sep.find('x');
+        llvm::StringRef seg =
+            (x == llvm::StringRef::npos) ? sep : sep.take_front(x);
+        if (!parseDimSegment(seg)) {
+          emitInvalid();
+          return Attribute();
+        }
+        sep = (x == llvm::StringRef::npos) ? llvm::StringRef()
+                                           : sep.drop_front(x + 1);
+      }
+      if (dangling) {
+        emitInvalid();
+        return Attribute();
       }
     }
-    if (parser.parseGreater()) return Attribute();
     return TfShapeAttr::get(parser.getContext(), dims, unranked);
   }
 
@@ -172,17 +215,17 @@ class TfTypeCompatDialect : public Dialect {
       printer << "shape<*>";
       return;
     }
-    printer << "shape<[";
+    printer << "shape<";
     llvm::interleave(
         shape.getShape(), printer,
         [&](int64_t dim) {
           if (dim < 0)
-            printer << "?";
+            printer << '?';
           else
             printer << dim;
         },
-        ", ");
-    printer << "]>";
+        "x");
+    printer << '>';
   }
 };
 
