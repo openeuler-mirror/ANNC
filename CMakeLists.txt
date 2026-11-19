@@ -30,7 +30,7 @@ option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protob
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
 # TF stablehlo V2 route (one opt-in switch for the whole route): the stablehlo
 # dialect integration + sink layer, and the V2 tools (annc-converter-v2 now;
-# annc-tf2atir-v2 once merged). ON requires an external LLVM/MLIR 20.1.8
+# annc-stablehlo-sink once merged). ON requires an external LLVM/MLIR 20.1.8
 # toolchain, third_party/stablehlo and, from the converter's rewrite core
 # onward, the pip TensorFlow wheel. OFF (default) keeps the historical build
 # path untouched.
@@ -356,10 +356,19 @@ endif()
 # Snapshot/restore them so only explicitly linked stablehlo targets are built.
 if(ANNC_ENABLE_TF2ATIR_V2)
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/stablehlo/CMakeLists.txt")
-    message(FATAL_ERROR
-      "ANNC_ENABLE_TF2ATIR_V2=ON requires third_party/stablehlo (v1.9.7). "
-      "Fetch it with: git -C third_party clone --depth 1 --branch v1.9.7 "
-      "https://github.com/openxla/stablehlo.git stablehlo")
+    # Auto-fetch on first configure (third_party/* stays untracked); an
+    # existing checkout is reused as-is. The source is GitCode's platform-run
+    # GitHub mirror (gh_mirrors): its v1.9.7 tag resolves to the same commit
+    # (e34c3f6) as upstream openxla/stablehlo.
+    FetchContent_Declare(stablehlo
+      GIT_REPOSITORY https://gitcode.com/gh_mirrors/st/stablehlo.git
+      GIT_TAG        v1.9.7
+      GIT_SHALLOW    TRUE
+      SOURCE_DIR     ${CMAKE_SOURCE_DIR}/third_party/stablehlo
+    )
+    message(STATUS
+      "ANNC: fetching stablehlo v1.9.7 from gitcode.com/gh_mirrors/st/stablehlo.git ...")
+    FetchContent_Populate(stablehlo)
   endif()
   get_property(_annc_mlir_dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
   get_property(_annc_mlir_conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
