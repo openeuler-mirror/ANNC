@@ -25,6 +25,7 @@ ENABLE_TENSORFLOW="ON"
 ENABLE_TENSORFLOW_ADDON=""
 ENABLE_ONNX="ON"
 ENABLE_ONNXRUNTIME_EP="OFF"
+ENABLE_TF2ATIR_V2="OFF"
 # Mutually exclusive framework selection. Empty keeps the legacy default
 # (TensorFlow + ONNX frontend, ORT EP off). --enable-tf / --enable-ort / --all
 # resolve the four switches below after argument parsing.
@@ -167,6 +168,14 @@ while [[ $# -gt 0 ]]; do
       ENABLE_ONNX="OFF"
       shift
       ;;
+    --enable-tf2atir-v2)
+      ENABLE_TF2ATIR_V2="ON"
+      shift
+      ;;
+    --disable-tf2atir-v2)
+      ENABLE_TF2ATIR_V2="OFF"
+      shift
+      ;;
     --coverage)
       ENABLE_COVERAGE="ON"
       shift
@@ -214,6 +223,12 @@ while [[ $# -gt 0 ]]; do
       echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
       echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
       echo "                                (legacy/custom mode; conflicts with --enable-ort/--all)"
+      echo "  --enable-tf2atir-v2           Build the TF stablehlo V2 route (pb2stablehlo,"
+      echo "                                annc-stablehlo-sink, annc-tf-pipeline-v2; default OFF;"
+      echo "                                requires the LLVM/MLIR 20.1.8 toolchain,"
+      echo "                                third_party/stablehlo (v1.9.7) and the"
+      echo "                                TensorFlow frontend (--enable-tf)"
+      echo "  --disable-tf2atir-v2          Disable the TF stablehlo V2 route (default)"
       echo "  --dry-run                     Print the resolved framework switches and exit"
       echo "                                (no configure/build; useful for CI checks)"
       echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
@@ -291,6 +306,11 @@ case "${FRAMEWORK_MODE}" in
     exit 1
     ;;
 esac
+if [ "${ENABLE_TF2ATIR_V2}" = "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
+  echo "WARNING: --enable-tf2atir-v2 with the TensorFlow frontend disabled builds" >&2
+  echo "WARNING: annc-converter-v2 but NOT annc-tf-pipeline-v2 (the orchestrator" >&2
+  echo "WARNING: lives under frontends/tensorflow, which needs the TF frontend)." >&2
+fi
 
 # The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
 # the kernel MLAS backend automatically.  TF-only builds keep it off.
@@ -315,6 +335,7 @@ if [ "${DRY_RUN}" == "YES" ]; then
   echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
   echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
   echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
+  echo "ANNC_ENABLE_TF2ATIR_V2=${ENABLE_TF2ATIR_V2}"
   exit 0
 fi
 
@@ -846,6 +867,7 @@ check_framework_switch_cache() {
     "ANNC_ENABLE_TENSORFLOW_ADDON:${ENABLE_TENSORFLOW_ADDON}:ON"
     "ANNC_ENABLE_ONNX:${ENABLE_ONNX}:ON"
     "ANNC_ENABLE_ONNXRUNTIME_EP:${ENABLE_ONNXRUNTIME_EP}:OFF"
+    "ANNC_ENABLE_TF2ATIR_V2:${ENABLE_TF2ATIR_V2}:OFF"
   )
   local -a mismatches=()
   local missing_keys="NO"
@@ -1028,6 +1050,7 @@ else
     -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
     -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
     -DANNC_ENABLE_ONNXRUNTIME_EP="${ENABLE_ONNXRUNTIME_EP}" \
+    -DANNC_ENABLE_TF2ATIR_V2="${ENABLE_TF2ATIR_V2}" \
     -DANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR}" \
     -DANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE}" \
     -DANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS}" \
