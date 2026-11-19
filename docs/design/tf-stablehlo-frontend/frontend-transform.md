@@ -193,7 +193,11 @@ shape 前置检查这一前提，在本地以护栏补偿；长期方案在上�
 | 本组件（wheel 域） | TF 2.20 pip wheel：`libtensorflow_cc.so.2` + vendored MLIR 21.0.0git |
 
 工程约束：llvm 头三级来源（本地快照 `third_party/llvm-include/` →
-`ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR` → 官方仓 sparse clone，生成的
+`ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR` → sparse clone，默认取
+`gitee.com/mirrors/LLVM-Project` 平台镜像，`ANNC_TF_TRANSFORM_LLVM_REPO`
+可换回官方 GitHub 仓；默认 ref 钉死为 TF v2.20.0 的 llvm-project pin
+`f8cb7987`，即 wheel 内嵌 MLIR 21.0.0git 的构建来源，分支 HEAD 不构成
+ABI 契约；生成的
 `llvm-config.h` 以构建资产入库）；target 级 `BEFORE` include 压过项目全局
 路径；I1~I4 见 §2.1。配置期对 TF 版本、wheel 产物、llvm 头来源逐一
 FATAL 门禁（含修复指引）。
