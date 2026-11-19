@@ -22,7 +22,7 @@ endif()
 set(ANNC_TENSORFLOW_INCLUDE_DIR "" CACHE PATH
   "Host TensorFlow SDK header root (required by the standalone plugin build)")
 set(ANNC_TENSORFLOW_LIBRARIES "" CACHE STRING
-  "TensorFlow shared libraries for the in-tree unit tests; empty uses Python TensorFlow")
+  "TensorFlow shared library for the in-tree tool and unit tests; empty uses Python TensorFlow only without ANNC_TENSORFLOW_INCLUDE_DIR (with SDK headers alone the build stays headers-only and skips TF-linking targets)")
 set(ANNC_TENSORFLOW_CXX11_ABI "" CACHE STRING
   "Required _GLIBCXX_USE_CXX11_ABI value (0 or 1)")
 
@@ -144,6 +144,17 @@ function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   if(ANNC_TENSORFLOW_LIBRARIES)
     set(_libraries ${ANNC_TENSORFLOW_LIBRARIES})
     set(_library_source "explicit")
+  elseif(ANNC_TENSORFLOW_INCLUDE_DIR)
+    # SDK mode is headers-only by contract: headers come from the SDK and
+    # no TensorFlow library is linked unless ANNC_TENSORFLOW_LIBRARIES
+    # names one explicitly. A headers-only SDK cannot satisfy an
+    # executable's protobuf runtime symbols, and probing the pip wheel from
+    # under it produced hybrid SDK/wheel builds that break at link time
+    # when the wheel hides protobuf — so SDK mode never falls back to
+    # Python here. The targets that need a linkable library (the offline
+    # tool, the unit tests) are skipped downstream instead.
+    set(_libraries "")
+    set(_library_source "none (SDK headers-only)")
   else()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     execute_process(
@@ -167,14 +178,18 @@ function(annc_resolve_tensorflow out_include out_libraries out_compile_options)
   endif()
 
   list(LENGTH _libraries _library_count)
-  if(NOT _library_count EQUAL 1 OR NOT EXISTS "${_libraries}")
+  if(_library_count EQUAL 0 AND ANNC_TENSORFLOW_INCLUDE_DIR)
+    # SDK headers-only mode: nothing links a TF library by design.
+  elseif(NOT _library_count EQUAL 1 OR NOT EXISTS "${_libraries}")
     message(FATAL_ERROR
       "annc-converter-v2 requires exactly one existing libtensorflow_framework "
       "in ANNC_TENSORFLOW_LIBRARIES (or a Python TensorFlow providing it); got: "
       "${_libraries}")
   endif()
-  message(STATUS
-    "annc-converter-v2: TensorFlow framework: ${_libraries} (source: ${_library_source})")
+  if(_library_count EQUAL 1)
+    message(STATUS
+      "annc-converter-v2: TensorFlow framework: ${_libraries} (source: ${_library_source})")
+  endif()
 
   set(${out_include} "${_include_dir}" PARENT_SCOPE)
   set(${out_libraries} "${_libraries}" PARENT_SCOPE)
@@ -198,6 +213,16 @@ elseif(_v2_plugin)
 else()
   # In-tree without the plugin flag: resolve only for the unit tests.
   annc_resolve_tensorflow(_v2_tf_include _v2_tf_framework _v2_tf_flags)
+endif()
+
+# Whether a linkable TF library exists at all. SDK headers-only mode
+# (ANNC_TENSORFLOW_INCLUDE_DIR without ANNC_TENSORFLOW_LIBRARIES) leaves it
+# empty and every target linking one — the offline tool and the unit tests
+# (tests/ self-skip on the missing annc_converter_v2_core target) — is
+# skipped below. The PRELOAD plugin never links TF and always builds.
+set(_v2_has_tf_library FALSE)
+if(_v2_tf_framework)
+  set(_v2_has_tf_library TRUE)
 endif()
 
 # nlohmann/json: in-tree target from the repo root; standalone adds
@@ -266,6 +291,15 @@ if(_v2_standalone)
   return()
 endif()
 
+# Everything below links the TF library. SDK headers-only mode has none:
+# keep the plugin (above) and stop here.
+if(NOT _v2_has_tf_library)
+  message(STATUS
+    "annc-converter-v2: no linkable TF library in SDK headers-only mode; "
+    "building the PRELOAD plugin only (offline tool and unit tests skipped)")
+  return()
+endif()
+
 # In-tree static library wrapper: carries the framework link for the unit
 # test executables (the plugin above deliberately does not inherit it).
 add_library(annc_converter_v2_core STATIC
@@ -291,3 +325,32 @@ set_target_properties(annc_converter_v2_core PROPERTIES
   BUILD_RPATH "${_v2_tf_libdir}"
   INSTALL_RPATH "${_v2_tf_libdir}"
 )
+
+# Offline GraphDef-rewrite executable for the standalone pipelines: the
+# same core objects linked against the resolved TF framework (wheel by
+# default, or ANNC_TENSORFLOW_LIBRARIES; never the host predictor process).
+# Registered in-tree only; the PRELOAD plugin stays the deployable form and
+# SDK headers-only builds skip this target (see the guard above).
+add_executable(annc-converter-v2
+  converter_main.cpp
+  $<TARGET_OBJECTS:annc_converter_v2_core_objs>
+)
+target_include_directories(annc-converter-v2 SYSTEM PRIVATE
+  "${_v2_tf_include}"
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(annc-converter-v2 PRIVATE
+  nlohmann_json::nlohmann_json
+  "${_v2_tf_framework}"
+)
+target_compile_definitions(annc-converter-v2 PRIVATE
+  _GLIBCXX_USE_CXX11_ABI=${ANNC_TENSORFLOW_CXX11_ABI}
+  NDEBUG
+)
+target_compile_options(annc-converter-v2 PRIVATE ${_v2_tf_flags})
+get_filename_component(_v2_tf_libdir "${_v2_tf_framework}" DIRECTORY)
+set_target_properties(annc-converter-v2 PROPERTIES
+  BUILD_RPATH "${_v2_tf_libdir}"
+  INSTALL_RPATH "${_v2_tf_libdir}"
+)
+install(TARGETS annc-converter-v2 DESTINATION bin)
