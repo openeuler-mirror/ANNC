@@ -107,6 +107,11 @@ static Value traceSideRole(Value subOperand, bool wantOrigin, SideTrace &t) {
     if (!subOperand.hasOneUse()) return Value();
     t.bcast = def;
     root = bcast.getOperand();
+  } else {
+    // Without a broadcast the operand must already be a scalar: a live
+    // vector here makes the padding reshape unsatisfiable at runtime.
+    auto ty = dyn_cast<RankedTensorType>(subOperand.getType());
+    if (!ty || ty.getRank() != 0) return Value();
   }
   return traceScaffold(
       root,
@@ -400,7 +405,7 @@ static LogicalResult fuseKpEmbeddingPadding(
   if (cast<RankedTensorType>(m.packConst.getType()).getRank() == 1) {
     rewriter.setInsertionPointAfterValue(m.packConst);
     auto packScalar = rewriter.create<stablehlo::ReshapeOp>(
-        m.packConst.getDefiningOp()->getLoc(),
+        m.packConst.getLoc(),
         TypeRange{RankedTensorType::get({}, rewriter.getI32Type())},
         ValueRange{m.packConst});
     synth.push_back(packScalar.getOperation());
@@ -409,7 +414,9 @@ static LogicalResult fuseKpEmbeddingPadding(
 
   if (!isa<BlockArgument>(m.originVec)) {
     Value nv = m.originVec;
-    for (int hop = 0; hop < 8 && isGetDimCarrier(nv.getDefiningOp()); ++hop)
+    for (int hop = 0; hop < 8 && nv.getDefiningOp() &&
+                      isGetDimCarrier(nv.getDefiningOp());
+         ++hop)
       nv = nv.getDefiningOp()->getOperand(0);
     std::string originName = sourceNameOf(nv);
     if (originName.empty()) {
