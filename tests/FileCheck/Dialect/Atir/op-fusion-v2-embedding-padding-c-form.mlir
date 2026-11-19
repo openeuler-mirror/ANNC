@@ -23,8 +23,8 @@ module {
     %dataRows = stablehlo.reshape %dataSlice {annc.source_node = "model/click/strided_slice_1", annc.source_op = "tf.StridedSlice"} : (tensor<1xi32>) -> tensor<i32> loc("pad_c")
     %sub = stablehlo.subtract %originRows, %dataRows {annc.prov = ["model/click/strided_slice:0", "model/click/strided_slice_1:0"], annc.source_node = "model/click/sub", annc.source_op = "tf.Sub"} : tensor<i32> loc(fused["Sub:", "model/click/sub"])
     %rowsPack = stablehlo.reshape %sub {annc.source_node = "model/click/zeros/packed", annc.source_op = "tf.Pack"} : (tensor<i32>) -> tensor<1xi32> loc("pad_c")
-    %pack = stablehlo.constant {annc.const_source = "model/click/zeros/packed/1"} dense<4> : tensor<1xi32> loc("Const:_pack")
-    %dims = stablehlo.concatenate %rowsPack, %pack, dim = 0 {annc.const_source = "model/click/zeros/packed", annc.source_node = "model/click/zeros/packed", annc.source_op = "tf.Pack"} : (tensor<1xi32>, tensor<1xi32>) -> tensor<2xi32> loc("pad_c")
+    %packc = stablehlo.constant dense<4> : tensor<1xi32> loc("Const:_pack")
+    %dims = stablehlo.concatenate %rowsPack, %packc, dim = 0 : (tensor<1xi32>, tensor<1xi32>) -> tensor<2xi32> loc("pad_c")
     %c0f = stablehlo.constant dense<0.000000e+00> : tensor<f32> loc("Const:_fill")
     %fill = stablehlo.dynamic_broadcast_in_dim %c0f, %dims, dims = [] {annc.source_node = "model/click/zeros", annc.source_op = "tf.Fill"} : (tensor<f32>, tensor<2xi32>) -> tensor<?x4xf32> loc("pad_c")
     %concat = stablehlo.concatenate %data, %fill, dim = 0 : (tensor<?x4xf32>, tensor<?x4xf32>) -> tensor<?x4xf32> loc(fused["ConcatV2:", "model/click/concat"])
@@ -43,7 +43,7 @@ module {
 // (V1 wires the same tensor as the origin_shape edge).
 // CHECK-SAME: args = [{dtype = "i64", rank = 1 : i64, role = "dynamic", shape = [2], tf_name = "serve_prep/gen/SparseReshape:1"}
 // CHECK-SAME: {dtype = "i32", rank = 0 : i64, role = "dynamic", shape = [], tf_name = "model/click/strided_slice_1:0"}
-// CHECK-SAME: {dtype = "i32", rank = 0 : i64, role = "dynamic", shape = [], tf_name = "model/click/zeros/packed/1"}
+// CHECK-SAME: {dtype = "i32", rank = 0 : i64, role = "dynamic", shape = [], tf_name = "model/click/Reshape_1/pack"}
 // CHECK-SAME: {dtype = "f32", rank = 2 : i64, role = "dynamic", shape = [-9223372036854775808, 4], tf_name = "data"}
 // CHECK-SAME: {dtype = "i32", rank = 1 : i64, role = "constant", shape = [2], tf_name = "model/click/Reshape_1/shape"}]
 // CHECK-SAME: fusion.pattern = "kp_embedding_padding"
