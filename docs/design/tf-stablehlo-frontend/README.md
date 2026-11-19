@@ -5,7 +5,7 @@
 | 文档编号 | ANNC-TFSTABLEHLO-LLD-000 |
 | 版本与日期 | 1.0，2026-11-12；V2 stablehlo 路线生产端（pb2stablehlo）与消费端（residue-sink）交付后的设计组索引 |
 | 文档状态 | 索引。各模块设计见同目录子文档 |
-| 源码基线 | `addons/tensorflow/transform/`、`annc/{include,lib}/Conversion/StablehloToAtir/`、`annc/tools/annc-tf2atir-v2/` |
+| 源码基线 | `addons/tensorflow/transform/`、`annc/{include,lib}/Conversion/StablehloToAtir/`、`annc/tools/annc-stablehlo-sink/` |
 | 上级文档 | [ANNC 总体架构](../../architecture/overview.md)（V2 stablehlo 路线一节） |
 | 关联文档 | [架构决策索引](../../decisions/README.md)（ADR-023：wheel 隔离构建域）、[CLI 工作流](../../guides/cli-workflows.md)、[环境变量参考](../../guides/environment-variables.md) |
 
@@ -34,7 +34,7 @@ TF GraphDef / SavedModel
 ## 3 状态与阅读入口
 
 - 两份 LLD 状态头均声明源码基线与差距落点；当前行为以源码与测试为准。
-- 端到端入口：`pb2stablehlo`（前端产物）→ `annc-tf2atir-v2`（残差下沉），
+- 端到端入口：`pb2stablehlo`（前端产物）→ `annc-stablehlo-sink`（残差下沉），
   CLI 契约见 [CLI 工作流](../../guides/cli-workflows.md)。
 - 构建前提：`ANNC_ENABLE_TF2ATIR_V2=ON`（默认 OFF，默认构建零影响）；
   前端另需 TF 2.20 pip wheel 与 llvm 头来源，见

@@ -1,4 +1,4 @@
-// RUN: annc-tf2atir-v2 --help >/dev/null && annc-asm %s --shape-legalize-to-stablehlo --reconcile-unrealized-casts --annc-select-kernel='kernel-name=fused_matmul_add' --annc-specialize-shapes='shape-spec=%S/Inputs/annc-runtime-shapes.json' --verify-each | FileCheck %s
+// RUN: annc-stablehlo-sink --help >/dev/null && annc-asm %s --shape-legalize-to-stablehlo --reconcile-unrealized-casts --annc-select-kernel='kernel-name=fused_matmul_add' --annc-specialize-shapes='shape-spec=%S/Inputs/annc-runtime-shapes.json' --verify-each | FileCheck %s
 
 module {
   func.func private @fused_matmul_add(
