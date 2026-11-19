@@ -349,11 +349,12 @@ struct DotGemmV2Pattern : public OpRewritePattern<stablehlo::DotOp> {
         fixedInputs[0] = dot.getLhs();
         dynamicInput = dot.getRhs();
       }
-      SmallVector<Value> signatureInputs = {dot.getLhs(), dot.getRhs()};
-      for (const EpilogueStep &step : site.steps)
-        if (step.external &&
-            !llvm::is_contained(signatureInputs, step.external))
-          signatureInputs.push_back(step.external);
+      // Signature order must match the metadata args order (fixed weights
+      // first, dynamic input last): the runtime collects shapes by the
+      // ANNCFused input position, so a dynamic-first signature misaligns
+      // every shape by one slot (argument rank mismatch on specialize).
+      SmallVector<Value> signatureInputs = fixedInputs;
+      signatureInputs.push_back(dynamicInput);
       const std::string kernelName = uniquifySymbolName(
           module, site.empty()
                       ? "fused_matmul_" +
