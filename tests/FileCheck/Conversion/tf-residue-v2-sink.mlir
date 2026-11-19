@@ -1,4 +1,4 @@
-// RUN: annc-tf2atir-v2 %s | FileCheck %s
+// RUN: annc-stablehlo-sink %s | FileCheck %s
 // Residue sink (V2) — complement-only policy. The artifact carries
 // annc.residue carrier ops (the post-rename residue form); each opType is
 // what the TF provider matches against the complement map.

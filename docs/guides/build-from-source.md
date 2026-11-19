@@ -157,14 +157,17 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 ### TF stablehlo V2 路线（sink 层与 V2 工具）
 
 `ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线：stablehlo 方言集成与 sink
-层，以及 V2 工具（`annc-converter-v2`、`annc-tf2atir-v2`，随各自批次
+层，以及 V2 工具（`annc-converter-v2`、`annc-stablehlo-sink`，随各自批次
 并入同一开关）。V2 融合（`-atir-op-fusion-v2` pass 与配套 FileCheck/单测）
 随同一开关编译，OFF 构建不含任何 V2 源。TF 2.20 环境下同一开关还包含 `pb2stablehlo`（GraphDef
 → StableHLO 前端，`addons/tensorflow/transform/`，增量交付中）：wheel
 隔离编译——需 TF 2.20 pip wheel（配置期门禁版本），llvm 头按
 `third_party/llvm-include` 本地快照 → `ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR`
-→ 官方仓 sparse clone（`ANNC_TF_TRANSFORM_LLVM_REPO`/`_REF` 可覆盖，
-默认 llvmorg-21.0.0）三级解析，与项目 LLVM/MLIR 工具链完全隔离。默认 OFF，不触碰历史构建路径。
+→ sparse clone（默认 `gitee.com/mirrors/LLVM-Project` 平台镜像，
+`ANNC_TF_TRANSFORM_LLVM_REPO`/`_REF` 可覆盖；默认 ref 钉死为 TF v2.20.0
+在 `third_party/xla/third_party/llvm/workspace.bzl` 记录的 llvm-project
+commit `f8cb7987`——wheel 内嵌 MLIR 21.0.0git 的构建来源，勿改用会前进的
+release/21.x 分支）三级解析，与项目 LLVM/MLIR 工具链完全隔离。默认 OFF，不触碰历史构建路径。
 
 #### stablehlo 集成（sink 层依赖）
 
@@ -188,11 +191,16 @@ LLVM/MLIR API 兼容层：被选中的 pass 仍须能针对 ANNC 使用的工具
 [MLIR Developer Guide](https://mlir.llvm.org/getting_started/DeveloperGuide/#breaking-changes)
 和 [StableHLO compatibility](https://github.com/openxla/stablehlo/blob/main/docs/compatibility.md)。
 
-依赖获取（不入库，`third_party/*` 已被忽略）：
+依赖获取（不入库，`third_party/*` 已被忽略）：首次以
+`ANNC_ENABLE_TF2ATIR_V2=ON` 配置时，CMake 自动从 GitCode 平台镜像浅克隆
+stablehlo v1.9.7（`gitcode.com/gh_mirrors/st/stablehlo`，为 GitHub 仓库的
+平台级同步镜像，其 v1.9.7 tag 与上游 openxla/stablehlo 指向同一 commit
+`e34c3f6`）；目录已存在时直接复用，不再重新拉取。手动拉取（可换用官方源
+`https://github.com/openxla/stablehlo.git`）仍等效：
 
 ```shell
 git -C third_party clone --depth 1 --branch v1.9.7 \
-  https://github.com/openxla/stablehlo.git stablehlo
+  https://gitcode.com/gh_mirrors/st/stablehlo.git stablehlo
 ```
 
 构建与验证（推荐使用独立构建目录，与默认 `build/` 互不干扰；

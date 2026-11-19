@@ -1,4 +1,4 @@
-// RUN: annc-tf2atir-v2 --help >/dev/null && annc-asm %s -annc-gemm-epilogue-commit --verify-each | FileCheck %s
+// RUN: annc-stablehlo-sink --help >/dev/null && annc-asm %s -annc-gemm-epilogue-commit --verify-each | FileCheck %s
 
 module {
   func.func @bias_defined_after_dot(%lhs: tensor<2x3xf32>,

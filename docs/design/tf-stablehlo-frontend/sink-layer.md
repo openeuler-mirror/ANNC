@@ -38,7 +38,7 @@ TF GraphDef / SavedModel
 ### 1.3 范围
 
 在范围内：sink 驱动（`StablehloSink`，ConversionTarget/TypeConverter/ pattern 优先级/census 统计）、`ResidueProvider` 接缝、`V2OpMatcher` 查表解析、TF 适配层（`kOpMap`、属性解码与发射）、`tf_type` 兼容方言、
-`annc-tf2atir-v2` 工具。
+`annc-stablehlo-sink` 工具。
 
 范围之外：残差的产生（见[前端设计](frontend-transform.md)）、ATIR 下游 lowering 与 V2 融合、TF 运行时分区回退。
 
@@ -87,7 +87,7 @@ TF GraphDef / SavedModel
 
 ### 3.3 工具与产物
 
-`annc-tf2atir-v2 input.mlir -o output.mlir`（省略 `-o` 时输出到 stdout），行为契约见 [CLI 工作流](../../guides/cli-workflows.md)。`--op-fusion-v2` 选项随 V2 融合线另行批次。
+`annc-stablehlo-sink input.mlir -o output.mlir`（省略 `-o` 时输出到 stdout），行为契约见 [CLI 工作流](../../guides/cli-workflows.md)。`--op-fusion-v2` 选项随 V2 融合线另行批次。
 
 ### 3.4 兼容方言 `tf_type`
 
@@ -129,7 +129,7 @@ sink 结束后遍历统计三类去向：sunk（已映射下沉）、unsupported
 | 层 | 资产 | 覆盖 | 命令 |
 | --- | --- | --- | --- |
 | 组件契约 | `tests/unit/annc/stablehlo_sink_component_test.cpp`（7 用例） | F1/F2 契约、kOpMap 全目标可解析、V2 op / 常量发射契约、tf_type 解析 | `ctest --test-dir build -R StablehloSink` |
-| pass 端到端 | `stablehlo_sink_pass_test.cpp`（7 用例）+ FileCheck（`tf-residue-v2-sink.mlir`，17 断言，经 `annc-tf2atir-v2`） | F1/F2 下沉、unknown 回退、脚手架保留、string 类型桥、unranked 映射、spec_mismatch 回退 | 同上 / `bash tests/FileCheck/run.sh Conversion` |
+| pass 端到端 | `stablehlo_sink_pass_test.cpp`（7 用例）+ FileCheck（`tf-residue-v2-sink.mlir`，17 断言，经 `annc-stablehlo-sink`） | F1/F2 下沉、unknown 回退、脚手架保留、string 类型桥、unranked 映射、spec_mismatch 回退 | 同上 / `bash tests/FileCheck/run.sh Conversion` |
 | 数值等价 | `tests/e2e/tf/e2e_kp_embedding_patterns.py` | 原图与重写图输出对照 | 见文档头说明 |
 
 改动纪律：`kOpMap` 增删必须同步组件测试的"全目标可解析"用例；新增哨兵填充域须补 spec_mismatch 反例。
@@ -140,7 +140,7 @@ sink 结束后遍历统计三类去向：sunk（已映射下沉）、unsupported
 | --- | --- | --- | --- |
 | GAP-1 | `detail` 恒空（provider 接口不回传拒绝原因） | 排障只到 `reason` 粒度 | provider 扩展拒绝原因查询后回填 |
 | GAP-2 | `#tf_type.shape` 属性解析未实现 | 携带该属性的产物无法解析（当前产物不携带） | 按需补 |
-| GAP-3 | `annc-tf2atir-v2` pipeline 未编排 V2 融合 pass（`annc-asm`/`annc-opt` 的 `-atir-op-fusion-v2` 已落地） | pipeline 单命令尚不能产出融合后的 ATIR，需手动跑 pass | 随 V2 融合 pipeline 批次 |
+| GAP-3 | `annc-stablehlo-sink` pipeline 未编排 V2 融合 pass（`annc-asm`/`annc-opt` 的 `-atir-op-fusion-v2` 已落地） | pipeline 单命令尚不能产出融合后的 ATIR，需手动跑 pass | 随 V2 融合 pipeline 批次 |
 
 ## 附录 A 源码位置索引（文件级）
 
@@ -162,4 +162,4 @@ sink 结束后遍历统计三类去向：sunk（已映射下沉）、unsupported
 | 批 1 | stablehlo 方言集成与值域（EXCLUDE_FROM_ALL、属性快照/还原） | 已合入 |
 | 批 2 | `ResidueProvider` 接缝、TF 适配层（`kOpMap`）、`V2OpMatcher`、`tf_type` 兼容方言 + 组件 GTest | 已合入 |
 | 批 3 | `residue-sink` 驱动（ConversionTarget / TypeConverter / pattern 优先级 / census）、`Passes.td`、pass 构造与统计输出 | 已合入 |
-| 批 4 | `annc-tf2atir-v2` 工具、端到端 FileCheck、CLI 文档 | 已合入 |
+| 批 4 | `annc-stablehlo-sink` 工具、端到端 FileCheck、CLI 文档 | 已合入 |
