@@ -123,34 +123,64 @@ TEST_F(StablehloSinkComponentTest, ParsesParameterizedTfTypeTags) {
   EXPECT_NE(printed.find("!tf_type.resource<tensor<32xf32>>"), std::string::npos);
 }
 
-// List spelling round-trips losslessly; negative literals are the internal
-// encoding and must fail loud instead of silently re-interpreting.
+// The upstream spelling round-trips losslessly; negative literals are the
+// internal encoding and must fail loud instead of silently re-interpreting.
 TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeAttr) {
-  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[3, 16]>} { return })mlir"));
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<3x16>} { return })mlir"));
   std::string printed;
   llvm::raw_string_ostream os(printed);
   module_->print(os);
-  EXPECT_NE(printed.find("#tf_type.shape<[3, 16]>"), std::string::npos);
+  EXPECT_NE(printed.find("#tf_type.shape<3x16>"), std::string::npos);
 
-  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[?]>} { return })mlir"));
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<?>} { return })mlir"));
   ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<*>} { return })mlir"));
-  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[]>} { return })mlir"));
-  // Bare `<>` is an alias of `[]` (rank-0).
   ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<>} { return })mlir"));
-  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[-1]>} { return })mlir"));
-  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[3,,4]>} { return })mlir"));
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<-1>} { return })mlir"));
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<3,,4>} { return })mlir"));
+  // Separator discipline: whitespace- or comma-separated dims and dangling
+  // 'x' suffixes do not belong to the compact spelling.
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<3 16>} { return })mlir"));
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<3x>} { return })mlir"));
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<3x16x>} { return })mlir"));
+  // An empty compound segment (`2xx3` -> segment "" between the x's) is
+  // rejected by the radix-10 dimension check.
+  EXPECT_FALSE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<2xx3>} { return })mlir"));
+  // MLIR auto-senses the radix: `0x3` parses as 3 by design (decimal is
+  // guaranteed at the pb source; locked here so the semantic stays visible).
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<0x3>} { return })mlir"));
+  std::string hexPrinted;
+  llvm::raw_string_ostream hos(hexPrinted);
+  module_->print(hos);
+  EXPECT_NE(hexPrinted.find("#tf_type.shape<3>"), std::string::npos);
 }
 
 // The dynamic dimension must print as `?` verbatim and round-trip; a char
 // glued to the integer overload would silently print 63 and re-parse as a
 // static dim (regression guard for the printer path).
-TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeDynamicDim) {
-  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[?, 32]>} { return })mlir"));
+// Dynamic dims print as the list spelling (`[2, ?]`): a compact body that
+// starts with a digit and carries `?` (e.g. `2x?`) is captured by the
+// generic attribute parser before this dialect hook runs, so the compact
+// form would not round-trip. `?`-leading bodies do reach the hook.
+TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeTrailingDynamic) {
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[2, ?]>} { return })mlir"));
   std::string printed;
   llvm::raw_string_ostream os(printed);
   module_->print(os);
+  EXPECT_NE(printed.find("#tf_type.shape<[2, ?]>"), std::string::npos);
+
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[?, ?]>} { return })mlir"));
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<[4, 5, ?]>} { return })mlir"));
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<?x?>} { return })mlir"));
+}
+
+TEST_F(StablehloSinkComponentTest, RoundTripsTfShapeDynamicDim) {
+  ASSERT_TRUE(func(R"mlir(func.func @f() attributes {annc.probe = #tf_type.shape<?x32>} { return })mlir"));
+  std::string printed;
+  llvm::raw_string_ostream os(printed);
+  module_->print(os);
+  // Dynamic dims print as the list spelling (see TrailingDynamic).
   EXPECT_NE(printed.find("#tf_type.shape<[?, 32]>"), std::string::npos);
-  EXPECT_EQ(printed.find("#tf_type.shape<[63, 32]>"), std::string::npos);
+  EXPECT_EQ(printed.find("#tf_type.shape<63x32>"), std::string::npos);
 }
 
 // Provenance edge cases: empty node, negative/overflow/non-numeric ports,

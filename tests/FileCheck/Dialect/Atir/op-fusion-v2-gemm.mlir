@@ -17,7 +17,7 @@ module {
 
   // main side: one call replaces the dot (two inputs + the return value).
   // CHECK-LABEL: func.func @main(
-  // CHECK: %[[CALL:.*]] = call @fused_matmul_{{[0-9a-fA-F]+}}(%arg0, %arg1) : (tensor<?x5xf32>, tensor<5x1xf32>) -> tensor<?x1xf32>
+  // CHECK: %[[CALL:.*]] = call @fused_matmul_{{[0-9a-fA-F]+}}(%arg1, %arg0) : (tensor<5x1xf32>, tensor<?x5xf32>) -> tensor<?x1xf32>
   // CHECK: return %[[CALL]]
 
   // Negative: a non-f32 (i32) dot stays untouched.
@@ -36,13 +36,13 @@ module {
     return %0 : tensor<?x1x1xf32>
   }
 
-  // Kernel: signature (lhs, rhs) -> out; the body is the moved
+  // Kernel: signature (fixed rhs, dynamic lhs) -> out; the body is the moved
   // stablehlo.dot (pre-lowering carrier); top-level attrs jit/kernel/
   // fusion.pattern (prune contract) / llvm.emit_c_interface.
   // Metadata follows the context v3 contract (outlineContextBuiltin line):
   // args fixed-to-dynamic (static rhs weight first), kernel_arg_order empty
   // (outputs allocated through the context), symbolic_signature empty.
-  // CHECK: func.func private @fused_matmul_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<?x5xf32>, %{{.*}}: tensor<5x1xf32>) -> tensor<?x1xf32> attributes {annc.execution_mode = "jit", annc.kernel, fusion.metadata =
+  // CHECK: func.func private @fused_matmul_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<5x1xf32>, %{{.*}}: tensor<?x5xf32>) -> tensor<?x1xf32> attributes {annc.execution_mode = "jit", annc.kernel, fusion.metadata =
   // CHECK-SAME: abi = "annc_context_v3"
   // CHECK-SAME: role = "fixed"
   // CHECK-SAME: role = "dynamic"

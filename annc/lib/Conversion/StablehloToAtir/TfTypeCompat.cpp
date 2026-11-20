@@ -149,7 +149,43 @@ class TfTypeCompatDialect : public Dialect {
       parser.emitError(parser.getCurrentLocation())
           << "invalid dimension in 'tf_type.shape' attribute";
     };
-    while (failed(parser.parseOptionalGreater())) {
+    // afterSeparator tracks a bare `x` separator: the token right after it
+    // must be a dimension, so `3x>` (dangling) fails while `2x?>` and
+    // `3x16x?>` parse (the single-char x is a separator, never dangling).
+    bool afterSeparator = false;
+    while (true) {
+      if (succeeded(parser.parseOptionalGreater())) {
+        if (afterSeparator) {
+          emitInvalid();
+          return Attribute();
+        }
+        break;
+      }
+      if (succeeded(parser.parseOptionalLSquare())) {
+        // List spelling: the safe transport for dynamic dims (a compact
+        // spelling with a leading digit and a trailing `?` gets captured
+        // by the generic attribute parser before this hook runs).
+        bool closed = succeeded(parser.parseOptionalRSquare());
+        while (!closed) {
+          if (succeeded(parser.parseOptionalQuestion())) {
+            dims.push_back(-1);
+          } else {
+            int64_t dim = -1;
+            if (failed(parser.parseInteger(dim)) || dim < 0) {
+              emitInvalid();
+              return Attribute();
+            }
+            dims.push_back(dim);
+          }
+          closed = succeeded(parser.parseOptionalRSquare());
+          if (!closed && failed(parser.parseOptionalComma())) {
+            emitInvalid();
+            return Attribute();
+          }
+        }
+        if (failed(parser.parseGreater())) return Attribute();
+        break;
+      }
       if (succeeded(parser.parseOptionalStar())) {
         if (unranked || !dims.empty() ||
             failed(parser.parseOptionalGreater())) {
@@ -173,6 +209,7 @@ class TfTypeCompatDialect : public Dialect {
         }
         dims.push_back(dim);
       }
+      afterSeparator = false;
       llvm::StringRef sep;
       if (failed(parser.parseOptionalKeyword(&sep))) {
         // No keyword: only '>' may follow a dimension. Whitespace- or
@@ -187,7 +224,8 @@ class TfTypeCompatDialect : public Dialect {
             << "'";
         return Attribute();
       }
-      bool dangling = sep.back() == 'x';
+      bool dangling = sep.size() > 1 && sep.back() == 'x';
+      bool bareSeparator = sep.size() == 1;
       sep = sep.drop_front();
       while (!sep.empty()) {
         size_t x = sep.find('x');
@@ -204,6 +242,7 @@ class TfTypeCompatDialect : public Dialect {
         emitInvalid();
         return Attribute();
       }
+      afterSeparator = bareSeparator;
     }
     return TfShapeAttr::get(parser.getContext(), dims, unranked);
   }
@@ -213,6 +252,23 @@ class TfTypeCompatDialect : public Dialect {
     auto shape = cast<TfShapeAttr>(attr);
     if (shape.isUnranked()) {
       printer << "shape<*>";
+      return;
+    }
+    // Dynamic dims go through the list spelling: a compact `2x?` is
+    // captured by the generic attribute parser on re-parse (see the list
+    // branch in parseAttribute), so printing it would not round-trip.
+    if (llvm::is_contained(shape.getShape(), -1)) {
+      printer << "shape<[";
+      llvm::interleave(
+          shape.getShape(), printer,
+          [&](int64_t dim) {
+            if (dim < 0)
+              printer << '?';
+            else
+              printer << dim;
+          },
+          ", ");
+      printer << "]>";
       return;
     }
     printer << "shape<";
