@@ -25,11 +25,11 @@ module {
 // CHECK-SAME: -> memref<2x4xf32>
 // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<2x4xf32>
 // CHECK: linalg.matmul ins(%arg0, %arg1 : tensor<2x3xf32>, tensor<3x4xf32>) outs(%[[EMPTY]] : tensor<2x4xf32>) -> tensor<2x4xf32>
-// CHECK: bufferization.to_buffer
+// CHECK: bufferization.to_memref
 // CHECK: return {{.*}} : memref<2x4xf32>
 // CHECK-LABEL: func.func @fused_epilogue(
 // CHECK-SAME: -> memref<2x4xf32>
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%arg0, %arg1, %arg2 : tensor<2x3xf32>, tensor<3x4xf32>, tensor<4xf32>)
-// CHECK: bufferization.to_buffer
+// CHECK: bufferization.to_memref
 // CHECK: return {{.*}} : memref<2x4xf32>

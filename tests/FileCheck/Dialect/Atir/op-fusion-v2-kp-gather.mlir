@@ -1,5 +1,5 @@
 // RUN: annc-opt %s -atir-op-fusion-v2 | FileCheck %s
-// RUN: annc-opt %s -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen | FileCheck %s --check-prefix=CODEGEN
+// RUN: annc-opt %s -atir-op-fusion-v2 | annc-asm - --annc-fast-codegen | FileCheck %s --check-prefix=CODEGEN
 //
 // op-fusion-v2 pattern: kp_gather (KP embedding gather, the V2 carrier
 // port of the V1 KPFusedGather). Shapes from the cvr_3 sink artifact (keys
