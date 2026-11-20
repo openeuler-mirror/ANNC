@@ -287,8 +287,10 @@ flowchart TB
 [ADR-023](../decisions/decisions.md#adr-023)），与 v1 工具链互不混链。
 
 StableHLO 主图进入后端后，`annc-gemm-epilogue-commit` 可直接匹配
-`stablehlo.dot` 后接的 Add/Mul/Relu 链，并提交为 `atir.fused_matmul`。该 pass
-从数据流与广播形状识别链路，不消费前端融合候选属性；融合输入以 builtin
+`stablehlo.dot` 后接的 Add/Mul/Relu 链，并提交为 `atir.fused_matmul`。无
+epilogue 链的裸 dot 同样提交为不带 epilogue 描述的 `atir.fused_matmul`——
+`stablehlo.dot` 本身没有 V2 lowering，保留原样会导致下游 GEMM 提取静默丢失。
+该 pass 从数据流与广播形状识别链路，不消费前端融合候选属性；融合输入以 builtin
 tensor 作为 variadic operands，epilogue 步骤顺序保存在 op 属性中。此 pass 与
 其 ATIR op 由 `ANNC_ENABLE_TF2ATIR_V2` 控制，后续 lowering 由下游 pass 负责。
 

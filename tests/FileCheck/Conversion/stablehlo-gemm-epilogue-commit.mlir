@@ -27,3 +27,23 @@ module {
 // CHECK-NOT: stablehlo.dot
 // CHECK-NOT: stablehlo.add
 // CHECK-NOT: stablehlo.multiply
+
+// -----
+
+module {
+  func.func @bare_dot(%lhs: tensor<2x3xf32>, %rhs: tensor<3x4xf32>)
+      -> tensor<2x4xf32> {
+    %dot = stablehlo.dot %lhs, %rhs, precision = [DEFAULT, DEFAULT]
+        : (tensor<2x3xf32>, tensor<3x4xf32>) -> tensor<2x4xf32>
+    return %dot : tensor<2x4xf32>
+  }
+}
+
+// A bare dot commits without an epilogue plan; the V2 conversion lowers the
+// resulting atir.fused_matmul to a plain linalg.matmul.
+// CHECK-LABEL: func.func @bare_dot
+// CHECK: atir.fused_matmul
+// CHECK-SAME: : (tensor<2x3xf32>, tensor<3x4xf32>) -> tensor<2x4xf32>
+// CHECK-NOT: annc.gemm.epilogue
+// CHECK-NOT: stablehlo.dot
+// CHECK: return %{{.*}} : tensor<2x4xf32>
