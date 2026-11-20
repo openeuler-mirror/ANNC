@@ -26,8 +26,7 @@ static bool isSameShapeFamily(llvm::StringRef tfOp) {
   // OpDef shared type_attr alone does NOT imply same shape (Squeeze shares
   // T but drops a rank; caused a ConvertDynamicSqueezeOp segfault,
   // cvr_3 verified).
-  return tfOp == "Cast" || tfOp == "Identity" ||
-         tfOp == "FloorMod" || tfOp == "FloorDiv" || tfOp == "Rsqrt" ||
+  return tfOp == "Cast" || tfOp == "Identity" || tfOp == "Rsqrt" ||
          tfOp == "Abs" || tfOp == "Neg" || tfOp == "Exp" || tfOp == "Sigmoid" ||
          tfOp == "Tanh" || tfOp == "Relu" || tfOp == "Square" || tfOp == "Ceil" ||
          tfOp == "ZerosLike" || tfOp == "StringToNumber" ||
@@ -42,6 +41,7 @@ static bool isBroadcastBinary(llvm::StringRef tfOp) {
   // rank(result) = max(rank(operands)) -- one-way, dims stay dynamic.
   return tfOp == "Add" || tfOp == "AddV2" || tfOp == "Sub" || tfOp == "Mul" ||
          tfOp == "MulNoNan" || tfOp == "Div" || tfOp == "RealDiv" ||
+         tfOp == "FloorDiv" || tfOp == "FloorMod" ||
          tfOp == "Minimum" || tfOp == "Maximum" || tfOp == "Equal" ||
          tfOp == "NotEqual" || tfOp == "Greater" || tfOp == "GreaterEqual" ||
          tfOp == "Less" || tfOp == "LessEqual" || tfOp == "LogicalAnd" ||
@@ -96,13 +96,21 @@ struct RankSolver {
     for (Value m : members) proposeRank(m, *rank);
   }
 
-  // TF broadcasting hard guarantee (one-way): rank(result) = max(known ranks).
+  // TF broadcasting hard guarantee (one-way): rank(result) = max(operand
+  // ranks). Propose only when every operand rank is known: a partially
+  // known view commits a too-low rank early, which then freezes forever.
   void proposeBroadcast(Operation *op) {
     if (op->getNumResults() == 0) return;
     int64_t best = -1;
-    for (Value v : op->getOperands())
-      if (auto r = knownRankOf(v)) best = std::max(best, *r);
-    if (best >= 0) proposeRank(op->getResult(0), best);
+    bool allKnown = true;
+    for (Value v : op->getOperands()) {
+      if (auto r = knownRankOf(v)) {
+        best = std::max(best, *r);
+      } else {
+        allKnown = false;
+      }
+    }
+    if (allKnown) proposeRank(op->getResult(0), best);
   }
 
   bool commit() {

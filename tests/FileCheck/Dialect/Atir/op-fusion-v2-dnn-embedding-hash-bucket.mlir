@@ -11,7 +11,7 @@
 module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, producer = 0 : i32}} {
   func.func @main() -> tensor<?x16xf32> attributes {tf.arg_names = [], tf.entry_function = {control_outputs = "", inputs = "", outputs = "out:0"}} {
     %s = atir.unsupported {detail = "", metadata = {call_target_name = "tf.Placeholder", device = "", residue_reason = "non_numeric_type", shape = #tf_type.shape<*>}, opType = "Placeholder", reason = "unknown_op"} () : () -> tensor<?x!atir.string> loc(fused["Placeholder:", "input_str"])
-    %w = atir.unsupported {detail = "", metadata = {call_target_name = "tf.Placeholder", device = "", residue_reason = "no_legalize_pattern", shape = #tf_type.shape<[10000, 16]>}, opType = "Placeholder", reason = "unknown_op"} () : () -> tensor<10000x16xf32> loc(fused["Placeholder:", "embedding_weights"])
+    %w = atir.unsupported {detail = "", metadata = {call_target_name = "tf.Placeholder", device = "", residue_reason = "no_legalize_pattern", shape = #tf_type.shape<10000x16>}, opType = "Placeholder", reason = "unknown_op"} () : () -> tensor<10000x16xf32> loc(fused["Placeholder:", "embedding_weights"])
     %h = "atir.string_to_hash_bucket_fast_v2"(%s) <{numBuckets = 10000 : i64}> : (tensor<?x!atir.string>) -> tensor<?xi64> loc("hash_anchor")
     %u:2 = atir.unsupported {detail = "", metadata = {call_target_name = "tf.Unique", device = "", residue_reason = "unregistered_custom_op"}, opType = "Unique", reason = "unknown_op"} (%h) : (tensor<?xi64>) -> (tensor<?xi64>, tensor<?xi64>) loc("uniq_node")
     %idx32 = stablehlo.convert %u#1 : (tensor<?xi64>) -> tensor<?xi32> loc("idx_conv")
