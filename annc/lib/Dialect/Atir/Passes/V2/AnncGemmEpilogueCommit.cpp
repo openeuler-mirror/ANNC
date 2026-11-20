@@ -224,8 +224,9 @@ LogicalResult commit(stablehlo::DotOp dot) {
     }
   }
 
-  if (steps.empty()) return success();
-  Value output = steps.back().result;
+  // A bare dot (no epilogue chain) commits too: stablehlo.dot has no V2
+  // lowering, so leaving it in place would starve GEMM extraction downstream.
+  Value output = steps.empty() ? dot.getResult() : steps.back().result;
   if (!outputType || !llvm::isa<RankedTensorType>(output.getType()))
     return success();
 
@@ -238,8 +239,11 @@ LogicalResult commit(stablehlo::DotOp dot) {
     inputs.push_back(unwrapped->source);
   }
 
-  OpBuilder builder(steps.back().source->getContext());
-  builder.setInsertionPointAfter(steps.back().source);
+  OpBuilder builder(dot->getContext());
+  if (steps.empty())
+    builder.setInsertionPoint(dot);
+  else
+    builder.setInsertionPointAfter(steps.back().source);
   OperationState state(dot.getLoc(), "atir.fused_matmul");
   state.addOperands({dot.getLhs(), dot.getRhs()});
   state.addOperands(inputs);
@@ -249,7 +253,8 @@ LogicalResult commit(stablehlo::DotOp dot) {
         attr.getName() != "annc.source_op" &&
         attr.getName() != "annc.source_ports")
       state.addAttribute(attr.getName(), attr.getValue());
-  state.addAttribute("annc.gemm.epilogue", buildEpilogueAttr(builder, steps));
+  if (!steps.empty())
+    state.addAttribute("annc.gemm.epilogue", buildEpilogueAttr(builder, steps));
   for (StringRef name :
        {"annc.source_node", "annc.source_op", "annc.source_ports"})
     if (Attribute attr = dot->getAttr(name)) state.addAttribute(name, attr);
