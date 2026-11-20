@@ -577,13 +577,15 @@ int RestoreConstantLocs(mlir::ModuleOp module, const PbIndex& pb) {
   return restored;
 }
 
-// StridedSlice sites: tag slice/real_dynamic_slice with the pb name of the
-// begin vector Const (annc.begin_source, CSE-immune).
+// StridedSlice sites: tag slice/real_dynamic_slice (and the not-yet-wrapped
+// tf.StridedSlice residues) with the pb name of the begin vector Const
+// (annc.begin_source, CSE-immune).
 int TagSliceBegins(mlir::ModuleOp module, const PbIndex& pb) {
   int tagged = 0;
   module->walk([&](mlir::Operation* op) {
     llvm::StringRef nm = op->getName().getStringRef();
-    if (nm != "stablehlo.slice" && nm != "stablehlo.real_dynamic_slice")
+    if (nm != "stablehlo.slice" && nm != "stablehlo.real_dynamic_slice" &&
+        nm != "tf.StridedSlice")
       return;
     if (op->hasAttr("annc.begin_source")) return;
     std::string host = PbHostOf(op->getLoc(), pb);
