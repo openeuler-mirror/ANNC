@@ -31,8 +31,30 @@ v1 同时链接 TF protobuf 与 annc 的 LLVM/MLIR。本工具的形态：
   复刻（`fusion_meta.h`），只消费 `annc-fusion-metadata` 的显式 JSON
   契约，不解析 MLIR。
 
-`annc-tf-pipeline` 当前仍编排 v1；切换时需把 `annc-fusion-metadata`
-的 JSON 导出作为 v2 前置步骤。
+V2 路线的离线编排由 `annc-tf-pipeline-v2`
+（`frontends/tensorflow/tf-pipeline-v2/`）承担：它按
+pb2stablehlo → annc-stablehlo-sink → 融合 → fast-codegen →
+`annc-fusion-metadata` 的顺序产出本组件所需的
+`fusion_metadata.json` 与 fusion-only ATIR。
+
+## 离线形态：annc-converter-v2 可执行
+
+与插件同一份 core objects（`rewriteGraphDefInPlace`），以 CLI 形态离线
+改写 GraphDef：
+
+```shell
+annc-converter-v2 --metadata_json fusion_metadata.json \
+  --input_graphdef model.pb --output_graphdef rewritten.pb \
+  [--shared_lib_path kernel.so] [--atir_module_path fused.mlir]
+```
+
+`--shared_lib_path` 与 `--atir_module_path` 可同时给出：AOT 站点读共享
+库、JIT 站点读 ATIR 模板，各取所需。**依赖**：链接构建时解析出的 TF
+framework（默认 pip wheel，或 `ANNC_TENSORFLOW_LIBRARIES` 显式指定）；
+**SDK headers-only 模式下该可执行被跳过**（无可链库，只构建 PRELOAD
+插件）——此时改写交给 predictor 进程内插件，编排工具用
+`annc-tf-pipeline-v2 --skip-converter` 跳过本步骤。产物 `rewritten.pb`
+仅供人工检查，不参与 predictor 运行时。
 
 ## 构建与运行
 

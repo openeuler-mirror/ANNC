@@ -13,7 +13,7 @@
 module {
   // Main case: full four-step tail (add/mul/add/relu); main keeps call+return.
   // CHECK-LABEL: func.func @main(
-  // CHECK: %[[CALL:.*]] = call @fused_matmul_add_mul_add_relu_{{[0-9a-fA-F]+}}(%arg0, %arg1, %arg2, %arg3, %arg4) : (tensor<?x400xf32>, tensor<400x400xf32>, tensor<400xf32>, tensor<400xf32>, tensor<400xf32>) -> tensor<?x400xf32>
+  // CHECK: %[[CALL:.*]] = call @fused_matmul_add_mul_add_relu_{{[0-9a-fA-F]+}}(%arg1, %arg2, %arg3, %arg4, %arg0) : (tensor<400x400xf32>, tensor<400xf32>, tensor<400xf32>, tensor<400xf32>, tensor<?x400xf32>) -> tensor<?x400xf32>
   // CHECK: return %[[CALL]] : tensor<?x400xf32>
   func.func @main(%arg0: tensor<?x400xf32>, %arg1: tensor<400x400xf32>, %arg2: tensor<400xf32>, %arg3: tensor<400xf32>, %arg4: tensor<400xf32>) -> tensor<?x400xf32> attributes {tf.arg_names = ["model/input_x:0", "model/dense/kernel:0", "model/dense/bias:0", "model/dense/scale:0", "model/dense/shift:0"]} {
     %batch = stablehlo.get_dimension_size %arg0, dim = 0 : (tensor<?x400xf32>) -> tensor<i32> loc("model/Shape")
@@ -39,7 +39,7 @@ module {
   // the bias broadcast and shape chain stay in main for the mul.
   // CHECK-LABEL: func.func @main_trunc(
   // CHECK: stablehlo.dynamic_broadcast_in_dim %arg2
-  // CHECK: %[[CT:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg0, %arg1, %arg2) : (tensor<?x64xf32>, tensor<64x32xf32>, tensor<32xf32>) -> tensor<?x32xf32>
+  // CHECK: %[[CT:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg1, %arg2, %arg0) : (tensor<64x32xf32>, tensor<32xf32>, tensor<?x64xf32>) -> tensor<?x32xf32>
   // CHECK: stablehlo.multiply %[[CT]]
   // CHECK: stablehlo.negate %[[CT]]
   // CHECK: return
@@ -62,7 +62,7 @@ module {
   // epilogue steps are shape-preserving); regression guard for the
   // use-after-free that erased members used to leave behind.
   // CHECK-LABEL: func.func @main_scaffold_mid(
-  // CHECK: %[[CM:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg0, %arg1, %arg2) : (tensor<?x64xf32>, tensor<64x32xf32>, tensor<32xf32>) -> tensor<?x32xf32>
+  // CHECK: %[[CM:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg1, %arg2, %arg0) : (tensor<64x32xf32>, tensor<32xf32>, tensor<?x64xf32>) -> tensor<?x32xf32>
   // CHECK: %[[SH:.*]] = shape.shape_of %[[CM]] : tensor<?x32xf32> -> tensor<2xindex>
   // CHECK: %[[MU:.*]] = stablehlo.multiply %[[CM]]
   // CHECK: return %[[MU]], %[[SH]] : tensor<?x32xf32>, tensor<2xindex>
@@ -79,12 +79,12 @@ module {
     return %mul_s, %shp_s : tensor<?x32xf32>, tensor<2xindex>
   }
 
-  // Main kernel: signature (lhs, rhs, bias, scale, shift) -> relu output;
+  // Main kernel: signature (rhs, bias, scale, shift, dynamic lhs) -> relu output;
   // aux (shape chain / three weight broadcasts / relu zero) and members
   // (dot/add/mul/add/maximum) all live in the kernel; context v3 contract:
   // fusion.pattern=matmul_add_mul_add_relu, args 4 fixed + 1 dynamic,
   // kernel_arg_order empty (context-allocated outputs), outputs=tail:0.
-  // CHECK: func.func private @fused_matmul_add_mul_add_relu_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<?x400xf32>, %{{.*}}: tensor<400x400xf32>, %{{.*}}: tensor<400xf32>, %{{.*}}: tensor<400xf32>, %{{.*}}: tensor<400xf32>) -> tensor<?x400xf32> attributes {annc.execution_mode = "jit", annc.kernel, fusion.metadata =
+  // CHECK: func.func private @fused_matmul_add_mul_add_relu_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<400x400xf32>, %{{.*}}: tensor<400xf32>, %{{.*}}: tensor<400xf32>, %{{.*}}: tensor<400xf32>, %{{.*}}: tensor<?x400xf32>) -> tensor<?x400xf32> attributes {annc.execution_mode = "jit", annc.kernel, fusion.metadata =
   // CHECK-SAME: abi = "annc_context_v3"
   // CHECK-SAME: role = "fixed"
   // CHECK-SAME: role = "fixed"
@@ -115,7 +115,7 @@ module {
 
   // Truncated-site kernel: members stop at add (pattern=matmul_add); the
   // (lhs, rhs, bias)。
-  // CHECK: func.func private @fused_matmul_add_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<?x64xf32>, %{{.*}}: tensor<64x32xf32>, %{{.*}}: tensor<32xf32>) -> tensor<?x32xf32> attributes {annc.execution_mode = "jit", annc.kernel,
+  // CHECK: func.func private @fused_matmul_add_{{[0-9a-fA-F]+}}(%{{.*}}: tensor<64x32xf32>, %{{.*}}: tensor<32xf32>, %{{.*}}: tensor<?x64xf32>) -> tensor<?x32xf32> attributes {annc.execution_mode = "jit", annc.kernel,
   // CHECK-SAME: kernel_arg_order = []
   // CHECK-SAME: tf.name = "annc_fused_model_dense_t_add"
   // The truncated-site dot carries a single-step candidate (add).
@@ -125,7 +125,7 @@ module {
 
   // basic (ANNC_GEMM=1): bare dot only; the tail consumes the call result.
   // GEMM-BASIC-LABEL: func.func @main(
-  // GEMM-BASIC: %[[C:.*]] = call @fused_matmul_{{[0-9a-fA-F]+}}(%arg0, %arg1) : (tensor<?x400xf32>, tensor<400x400xf32>) -> tensor<?x400xf32>
+  // GEMM-BASIC: %[[C:.*]] = call @fused_matmul_{{[0-9a-fA-F]+}}(%arg1, %arg0) : (tensor<400x400xf32>, tensor<?x400xf32>) -> tensor<?x400xf32>
   // GEMM-BASIC: stablehlo.add %[[C]]
   // GEMM-BASIC: stablehlo.multiply
   // GEMM-BASIC: stablehlo.maximum

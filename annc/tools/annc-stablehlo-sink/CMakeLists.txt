@@ -1,4 +1,4 @@
-# annc-tf2atir-v2: the V2-route entry tool (consumes the frontend stablehlo
+# annc-stablehlo-sink: the V2-route entry tool (consumes the frontend stablehlo
 # artifact and runs the residue sink). Registered only under
 # ANNC_ENABLE_TF2ATIR_V2=ON, together with StablehloToAtirConversion.
 set(LLVM_LINK_COMPONENTS
@@ -21,12 +21,12 @@ set(LIBS
   StablehloToAtirConversion
   ANNCHelper
 )
-add_llvm_executable(annc-tf2atir-v2
-  annc-tf2atir-v2.cpp
+add_llvm_executable(annc-stablehlo-sink
+  annc-stablehlo-sink.cpp
   DEPENDS
   ${LIBS}
 )
-target_link_libraries(annc-tf2atir-v2 PRIVATE ${LIBS})
-llvm_update_compile_flags(annc-tf2atir-v2)
-mlir_check_all_link_libraries(annc-tf2atir-v2)
-install(TARGETS annc-tf2atir-v2 DESTINATION bin)
+target_link_libraries(annc-stablehlo-sink PRIVATE ${LIBS})
+llvm_update_compile_flags(annc-stablehlo-sink)
+mlir_check_all_link_libraries(annc-stablehlo-sink)
+install(TARGETS annc-stablehlo-sink DESTINATION bin)

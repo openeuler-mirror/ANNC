@@ -18,12 +18,15 @@
 #   2. ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR — an existing llvm include root
 #      (a full llvm-project checkout's llvm/include),
 #   3. automatic sparse clone of llvm-project from
-#      ANNC_TF_TRANSFORM_LLVM_REPO (default: the official GitHub repository;
-#      e.g. https://gitee.com/mirrors/LLVM-Project.git is a reachable
-#      mirror — its tags lag upstream, which is why the default ref is a
-#      branch) at ANNC_TF_TRANSFORM_LLVM_REF (default release/21.x, the line
-#      the TF 2.20 wheel vendors as 21.0.0git; pin an exact commit here when
-#      a ref drift ever breaks the build), landing under the build tree.
+#      ANNC_TF_TRANSFORM_LLVM_REPO (default: the Gitee platform mirror
+#      https://gitee.com/mirrors/LLVM-Project.git of the official GitHub
+#      repository; point the variable back at github.com/llvm/llvm-project
+#      when needed) at ANNC_TF_TRANSFORM_LLVM_REF (default: an exact commit,
+#      f8cb7987c64d..., the llvm-project pin of TensorFlow v2.20.0 recorded
+#      in third_party/xla/third_party/llvm/workspace.bzl — the commit the
+#      wheel's vendored MLIR 21.0.0git was built from; a moving release/21.x
+#      HEAD drifts thousands of commits past this ABI anchor, so keep ref
+#      overrides pinned too), landing under the build tree.
 # The generated llvm/Config/llvm-config.h is supplied from
 # cmake/wheel-llvm-config/ (a build asset: it encodes the wheel's LLVM build
 # configuration; upstream ships only the .cmake template). Version mismatch
@@ -112,26 +115,65 @@ if(NOT EXISTS "${_llvm_snapshot}/llvm/Config/llvm-config.h")
   else()
     set(_llvm_repo "${ANNC_TF_TRANSFORM_LLVM_REPO}")
     if(NOT _llvm_repo)
-      set(_llvm_repo "https://github.com/llvm/llvm-project.git")
+      # Gitee's platform-run mirror of github.com/llvm/llvm-project; the
+      # official repository stays reachable via ANNC_TF_TRANSFORM_LLVM_REPO.
+      set(_llvm_repo "https://gitee.com/mirrors/LLVM-Project.git")
     endif()
     set(_llvm_ref "${ANNC_TF_TRANSFORM_LLVM_REF}")
     if(NOT _llvm_ref)
-      set(_llvm_ref "release/21.x")
+      # Exact llvm-project commit TensorFlow v2.20.0 pins in third_party/xla/
+      # third_party/llvm/workspace.bzl; the 2.20 wheel's vendored MLIR was
+      # built from it, so the headers must come from the same commit. A
+      # moving release/21.x HEAD is not an ABI contract.
+      set(_llvm_ref "f8cb7987c64dcffb72414a40560055cb717dbf74")
     endif()
     set(_llvm_snapshot "${CMAKE_BINARY_DIR}/transform-llvm-include")
     if(NOT EXISTS "${_llvm_snapshot}/llvm/ADT/StringRef.h")
-      message(STATUS "pb2stablehlo: sparse-cloning llvm/include from "
+      message(STATUS "pb2stablehlo: sparse-fetching llvm/include from "
                      "${_llvm_repo} @ ${_llvm_ref}")
       set(_clone_dir "${CMAKE_BINARY_DIR}/transform-llvm-clone")
       file(REMOVE_RECURSE "${_clone_dir}")
-      execute_process(
-        COMMAND git clone --quiet --depth 1 --filter=blob:none --sparse
-                --branch "${_llvm_ref}" "${_llvm_repo}" "${_clone_dir}"
-        RESULT_VARIABLE _clone_rc ERROR_VARIABLE _clone_err)
-      if(_clone_rc EQUAL 0)
+      string(LENGTH "${_llvm_ref}" _llvm_ref_len)
+      if(_llvm_ref MATCHES "^[0-9a-fA-F]+$" AND _llvm_ref_len EQUAL 40)
+        # git clone --branch rejects raw commit SHAs; seed an empty repo and
+        # fetch the exact object instead (GitHub and its Gitee mirror both
+        # serve fetch-by-SHA).
         execute_process(
-          COMMAND git -C "${_clone_dir}" sparse-checkout set llvm/include
-          RESULT_VARIABLE _sparse_rc ERROR_VARIABLE _sparse_err)
+          COMMAND git init --quiet "${_clone_dir}"
+          RESULT_VARIABLE _clone_rc ERROR_VARIABLE _clone_err)
+        if(_clone_rc EQUAL 0)
+          execute_process(
+            COMMAND git -C "${_clone_dir}" remote add origin "${_llvm_repo}"
+            RESULT_VARIABLE _clone_rc ERROR_VARIABLE _clone_err)
+        endif()
+        if(_clone_rc EQUAL 0)
+          execute_process(
+            COMMAND git -C "${_clone_dir}" fetch --quiet --depth 1
+                    --filter=blob:none origin "${_llvm_ref}"
+            RESULT_VARIABLE _clone_rc ERROR_VARIABLE _clone_err)
+        endif()
+        set(_sparse_rc 0)
+        set(_sparse_err "")
+        if(_clone_rc EQUAL 0)
+          execute_process(
+            COMMAND git -C "${_clone_dir}" sparse-checkout set llvm/include
+            RESULT_VARIABLE _sparse_rc ERROR_VARIABLE _sparse_err)
+        endif()
+        if(_clone_rc EQUAL 0 AND _sparse_rc EQUAL 0)
+          execute_process(
+            COMMAND git -C "${_clone_dir}" checkout --quiet --detach FETCH_HEAD
+            RESULT_VARIABLE _sparse_rc ERROR_VARIABLE _sparse_err)
+        endif()
+      else()
+        execute_process(
+          COMMAND git clone --quiet --depth 1 --filter=blob:none --sparse
+                  --branch "${_llvm_ref}" "${_llvm_repo}" "${_clone_dir}"
+          RESULT_VARIABLE _clone_rc ERROR_VARIABLE _clone_err)
+        if(_clone_rc EQUAL 0)
+          execute_process(
+            COMMAND git -C "${_clone_dir}" sparse-checkout set llvm/include
+            RESULT_VARIABLE _sparse_rc ERROR_VARIABLE _sparse_err)
+        endif()
       endif()
       if(NOT _clone_rc EQUAL 0 OR NOT _sparse_rc EQUAL 0)
         message(FATAL_ERROR
