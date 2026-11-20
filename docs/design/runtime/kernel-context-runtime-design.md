@@ -758,3 +758,19 @@ EP 拒绝 `annc_execution_v2` 站点；不能只改 JSON 标签复用旧共享�
 
 普通 `mlir_ciface` 站点仍按旧独立路径调用。源码中的历史 V2 IR lowering/兼容定义本次未整体清理，
 保留不代表 EP 会接受 V2 产物。这里不改变 CLI、融合开关或公开 Python API。
+
+## V2 carrier forms (batch 5)
+
+`kp_sparse_dynamic_stitch` and `kp_sparse_segment_reduce` are ported onto
+the V2 route (stablehlo carriers, `outlineSite` with `context_i64_attrs`):
+
+- Stitch keys on the unified `KPFusedSparseDynamicStitch` name with N as
+  the sole i64 attribute; x must be i64 (the kernel dtype), and the
+  row-id DP's explicit divides must use N as the divisor.
+- Segment-reduce keeps the V1 5-arg ABI across Forms A/A'/B; the FE tags
+  StridedSlice residues with `annc.begin_source` (same channel as the
+  slice forms) so constant-role wiring resolves to real Const nodes.
+- Known gaps: the fast-codegen `atir.Customize` lowering for V2 sites is
+  not ported (CODEGEN assertions in the FileCheck cases are parked with
+  comments); x >= 0 is a stitch kernel precondition inherited, not
+  re-checked at match time.
