@@ -39,7 +39,7 @@ module {
   // the bias broadcast and shape chain stay in main for the mul.
   // CHECK-LABEL: func.func @main_trunc(
   // CHECK: stablehlo.dynamic_broadcast_in_dim %arg2
-  // CHECK: %[[CT:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg0, %arg1, %arg2) : (tensor<?x64xf32>, tensor<64x32xf32>, tensor<32xf32>) -> tensor<?x32xf32>
+  // CHECK: %[[CT:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg1, %arg2, %arg0) : (tensor<64x32xf32>, tensor<32xf32>, tensor<?x64xf32>) -> tensor<?x32xf32>
   // CHECK: stablehlo.multiply %[[CT]]
   // CHECK: stablehlo.negate %[[CT]]
   // CHECK: return
@@ -62,7 +62,7 @@ module {
   // epilogue steps are shape-preserving); regression guard for the
   // use-after-free that erased members used to leave behind.
   // CHECK-LABEL: func.func @main_scaffold_mid(
-  // CHECK: %[[CM:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg0, %arg1, %arg2) : (tensor<?x64xf32>, tensor<64x32xf32>, tensor<32xf32>) -> tensor<?x32xf32>
+  // CHECK: %[[CM:.*]] = call @fused_matmul_add_{{[0-9a-fA-F]+}}(%arg1, %arg2, %arg0) : (tensor<64x32xf32>, tensor<32xf32>, tensor<?x64xf32>) -> tensor<?x32xf32>
   // CHECK: %[[SH:.*]] = shape.shape_of %[[CM]] : tensor<?x32xf32> -> tensor<2xindex>
   // CHECK: %[[MU:.*]] = stablehlo.multiply %[[CM]]
   // CHECK: return %[[MU]], %[[SH]] : tensor<?x32xf32>, tensor<2xindex>
@@ -79,7 +79,7 @@ module {
     return %mul_s, %shp_s : tensor<?x32xf32>, tensor<2xindex>
   }
 
-  // Main kernel: signature (lhs, rhs, bias, scale, shift) -> relu output;
+  // Main kernel: signature (rhs, bias, scale, shift, dynamic lhs) -> relu output;
   // aux (shape chain / three weight broadcasts / relu zero) and members
   // (dot/add/mul/add/maximum) all live in the kernel; context v3 contract:
   // fusion.pattern=matmul_add_mul_add_relu, args 4 fixed + 1 dynamic,

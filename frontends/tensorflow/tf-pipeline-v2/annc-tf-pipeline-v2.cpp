@@ -102,7 +102,9 @@ void printUsage() {
          "  --no-assume-opaque-i8     Stop marking dtype-less slots DT_INT8\n"
          "  --keep_temps              Keep intermediate artifacts\n"
          "  --verbose                 Print invoked commands\n"
-         "                            (maps onto ANNC_LOG_LEVEL=info)\n";
+         "                            (maps onto ANNC_LOG_LEVEL=info)\n"
+         "  GEMM fusion is gated by ANNC_GEMM (default 0 = off: no dot\n"
+         "  kernel is produced); export it in the calling environment.\n";
 }
 
 bool hasArg(int argc, char **argv, const std::string &name) {
@@ -297,6 +299,18 @@ bool runV2Chain(int argc, char **argv) {
   // GraphDef attributes.
   bool hasAot = false;
   if (!containsAotKernel(customizeAtir, hasAot)) return false;
+  {
+    // Zero fusion sites is usually a routing miss (ANNC_GEMM off by
+    // default), not a valid empty graph; surface it instead of a silent
+    // no-op rewrite pass.
+    std::ifstream probe(customizeAtir, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(probe)),
+                     std::istreambuf_iterator<char>());
+    if (text.find("annc.kernel") == std::string::npos)
+      ANNC_LOG_WARN("tf-pipeline-v2")
+          << "no annc.kernel sites materialized; check ANNC_GEMM (dot "
+             "fusion is off by default) and the fusion coverage\n";
+  }
   if (hasAot) {
     // The context-kernel ABI lowering behind annc -shared is guarded off in
     // V2 builds unless this switch is on; the pipeline owns the switch so

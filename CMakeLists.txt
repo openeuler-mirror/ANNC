@@ -193,7 +193,7 @@ foreach(_annc_root IN ITEMS
 endforeach()
 if(NOT DEFINED LLVM_DIR)
   find_program(ANNC_LLVM_CONFIG NAMES
-    llvm-config-22 llvm-config-21 llvm-config-20 llvm-config)
+    llvm-config-20 llvm-config-21 llvm-config-22 llvm-config)
   if(ANNC_LLVM_CONFIG)
     execute_process(COMMAND "${ANNC_LLVM_CONFIG}" --cmakedir
       OUTPUT_VARIABLE _annc_llvm_cmake_dir

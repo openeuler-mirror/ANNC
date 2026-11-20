@@ -307,9 +307,10 @@ case "${FRAMEWORK_MODE}" in
     ;;
 esac
 if [ "${ENABLE_TF2ATIR_V2}" = "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
-  echo "WARNING: --enable-tf2atir-v2 with the TensorFlow frontend disabled builds" >&2
-  echo "WARNING: annc-converter-v2 but NOT annc-tf-pipeline-v2 (the orchestrator" >&2
-  echo "WARNING: lives under frontends/tensorflow, which needs the TF frontend)." >&2
+  echo "ERROR: --enable-tf2atir-v2 requires the TensorFlow frontend/addon:" >&2
+  echo "ERROR: annc-converter-v2 reads ANNC_TENSORFLOW_CXX11_ABI from that" >&2
+  echo "ERROR: subtree, so configure fails without it." >&2
+  exit 1
 fi
 
 # The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
