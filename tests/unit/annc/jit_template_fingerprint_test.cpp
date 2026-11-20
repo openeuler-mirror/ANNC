@@ -137,4 +137,20 @@ TEST_F(TemplateFingerprintTest, IgnoresExecutionMode) {
   EXPECT_EQ(Fingerprint(jit), Fingerprint(aot));
 }
 
+// pb2stablehlo stamps annc.source_{node,op,ports} (TF node identity) on every
+// op; clones keep them inside the JIT template body, so the fingerprint must
+// strip them or isomorphic sites never share a compiled kernel.
+TEST_F(TemplateFingerprintTest, IgnoresFrontendSourceAttrs) {
+  const std::string base = BuildKernel("dense_a", "model/a", false, -1.0f);
+  auto tagged = [&](llvm::StringRef nodeName) {
+    return ReplaceAll(base, "}> {metadata = {",
+                      "}> {annc.source_node = \"" + nodeName.str() +
+                          "\", annc.source_op = \"MatMul\", "
+                          "annc.source_ports = \"0\", metadata = {");
+  };
+  EXPECT_EQ(Fingerprint(base), Fingerprint(tagged("wd_dcn/dense_1/MatMul")));
+  EXPECT_EQ(Fingerprint(tagged("wd_dcn/dense_1/MatMul")),
+            Fingerprint(tagged("wd_dcn/dense_2/MatMul")));
+}
+
 }  // namespace
