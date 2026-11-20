@@ -43,8 +43,8 @@ module {
       ^bb0(%in: f32, %out: f32):
         linalg.yield %in : f32
     } -> tensor<2x3xf32>
-    %out0 = bufferization.to_buffer %result0 : tensor<2x3xf32> to memref<2x3xf32>
-    %out1 = bufferization.to_buffer %result1 : tensor<2x3xf32> to memref<2x3xf32>
+    %out0 = bufferization.to_memref %result0 : tensor<2x3xf32> to memref<2x3xf32>
+    %out1 = bufferization.to_memref %result1 : tensor<2x3xf32> to memref<2x3xf32>
     return %out0, %out1 : memref<2x3xf32>, memref<2x3xf32>
   }
 
@@ -60,7 +60,7 @@ module {
     %zero = arith.constant 0.0 : f32
     %empty = tensor.empty(%n) : tensor<?x3xf32>
     %result = linalg.fill ins(%zero : f32) outs(%empty : tensor<?x3xf32>) -> tensor<?x3xf32>
-    %out = bufferization.to_buffer %result : tensor<?x3xf32> to memref<?x3xf32>
+    %out = bufferization.to_memref %result : tensor<?x3xf32> to memref<?x3xf32>
     return %out : memref<?x3xf32>
   }
 

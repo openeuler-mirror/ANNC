@@ -22,6 +22,28 @@ annc-partition --version
 v2 的 predictor 进程内改写形态见
 [addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
 
+### V2 路线：annc-tf-pipeline-v2
+
+`annc-tf-pipeline-v2`（`ANNC_ENABLE_TF2ATIR_V2=ON` 构建产出）编排完整
+V2 离线链：pb2stablehlo → `annc-stablehlo-sink` → `annc-asm
+-atir-op-fusion-v2` → fast-codegen → `annc-fusion-metadata` →
+prune/lower →（AOT 站点时）`annc -shared` → `annc-converter-v2` 回写。
+产物三件套落在 `--work_dir`：`fusion_metadata.json`、
+`model_fused_atir.mlir`（JIT 模板）与 `annc_generated_kernel.so`（仅
+AOT 站点）；`--keep_temps` 额外保留全部中间产物。与 v1 的差异：
+入口名单经 `--input` 显式给出（feed 点，可重复）、metadata 为必产物、
+`--verbose` 等价 `ANNC_LOG_LEVEL=info`。predictor 进程内改写部署下用
+`--skip-converter` 跳过离线回写（rewritten.pb 不参与运行时）。
+
+```shell
+annc-tf-pipeline-v2 \
+  --input_graphdef input.pb \
+  --input <feed_node> \
+  --output_tensor <output_node> \
+  --work_dir /tmp/annc_v2_work \
+  --keep_temps --verbose
+```
+
 > **GEMM 融合需要先打开开关**：`ANNC_GEMM` 未设置时默认为 `0`，`OpFusion` 不做 MatMul/GEMM 融合，也不会产生 JIT kernel，且不会报错。需要 GEMM 融合时先 `export ANNC_GEMM=1`（plain MatMul）或 `ANNC_GEMM=2`（追加 epilogue 尾融合）。取值与依赖见[环境变量参考](environment-variables.md)。
 
 ```shell
@@ -49,7 +71,7 @@ annc-tf-pipeline \
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
-## `annc-tf2atir-v2`（V2 路线）
+## `annc-stablehlo-sink`（V2 路线）
 
 V2 路线的图改写入口：读入前端产物（stablehlo + 残差载体的 `.mlir`），
 执行 residue-sink（映射残差 → `atir.*_v2`，未映射残差 →
@@ -59,7 +81,7 @@ debug 信息的 ATIR。随 `ANNC_ENABLE_TF2ATIR_V2=ON` 构建（默认 OFF），
 `tests/FileCheck/Conversion/tf-residue-v2-sink.mlir`。
 
 ```shell
-annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
+annc-stablehlo-sink input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
 ```
 
 在启用 `ANNC_ENABLE_TF2ATIR_V2` 的 `annc-asm` 构建中，可以复用
@@ -99,7 +121,7 @@ annc-opt sunk.mlir -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen
 TF GraphDef → StableHLO 的 V2 前端（wheel 隔离编译，TF 2.20 + 独立
 llvm 快照；构建开关同 `ANNC_ENABLE_TF2ATIR_V2`，TF 2.20 分支可达）。
 读入 GraphDef pb，产出 **stablehlo 主图 + 残差载体** 的 `.mlir`（即
-`annc-tf2atir-v2` 消费的前端产物）。
+`annc-stablehlo-sink` 消费的前端产物）。
 
 ```shell
 pb2stablehlo graph.pb --input x:DT_STRING --output y \
@@ -124,7 +146,7 @@ pb2stablehlo graph.pb --input x:DT_STRING --output y \
 退出码：0 成功；1 IO/导入失败；2 用法；3 方言注册；4 类型/不变量；
 5 内部阶段（管线失败）；6 图结构。A/B 开关（`ANNC_NO_*`）见
 [环境变量参考](environment-variables.md)。产出交由
-`annc-tf2atir-v2`（见上）完成残差下沉。
+`annc-stablehlo-sink`（见上）完成残差下沉。
 
 行为契约与阶段失败语义见
 [前端设计](../design/tf-stablehlo-frontend/frontend-transform.md)；

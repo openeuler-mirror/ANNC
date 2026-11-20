@@ -1,4 +1,4 @@
-// RUN: annc-tf2atir-v2 --help >/dev/null && env ANNC_ENABLE_LOWERING_CONTEXT_ABI=1 annc-asm %s --convert-context-kernel-abi --convert-atir-v2-to-linalg --verify-each | FileCheck %s --implicit-check-not=stablehlo.constant --implicit-check-not=atir.Customize --implicit-check-not='!atir.tensor'
+// RUN: annc-stablehlo-sink --help >/dev/null && env ANNC_ENABLE_LOWERING_CONTEXT_ABI=1 annc-asm %s --convert-context-kernel-abi --convert-atir-v2-to-linalg --verify-each | FileCheck %s --implicit-check-not=stablehlo.constant --implicit-check-not=atir.Customize --implicit-check-not='!atir.tensor'
 
 func.func @stablehlo_constant(%input: tensor<4x5x32xf32>) -> tensor<4x5x16xf32>
     attributes {annc.kernel, fusion.metadata = {abi = "annc_context_v3"}} {
