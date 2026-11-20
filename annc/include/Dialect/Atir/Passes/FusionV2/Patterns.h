@@ -22,8 +22,10 @@ void addKpGatherV2Pattern(mlir::RewritePatternSet &patterns,
 
 void populateAtirOpFusionV2Patterns(mlir::RewritePatternSet &patterns,
                                     fusionv2::CallPortTable *portTable);
-void addSparseDynamicStitchV2Pattern(mlir::RewritePatternSet &patterns);
-void addSparseSegmentReduceV2Pattern(mlir::RewritePatternSet &patterns);
+void addSparseDynamicStitchV2Pattern(mlir::RewritePatternSet &patterns,
+                                     fusionv2::CallPortTable *portTable);
+void addSparseSegmentReduceV2Pattern(mlir::RewritePatternSet &patterns,
+                                     fusionv2::CallPortTable *portTable);
 void addSparseReshapeV2Pattern(mlir::RewritePatternSet &patterns);
 // kp_embedding_padding: Reshape-residue anchor with a runtime target over
 // the string-transport carrier chain (concat-with-zeros tail).
