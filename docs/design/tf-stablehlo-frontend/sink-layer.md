@@ -93,7 +93,7 @@ TF GraphDef / SavedModel
 
 仅使携带 TF 类型的产物无损解析：任意 `!tf_type.<tag>`（含 `resource<tensor<...>>` 等参数化形态）可 parse，功能上只识别 `string`（`isTfStringType`）。不参与语义，类型归一化由 sink 类型转换器完成。
 
-`#tf_type.shape` 属性已落地，采用列表拼写（逗号分隔，避免紧凑 `d1x…dN` 拼写与 MLIR 十六进制词法冲突）：`#tf_type.shape<[3, 16]>`、`#tf_type.shape<[?]>`（未知维）、`#tf_type.shape<*>`（未知秩）、`#tf_type.shape<[]>`（rank-0，别名 `<>` 亦接受）；负数字面量与多写逗号在解析期报错；紧凑拼写 `d1x…dN` 不受支持（与 MLIR 十六进制词法冲突，见上文）。
+`#tf_type.shape` 属性已落地，采用紧凑拼写（MLIR 整数词法）：`#tf_type.shape<3x16>`（`x` 复合段）、`#tf_type.shape<?>`（未知维）、`#tf_type.shape<*>`（未知秩）、`#tf_type.shape<>`（rank-0）；负数字面量与多写逗号在解析期报错。因 MLIR 整数词法自动识别进制，`0x3` 按十六进制语义解析为 3（属既定行为，由组件测试锁定）；维度在 pb 源头保证十进制。破坏性变更：早期列表拼写 `#tf_type.shape<[3, 16]>` 已不再支持（真实语料产物全部为紧凑拼写，列表式无法读入），旧中间产物需重新生成。
 
 ## 4 核心机制
 
