@@ -38,8 +38,14 @@ fi
         path = tools / name
         path.write_text(stage)
         path.chmod(0o755)
+    onnx = pytest.importorskip("onnx")
+    h, t = onnx.helper, onnx.TensorProto
     model = tmp_path / "model.onnx"
-    model.write_bytes(b"minimal onnx graph")
+    onnx.save(h.make_model(h.make_graph(
+        [h.make_node("Add", ["x", "x"], ["y"], name="sum")], "main",
+        [h.make_tensor_value_info("x", t.FLOAT, [2])],
+        [h.make_tensor_value_info("y", t.FLOAT, [2])],
+    ), opset_imports=[h.make_opsetid("", 13)], ir_version=9), model)
     return tools, model, log
 
 
@@ -67,8 +73,17 @@ def test_external_tools_publish_stablehlo_and_metadata(tmp_path):
     report = json.loads(metadata.read_text())
     assert report["schema"] == "annc-stablehlo-boundary/1"
     assert report["producer"]["tool"] == "onnx-mlir"
-    assert report["stages"]["source_import"]["exit_code"] == 0
-    assert report["stages"]["onnx_ir_optimization"]["exit_code"] == 0
+    assert "onnx_import" not in report["stages"]
+    imported = report["stages"]["source_import"]
+    assert imported["exit_code"] == 0
+    assert "--annc-import-onnx" in report["stages"]["source_import"]["command"]
+    optimized = report["stages"]["onnx_ir_optimization"]
+    assert optimized["exit_code"] == 0
+    assert optimized["command"][1] == imported["command"][-1]
+    assert report["imported_onnx_mlir"] == imported["command"][-1]
+    assert "--canonicalize=disable-patterns=PropagateReshapeThroughBinaryOpPattern<mlir::ONNXAddOp>" in optimized["command"]
+    assert "--onnx-const-prop-disable-pattern=MulConstAssociative1" in optimized["command"]
+    assert "--standard-func-return" in optimized["command"]
     assert report["stages"]["onnx_to_stablehlo"]["exit_code"] == 0
     assert report["stages"]["preprocessing_passes"]["exit_code"] == 0
     assert report["stages"]["residual_lowering"]["exit_code"] == 0
