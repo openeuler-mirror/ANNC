@@ -116,7 +116,7 @@ def build_model(
     onnx.save(model, path)
 
 
-def build_rank4_model(path, broadcast_data=False):
+def build_rank4_model(path, broadcast_data=False, dynamic_m=False):
     """Rank-4 sites: the per-domain projections of model3.
 
     x [B0, 1, T, K] -> MatMul(., W [B0, 1, K, N]) -> Add(., bias [B0, 1, 1, N])
@@ -126,8 +126,11 @@ def build_rank4_model(path, broadcast_data=False):
     """
     batch, seq, k, n = 2, 5, 12, 16
     data_batch = 1 if broadcast_data else batch
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [data_batch, 1, seq, k])
-    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [batch, 1, seq, n])
+    sequence_dim = "M" if dynamic_m else seq
+    x = helper.make_tensor_value_info(
+        "x", TensorProto.FLOAT, [data_batch, 1, sequence_dim, k]
+    )
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [batch, 1, sequence_dim, n])
     w = numpy_helper.from_array(
         (np.arange(batch * k * n, dtype=np.float32).reshape(batch, 1, k, n) - 96.0)
         / 37.0,
