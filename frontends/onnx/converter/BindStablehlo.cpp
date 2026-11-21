@@ -56,21 +56,31 @@ OnnxSourceGraph::OnnxSourceGraph(ModuleOp module) {
   auto function = functions[0];
   for (const auto &tensor : graph.at("tensors"))
     tensors.emplace(tensor.at("name").get<std::string>(), &tensor);
-  // Finalization has already checked alias identity and emitted these arrays.
-  auto add = [&](Value value, ArrayAttr aliases) {
-    for (Attribute attr : aliases)
-      values.emplace(cast<StringAttr>(attr).str(), value);
+  auto add = [&](Value value, Attribute attribute, StringRef name) {
+    auto aliases = dyn_cast_or_null<ArrayAttr>(attribute);
+    if (!aliases)
+      throw std::runtime_error("invalid " + name.str() + ": expected an array");
+    for (Attribute attr : aliases) {
+      auto alias = dyn_cast<StringAttr>(attr);
+      if (!alias)
+        throw std::runtime_error("invalid " + name.str() +
+                                 ": expected a tensor name");
+      values.emplace(alias.str(), value);
+    }
   };
   for (BlockArgument arg : function.getArguments())
-    add(arg, function.getArgAttrOfType<ArrayAttr>(arg.getArgNumber(),
-                                              "annc.tensor_names"));
+    add(arg, function.getArgAttr(arg.getArgNumber(), "annc.tensor_names"),
+        "annc.tensor_names");
   function.walk([&](Operation *op) {
     if (op->getName().getDialectNamespace() != "stablehlo" &&
         !isa<atir::OpaqueOp>(op))
       return;
     auto results = op->getAttrOfType<ArrayAttr>("annc.result_tensors");
+    if (!results || results.size() != op->getNumResults())
+      throw std::runtime_error(
+          "invalid annc.result_tensors: expected one alias array per result");
     for (auto [value, aliases] : llvm::zip(op->getResults(), results))
-      add(value, cast<ArrayAttr>(aliases));
+      add(value, aliases, "annc.result_tensors");
   });
   // Preserve the existing name order when resolving shared constant aliases.
   for (const auto &[name, value] : values) aliases[value].push_back(name);

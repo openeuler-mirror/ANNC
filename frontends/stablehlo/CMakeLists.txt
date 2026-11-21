@@ -14,7 +14,7 @@ target_include_directories(annc-stablehlo-opt PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${_stablehlo_source}" "${_stablehlo_build}")
 target_link_directories(annc-stablehlo-opt PRIVATE
-  "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/lib")
+  "${ANNC_ONNX_MLIR_LIBRARY_DIR}")
 target_link_libraries(annc-stablehlo-opt PRIVATE
   AtirDialect ANNCFusionMetadata nlohmann_json::nlohmann_json
   MLIROptLib MLIRFuncDialect MLIRLLVMDialect
