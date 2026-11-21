@@ -68,6 +68,8 @@ void populateAtirOpFusionV2Patterns(RewritePatternSet &patterns,
   addDnnEmbeddingHashBucketV2Pattern(patterns, portTable);
   addEmbeddingPaddingV2Pattern(patterns, portTable);
   addEmbeddingPaddingFastV2Pattern(patterns, portTable);
+  addSparseDynamicStitchV2Pattern(patterns, portTable);
+  addSparseSegmentReduceV2Pattern(patterns, portTable);
   addDotGemmV2Pattern(patterns);
 }
 
