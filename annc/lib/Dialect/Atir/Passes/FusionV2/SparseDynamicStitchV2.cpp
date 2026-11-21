@@ -151,7 +151,8 @@ static Value traceUniqueIds(Value x, SmallVectorImpl<int64_t> &divConsts) {
     if (auto div = dyn_cast<stablehlo::DivOp>(def))
       if (auto rhs = div.getRhs().getDefiningOp<stablehlo::ConstantOp>())
         if (auto attr = rhs.getValue().dyn_cast<DenseElementsAttr>();
-            attr && attr.isSplat())
+            attr && attr.isSplat() &&
+            isa<IntegerType>(attr.getElementType()))
           divConsts.push_back(attr.getSplatValue<APInt>().getSExtValue());
     if (auto residue = dyn_cast<atir::UnsupportedOp>(def))
       if (residue.getOpType() == "Unique" && def->getNumResults() >= 1)
@@ -219,7 +220,9 @@ static bool matchOperands(StitchMatch &m) {
     auto vTy = dyn_cast<RankedTensorType>(v.getType());
     if (!vTy || !vTy.getElementType().isF32() || vTy.getRank() != 2)
       return fail("table-type");
-    if (vTy.isDynamicDim(1)) continue;
+    // A dynamic width would mix <?x?xf32> and <?xWxf32> gathers and break
+    // the synthesized select chain, so require a uniform static width.
+    if (vTy.isDynamicDim(1)) return fail("table-width-dynamic");
     if (width && *width != vTy.getDimSize(1)) return fail("table-width");
     width = vTy.getDimSize(1);
   }
@@ -384,6 +387,8 @@ class FuseKpSparseDynamicStitchV2Pattern
 
     // ---- Commit: rebind anchor users to the site output; dead-residue
     // deletion; outline. ----
+    if (anchor.getResult(0).getType() != acc.getType())
+      return roll("result-type");
     rewriter.replaceAllUsesWith(anchor.getResult(0), acc);
     rewriter.eraseOp(anchor.getOperation());
     auto eraseGroupMembers = [&](const PartitionLike &view) {
