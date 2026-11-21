@@ -104,8 +104,8 @@ static bool matchStaticShapeTail(const SmallPtrSetImpl<Operation *> &closure,
     if (start.size() != 1 || limit.size() != 1 || strides.size() != 1)
       return false;
     if (strides[0] != 1 || limit[0] != start[0] + 1) return false;
-    if (hit && (start0 != start[0] || hit != op))
-      return false;  // multiple candidates: pointer-order nondeterminism
+    if (hit)
+      return false;  // multiple slice candidates: reject for determinism
     hit = op;
     start0 = start[0];
   }
@@ -288,7 +288,6 @@ static bool matchArithmeticKeys(SmallPtrSetImpl<Operation *> &keysClosure,
                                 DenseSet<Value> &keysBoundary, Value &keys,
                                 Value &begin, Value &beginStackConst,
                                 Operation *&keysSliceOp) {
-  bool boundaryOk = true;
   for (Value v : keysBoundary) {
     auto ty = dyn_cast<RankedTensorType>(v.getType());
     bool isI64R2 =
@@ -305,6 +304,7 @@ static bool matchArithmeticKeys(SmallPtrSetImpl<Operation *> &keysClosure,
       return false;
     }
   }
+  if (!keys) return false;  // boundary without an i64 rank-2 value
   auto keysTy = dyn_cast<RankedTensorType>(keys.getType());
   if (!keysTy || !keysTy.getElementType().isInteger(64) ||
       keysTy.getRank() != 2)
@@ -509,8 +509,8 @@ class FuseKpSparseSegmentReduceV2Pattern
                 m.keysSliceOp->getAttrOfType<StringAttr>("annc.begin_source"))
           beginName = src.getValue().str();
       if (beginName.empty())
-        beginName = fusionv2::anchorFromLoc(
-            m.beginStackConst.getDefiningOp()->getLoc());
+        if (auto *beginDef = m.beginStackConst.getDefiningOp())
+          beginName = fusionv2::anchorFromLoc(beginDef->getLoc());
       if (beginName.empty())
         beginName = fusionv2::anchorFromLoc(anchor.getLoc()) + "_begin";
       promoted.emplace_back(m.beginStackConst, beginName);

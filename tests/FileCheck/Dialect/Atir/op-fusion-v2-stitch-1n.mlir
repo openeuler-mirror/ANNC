@@ -243,6 +243,10 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
 #loc57 = loc(callsite(#loc54 at #loc39))
 
 // ABI order = (x, v0, v1): x = Unique port 0, tables follow gather order.
+// NOT placed before the first positive check so it scans all of @main
+// (the residues live before the kernel func declaration in print order).
+// CHECK-NOT: opType = "ParallelDynamicStitch"
+// CHECK-NOT: opType = "DynamicPartition"
 // CHECK: call @KPFusedSparseDynamicStitch
 // CHECK: func.func private @KPFusedSparseDynamicStitch
 // CHECK-SAME: annc.kernel
@@ -251,6 +255,3 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
 // CHECK-SAME: fusion.pattern = "kp_sparse_dynamic_stitch"
 // CHECK-SAME: kernel_name = "KPFusedSparseDynamicStitch"
 // CHECK-SAME: tf_name = "out"
-// The stitch anchor, both DP groups and the gather chain are erased;
-// CHECK-NOT: opType = "ParallelDynamicStitch"
-// CHECK-NOT: opType = "DynamicPartition"
