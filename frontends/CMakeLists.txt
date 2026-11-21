@@ -23,3 +23,7 @@ if(ANNC_ENABLE_ONNX)
   # Pipeline orchestrator for the ONNX Runtime EP's runtime-compile mode.
   add_subdirectory(onnx/onnx-pipeline)
 endif()
+
+if(ANNC_ENABLE_STABLEHLO_FRONTEND)
+  add_subdirectory(stablehlo)
+endif()
