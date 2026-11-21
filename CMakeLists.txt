@@ -52,6 +52,28 @@ set(ANNC_ONNX_MLIR_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir" CACHE 
     "Pinned ONNX-MLIR source submodule")
 set(ANNC_ONNX_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/third-party/onnx-mlir-build" CACHE PATH
     "Build tree for the pinned ONNX-MLIR source")
+if(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO OR ANNC_ENABLE_STABLEHLO_FRONTEND)
+  set(_onnx_mlir_lib_dirs
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/${CMAKE_BUILD_TYPE}/lib"
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/lib"
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/lib")
+  if(EXISTS "${ANNC_ONNX_MLIR_BUILD_DIR}/CMakeCache.txt")
+    load_cache("${ANNC_ONNX_MLIR_BUILD_DIR}" READ_WITH_PREFIX _paired_
+      CMAKE_BUILD_TYPE CMAKE_CONFIGURATION_TYPES)
+    # ANNC and the paired single-config build may use different build types.
+    if(DEFINED _paired_CMAKE_BUILD_TYPE AND NOT _paired_CMAKE_CONFIGURATION_TYPES)
+      set(_onnx_mlir_lib_dirs
+        "${ANNC_ONNX_MLIR_BUILD_DIR}/${_paired_CMAKE_BUILD_TYPE}/lib")
+    endif()
+  endif()
+  find_library(_annc_stablehlo_ops NAMES StablehloOps
+    PATHS ${_onnx_mlir_lib_dirs} NO_DEFAULT_PATH NO_CACHE)
+  if(NOT _annc_stablehlo_ops)
+    message(FATAL_ERROR
+      "StablehloOps not found in the paired ONNX-MLIR build: ${_onnx_mlir_lib_dirs}. Build ONNX-MLIR first or set ANNC_ONNX_MLIR_BUILD_DIR.")
+  endif()
+  get_filename_component(ANNC_ONNX_MLIR_LIBRARY_DIR "${_annc_stablehlo_ops}" DIRECTORY)
+endif()
 set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
 set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for the EP's native pool (always used by the EP); an install/SDK tree does not carry them")
 set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the native-pool context layout and archives were verified against; the adapter refuses the native path in any other host and falls back to the public KernelContext_ParallelFor adapter")

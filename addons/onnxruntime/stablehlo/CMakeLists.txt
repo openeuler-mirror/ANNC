@@ -4,11 +4,12 @@ if(NOT EXISTS "${ANNC_ONNX_MLIR_SOURCE_DIR}/src/Dialect/ONNX/ONNXDialect.hpp")
     "ONNX-MLIR source is missing. Initialize the submodule with: "
     "git submodule update --init --recursive third-party/onnx-mlir")
 endif()
-if(NOT EXISTS "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/bin/onnx-mlir" OR
-   NOT EXISTS "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/bin/onnx-mlir-opt")
+get_filename_component(_onnx_mlir_config_dir "${ANNC_ONNX_MLIR_LIBRARY_DIR}" DIRECTORY)
+if(NOT EXISTS "${_onnx_mlir_config_dir}/bin/onnx-mlir" OR
+   NOT EXISTS "${_onnx_mlir_config_dir}/bin/onnx-mlir-opt")
   message(FATAL_ERROR
-    "Build the pinned ONNX-MLIR submodule first and set "
-    "ANNC_ONNX_MLIR_BUILD_DIR to its build tree")
+    "ONNX-MLIR tools not found in ${_onnx_mlir_config_dir}/bin. "
+    "Build the pinned ONNX-MLIR submodule first or set ANNC_ONNX_MLIR_BUILD_DIR.")
 endif()
 
 set(ANNC_STABLEHLO_SOURCE_DIR
@@ -17,9 +18,6 @@ set(ANNC_STABLEHLO_SOURCE_DIR
 set(ANNC_STABLEHLO_BUILD_DIR
     "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/stablehlo" CACHE PATH
     "StableHLO build tree paired with ONNX-MLIR")
-set(ANNC_STABLEHLO_LIB_DIR
-    "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/lib" CACHE PATH
-    "ONNX-MLIR and StableHLO library directory")
 
 add_subdirectory(pipeline)
 

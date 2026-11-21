@@ -53,7 +53,7 @@ target_include_directories(annc-onnx-framework-opt PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../passes/preprocessing"
   ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
 target_link_directories(annc-onnx-framework-opt PRIVATE
-  "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/lib")
+  "${ANNC_ONNX_MLIR_LIBRARY_DIR}")
 target_link_libraries(annc-onnx-framework-opt PRIVATE
   AtirDialect nlohmann_json::nlohmann_json
   -Wl,--start-group
