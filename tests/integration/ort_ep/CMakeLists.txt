@@ -20,7 +20,7 @@ if(ANNC_EP_ORT_BUILD_TREE)
 endif()
 
 foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report concurrent
-                 cache-config missing-pipeline pipeline-failure zero-site)
+                 cache-config missing-pipeline pipeline-failure zero-site metadata-ir-invalid)
   add_test(NAME AnncEpAotFixture.${mode}
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/ep_aot_fixture.py
