@@ -29,7 +29,10 @@ else()
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpDnnEmbeddingHashBucketV2Rewrite.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingPaddingV2Rewrite.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseDynamicStitchV2Rewrite.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceV2Rewrite.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseReshapeV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpSparseSelectV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpTargetBehaviorInteractionV2Rewrite.cpp)
 endif()
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherMatch.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherRewrite.cpp)
