@@ -336,7 +336,7 @@ class StringTransport {
     }
     Value wMax = widths[0];
     for (size_t k = 1; k < widths.size(); ++k) {
-      wMax = emitBinary("stablehlo.max", wMax, widths[k], scalarI32);
+      wMax = emitBinary("stablehlo.maximum", wMax, widths[k], scalarI32);
     }
 
     for (size_t k = 0; k < packeds.size(); ++k) {
@@ -348,24 +348,13 @@ class StringTransport {
       }
       dims.push_back(diff);
       Value shape = emitShapeVector(dims);
-      Value zero = emitOp(
-          "stablehlo.constant", loc, {}, scalarZeroTy, [&](OperationState& st) {
-            st.addAttribute("value", mlir::DenseElementsAttr::get(
-                                         scalarZeroTy, llvm::APInt(8, 0)));
+      Value iota = emitOp(
+          "stablehlo.dynamic_iota", loc, {shape}, packeds[k].getType(),
+          [&](OperationState& st) {
+            st.addAttribute("iota_dimension", b_.getI64IntegerAttr(rank - 1));
           });
-      OperationState rz(
-          loc, mlir::OperationName("stablehlo.reshape", b_.getContext()));
-      rz.addOperands({zero});
-      rz.addTypes(RankedTensorType::get({1}, b_.getI8Type()));
-      Value zero1 = b_.create(rz)->getResult(0);
-      Value zeros = emitOp(
-          "stablehlo.dynamic_broadcast_in_dim", loc, {zero1, shape},
-          packeds[k].getType(), [&](OperationState& st) {
-            st.addAttribute("broadcast_dimensions",
-                            mlir::DenseIntElementsAttr::get(
-                                RankedTensorType::get({1}, b_.getI64Type()),
-                                llvm::ArrayRef<int64_t>{0}));
-          });
+      Value zeros =
+          emitBinary("stablehlo.subtract", iota, iota, packeds[k].getType());
       OperationState cst(
           loc, mlir::OperationName("stablehlo.concatenate", b_.getContext()));
       cst.addOperands({packeds[k], zeros});
