@@ -278,7 +278,14 @@ bool runV2Chain(int argc, char **argv) {
   // Step 3: the V2 fusion pass.
   // Step 4: fast codegen over the fused artifact.
   // Step 5: the converter requires this metadata; always produced.
-  // Step 6: prune AOT funcs and lower for the shared library.
+  // Step 6: prune to the AOT kernel funcs (the prune drops @main and the
+  // model-level calls), then turn each Customize body into a context entry
+  // and lower through the V2 conversion. The legacy ConvertAtirToLinalg/
+  // CustomizeCallLowering path rejects the annc_context_v3 ABI and must
+  // not run here; annc -shared appends the ABI conversion for the entries.
+  // The context-ABI switch is set before both steps so the asm children
+  // and the linker see the same route.
+  ::setenv("ANNC_ENABLE_LOWERING_CONTEXT_ABI", "1", /*overwrite=*/1);
   bool ok =
       runCommand(pb2Args) &&
       runCommand({anncTf2AtirV2, stablehlo.string(), "-o", sunk.string()}) &&
@@ -290,7 +297,7 @@ bool runV2Chain(int argc, char **argv) {
                   fusionMetadata.string()}) &&
       runCommand({anncAsm, customizeAtir.string(),
                   "--atir-prune-func=execution-mode=aot", "--annc-fast-codegen",
-                  "--convert-atir-to-linalg", "--convert-atir-v2-to-linalg",
+                  "--lower-context-kernel-entries", "--convert-atir-v2-to-linalg",
                   "-o", loweredMlir.string()});
   if (!ok) return false;
 

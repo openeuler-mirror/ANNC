@@ -217,6 +217,8 @@ LogicalResult collectBoundary(
 
       if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
         const size_t index = blockArg.getArgNumber();
+        if (blockArg.getOwner()->getParentOp() != main.getOperation())
+          continue;
         if (index >= entryInputs.size()) {
           ANNC_LOG_DEBUG("op-fusion-v2")
               << "boundary skip: arg " << index
@@ -653,8 +655,9 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
       if (inner == tail) return;
       for (Value o : inner->getOperands()) tailDeps.push_back(o);
     });
-    for (Value o : tailDeps)
-      assert(succeeded(emitValue(o)) && "emitValue cannot fail");
+    for (Value o : tailDeps) {
+      if (failed(emitValue(o))) return failure();
+    }
     emittedM.insert(tail);
     rewriter.moveOpBefore(tail, body, body->end());
   }
