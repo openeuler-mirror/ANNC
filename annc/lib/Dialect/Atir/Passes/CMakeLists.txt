@@ -18,7 +18,10 @@ if(ANNC_ENABLE_TF2ATIR_V2)
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/EmbeddingPaddingV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/EmbeddingPaddingFastV2.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/SparseDynamicStitchV2.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/SparseSegmentReduceV2.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/SparseSegmentReduceV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/SparseReshapeV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/SparseSelectV2.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/FusionV2/TargetBehaviorInteractionV2.cpp)
 else()
   list(REMOVE_ITEM _srcs
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingGatherV2Rewrite.cpp
@@ -26,7 +29,10 @@ else()
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpDnnEmbeddingHashBucketV2Rewrite.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingPaddingV2Rewrite.cpp
        ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseDynamicStitchV2Rewrite.cpp
-       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceV2Rewrite.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseSegmentReduceV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpEmbeddingSparseReshapeV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpSparseSelectV2Rewrite.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/Patterns/CustomPatterns/KpTargetBehaviorInteractionV2Rewrite.cpp)
 endif()
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherMatch.cpp)
 list(APPEND _srcs Patterns/CustomPatterns/KPFusedGatherRewrite.cpp)
