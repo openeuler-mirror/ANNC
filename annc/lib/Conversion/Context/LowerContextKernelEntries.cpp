@@ -77,9 +77,12 @@ LogicalResult validateContextBoundaryMetadata(CustomizeOp custom,
           encoding && !encoding.empty())
         actualDtype = encoding.str();
     }
+    if (llvm::StringRef(actualDtype).starts_with("!atir."))
+      actualDtype.erase(0, strlen("!atir."));
     if (dtype.getValue() != actualDtype)
-      return custom.emitError(
-          "context fusion metadata dtype does not match boundary");
+      return custom.emitError()
+             << "context fusion metadata dtype '" << dtype.getValue().str()
+             << "' does not match boundary '" << actualDtype << "'";
     for (auto [attr, dim] : llvm::zip(shape, actual->first)) {
       auto declared = dyn_cast<IntegerAttr>(attr);
       if (!declared || (declared.getInt() >= 0 && !ShapedType::isDynamic(dim) &&

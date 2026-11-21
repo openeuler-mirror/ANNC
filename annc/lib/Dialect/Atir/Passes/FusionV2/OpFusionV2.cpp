@@ -70,6 +70,9 @@ void populateAtirOpFusionV2Patterns(RewritePatternSet &patterns,
   addEmbeddingPaddingFastV2Pattern(patterns, portTable);
   addSparseDynamicStitchV2Pattern(patterns, portTable);
   addSparseSegmentReduceV2Pattern(patterns, portTable);
+  addSparseReshapeV2Pattern(patterns, portTable);
+  addSparseSelectV2Pattern(patterns, portTable);
+  addTargetBehaviorInteractionV2Pattern(patterns, portTable);
   addDotGemmV2Pattern(patterns);
 }
 
