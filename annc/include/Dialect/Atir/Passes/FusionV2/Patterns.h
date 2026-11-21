@@ -26,13 +26,16 @@ void addSparseDynamicStitchV2Pattern(mlir::RewritePatternSet &patterns,
                                      fusionv2::CallPortTable *portTable);
 void addSparseSegmentReduceV2Pattern(mlir::RewritePatternSet &patterns,
                                      fusionv2::CallPortTable *portTable);
-void addSparseReshapeV2Pattern(mlir::RewritePatternSet &patterns);
+void addSparseReshapeV2Pattern(mlir::RewritePatternSet &patterns,
+          fusionv2::CallPortTable *portTable);
 // kp_embedding_padding: Reshape-residue anchor with a runtime target over
 // the string-transport carrier chain (concat-with-zeros tail).
 void addEmbeddingPaddingV2Pattern(mlir::RewritePatternSet &patterns,
                                   fusionv2::CallPortTable *portTable);
-void addSparseSelectV2Pattern(mlir::RewritePatternSet &patterns);
-void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns);
+void addSparseSelectV2Pattern(mlir::RewritePatternSet &patterns,
+          fusionv2::CallPortTable *portTable);
+void addTargetBehaviorInteractionV2Pattern(mlir::RewritePatternSet &patterns,
+          fusionv2::CallPortTable *portTable);
 // kp_embedding_padding_fast: StridedSlice anchor (or the scalar reshape
 // folded at import); shares the padding kernel family (dual rank-0
 // outputs). The slow form requires the unranked atir origin carrier, the
