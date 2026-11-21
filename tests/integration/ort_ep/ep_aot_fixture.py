@@ -118,6 +118,9 @@ def run_pipeline(args):
         "schema": "annc-ep-site-report/1", "contract_version": "1.0.0",
         "sites": sites,
     }))
+    if os.environ.get("ANNC_EP_FIXTURE_MODE") == "metadata-ir-invalid":
+        # A valid legacy report must not hide a broken kernel IR.
+        (output / "model.fused.mlir").write_text("module { invalid metadata\n")
     with open(os.environ["ANNC_EP_FIXTURE_COMPILE_LOG"], "a") as log:
         log.write("compile\n")
 
@@ -241,7 +244,7 @@ def run_test(args):
         assert not (work / "compute.log").exists()
         print("Missing kernel library: CPU fallback; no DONE marker")
         return
-    if args.mode == "malformed-report":
+    if args.mode in {"malformed-report", "metadata-ir-invalid"}:
         assert not entries, "malformed report must not be published"
         assert not (work / "compute.log").exists()
         assert (work / "compile.log").read_text().splitlines() == ["compile", "compile"]
@@ -277,7 +280,7 @@ def main():
     parser.add_argument("--mode", choices=["normal", "missing-symbol",
                                             "missing-library", "malformed-report", "concurrent",
                                             "cache-config", "missing-pipeline",
-                                            "pipeline-failure", "zero-site"],
+                                            "pipeline-failure", "zero-site", "metadata-ir-invalid"],
                         default="normal")
     args = parser.parse_args()
     if args.toolchain_info or args.model:

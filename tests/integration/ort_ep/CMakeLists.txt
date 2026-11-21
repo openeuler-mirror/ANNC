@@ -20,7 +20,7 @@ if(ANNC_EP_ORT_BUILD_TREE)
 endif()
 
 foreach(mode IN ITEMS normal missing-symbol missing-library malformed-report concurrent
-                 cache-config missing-pipeline pipeline-failure zero-site)
+                 cache-config missing-pipeline pipeline-failure zero-site metadata-ir-invalid)
   add_test(NAME AnncEpAotFixture.${mode}
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/ep_aot_fixture.py
@@ -92,14 +92,18 @@ endif()
 set_tests_properties(AnncEpFtdmmAotE2e PROPERTIES
   TIMEOUT 300 ENVIRONMENT "${AnncEpTestEnvironment}")
 
-# One fused pattern per switch; each is run enabled (claimed) and disabled
-# (the EP drops the site and the CPU EP runs it).
-add_test(NAME AnncEpFusionToggles
-  COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/fusion_toggles_e2e.py
-    --ep-library $<TARGET_FILE:annc_ep>)
-set_tests_properties(AnncEpFusionToggles PROPERTIES
-  TIMEOUT 300 ENVIRONMENT "${AnncEpTestEnvironment}")
+# Exercise each switch with its real model and compiler contract.
+if(TARGET annc-onnx-pipeline)
+  add_test(NAME AnncEpFusionToggles
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/fusion_toggles_e2e.py
+      --ep-library $<TARGET_FILE:annc_ep>
+      --pipeline $<TARGET_FILE:annc-onnx-pipeline>
+      --kernel-lib-dir $<TARGET_FILE_DIR:ANNCBuiltinKernels>
+      ${AnncEpKernelLibArgs})
+  set_tests_properties(AnncEpFusionToggles PROPERTIES
+    TIMEOUT 600 ENVIRONMENT "${AnncEpTestEnvironment}")
+endif()
 
 # The context-ABI FTDMM needs the pipeline and kernel library built from
 # this tree (the legacy e2e can also run against an installed dev pipeline).

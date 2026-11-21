@@ -5,11 +5,11 @@
 #include "FusionMetadata/FusionMetadataJson.h"
 #ifdef ANNC_ENABLE_TF2ATIR_V2
 #include "Conversion/StablehloToAtir/StablehloSink.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #endif
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -46,12 +46,11 @@ int main(int argc, char **argv) {
       argc, argv, "annc-fusion-metadata: extract ANNCFused metadata\n");
 
   DialectRegistry registry;
-  registry.insert<func::FuncDialect, LLVM::LLVMDialect,
+  registry.insert<func::FuncDialect, LLVM::LLVMDialect, arith::ArithDialect,
 #if ANNC_ENABLE_TF2ATIR_V2
                   // V2 fused artifacts keep the mixed stablehlo/shape/
                   // arith/tensor carriers plus tf_type compat types.
-                  mlir::arith::ArithDialect, mlir::shape::ShapeDialect,
-                  mlir::tensor::TensorDialect,
+                  mlir::shape::ShapeDialect, mlir::tensor::TensorDialect,
                   mlir::stablehlo::StablehloDialect,
 #endif
                   atir::AtirDialect>();

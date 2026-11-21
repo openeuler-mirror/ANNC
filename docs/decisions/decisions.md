@@ -283,3 +283,13 @@
 | **当前边界** | 一个融合函数由手写 Customize kernel 接管完整区域，或由 codegen 执行完整区域；两条路线在同一导出函数内互斥。Context 的输入、输出槽位按整个融合函数边界编号，不提供内部子算子的局部槽位映射。 |
 | **调用协议** | 手写 Customize 路线将 kernel 返回的 i32 status 用作融合函数返回值；普通 codegen 路线把计算结果绑定到 Context 输出槽位，函数返回 void。部分替换的 Customize 调用不能直接借用整个融合函数的槽位与返回协议。 |
 | **实现现状** | 后端 Customize lowering 校验其结果直接流向函数 return；尚未另行校验函数体是否完全由 Customize 接管。`ANNC_ENABLE_LOWERING_CONTEXT_ABI` 是后续增量实现的临时开关，不是函数级互斥架构的来源。 |
+
+<a id="adr-025"></a>
+
+## ADR-025：ONNX 可选 StableHLO 前端复用公共后端和 EP
+
+状态 **implemented（分支实现）**。
+
+StableHLO 保留了匹配所需的计算、类型和数据流。匹配器直接生成融合候选，ONNX 绑定负责确认原图成员和连线。提取后的标准 kernel IR 交给公共后端，EP 读取其中的 FusionMetadata 并通过原有接口接管会话内的节点。私有 `com.microsoft.FusedTensordotMatMul` 在转换时保留为 `atir.opaque`，由 ORT 执行。
+
+统一入口默认使用 ATIR，StableHLO 由环境变量启用。转换工具与公共后端通过 IR 文件交接，各自使用配套的 MLIR。
