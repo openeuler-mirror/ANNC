@@ -9,8 +9,10 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 // The helper is supplied by the optional AArch64 GEMM microkernel archive.
 // Keep the compiler build usable without that archive; reject SVE prepacking
@@ -21,6 +23,13 @@ extern "C" int64_t annc_aarch64_sve_packed_b_elements_f32(int64_t k, int64_t n)
 namespace annc {
 using namespace mlir;
 using namespace aarch64::gemm;
+
+namespace {
+inline bool prepackDebugEnabled() {
+  const char* v = std::getenv("ANNC_JIT_PREPACK_DEBUG");
+  return v && v[0] && v[0] != '0';
+}
+}  // namespace
 
 LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
                             llvm::StringRef output) {
@@ -68,20 +77,29 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
         failedPack = true;
         return;
       }
-      if (candidate->strategy.rhsPacking != RhsPacking::kPrepacked) return;
-      Value rhs = getGemmInput(op, 1), root = rhs;
-      bool exclusive = root.hasOneUse();
-      while (auto cast = root.getDefiningOp<memref::CastOp>()) {
-        root = cast.getSource();
-        exclusive &= root.hasOneUse();
+      if (candidate->strategy.rhsPacking != RhsPacking::kPrepacked) {
+        if (prepackDebugEnabled())
+          llvm::errs() << "[PREPACK-DBG] anchor strategy!=kPrepacked skip\n";
+        return;
       }
-      auto argument = dyn_cast<BlockArgument>(root);
+      Value rhs = getGemmInput(op, 1);
+      bool exclusive = false;
+      const int64_t argumentIndex =
+          resolveEntryInputSlot(rhs, func, &exclusive);
       auto type = dyn_cast<MemRefType>(rhs.getType());
       bool eligible =
-          exclusive && argument && argument.getOwner() == &func.front() &&
-          type && type.getRank() == 2 && type.hasStaticShape() &&
-          type.getLayout().isIdentity() && type.getElementType().isF32() &&
-          inputs.count(argument.getArgNumber());
+          exclusive && argumentIndex >= 0 && type && type.getRank() == 2 &&
+          type.hasStaticShape() && type.getLayout().isIdentity() &&
+          type.getElementType().isF32() && inputs.count(argumentIndex);
+      if (prepackDebugEnabled())
+        llvm::errs() << "[PREPACK-DBG] anchor arg=" << argumentIndex
+                     << " exclusive=" << exclusive
+                     << " shape="
+                     << (type ? (type.getShape()[0] * int64_t(100000) +
+                                 type.getShape()[1])
+                              : int64_t(-1))
+                     << " inManifest=" << (inputs.count(argumentIndex) ? 1 : 0)
+                     << " eligible=" << (eligible ? 1 : 0) << "\n";
       if (!eligible) {
         setCandidateRhsPacking(op, RhsPacking::kPacked);
         if (failed(planGemmThreads(op))) failedPack = true;
@@ -93,7 +111,7 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
                            strategy.executionKind);
       AnncPackedRhsSpec s{
           1,
-          argument.getArgNumber(),
+          argumentIndex,
           type.getShape()[0],
           type.getShape()[1],
           getFixedCacheParameters(strategy.cache).kc,
