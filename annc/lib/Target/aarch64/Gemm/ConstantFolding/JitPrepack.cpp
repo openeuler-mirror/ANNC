@@ -1,5 +1,6 @@
 #include "JitPrepack.h"
 
+#include <cstdlib>
 #include <limits>
 #include <set>
 
@@ -26,8 +27,11 @@ using namespace aarch64::gemm;
 
 namespace {
 inline bool prepackDebugEnabled() {
-  const char* v = std::getenv("ANNC_JIT_PREPACK_DEBUG");
-  return v && v[0] && v[0] != '0';
+  static const bool enabled = [] {
+    const char* v = std::getenv("ANNC_JIT_PREPACK_DEBUG");
+    return v && v[0] && v[0] != '0';
+  }();
+  return enabled;
 }
 }  // namespace
 
@@ -95,9 +99,10 @@ LogicalResult prepareJitRhs(ModuleOp module, llvm::StringRef manifest,
         llvm::errs() << "[PREPACK-DBG] anchor arg=" << argumentIndex
                      << " exclusive=" << exclusive
                      << " shape="
-                     << (type ? (type.getShape()[0] * int64_t(100000) +
-                                 type.getShape()[1])
-                              : int64_t(-1))
+                     << (type && type.getRank() == 2 && type.hasStaticShape()
+                             ? (type.getShape()[0] * int64_t(100000) +
+                                type.getShape()[1])
+                             : int64_t(-1))
                      << " inManifest=" << (inputs.count(argumentIndex) ? 1 : 0)
                      << " eligible=" << (eligible ? 1 : 0) << "\n";
       if (!eligible) {
