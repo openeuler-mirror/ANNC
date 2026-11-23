@@ -119,6 +119,15 @@ pattern），主图以 `func.call` 回接，kernel 带 V1 契约的
 `fusion.metadata`。dot GEMM 的尾链吸收由 `ANNC_GEMM` 门控（2/99 启用，
 见 [环境变量参考](environment-variables.md)）。
 
+TF 路线（V2 前端）在融合前后追加两个归一 pass，均在 `annc-asm` 注册：
+
+- `-atir-inline-shape-assumings`：内联纯 `shape.assuming` 宿主（odml
+  前端把 shape 计算包进 region，不展开则站点匹配不到成员）；非纯
+  region 保留原样。
+- `-atir-drop-shape-only-subgraphs`：清除只服务 shape 的死闭包（站点
+  边界重接到 kernel 输出后，原 lookup/mask/shape 链值死）；同秩真
+  reshape（非 `shape_of` 描述链）受保护不替换。
+
 ```shell
 annc-opt sunk.mlir -atir-op-fusion-v2 -o fused.mlir
 ```
