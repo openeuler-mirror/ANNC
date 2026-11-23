@@ -62,6 +62,12 @@ class ANNCFusedOp : public OpKernel {
       const std::shared_ptr<annc::jit::JitExecutable>& executable,
       std::shared_ptr<AnncJitBinding>* binding);
 
+  // JIT prepack admission: both kernel ABIs consume the compile-time packed
+  // RHS spec table; the context path redirects the input view base pointers.
+  bool SupportsJitPrepack() const {
+    return abi_ == "mlir_ciface" || abi_ == ANNC_CONTEXT_ABI_NAME;
+  }
+
   Status ExecuteMlirCifaceKernel(OpKernelContext* context,
                                  void* kernel_function,
                                  bool profile_enabled,
@@ -69,7 +75,8 @@ class ANNCFusedOp : public OpKernel {
                                  const AnncJitBinding* binding = nullptr);
   Status ExecuteContextV3Kernel(
       OpKernelContext* context, void* kernel_function, bool jit_mode,
-      annc::threadpool::AnncThreadPool* thread_pool);
+      annc::threadpool::AnncThreadPool* thread_pool,
+      const AnncJitBinding* binding = nullptr);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;

@@ -901,7 +901,7 @@ annc::jit::JitCompileResult ANNCFusedOp::CompileJitKernel(
   request.atir_module_path = atir_module_path_;
   request.kernel_name = kernel_name_;
   request.intra_thread_count = intra_thread_count;
-  request.enable_prepack = prepack_enabled_ && abi_ == "mlir_ciface";
+  request.enable_prepack = prepack_enabled_ && SupportsJitPrepack();
   request.immutable_arguments = jit_immutable_arguments_;
   request.argument_shapes.reserve(arguments.size());
   for (const auto& argument : arguments) {
@@ -988,7 +988,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
       }
       steady_call = true;
     } else {
-      const bool prepack = prepack_enabled_ && abi_ == "mlir_ciface";
+      const bool prepack = prepack_enabled_ && SupportsJitPrepack();
       if (prepack) InitializeJitWeights(context);
       const std::string& identity =
           prepack ? jit_identity_ : jit_template_identity_;
@@ -1110,7 +1110,7 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   if (abi_ == ANNC_CONTEXT_ABI_NAME) {
     auto t_kernel_start = profile_enabled ? Clock::now() : TimePoint{};
     execute_status = ExecuteContextV3Kernel(
-        context, kernel_function, jit_mode, adapter.get());
+        context, kernel_function, jit_mode, adapter.get(), jit_binding.get());
     if (profile_enabled) {
       profile_sample.kernel_us = ElapsedUs(t_kernel_start);
     }

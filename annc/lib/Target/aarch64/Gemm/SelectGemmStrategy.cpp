@@ -1,5 +1,7 @@
 #include "GemmPlan.h"
 
+#include "Support/ContextABISwitch.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <optional>
@@ -7,6 +9,7 @@
 #include "Dialect/Atir/Passes/GemmEpilogueCandidate.h"
 #include "Target/aarch64/Passes.h"
 #include "llvm/Support/Error.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 namespace annc {
@@ -28,10 +31,26 @@ LogicalResult selectGemmStrategy(
       aarch64::gemm::readProblem(op);
   if (failed(problem)) return failure();
 
+  // In the context-ABI route (V2) the RHS checkpoint tensor name never
+  // exists: the V2 lowering uses builtin ranked tensors and never attaches
+  // annc.aarch64.rhs_name. Prepack eligibility instead requires the GEMM RHS
+  // to trace through the context-ABI load chain to a kernel entry slot that
+  // fusion.metadata marks immutable; prepareJitRhs later re-checks the full
+  // contract (exclusive use, static f32 shape, immutable-input manifest) and
+  // demotes ineligible anchors back to kPacked.
   const auto selectPath = [&](bool allowSpecialized) {
+    bool hasPrepackableRhs = op->hasAttr(aarch64::gemm::kRhsNameAttrName);
+    if (!hasPrepackableRhs && enablePrepack &&
+        annc::loweringContextABIEnabled()) {
+      if (auto func = op->getParentOfType<mlir::func::FuncOp>()) {
+        const int64_t slot = aarch64::gemm::resolveEntryInputSlot(
+            aarch64::gemm::getGemmInput(op, 1), func);
+        hasPrepackableRhs = aarch64::gemm::entrySlotRoleImmutable(func, slot);
+      }
+    }
     return aarch64::gemm::selectGemmPath(
         config.isa, problem->m, problem->n, problem->k, enablePrepack,
-        op->hasAttr(aarch64::gemm::kRhsNameAttrName), allowSpecialized);
+        hasPrepackableRhs, allowSpecialized);
   };
   const auto &kernelPolicy =
       aarch64::gemm::getGemmKernelTilingStrategy(config.kernel.kind);

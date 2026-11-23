@@ -8,13 +8,23 @@ void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
   std::call_once(jit_weights_once_, [&] {
     jit_identity_ = jit_template_identity_ + ":packed-rhs-v1";
     const int inputs = context->num_inputs();
-    jit_argument_order_ = kernel_arg_order_;
-    if (jit_argument_order_.empty()) {
-      if (inputs == 3 && num_outputs_ == 1 && input_ranks_.empty())
-        jit_argument_order_ = {2, 0, 3, 1};
-      else {
-        for (int i = 0; i < inputs + num_outputs_; ++i)
-          jit_argument_order_.push_back(i);
+    // Under the context ABI the kernel argument index is the context input
+    // slot, so map it directly to the TensorFlow transport slot; the legacy
+    // heuristic below would apply a stale permutation to the packed slots.
+    if (abi_ == ANNC_CONTEXT_ABI_NAME) {
+      jit_argument_order_.resize(inputs);
+      for (int i = 0; i < inputs; ++i)
+        jit_argument_order_[i] =
+            context_input_order_.empty() ? i : context_input_order_[i];
+    } else {
+      jit_argument_order_ = kernel_arg_order_;
+      if (jit_argument_order_.empty()) {
+        if (inputs == 3 && num_outputs_ == 1 && input_ranks_.empty())
+          jit_argument_order_ = {2, 0, 3, 1};
+        else {
+          for (int i = 0; i < inputs + num_outputs_; ++i)
+            jit_argument_order_.push_back(i);
+        }
       }
     }
     jit_weights_.resize(inputs);
