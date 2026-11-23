@@ -48,8 +48,8 @@ endif()
 option(ANNC_ENABLE_TF2ATIR_V2 "Build the TensorFlow stablehlo V2 route (sink layer and V2 tools)" ${_annc_tf2atir_v2_default})
 option(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO "Build the ONNX-to-StableHLO generation pipeline (addons/onnxruntime/stablehlo); does not change EP execution" OFF)
 option(ANNC_ENABLE_STABLEHLO_FRONTEND "Build the StableHLO/ATIR reader using the paired ONNX-MLIR StableHLO libraries" OFF)
-set(ANNC_ONNX_MLIR_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir" CACHE PATH
-    "Pinned ONNX-MLIR source submodule")
+set(ANNC_ONNX_MLIR_SOURCE_DIR "" CACHE PATH
+    "Override the source directory recorded by the ONNX-MLIR build")
 set(ANNC_ONNX_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/third-party/onnx-mlir-build" CACHE PATH
     "Build tree for the pinned ONNX-MLIR source")
 if(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO OR ANNC_ENABLE_STABLEHLO_FRONTEND)
@@ -59,11 +59,19 @@ if(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO OR ANNC_ENABLE_STABLEHLO_FRONTEND)
     "${ANNC_ONNX_MLIR_BUILD_DIR}/lib")
   if(EXISTS "${ANNC_ONNX_MLIR_BUILD_DIR}/CMakeCache.txt")
     load_cache("${ANNC_ONNX_MLIR_BUILD_DIR}" READ_WITH_PREFIX _paired_
-      CMAKE_BUILD_TYPE CMAKE_CONFIGURATION_TYPES)
+      CMAKE_BUILD_TYPE CMAKE_CONFIGURATION_TYPES CMAKE_HOME_DIRECTORY)
     # ANNC and the paired single-config build may use different build types.
     if(DEFINED _paired_CMAKE_BUILD_TYPE AND NOT _paired_CMAKE_CONFIGURATION_TYPES)
       set(_onnx_mlir_lib_dirs
         "${ANNC_ONNX_MLIR_BUILD_DIR}/${_paired_CMAKE_BUILD_TYPE}/lib")
+    endif()
+  endif()
+  # Older build trees cached the submodule path as the default.
+  if(NOT ANNC_ONNX_MLIR_SOURCE_DIR OR
+     ANNC_ONNX_MLIR_SOURCE_DIR STREQUAL "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir")
+    set(ANNC_ONNX_MLIR_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir")
+    if(EXISTS "${_paired_CMAKE_HOME_DIRECTORY}/src/Dialect/ONNX/ONNXDialect.hpp")
+      set(ANNC_ONNX_MLIR_SOURCE_DIR "${_paired_CMAKE_HOME_DIRECTORY}")
     endif()
   endif()
   find_library(_annc_stablehlo_ops NAMES StablehloOps
