@@ -2,6 +2,10 @@
 
 #include <algorithm>
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "mlir/IR/Diagnostics.h"
 
@@ -77,6 +81,61 @@ mlir::Value getGemmOutput(mlir::Operation *op, unsigned index) {
   if (auto matmul = llvm::dyn_cast<mlir::linalg::MatmulOp>(op))
     return matmul.getOutputs()[index];
   return llvm::cast<mlir::linalg::GenericOp>(op).getOutputs()[index];
+}
+
+int64_t resolveEntryInputSlot(mlir::Value value, mlir::func::FuncOp func,
+                              bool *exclusive) {
+  mlir::Value root = value;
+  if (exclusive) *exclusive = root.hasOneUse();
+  while (mlir::Operation *def = root.getDefiningOp()) {
+    mlir::Value next;
+    if (auto cast = llvm::dyn_cast<mlir::memref::CastOp>(def)) {
+      next = cast.getSource();
+    } else if (auto cast = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(
+                   def)) {
+      if (cast->getNumOperands() != 1) break;
+      next = cast->getOperand(0);
+    } else if (auto toMemref =
+                   llvm::dyn_cast<mlir::bufferization::ToMemrefOp>(def)) {
+      next = toMemref.getTensor();
+    } else if (auto toTensor =
+                   llvm::dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
+      next = toTensor.getMemref();
+    } else if (auto load = llvm::dyn_cast<mlir::LLVM::LoadOp>(def)) {
+      next = load->getOperand(0);
+    } else {
+      break;
+    }
+    root = next;
+    if (exclusive) *exclusive &= root.hasOneUse();
+  }
+  if (auto argument = llvm::dyn_cast<mlir::BlockArgument>(root))
+    return argument.getOwner() == &func.front() ? argument.getArgNumber() : -1;
+  if (auto call = root.getDefiningOp<mlir::func::CallOp>()) {
+    if (call.getCallee() == "annc_context_get_input_memref" &&
+        call.getNumOperands() == 2 && func.getNumArguments() > 0 &&
+        call.getOperand(0) == func.front().getArgument(0)) {
+      mlir::Operation *constant = call->getOperand(1).getDefiningOp();
+      if (const auto attr = constant ? constant->getAttrOfType<mlir::IntegerAttr>(
+                                           "value")
+                                     : mlir::IntegerAttr{})
+        return attr.getValue().getSExtValue();
+    }
+  }
+  return -1;
+}
+
+bool entrySlotRoleImmutable(mlir::func::FuncOp func, int64_t slot) {
+  auto metadata = func->getAttrOfType<mlir::DictionaryAttr>("fusion.metadata");
+  auto args =
+      metadata ? metadata.getAs<mlir::ArrayAttr>("args") : mlir::ArrayAttr{};
+  // The args array mirrors the original entry argument order; aux promotion
+  // arguments appended after it have no boundary record and stay ineligible.
+  if (!args || slot < 0 || slot >= static_cast<int64_t>(args.size()))
+    return false;
+  auto arg = llvm::dyn_cast<mlir::DictionaryAttr>(args[slot]);
+  auto role = arg ? arg.getAs<mlir::StringAttr>("role") : mlir::StringAttr{};
+  return role && (role.getValue() == "fixed" || role.getValue() == "constant");
 }
 
 llvm::StringRef getGemmTargetName(GemmTarget target) {

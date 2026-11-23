@@ -39,10 +39,24 @@ if(TARGET annc_tensorflow_support AND TARGET annc-tf-pipeline)
 endif()
 add_subdirectory(unit/tensorflow)
 
+# pb2stablehlo unit tests: registered only while the V2 switch
+# (ANNC_ENABLE_TF2ATIR_V2, TF-2.20 side) defines the pb2_transform_objs
+# target. The suite compiles in the transform's wheel-isolated domain
+# (no GTest; see its CMakeLists).
+if(TARGET pb2_transform_objs)
+  add_subdirectory(unit/transform)
+endif()
+
 # ONNX frontend unit test: registered only while ANNC_ENABLE_ONNX=ON, which is
 # what defines the annc-onnx2atir target.
 if(TARGET annc-onnx2atir)
   add_subdirectory(unit/onnx2atir)
+endif()
+
+# annc-converter-v2 unit tests: registered while the V2 route built the core
+# library (the core target carries the TF include/link setup).
+if(TARGET annc_converter_v2_core)
+  add_subdirectory(unit/converter_v2)
 endif()
 
 # ONNX Runtime EP tests: registered only while ANNC_ENABLE_ONNXRUNTIME_EP=ON,
@@ -53,6 +67,26 @@ endif()
 if(TARGET annc_ep)
   add_subdirectory(unit/ort_ep)
   add_subdirectory(integration/ort_ep)
+endif()
+
+if(TARGET annc_fused_op_1_15)
+  set(_tf_optimizer annc_optimizer_1_15)
+  set(_tf_fused_op annc_fused_op_1_15)
+elseif(TARGET annc_fused_op)
+  set(_tf_optimizer annc_optimizer)
+  set(_tf_fused_op annc_fused_op)
+endif()
+if(DEFINED _tf_fused_op AND TARGET annc-tf-pipeline)
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tensorflow-runtime.json"
+    CONTENT "{
+  \"python\": \"${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}\",
+  \"optimizer\": \"$<TARGET_FILE:${_tf_optimizer}>\",
+  \"fused_op\": \"$<TARGET_FILE:${_tf_fused_op}>\",
+  \"pipeline\": \"$<TARGET_FILE:annc-tf-pipeline>\",
+  \"preload\": $<IF:$<BOOL:${ANNC_TENSORFLOW_PRELOAD}>,true,false>,
+  \"kdnn\": $<IF:$<BOOL:${ANNC_ENABLE_KDNN_ADAPTOR}>,true,false>
+}
+")
 endif()
 
 if(TARGET annc_fused_op_1_15 AND TARGET annc-tf-pipeline)

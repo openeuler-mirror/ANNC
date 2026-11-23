@@ -19,4 +19,14 @@ AtirTypeToLinalgConverter::AtirTypeToLinalgConverter()
         [](OpBuilder& builder, mlir::TensorType tensorType, ValueRange inputs, Location loc) {
         return builder.create<bufferization::ToTensorOp>(loc, tensorType, inputs[0], true, true).getResult();
     });
+    addSourceMaterialization(
+        [](OpBuilder& builder, TensorType tensorType, ValueRange inputs,
+           Location loc) -> Value {
+            if (inputs.size() != 1 ||
+                !mlir::isa<RankedTensorType>(inputs.front().getType()))
+                return {};
+            return builder.create<UnrealizedConversionCastOp>(
+                       loc, TypeRange{tensorType}, inputs)
+                .getResult(0);
+        });
 }

@@ -100,6 +100,23 @@ shardByColumns == false:
 
 随后分别用各维的 `offset(task)` 和 `size(task)` 计算线程子问题。这样每个网格坐标对应唯一的 `(M, N)` 区域，所有区域完整覆盖输出矩阵。
 
+## Context 线程调度
+
+启用临时开关 `ANNC_ENABLE_LOWERING_CONTEXT_ABI` 时，线程物化从包含 GEMM 的函数取得
+唯一的 Context 指针参数，作为 dispatcher 的第一个参数传入。普通 GEMM 使用
+`annc_context_parallel_for_gemm`，带外部 epilogue 输入的 GEMM 使用
+`annc_context_parallel_for_gemm_epilogue`；两者均通过 `llvm.emit_c_interface`
+调用 `ANNCGemmSupport` 中对应的 `_mlir_ciface_` C 入口。Outlined task 的 ABI 不变，
+仍接收 task ID、A/B/C memref 和可选的 epilogue descriptors。
+
+Dispatcher 从 `KernelContext::getThreadPool()` 获取 `services->thread_pool`，使用已有
+`annc::threadpool::parallel_for` 同步执行任务，保持 `grain_size = 1` 固定块调度。
+空池、单线程或嵌套并行时由公共 helper 串行执行；新入口不从 TLS 回退寻找线程池。
+默认关闭开关时继续调用原来的 TLS dispatcher，新旧符号分别保留各自的 ABI。
+Planner 选择单线程网格时直接保留串行 GEMM，不生成 dispatcher 调用。
+
 ## 相关测试
 
 `gemm_thread_planner_test.cpp` 覆盖范围截断和末任务余数、候选网格选择、窄形状与 packing 成本，以及多组 M/N 形状下输出区域恰好覆盖一次。线程策略或 cost model 变更时，应同时检查 planner 结果和 thread tiling 生成的范围映射。
+
+`context-gemm-thread-dispatch.mlir` 检查新旧 dispatcher 的选择、Context 参数传递、普通/epilogue task ABI 和 LLVM C wrapper 签名；`gemm_context_dispatch_test.cpp` 对照数值结果，验证 Context 线程池选择、空池串行、嵌套串行及旧 TLS 路径。

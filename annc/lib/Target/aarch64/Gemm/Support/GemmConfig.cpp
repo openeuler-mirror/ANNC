@@ -1,5 +1,6 @@
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <optional>
 
@@ -75,6 +76,19 @@ llvm::Expected<GemmDataType> parseConfigDataType(const nlohmann::json &config,
   return configError(path, "has unsupported data_type " + dataType);
 }
 
+llvm::Expected<std::optional<int64_t>> parseConfigMaxThreadCount(
+    const nlohmann::json &config, llvm::StringRef path) {
+  auto value = config.find("max_thread_count");
+  if (value == config.end()) return std::nullopt;
+  if (!value->is_number_integer() ||
+      (value->is_number_unsigned() &&
+       value->get<uint64_t>() > std::numeric_limits<int64_t>::max()) ||
+      value->get<int64_t>() <= 0)
+    return configError(path,
+                       "requires positive integer field max_thread_count");
+  return value->get<int64_t>();
+}
+
 }  // namespace
 
 std::optional<GemmTarget> parseGemmTargetName(llvm::StringRef name) {
@@ -114,6 +128,8 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
           "and kernel.fixed; see docs/design/gemm/aarch64-gemm-codegen.md");
     if (version != kTuningConfigVersion)
       return configError(path, "requires version = 3");
+    auto maxThreadCount = parseConfigMaxThreadCount(config, path);
+    if (!maxThreadCount) return maxThreadCount.takeError();
     auto target = parseConfigTarget(config, path);
     auto isa = parseConfigIsa(config, path);
     auto dataType = parseConfigDataType(config, path);
@@ -168,7 +184,8 @@ llvm::Expected<GemmTuningConfig> loadGemmTuningConfig(llvm::StringRef path) {
         *cacheStrategy,
         *kernelStrategy,
         GemmThreadPlannerCostModel{*load, *store, *compute, *gemvCompute,
-                                   *microkernelCall, *packBytes, *packCall}};
+                                   *microkernelCall, *packBytes, *packCall},
+        *maxThreadCount};
   } catch (const std::exception &error) {
     return configError(path, error.what());
   }

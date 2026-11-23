@@ -8,6 +8,9 @@
 ./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
 ```
 
+TensorFlow 1.15、TensorFlow 2.20 和 ONNX Runtime 的插件均安装到
+`<install-prefix>/${CMAKE_INSTALL_LIBDIR}`（通常是 `lib` 或 `lib64`）。
+
 LLVM/MLIR 使用外部工具链（CMake `find_package`，不锁定版本），不再下载或编译 LLVM；nlohmann/json 由 CMake 在 configure 时 `FetchContent` 获取到 `third_party/json/`。openEuler 24.03 用系统 `llvm-toolset-20`；openEuler 22.03 仓库只有 LLVM/MLIR 12.0.1，需自建 LLVM/MLIR 20/21 并通过 `ANNC_LLVM_BIN` 或 `-DLLVM_DIR`/`-DMLIR_DIR` 指定，见[安装 ANNC](../getting-started/installation.md#4-llvm--mlir-与-nlohmannjson)。
 
 RELEASE 模式下 KDNN 自动从 release zip 下载并解压（默认构建不启用 KDNN 后端，需同时打开 adaptor）：
@@ -43,7 +46,7 @@ export ANNC_LLVM_BIN=<LLVM 20 的 bin 目录>
 
 自建的安装树同样适用。若直接使用 LLVM 构建树而不安装，MLIR 的配置位于 `<llvm-build>/tools/mlir/cmake/modules`，需显式传 `-DMLIR_DIR`（该布局不在 `ANNC_LLVM_BIN` 的前缀推断范围内）。
 
-然后配置并构建。默认启用 TensorFlow addon，版本、ABI 和 C++ 标准从所选 TF Python 检测；SDK 未报告 ABI 或标准时需显式指定，见下文 TF SDK 配置。
+然后配置并构建。默认启用 TensorFlow addon，ABI 和 C++ 标准自动检测：
 
 ```shell
 mkdir -p build && cd build
@@ -63,7 +66,7 @@ ninja && ninja install
 - `--clean`：清理构建目录后重新构建
 - `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
 - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party 保持原构建类型、不重编
-- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建所选 TF + ORT 加速栈（当前拒绝 TF1.15 + ORT EP）。TF 版本从目标 Python 检测，一次只构建一个版本；不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
+- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
 - `--dry-run`：打印解析后的框架开关并退出，不 configure/build
 - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
 - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
@@ -79,11 +82,15 @@ ninja && ninja install
 
 | CMake 选项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
+| `LLVM_ENABLE_EH` | `ON`/`OFF` | `ON`（首配默认，缓存值可 `-D` 覆盖） | ANNC 自有代码使用 C++ 异常；源码构建的 LLVM 默认 `OFF` 并注入 `-fno-exceptions`，此处对齐两种工具链。配置为 `OFF` 时直接报错退出。注意该开关同样作用于 `third_party/stablehlo` 等经 `add_mlir_library` 构建的目标（去掉 `-fno-exceptions/-fno-unwind-tables`）。异常不得跨越 MLIR 库栈帧（MLIR 以无 EH 构建），`try/catch` 仅限 ANNC 代码内 |
+| `LLVM_ENABLE_RTTI` | `ON`/`OFF` | `ON`（首配默认，缓存值可 `-D` 覆盖） | 与 EH 同步；配置为 `OFF` 时同样报错退出。MLIR 的 `TypeID` 不依赖 C++ RTTI |
 | `ANNC_DEBUG` | `ON`/`OFF` | `OFF` | 只以调试模式编译 ANNC 自有代码（`-g3 -O0 -UNDEBUG`），third_party 构建类型不变、不重编；对应 `build.sh --annc-debug` |
 | `ANNC_ENABLE_TENSORFLOW` | `ON`/`OFF` | `ON` | 构建 TF 前端工具（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）并编译预生成的 TF proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-tensorflow` |
-| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建所选版本的 TF 插件与 JIT 缓存，安装 optimizer / fused-op；测试由 `BUILD_TESTING` 控制；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
+| `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并编译预生成的 ONNX proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
+| `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 ONNX → StableHLO 转换工具，依赖 `third-party/onnx-mlir` 及其配套构建树 |
+| `ANNC_ENABLE_STABLEHLO_FRONTEND` | `ON`/`OFF` | `OFF` | 构建 `annc-stablehlo-opt`，用于在 StableHLO 上匹配、绑定原图和提取 kernel |
 | `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
@@ -101,40 +108,6 @@ ninja && ninja install
 | `ANNC_ENABLE_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 stablehlo artifact sink 层（v1.9.7 Embedded 模式，要求 LLVM/MLIR 20.1.8 工具链与 `third_party/stablehlo`）；TF stablehlo 前端 / stablehlo sink 迁移线的依赖，见下文「StableHLO artifact sink 层」 |
 
 所有框架组合都会构建通用 `annc-partition` 查询入口。当前该目标仅提供占位流程（各阶段返回 `not implemented`），不注册真实 TF 切分能力，也不改变既有前端、addon 或后端开关。
-
-### TensorFlow SDK 选择与 TF1.15 构建
-
-命令在仓库根目录执行。先准备可导入 TF1.15 的目标 Python、匹配的 SDK / 运行库及其 Python 依赖；通用 `requirements.txt` 固定为 `tensorflow==2.20.0`，不能用来安装 TF1.15。TF2.20 同样通过目标 Python 选择，当前构建入口仅接受 1.15.x / 2.20.x。
-
-```shell
-export ANNC_TENSORFLOW_PYTHON_EXECUTABLE=/path/to/tf115/bin/python
-./build.sh --enable-tf --build-type Release --install-prefix "$HOME/ANNC-tf115"
-```
-
-`ANNC_TENSORFLOW_PYTHON_EXECUTABLE` 默认跟随 `build.sh` 的 `PYTHON`；直接调用 CMake 时默认跟随 `Python3_EXECUTABLE`。TF Python 与 ANNC Python 绑定 / 测试解释器可以分开。已有构建缓存与新 SDK 参数不一致时，按脚本提示加 `--clean` 重新配置。
-
-| 配置 | 取值及检查 |
-| --- | --- |
-| `ANNC_TENSORFLOW_CXX_STANDARD` | 从 SDK 编译 flags 探测；TF1.15 接受 `14` / `17`，未报告时必须按 SDK 实际设置显式提供 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | 从 SDK 探测 `0` / `1`；未报告时显式提供，与探测值冲突会报错 |
-| `ANNC_TENSORFLOW_INCLUDE_DIR` | 默认取目标 Python 的 include；显式目录须包含匹配的版本头文件 |
-| `ANNC_TENSORFLOW_PRELOAD` | 默认 `ON`，宿主提供 TF 符号；`OFF` 为显式链接 |
-| `ANNC_TENSORFLOW_LIBRARIES` | 仅 linked 模式使用；TF1.15 要求一份 `libtensorflow_cc` 和一份 `libtensorflow_framework`，分号分隔；为空时在目标 Python 的库目录查找 |
-
-这些变量可由 `build.sh` 从环境传入，也可直接作为 CMake 的 `-D` 参数。TF1.15 的头文件、库和宿主必须属于同一 SDK；默认 preload 模式不得设置库列表。原生 GEMM / 预打包的依赖另见下节。
-
-TF1.15 插件目标为 `annc_optimizer_1_15` / `annc_fused_op_1_15`，文件仍名为 `libannc_optimizer.so` / `libannc_fused_op.so`，构建和安装均位于 `lib/tensorflow/1.15/`。TF2.20 仍使用 `tensorflow_addons/` 和 `${CMAKE_INSTALL_LIBDIR}/` 安装目录。两版需分别构建；当前没有版本专用 `--enable-tf1_15` / `--enable-tf2_20` 开关。
-
-TF1.15 的插件与缓存按 SDK 标准 / ABI 编译，`annc_tensorflow_support` 固定 C++17 / ABI=1，通过 C 接口相连。不要将 SDK 的 ABI 设置扩散到 LLVM/MLIR 或全部 ANNC 目标。接口及生命周期见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md)。
-
-安装后，TF1.15 的 `ANNC_FUSED_OP_PATH` 应指向 `<prefix>/lib/tensorflow/1.15/libannc_fused_op.so`，preload 宿主的 optimizer 路径也使用该目录。实际宿主检查先核对注册项，再运行：
-
-```shell
-ctest --test-dir build -N
-ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
-```
-
-需启用 `BUILD_TESTING` 并构建测试目标。preload 使用目标 Python 宿主，linked 使用同 SDK 的 C++ Session；两种模式需分别配置验证。源码中的 SDK 配置 pytest 使用模拟 SDK，不能替代此处实际加载与执行。
 
 ### GEMM-ASM 完整包
 
@@ -185,8 +158,17 @@ CI 或发布构建需要在配置阶段拒绝缺包时，`build.sh` 可组合使
 ### TF stablehlo V2 路线（sink 层与 V2 工具）
 
 `ANNC_ENABLE_TF2ATIR_V2=ON` 开启整条 V2 路线：stablehlo 方言集成与 sink
-层，以及 V2 工具（当前 `annc-converter-v2`；`annc-tf2atir-v2` 随其批次
-并入同一开关）。默认 OFF，不触碰历史构建路径。
+层，以及 V2 工具（`annc-converter-v2`、`annc-stablehlo-sink`，随各自批次
+并入同一开关）。V2 融合（`-atir-op-fusion-v2` pass 与配套 FileCheck/单测）
+随同一开关编译，OFF 构建不含任何 V2 源。TF 2.20 环境下同一开关还包含 `pb2stablehlo`（GraphDef
+→ StableHLO 前端，`addons/tensorflow/transform/`，增量交付中）：wheel
+隔离编译——需 TF 2.20 pip wheel（配置期门禁版本），llvm 头按
+`third_party/llvm-include` 本地快照 → `ANNC_TF_TRANSFORM_LLVM_INCLUDE_DIR`
+→ sparse clone（默认 `gitee.com/mirrors/LLVM-Project` 平台镜像，
+`ANNC_TF_TRANSFORM_LLVM_REPO`/`_REF` 可覆盖；默认 ref 钉死为 TF v2.20.0
+在 `third_party/xla/third_party/llvm/workspace.bzl` 记录的 llvm-project
+commit `f8cb7987`——wheel 内嵌 MLIR 21.0.0git 的构建来源，勿改用会前进的
+release/21.x 分支）三级解析，与项目 LLVM/MLIR 工具链完全隔离。默认 OFF，不触碰历史构建路径。
 
 #### stablehlo 集成（sink 层依赖）
 
@@ -197,11 +179,29 @@ stablehlo 以 `EXCLUDE_FROM_ALL` 子目录加入构建，并通过全局属性�
 sink 转换层的方言依赖，要求外部工具链为 LLVM/MLIR 20.1.8（stablehlo
 v1.9.x 的配套版本）。
 
-依赖获取（不入库，`third_party/*` 已被忽略）：
+V2 pass 复用采用源码级定向集成：`ANNCStablehloShapePasses` 只编译当前路线
+调用的 StableHLO pass 源文件，不链接聚合的 `StablehloPasses` target，以免
+把 VHLO 和无关转换一并纳入 ANNC 构建。这个选择只缩小构建范围，不提供
+LLVM/MLIR API 兼容层：被选中的 pass 仍须能针对 ANNC 使用的工具链编译。
+若某个必需的上游 pass 本身不兼容，改为链接整个 pass target 或使用另一套
+工具链编译的预构建库都不能消除它与本地 MLIR C++ API 的接口约束；应使用
+兼容的 StableHLO/LLVM 组合，或在 ANNC 中实现所需逻辑并针对 IR 行为补测试。
+当前定向编译的具体源码列表以
+[`annc/lib/Dialect/Atir/Passes/CMakeLists.txt`](../../annc/lib/Dialect/Atir/Passes/CMakeLists.txt)
+为准。MLIR 与 StableHLO 均不承诺跨版本的 C++ API 源码兼容，详见
+[MLIR Developer Guide](https://mlir.llvm.org/getting_started/DeveloperGuide/#breaking-changes)
+和 [StableHLO compatibility](https://github.com/openxla/stablehlo/blob/main/docs/compatibility.md)。
+
+依赖获取（不入库，`third_party/*` 已被忽略）：首次以
+`ANNC_ENABLE_TF2ATIR_V2=ON` 配置时，CMake 自动从 GitCode 平台镜像浅克隆
+stablehlo v1.9.7（`gitcode.com/gh_mirrors/st/stablehlo`，为 GitHub 仓库的
+平台级同步镜像，其 v1.9.7 tag 与上游 openxla/stablehlo 指向同一 commit
+`e34c3f6`）；目录已存在时直接复用，不再重新拉取。手动拉取（可换用官方源
+`https://github.com/openxla/stablehlo.git`）仍等效：
 
 ```shell
 git -C third_party clone --depth 1 --branch v1.9.7 \
-  https://github.com/openxla/stablehlo.git stablehlo
+  https://gitcode.com/gh_mirrors/st/stablehlo.git stablehlo
 ```
 
 构建与验证（推荐使用独立构建目录，与默认 `build/` 互不干扰；
@@ -228,25 +228,30 @@ configure 成功时输出 `ANNC: stablehlo artifact sink layer enabled
 配套的 LLVM 21 API，在 20.1.8 工具链下不保证可编译，且非 ANNC 消费
 目标，不作为验证口径。
 
-#### annc-converter-v2（TensorFlow 依赖与 addons 一致）
+#### annc-converter-v2（PRELOAD 插件）
 
-同一开关构建 `annc-converter-v2`（TensorFlow GraphDef 重写工具，与 ANNC
-的 LLVM/MLIR 栈进程隔离）。TF 依赖与 `tensorflow_addons` 同一组变量与
-解析流程（`build.sh` 原样透传）：显式 `ANNC_TENSORFLOW_INCLUDE_DIR`
-（如宿主 SDK `<TF_ROOT>/install/annc-tensorflow-headers/include`）优先，
-为空回落 `python3` TensorFlow（`tf.sysconfig` 探测头/flags/
-`libtensorflow_framework`）；`ANNC_TENSORFLOW_CXX11_ABI` 必须显式设
-`0`/`1`。与 addons 的唯一差异：只链接 `libtensorflow_framework`。
+同一开关构建 `annc_graph_rewriter`（TensorFlow GraphDef 重写插件，与 ANNC
+的 LLVM/MLIR 栈进程隔离）。部署形态不链接任何 TF 库：构建只要求显式宿主
+SDK 头，TF/protobuf 符号保持未定义、由 predictor 进程加载插件时解析。
+`ANNC_TENSORFLOW_CXX11_ABI` 必须显式设 `0`/`1`。树内构建时单元测试
+（`ConverterV2.FusionMeta.*`、`ConverterV2.GraphDefRewriter*`）随 `ctest`
+注册，其可执行需要一个 TF 符号提供者（显式 `ANNC_TENSORFLOW_LIBRARIES`
+或 Python TensorFlow，与 `tensorflow_addons` 同一解析流程）；与 v1 的
+行为差异（JSON-only 元数据、站点丢弃语义、别名策略等）见
+[addons/tensorflow/annc-converter-v2/README.md](../../addons/tensorflow/annc-converter-v2/README.md)。
+
+部署机上的 standalone 插件构建（零 TF 库探测、零 Python）：
 
 ```shell
-cmake -S . -B build-v2 -DANNC_ENABLE_TF2ATIR_V2=ON \
+cmake -S addons/tensorflow/annc-converter-v2 -B build-v2 \
+  -DANNC_TENSORFLOW_PRELOAD=ON \
   -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
   -DANNC_TENSORFLOW_CXX11_ABI=1
+cmake --build build-v2    # 产物 build-v2/libannc_graph_rewriter.so
 ```
 
-`-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与该工具不兼容
-（配置期报错）；单元测试（`FusionMeta.*`、`GraphDefRewriter.*`）随
-`ctest` 注册。
+`-DNDEBUG` 为 SDK protobuf 头的硬性要求，`ANNC_DEBUG=ON` 与本组件不兼容
+（配置期报错）。
 
 ## 验证安装
 
@@ -284,3 +289,11 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 - REMOTE 源码构建自动应用 `patches/kdnn_rhs_packed` 补丁，提供 packed-B 接口。
 - `--build-type Debug` 会把 third_party（json）一起重编；只调试 ANNC 时改用 `--annc-debug`。
 - 切换 Python 环境或 TensorFlow 版本后需重新运行 CMake（configure 时自动检测 TF）。
+
+## ONNX 的 StableHLO 前端
+
+按 [ONNX-MLIR 构建步骤](../../addons/onnxruntime/stablehlo/README.md) 准备配套工具链。在同一个配套 MLIR 构建目录中打开 `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` 与 `ANNC_ENABLE_STABLEHLO_FRONTEND`，构建 `annc_onnx_stablehlo_addon` 和 `annc-stablehlo-opt`。
+
+公共后端、`annc-onnx-pipeline` 和 EP 在启用 ONNX 与 EP 的系统 LLVM 构建中生成。配套 ONNX-MLIR 位于当前 CMake 构建目录下的 `third-party/onnx-mlir-build` 时，无需手动指定目录。分开构建且 ONNX-MLIR 位于其他目录时，配置 ANNC 时用 `-DANNC_ONNX_MLIR_BUILD_DIR=<ONNX-MLIR 构建目录>` 指定实际位置。CMake 会把 `onnx-mlir-opt` 的目录写入流水线。
+
+将配套的三个可执行文件 `annc-onnx2stablehlo`、`annc-onnx-framework-opt`、`annc-stablehlo-opt` 放在 `annc-onnx-pipeline` 的同一 `bin` 目录。[CLI 工作流](cli-workflows.md#onnx-的-stablehlo-前端)

@@ -11,7 +11,6 @@
 #include "fused_op.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/threadpool.h"
-#include "tensorflow/core/util/work_sharder.h"
 
 namespace tensorflow {
 namespace {
@@ -97,7 +96,6 @@ struct ContextExecutionState {
   OpKernelContext* context;
   const std::vector<DataType>& output_types;
   const std::vector<int>& output_ranks;
-  thread::ThreadPool* thread_pool;
   std::vector<std::unique_ptr<ContextTensorOwner>> outputs;
   std::vector<std::unique_ptr<ContextTensorOwner>> temps;
   std::mutex error_mu;
@@ -246,84 +244,12 @@ AnncStatusCode ContextGetStatus(void* opaque) {
   return state ? state->GetStatus() : ANNC_STATUS_INVALID_ARGUMENT;
 }
 
-AnncStatusCode RunContextParallel(void* opaque, int64_t total,
-                                  int64_t grain_size, int64_t cost_per_unit,
-                                  int32_t max_parallelism,
-                                  AnncContextTask callback, void* task) {
-  auto* state = static_cast<ContextExecutionState*>(opaque);
-  if (!state) return ANNC_STATUS_INVALID_ARGUMENT;
-  if (state->GetStatus() != ANNC_STATUS_OK) return state->GetStatus();
-  if (!callback || total < 0) {
-    return state->Fail(ANNC_STATUS_INVALID_ARGUMENT,
-                       errors::InvalidArgument("Invalid ANNC parallel range"));
-  }
-  try {
-    if (total == 0) return ANNC_STATUS_OK;
-    auto invoke = [&](int64_t begin, int64_t end) {
-      try {
-        callback(task, begin, end);
-      } catch (const std::exception& error) {
-        state->Fail(ANNC_STATUS_INTERNAL, errors::Internal(error.what()));
-      } catch (...) {
-        state->Fail(ANNC_STATUS_INTERNAL,
-                    errors::Internal("ANNC parallel task failed"));
-      }
-    };
-    auto* pool = state->thread_pool;
-    if (!pool || pool->CurrentThreadId() >= 0 || max_parallelism == 1) {
-      invoke(0, total);
-    } else if (max_parallelism > 0) {
-      Shard(std::min(max_parallelism, pool->NumThreads()), pool, total,
-            std::max<int64_t>(cost_per_unit, 1), invoke);
-    } else if (grain_size > 0) {
-      pool->TransformRangeConcurrently(std::min(grain_size, total), total,
-                                       invoke);
-    } else {
-      pool->ParallelFor(total, std::max<int64_t>(cost_per_unit, 1), invoke);
-    }
-    return state->GetStatus();
-  } catch (const std::exception& error) {
-    return state->Fail(ANNC_STATUS_INTERNAL, errors::Internal(error.what()));
-  } catch (...) {
-    return state->Fail(ANNC_STATUS_INTERNAL,
-                       errors::Internal("ANNC parallel service failed"));
-  }
-}
-
-AnncStatusCode ContextParallelFor(void* opaque, int64_t total,
-                                  int64_t grain_size, AnncContextTask callback,
-                                  void* task) {
-  if (grain_size < 0) {
-    ReportContextError(opaque, ANNC_STATUS_INVALID_ARGUMENT,
-                       "Invalid ANNC parallel grain size");
-    return ANNC_STATUS_INVALID_ARGUMENT;
-  }
-  return RunContextParallel(opaque, total, grain_size, 1, 0, callback, task);
-}
-
-AnncStatusCode ContextShard(void* opaque, int32_t max_parallelism,
-                            int64_t total, int64_t cost_per_unit,
-                            AnncContextTask callback, void* task) {
-  if (max_parallelism < 1 || cost_per_unit < 0) {
-    ReportContextError(opaque, ANNC_STATUS_INVALID_ARGUMENT,
-                       "Invalid ANNC shard scheduling options");
-    return ANNC_STATUS_INVALID_ARGUMENT;
-  }
-  return RunContextParallel(opaque, total, 0, cost_per_unit, max_parallelism,
-                            callback, task);
-}
-
-int32_t ContextNumThreads(void* opaque) {
-  auto* state = static_cast<ContextExecutionState*>(opaque);
-  return state && state->thread_pool
-             ? std::max(state->thread_pool->NumThreads(), 1)
-             : 1;
-}
-
 }  // namespace
 
-Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
-                                           void* kernel_function) {
+Status ANNCFusedOp::ExecuteContextV3Kernel(
+    OpKernelContext* context, void* kernel_function, bool jit_mode,
+    annc::threadpool::AnncThreadPool* thread_pool,
+    const AnncJitBinding* binding) {
   if (!kernel_function) {
     return errors::FailedPrecondition("Context V3 kernel symbol is not loaded");
   }
@@ -337,11 +263,11 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
   }
   try {
     // The adapter borrows TensorFlow's pool for this synchronous invocation.
-    const auto* workers = context->device()->tensorflow_cpu_worker_threads();
-    thread::ThreadPool* thread_pool = workers ? workers->workers : nullptr;
     std::vector<ContextTensorOwner> inputs(num_inputs);
     std::vector<AnncTensorView> input_views(num_inputs);
     std::vector<AnncTensorView> output_views(num_outputs_);
+    for (int i = 0; i < num_outputs_; ++i)
+      output_views[i].element_type = ContextElementType(output_types_[i]);
     // Validate input contracts at the TF boundary. Output dtype/rank contracts
     // are checked by AllocateContextOutput; kernels receive only tensor views.
     for (int i = 0; i < num_inputs; ++i) {
@@ -355,10 +281,16 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
       }
       TF_RETURN_IF_ERROR(inputs[i].Bind(tensor, true));
       input_views[i] = inputs[i].view;
+      // Prepacked GEMM RHS: the microkernel addresses the buffer with the
+      // compile-time packing layout, so only the base pointers are redirected
+      // (mirrors the descriptor overwrite in ExecuteMlirCifaceKernel).
+      if (binding && !binding->packed.empty() && binding->packed[transport]) {
+        input_views[i].allocated = binding->packed[transport]->data;
+        input_views[i].aligned = binding->packed[transport]->data;
+      }
     }
     ContextExecutionState state{
-        context, output_types_, output_ranks_, thread_pool, {}, {}, {},
-        {},      OkStatus()};
+        context, output_types_, output_ranks_, {}, {}, {}, {}, OkStatus()};
     state.outputs.resize(num_outputs_);
     AnncRuntimeServices services{sizeof(AnncRuntimeServices),
                                  ANNC_CONTEXT_ABI_VERSION,
@@ -367,10 +299,7 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
                                  &AllocateContextTemp,
                                  &ReportContextError,
                                  &ContextGetStatus,
-                                 &ContextParallelFor,
-                                 &ContextNumThreads,
-                                 &ContextShard,
-                                 nullptr};
+                                 thread_pool};
     std::vector<AnncAttributeView> attributes;
     attributes.reserve(context_i64_attrs_.size());
     for (const int64_t& value : context_i64_attrs_)
@@ -386,8 +315,12 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(OpKernelContext* context,
                                 nullptr,
                                 0,
                                 &services};
-    const AnncStatusCode status =
-        reinterpret_cast<AnncKernelFn>(kernel_function)(&execution);
+    AnncStatusCode status = ANNC_STATUS_OK;
+    if (jit_mode) {
+      reinterpret_cast<void (*)(AnncKernelContext*)>(kernel_function)(&execution);
+    } else {
+      status = reinterpret_cast<AnncKernelFn>(kernel_function)(&execution);
+    }
     TF_RETURN_IF_ERROR(state.Error());
     if (status != ANNC_STATUS_OK) {
       const std::string message =

@@ -47,7 +47,7 @@ AnncStatusCode matmulAddReluWithAddOutputImpl(
   float* reluData = annc::kernels::contextData<float>(*relu);
 
   try {
-    auto workers = context.getThreadPool();
+    auto workers = context.getKernelThreadPool();
     workers.parallelFor(rows, [&](int64_t begin, int64_t end) {
       for (int64_t row = begin; row < end; ++row) {
         for (int64_t column = 0; column < columns; ++column) {

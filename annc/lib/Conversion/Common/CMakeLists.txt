@@ -20,6 +20,7 @@ add_mlir_library(CommonConversion
         MLIRFuncDialect
         MLIRMemRefDialect
         MLIRLLVMDialect
+        MLIRLLVMCommonConversion
         AtirDialect
         ANNCKernel
 )

@@ -14,7 +14,7 @@ ANNASM="${ANNASM:-$REPO_ROOT/build/bin/annc-asm}"
 ANNCFUSIONMETADATA="${ANNCFUSIONMETADATA:-$REPO_ROOT/build/bin/annc-fusion-metadata}"
 # v2-route tool: only exists in ANNC_ENABLE_TF2ATIR_V2=ON builds; tests
 # referencing it are skipped (not failed) when the binary is absent.
-ANNCTF2ATIRV2="${ANNCTF2ATIRV2:-$REPO_ROOT/build/bin/annc-tf2atir-v2}"
+ANNCTF2ATIRV2="${ANNCTF2ATIRV2:-$REPO_ROOT/build/bin/annc-stablehlo-sink}"
 ANNCEPILOGUEKERNELCOMPILE="${ANNCEPILOGUEKERNELCOMPILE:-${ANNCGEMMKERNELCOMPILE:-$REPO_ROOT/build/bin/annc-gemm-epilogue-kernel-compile}}"
 ANNCDRIVER="${ANNCDRIVER:-$REPO_ROOT/build/bin/annc}"
 
@@ -33,7 +33,30 @@ MLIROPT="${MLIROPT:-$ANNC_LLVM_BIN/mlir-opt}"
 FILECHECK="${FILECHECK:-$ANNC_LLVM_BIN/FileCheck}"
 # Some RUN lines invoke LLVM's `not` and `split-file` by bare name.
 export PATH="$ANNC_LLVM_BIN:$PATH"
-FILTER='grep -vE "^\[ANNC "'
+# Matches both log prefixes in the tree: the tool-level "[ANNC ..." and the
+# Support/Log.h "[annc:<subsystem>][<level>]" (only relevant at info/debug).
+FILTER='grep -vE "^\[[Aa][Nn][Nn][Cc][ :]"'
+
+# The AArch64 GEMM pipeline has no valid legacy route when either the V2
+# frontend is compiled in or the context ABI switch is enabled. The V2 tool
+# may be unavailable in partial builds, so use the build configuration rather
+# than its presence as the route selector.
+ANNC_V2_BUILD=0
+if [ -r "$REPO_ROOT/build/CMakeCache.txt" ] &&
+   grep -q '^ANNC_ENABLE_TF2ATIR_V2:BOOL=ON$' "$REPO_ROOT/build/CMakeCache.txt"; then
+    ANNC_V2_BUILD=1
+elif [ -x "$ANNCTF2ATIRV2" ]; then
+    ANNC_V2_BUILD=1
+fi
+ANNC_CONTEXT_ABI=0
+case "${ANNC_ENABLE_LOWERING_CONTEXT_ABI:-}" in
+    1|ON|TRUE|YES|on|true|yes) ANNC_CONTEXT_ABI=1 ;;
+esac
+ANNC_LEGACY_AARCH64_PIPELINE=1
+if [ "$ANNC_V2_BUILD" -eq 1 ] || [ "$ANNC_CONTEXT_ABI" -eq 1 ]; then
+    ANNC_LEGACY_AARCH64_PIPELINE=0
+fi
+export ANNC_LEGACY_AARCH64_PIPELINE
 
 for t in "$ANNCOPT" "$ANNASM" "$ANNCFUSIONMETADATA" "$MLIROPT" "$FILECHECK" \
          "$ANNC_LLVM_BIN/not" "$ANNC_LLVM_BIN/split-file"; do
@@ -60,19 +83,26 @@ for f in $FILES; do
     mapfile -t runs < <(sed -n 's/^\/\/ RUN: //p' "$f")
     [ "${#runs[@]}" -eq 0 ] && { echo SKIP; continue; }
 
+    # These fixtures specifically cover the legacy AArch64 route.
+    if grep -q '^// REQUIRES: legacy-aarch64-pipeline$' "$f" &&
+       [ "$ANNC_LEGACY_AARCH64_PIPELINE" -eq 0 ]; then
+        echo SKIP
+        continue
+    fi
+
     temp_file="$TMP_DIR/test-$file_index.tmp"
     file_index=$((file_index + 1))
     file_failed=0
 
     for run in "${runs[@]}"; do
         run="${run//annc-opt/$ANNCOPT}"
-        if [[ "$run" == *annc-tf2atir-v2* && ! -x "$ANNCTF2ATIRV2" ]]; then
+        if [[ "$run" == *annc-stablehlo-sink* && ! -x "$ANNCTF2ATIRV2" ]]; then
             echo SKIP
             continue 2
         fi
         run="${run//annc-asm/$ANNASM}"
         run="${run//annc-fusion-metadata/$ANNCFUSIONMETADATA}"
-        run="${run//annc-tf2atir-v2/$ANNCTF2ATIRV2}"
+        run="${run//annc-stablehlo-sink/$ANNCTF2ATIRV2}"
         run="${run//annc-gemm-epilogue-kernel-compile/$ANNCEPILOGUEKERNELCOMPILE}"
         run="${run// annc / $ANNCDRIVER }"
         run="${run//mlir-opt/$MLIROPT}"

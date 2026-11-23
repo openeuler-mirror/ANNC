@@ -1,4 +1,4 @@
-// RUN: annc-asm %s --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s
+// RUN: annc-asm %s --annc-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s
 // N16 has 17 tensors at the semantic boundary and one context at runtime.
 // CHECK-LABEL: func.func private @context_stitch_n16(
 // CHECK-SAME: %[[CTX:[A-Za-z0-9_]+]]: !llvm.ptr) -> i32

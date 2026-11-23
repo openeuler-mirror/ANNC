@@ -1,8 +1,8 @@
-// RUN: annc-asm %s -atir-fast-codegen -lower-context-kernel-entries | FileCheck %s
-// RUN: annc-asm %s -atir-fast-codegen | FileCheck %s --check-prefix=SCHEMA
-// RUN: env ANNC_GEMM=2 annc-asm %s -atir-fast-codegen | FileCheck %s --check-prefix=SCHEMA
-// RUN: annc-asm %s -atir-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
-// RUN: annc-asm %s -atir-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | mlir-opt -convert-func-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
+// RUN: annc-asm %s -annc-fast-codegen -lower-context-kernel-entries | FileCheck %s
+// RUN: annc-asm %s -annc-fast-codegen | FileCheck %s --check-prefix=SCHEMA
+// RUN: env ANNC_GEMM=2 annc-asm %s -annc-fast-codegen | FileCheck %s --check-prefix=SCHEMA
+// RUN: annc-asm %s -annc-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
+// RUN: annc-asm %s -annc-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | mlir-opt -convert-func-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
 
 // SCHEMA: atir.Customize
 // SCHEMA-SAME: custom.arg_names = ["lhs", "rhs"]

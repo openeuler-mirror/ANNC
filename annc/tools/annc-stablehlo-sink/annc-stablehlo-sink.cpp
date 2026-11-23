@@ -1,8 +1,8 @@
-// annc-tf2atir-v2 — new-path entry, coexisting with legacy annc-tf2atir.
+// annc-stablehlo-sink — CLI entry of the residue sink (stablehlo V2 route).
 // Consumes a frontend artifact (stablehlo + tf residue .mlir): the sink maps
 // residues through the shared OpSpec table into atir (unmapped ones land in
 // atir.unsupported), keeps other dialects, and prints [residue-sink] stats.
-// The sink itself is frontend-agnostic; this tool is the TF entry.
+// The sink itself is frontend-agnostic; the TF pipeline drives this entry.
 #include <memory>
 #include <string>
 

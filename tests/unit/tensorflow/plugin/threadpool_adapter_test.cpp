@@ -8,20 +8,22 @@ using Pool = annc::threadpool::AnncThreadPool;
 extern "C" void annc_set_current_threadpool(Pool*);
 extern "C" Pool* annc_get_current_threadpool();
 extern "C" int RunPoolKernel(int total, int cost, int grain, int* visits,
-                             bool throw_task);
+                             bool throw_task, int max_parallelism = -1);
 
 namespace {
 struct HostPool {
   int64_t total = -1, block = -1, cost = -1;
+  int max_parallelism = -1;
   bool fail = false, returned = false;
 };
 
 int Schedule(void* ctx, int64_t total, int64_t block, int64_t cost,
-             AnncThreadPoolTask task, void* data) noexcept {
+             int max_parallelism, AnncThreadPoolTask task, void* data) noexcept {
   auto& host = *static_cast<HostPool*>(ctx);
   host.total = total;
   host.block = block;
   host.cost = cost;
+  host.max_parallelism = max_parallelism;
   if (host.fail) return -1;
   task(data, 0, total / 2);
   task(data, total / 2, total);
@@ -30,7 +32,7 @@ int Schedule(void* ctx, int64_t total, int64_t block, int64_t cost,
 }
 
 annc::tensorflow::ThreadPoolAdapterPtr Adapter(HostPool& host) {
-  const AnncThreadPoolCallbacks callbacks{&host, [](void*) { return 2; },
+  const AnncThreadPoolCallbacks callbacks{&host, [](void*) { return 4; },
                                           [](void*) { return 0; }, Schedule};
   return annc::tensorflow::ThreadPoolAdapterPtr(
       anncCreateThreadPoolAdapter(&callbacks));
@@ -65,7 +67,7 @@ bool CheckSchedules() {
     visits.fill(0);
     CHECK(RunPoolKernel(4, test.cost, test.grain, visits.data(), false) == 0);
     CHECK(host.total == 4 && host.block == test.expected_block &&
-          host.cost == test.expected_cost);
+          host.cost == test.expected_cost && host.max_parallelism == 0);
     CHECK(visits == expected);
   }
   return true;
@@ -110,10 +112,27 @@ bool CheckRecovery() {
   CHECK(outer.returned && visits == expected);
   return true;
 }
+
+bool CheckParallelismLimit() {
+  HostPool host;
+  auto adapter = Adapter(host);
+  CHECK(adapter);
+  tensorflow::ScopedAnncThreadPool scope(reinterpret_cast<Pool*>(adapter.get()),
+                                         annc_set_current_threadpool,
+                                         annc_get_current_threadpool);
+  const std::array<int, 4> expected{{1, 1, 1, 1}};
+  for (int grain : {-1, 1}) {
+    std::array<int, 4> visits{};
+    CHECK(RunPoolKernel(4, 7, grain, visits.data(), false, 2) == 0);
+    CHECK(host.max_parallelism == 2 && visits == expected);
+  }
+  return true;
+}
 }  // namespace
 
 int main() {
-  return CheckSchedules() && CheckRecovery() && !annc_get_current_threadpool()
+  return CheckSchedules() && CheckRecovery() && CheckParallelismLimit() &&
+                 !annc_get_current_threadpool()
              ? 0
              : 1;
 }

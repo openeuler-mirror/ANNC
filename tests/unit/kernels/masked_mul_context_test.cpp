@@ -47,13 +47,6 @@ struct Outputs {
   std::array<Tensor, 11> tensors;
   std::array<AnncTensorView, 11> views{};
   AnncStatusCode status = ANNC_STATUS_OK;
-  static AnncStatusCode parallel(void*, int64_t total, int64_t,
-                                 AnncContextTask task, void* task_data) {
-    if (task == nullptr || total < 0) return ANNC_STATUS_INVALID_ARGUMENT;
-    if (total != 0) task(task_data, 0, total);
-    return ANNC_STATUS_OK;
-  }
-  static int32_t threads(void*) { return 1; }
   static AnncStatusCode allocate(void* opaque, uint32_t slot,
                                  const AnncTensorDesc* desc,
                                  AnncTensorView* out) {
@@ -99,8 +92,6 @@ struct Outputs {
     services.get_status = [](void* self) {
       return static_cast<Outputs*>(self)->status;
     };
-    services.parallel_for = parallel;
-    services.num_threads = threads;
     AnncKernelContext context{
         sizeof(AnncKernelContext),
         ANNC_CONTEXT_ABI_VERSION,

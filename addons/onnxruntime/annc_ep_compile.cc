@@ -27,12 +27,19 @@
 
 #include <nlohmann/json.hpp>
 
+#include "FusionMetadata/FusionMetadata.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Parser/Parser.h"
+
 namespace annc_ep {
 namespace {
 
 constexpr const char* kDriverName = "annc-onnx-pipeline";
 constexpr const char* kKernelLibraryName = "libannc_kernels.so";
 constexpr const char* kReportName = "sites.json";
+constexpr const char* kKernelIrName = "model.fused.mlir";
 constexpr const char* kDoneMarker = "DONE";
 
 std::string EnvString(const char* name, const std::string& fallback = "") {
@@ -194,6 +201,64 @@ int RunCaptured(const std::vector<std::string>& argv, int timeout_seconds,
   return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
 
+// StableHLO publishes standard kernel IR. Reuse the compiler's FusionInfo
+// reader rather than serializing a second deployment contract through JSON.
+bool ReadKernelMetadata(const std::string& path, SiteReport* report,
+                        std::string* error) {
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                  mlir::LLVM::LLVMDialect>();
+  mlir::MLIRContext context(registry);
+  auto module = mlir::parseSourceFile<mlir::ModuleOp>(path, &context);
+  if (!module) {
+    *error = "cannot parse kernel metadata IR '" + path + "'";
+    return false;
+  }
+  SiteReport parsed;
+  for (auto function : module->getOps<mlir::func::FuncOp>()) {
+    if (!function->hasAttr("annc.kernel")) continue;
+    auto info = annc::fusion::readFusionInfo(function);
+    if (!info) {
+      *error = llvm::toString(info.takeError());
+      return false;
+    }
+    Site site;
+    site.pattern = info->pattern;
+    site.kernelName = info->kernelName;
+    site.executionMode = info->executionMode;
+    site.abi = info->abi;
+    site.memberNodes = info->memberNodeNames;
+    site.kernelArgOrder = info->kernelArgOrder;
+    site.contextI64Attrs = info->contextI64Attrs;
+    auto arguments = [](const std::vector<annc::fusion::FusionArg>& values) {
+      std::vector<Site::Arg> result;
+      for (const auto& value : values)
+        result.push_back(
+            {value.tfName, value.role, value.dtype, value.rank, value.shape});
+      return result;
+    };
+    site.args = arguments(info->args);
+    site.outputs = arguments(info->outputs);
+    if (!site.outputs.empty()) site.outputTensor = site.outputs.front().name;
+    for (size_t i = 0; i < site.args.size(); ++i) {
+      const auto& arg = site.args[i];
+      if (arg.role == "fixed" && arg.rank == 2 && site.weightIndex < 0)
+        site.weightIndex = i;
+      if (arg.role == "dynamic" && arg.rank == 3 && site.flattenXIndex < 0)
+        site.flattenXIndex = i;
+    }
+    std::string validation_error;
+    if (!ValidateSite(site, &validation_error)) {
+      std::fprintf(stderr, "[annc-ep] dropping site '%s': %s\n",
+                   site.kernelName.c_str(), validation_error.c_str());
+      continue;
+    }
+    parsed.sites.push_back(std::move(site));
+  }
+  *report = std::move(parsed);
+  return true;
+}
+
 bool ReadSite(const nlohmann::json& entry, Site* site) {
   if (!entry.is_object()) return false;
   site->pattern = entry.value("pattern", "");
@@ -313,8 +378,12 @@ std::string CompileDriver::ToolchainInfo() {
   return toolchain_info_;
 }
 
-bool CompileDriver::ReadReport(const std::string& path, SiteReport* report,
+bool CompileDriver::ReadReport(const std::string& directory, SiteReport* report,
                                std::string* error) const {
+  const std::string ir_path = directory + "/" + kKernelIrName;
+  if (FileExists(ir_path)) return ReadKernelMetadata(ir_path, report, error);
+  // The original ONNX/ATIR pipeline retains its existing report interface.
+  const std::string path = directory + "/" + kReportName;
   std::ifstream in(path);
   if (!in.is_open()) {
     *error = "cannot open '" + path + "'";
@@ -382,10 +451,12 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
   const std::string work_dir = entry + ".work";
 
   auto loadPublished = [&]() {
-    if (!FileExists(donePath) || !FileExists(reportPath)) return false;
+    if (!FileExists(donePath) ||
+        (!FileExists(entry + "/" + kKernelIrName) && !FileExists(reportPath)))
+      return false;
     SiteReport cached;
     std::string report_error;
-    if (!ReadReport(reportPath, &cached, &report_error)) return false;
+    if (!ReadReport(entry, &cached, &report_error)) return false;
     // A zero-site model is a successful pipeline result and intentionally has
     // no shared library. Non-empty reports must have the library before the
     // marker is considered usable.
@@ -449,7 +520,7 @@ bool CompileDriver::Compile(const std::string& modelPath, const std::string& sig
       break;
     }
     std::string report_error;
-    if (!ReadReport(work_dir + "/" + kReportName, report, &report_error)) {
+    if (!ReadReport(work_dir, report, &report_error)) {
       stage_error = report_error;
       break;
     }

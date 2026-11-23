@@ -4,6 +4,7 @@
 namespace atir
 {
 void populateAtirToLinalgConversionPatterns(TypeConverter &inputTypeConverter, TypeConverter &atirTypeConverter, RewritePatternSet &patterns);
+void populateAtirV2ToLinalgConversionPatterns(RewritePatternSet &patterns);
 
 #define OpLowering(OP)                                                         \
   struct OP##LoweringToLinalg : public AtirLowering<atir::OP##Op> {      \
@@ -13,6 +14,32 @@ void populateAtirToLinalgConversionPatterns(TypeConverter &inputTypeConverter, T
 
 OpLowering(Constant) OpLowering(Add) OpLowering(MatMul) OpLowering(Customize)
 #undef OpLowering
+
+struct FusedMatMulLoweringToLinalg
+    : public mlir::OpConversionPattern<atir::FusedMatMulOp> {
+  using OpConversionPattern<atir::FusedMatMulOp>::OpConversionPattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      atir::FusedMatMulOp op, atir::FusedMatMulOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
+
+struct V2FuncReturnLoweringToLinalg
+    : public mlir::OpConversionPattern<mlir::func::ReturnOp> {
+  using OpConversionPattern<mlir::func::ReturnOp>::OpConversionPattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      mlir::func::ReturnOp op, mlir::func::ReturnOp::Adaptor adaptor,
+      mlir::ConversionPatternRewriter &rewriter) const override;
+};
+
+struct ContextCustomizeLoweringToLinalg
+    : public mlir::OpRewritePattern<atir::CustomizeOp> {
+  using OpRewritePattern<atir::CustomizeOp>::OpRewritePattern;
+  mlir::LogicalResult
+  matchAndRewrite(atir::CustomizeOp op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
 
 struct ReluLoweringToLinalg : public mlir::OpConversionPattern<atir::ReluOp> {
   using OpConversionPattern<atir::ReluOp>::OpConversionPattern;

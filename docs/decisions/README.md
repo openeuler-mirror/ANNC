@@ -46,11 +46,14 @@ ADR（Architecture Decision Record）用于记录对 ANNC 架构有长期影响�
 | ADR-013 | ONNX EP 执行上下文：线程池入上下文与 TF/ONNX 共用 ABI v3 | implemented | [decisions.md#adr-013](decisions.md#adr-013) |
 | ADR-014 | 框架前端与 addon 目录集中，构建按框架开关切分 | accepted | [decisions.md#adr-014](decisions.md#adr-014) |
 | ADR-015 | ONNX 共享编译器与 ORT 插件接入的整体方案 | proposed | [decisions.md#adr-015](decisions.md#adr-015) |
-| ADR-016 | TF1.15 独立插件与共用 TF 前端 | proposed（历史提案；已补实现偏差） | [decisions.md#adr-016](decisions.md#adr-016) |
+| ADR-016 | TF1.15 独立插件与共用 TF 前端 | proposed | [decisions.md#adr-016](decisions.md#adr-016) |
 | ADR-017 | TensorFlow JIT GEMM 代码与权重缓存分离及统一模式开关 | accepted / implemented | [decisions.md#adr-017](decisions.md#adr-017) |
 | ADR-018 | GEMM epilogue codegen 通过 GEMM-ASM 二进制接口交付 | accepted | [decisions.md#adr-018](decisions.md#adr-018) |
 | ADR-019 | annc-partition 的版本化输入与整包原子发布 | proposed | [decisions.md#adr-019](decisions.md#adr-019) |
 | ADR-022 | Kernel Context 与统一 Runtime ABI | proposed | [decisions.md#adr-022](decisions.md#adr-022) |
+| ADR-023 | pb2stablehlo 前端的 wheel 隔离构建域 | accepted | [decisions.md#adr-023](decisions.md#adr-023) |
+| ADR-024 | Context 融合函数的手写 Customize 与 codegen 路线互斥 | accepted（既有架构变更追记） | [decisions.md#adr-024](decisions.md#adr-024) |
+| ADR-025 | ONNX 可选 StableHLO 前端复用公共后端和 EP | implemented（分支实现） | [decisions.md#adr-025](decisions.md#adr-025) |
 
 新增 ADR 时，请在 `decisions.md` 中以如下格式添加详情，并在此索引表末尾追加一行：
 

@@ -4,6 +4,7 @@
 #include "Dialect/Atir/CustomOpSchema.h"
 #include "Kernel/KernelPriorityResolver.h"
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/SymbolTable.h"
@@ -28,29 +29,31 @@ std::optional<std::pair<ArrayRef<int64_t>, Type>> getShapeAndElementType(
   return std::nullopt;
 }
 
-LogicalResult validateContextBoundaryMetadata(CustomizeOp custom,
+LogicalResult validateContextBoundaryMetadata(Operation *custom,
                                               DictionaryAttr metadata,
                                               size_t numInputs,
                                               size_t numOutputs) {
   if (Attribute order = metadata.get("kernel_arg_order")) {
     auto array = dyn_cast<ArrayAttr>(order);
     if (!array || !array.empty())
-      return custom.emitError(
+      return custom->emitError(
           "context metadata must not reorder kernel arguments");
   }
   // Minimal lowering fixtures have no persisted boundary records. In that case
   // the exact CustomizeOp schema and SSA boundary remain the source of truth.
-  if (!metadata.get("args") && !metadata.get("outputs")) return success();
+  if (!metadata.get("args") && !metadata.get("outputs") &&
+      isa<CustomizeOp>(custom))
+    return success();
   auto inputs = dyn_cast_or_null<ArrayAttr>(metadata.get("args"));
   auto outputs = dyn_cast_or_null<ArrayAttr>(metadata.get("outputs"));
   if (!inputs || !outputs || inputs.size() != numInputs ||
       outputs.size() != numOutputs)
-    return custom.emitError("context fusion metadata does not match boundary");
+    return custom->emitError("context fusion metadata does not match boundary");
   auto validate = [&](Attribute attr, Value value,
                       bool output) -> LogicalResult {
     auto record = dyn_cast<DictionaryAttr>(attr);
     if (!record)
-      return custom.emitError(
+      return custom->emitError(
           "context fusion boundary record must be a dictionary");
     auto rank = dyn_cast_or_null<IntegerAttr>(record.get("rank"));
     auto dtype = dyn_cast_or_null<StringAttr>(record.get("dtype"));
@@ -62,12 +65,12 @@ LogicalResult validateContextBoundaryMetadata(CustomizeOp custom,
         tfName.empty() ||
         rank.getInt() != static_cast<int64_t>(actual->first.size()) ||
         shape.size() != actual->first.size())
-      return custom.emitError(
+      return custom->emitError(
           "context fusion metadata has incompatible rank or shape");
     if ((output && role.getValue() != "output") ||
         (!output && role.getValue() != "constant" &&
          role.getValue() != "fixed" && role.getValue() != "dynamic"))
-      return custom.emitError(
+      return custom->emitError(
           "context fusion metadata has invalid boundary role");
     std::string actualDtype;
     llvm::raw_string_ostream stream(actualDtype);
@@ -77,21 +80,24 @@ LogicalResult validateContextBoundaryMetadata(CustomizeOp custom,
           encoding && !encoding.empty())
         actualDtype = encoding.str();
     }
+    if (llvm::StringRef(actualDtype).starts_with("!atir."))
+      actualDtype.erase(0, strlen("!atir."));
     if (dtype.getValue() != actualDtype)
-      return custom.emitError(
-          "context fusion metadata dtype does not match boundary");
+      return custom->emitError()
+             << "context fusion metadata dtype '" << dtype.getValue().str()
+             << "' does not match boundary '" << actualDtype << "'";
     for (auto [attr, dim] : llvm::zip(shape, actual->first)) {
       auto declared = dyn_cast<IntegerAttr>(attr);
       if (!declared || (declared.getInt() >= 0 && !ShapedType::isDynamic(dim) &&
                         declared.getInt() != dim))
-        return custom.emitError(
+        return custom->emitError(
             "context fusion metadata shape does not match boundary");
     }
     return success();
   };
-  for (auto [attr, value] : llvm::zip_equal(inputs, custom.getOperands()))
+  for (auto [attr, value] : llvm::zip_equal(inputs, custom->getOperands()))
     if (failed(validate(attr, value, false))) return failure();
-  for (auto [attr, value] : llvm::zip_equal(outputs, custom.getResults()))
+  for (auto [attr, value] : llvm::zip_equal(outputs, custom->getResults()))
     if (failed(validate(attr, value, true))) return failure();
   return success();
 }
@@ -117,15 +123,36 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     if (!function->hasAttr("annc.kernel") ||
         !llvm::hasSingleElement(function.getBody()))
       return function.emitError("context entry must be a single-block kernel");
-    CustomizeOp custom;
+    Operation *custom = nullptr;
+    func::FuncOp bridgeDeclaration;
+    StringRef builtin;
     for (Operation &operation : function.front()) {
-      if (auto candidate = dyn_cast<CustomizeOp>(operation)) {
+      if (isa<CustomizeOp>(operation) ||
+          (isa<func::CallOp>(operation) && operation.hasAttr("annc.builtin"))) {
         if (custom)
           return function.emitError(
               "context entry requires exactly one builtin");
-        custom = candidate;
+        custom = &operation;
+        if (auto call = dyn_cast<func::CallOp>(operation)) {
+          auto name = call->getAttrOfType<StringAttr>("annc.builtin");
+          bridgeDeclaration =
+              module.lookupSymbol<func::FuncOp>(call.getCallee());
+          if (!name || !bridgeDeclaration || !bridgeDeclaration.isExternal() ||
+              !bridgeDeclaration.isPrivate() ||
+              bridgeDeclaration.getFunctionType() !=
+                  FunctionType::get(module.getContext(), call.getOperandTypes(),
+                                    call.getResultTypes()) ||
+              bridgeDeclaration->getAttr("annc.builtin") != name ||
+              bridgeDeclaration->getAttr("metadata") !=
+                  call->getAttr("metadata"))
+            return call.emitError(
+                "context builtin declaration does not match call");
+          builtin = name.getValue();
+        } else {
+          builtin = cast<CustomizeOp>(operation).getOpType();
+        }
       } else if (!isa<func::ReturnOp>(operation) &&
-                 !isa<ConstantOp>(operation) &&
+                 !isa<ConstantOp, arith::ConstantOp>(operation) &&
                  !(isa<BufferOp>(operation) && operation.use_empty())) {
         return function.emitError(
             "context entry contains unsupported operations");
@@ -134,35 +161,38 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     auto boundaryReturn =
         dyn_cast<func::ReturnOp>(function.front().getTerminator());
     if (!custom || !boundaryReturn ||
-        custom.getNumOperands() != function.getNumArguments() ||
-        !llvm::equal(custom.getResults(), boundaryReturn.getOperands()))
+        custom->getNumOperands() != function.getNumArguments() ||
+        !llvm::equal(custom->getResults(), boundaryReturn.getOperands()))
       return function.emitError(
           "context entry requires builtin inputs and outputs in boundary "
           "order");
 
     // A pre-affine fold may replace a boundary initializer in the same slot.
     // Keep the external binding intact and override only this call's view.
-    SmallVector<DenseElementsAttr> inputOverrides(custom.getNumOperands());
+    SmallVector<DenseElementsAttr> inputOverrides(custom->getNumOperands());
     std::optional<size_t> effectiveWeightSlot;
-    for (auto [index, operand] : llvm::enumerate(custom.getOperands())) {
+    for (auto [index, operand] : llvm::enumerate(custom->getOperands())) {
       if (operand == function.getArgument(index)) continue;
-      auto constant = operand.getDefiningOp<ConstantOp>();
+      auto constant = operand.getDefiningOp();
       auto tensor = dyn_cast<atir::TensorType>(operand.getType());
       auto payload =
           tensor ? dyn_cast_or_null<DenseElementsAttr>(tensor.getCacheData())
                  : DenseElementsAttr{};
+      if (auto standard = dyn_cast_or_null<arith::ConstantOp>(constant))
+        payload = dyn_cast<DenseElementsAttr>(standard.getValue());
       auto boundary =
           getShapeAndElementType(function.getArgument(index).getType());
       auto actual = getShapeAndElementType(operand.getType());
-      if (!constant || !payload || !payload.getElementType().isF32() ||
+      if (!constant || !isa<ConstantOp, arith::ConstantOp>(constant) ||
+          !payload || !payload.getElementType().isF32() ||
           !payload.getType().hasStaticShape() || !boundary || !actual ||
           boundary->second != actual->second ||
           boundary->first != actual->first ||
           payload.getType().getShape() != actual->first ||
           !llvm::all_of(operand.getUses(), [&](OpOperand &use) {
-            return use.getOwner() == custom.getOperation();
+            return use.getOwner() == custom;
           }))
-        return custom.emitError(
+        return custom->emitError(
             "context inputs must follow boundary order or be dense f32 "
             "constants");
       inputOverrides[index] = payload;
@@ -176,15 +206,15 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
                              : ArrayAttr{})
       for (auto attr : values) {
         auto value = dyn_cast<IntegerAttr>(attr);
-        if (!value) return custom.emitError("invalid context attribute");
+        if (!value) return custom->emitError("invalid context attribute");
         attributes.push_back(value.getInt());
       }
-    auto contextSchema = getContextKernelSchema(custom.getOpType(), attributes);
+    auto contextSchema = getContextKernelSchema(builtin, attributes);
     auto expectedSchema = contextSchema
                               ? contextSchema->toMetadata(module.getContext())
                               : DictionaryAttr{};
     if (!expectedSchema || schema != expectedSchema)
-      return custom.emitError(
+      return custom->emitError(
           "context entry requires the exact shared builtin schema");
     SmallVector<CustomOpSchema::Arg> tensorArgs;
     SmallVector<int64_t> attributeValues;
@@ -194,37 +224,38 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
       else if (arg.kind == CustomOpSchema::ArgKind::I64Attr)
         attributeValues.push_back(arg.i64Value);
       else
-        return custom.emitError("unsupported context argument kind");
+        return custom->emitError("unsupported context argument kind");
     }
     auto metadata = function->getAttrOfType<DictionaryAttr>("fusion.metadata");
     auto declaredAttrs =
         dyn_cast_or_null<ArrayAttr>(metadata.get("context_i64_attrs"));
     if ((!attributeValues.empty() && !declaredAttrs) ||
         (declaredAttrs && declaredAttrs.size() != attributeValues.size()))
-      return custom.emitError(
+      return custom->emitError(
           "context attribute metadata does not match schema");
     for (size_t i = 0; i < attributeValues.size(); ++i) {
       auto value = dyn_cast<IntegerAttr>(declaredAttrs[i]);
       if (!value || value.getInt() != attributeValues[i])
-        return custom.emitError(
+        return custom->emitError(
             "context attribute value does not match schema");
     }
     auto results = contextSchema->results();
-    if (tensorArgs.size() != custom.getNumOperands() ||
-        results.size() != custom.getNumResults())
-      return custom.emitError("context builtin schema does not match boundary");
-    for (auto [value, arg] : llvm::zip(custom.getOperands(), tensorArgs)) {
+    if (tensorArgs.size() != custom->getNumOperands() ||
+        results.size() != custom->getNumResults())
+      return custom->emitError(
+          "context builtin schema does not match boundary");
+    for (auto [value, arg] : llvm::zip(custom->getOperands(), tensorArgs)) {
       auto type = getShapeAndElementType(value.getType());
       if (!type || arg.rank < 0 ||
           static_cast<int64_t>(type->first.size()) != arg.rank)
-        return custom.emitError(
+        return custom->emitError(
             "context builtin has incompatible input schema");
     }
-    for (auto [value, result] : llvm::zip(custom.getResults(), results)) {
+    for (auto [value, result] : llvm::zip(custom->getResults(), results)) {
       auto type = getShapeAndElementType(value.getType());
       if (!type || result.rank < 0 ||
           static_cast<int64_t>(type->first.size()) != result.rank)
-        return custom.emitError(
+        return custom->emitError(
             "context builtin has incompatible result schema");
     }
     if (failed(validateContextBoundaryMetadata(
@@ -234,9 +265,9 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     auto bindings = inferTypeConstraintsFromSchema(
         schema, custom->getOperandTypes(), custom->getResultTypes());
     if (!bindings)
-      return custom.emitError() << llvm::toString(bindings.takeError());
+      return custom->emitError() << llvm::toString(bindings.takeError());
     annc::kernels::KernelResolveRequest request;
-    request.op_type = custom.getOpType().str();
+    request.op_type = builtin.str();
     request.abi = "annc_context_v3";
     if (auto rhsFormat = custom->getAttrOfType<StringAttr>("rhs_format"))
       request.rhs_format = rhsFormat.str();
@@ -245,7 +276,7 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     auto kernel = annc::kernels::resolveBestKernelInfo(
         request, enableKdnn && enableKdnn.getValue());
     if (!kernel)
-      return custom.emitError("no compatible context builtin registered");
+      return custom->emitError("no compatible context builtin registered");
 
     OpBuilder builder(module.getContext());
     auto pointer = LLVM::LLVMPointerType::get(module.getContext());
@@ -253,11 +284,11 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     auto type = builder.getFunctionType(TypeRange{pointer}, TypeRange{status});
     auto callee = module.lookupSymbol<func::FuncOp>(kernel->symbol_name);
     if (callee && callee.getFunctionType() != type)
-      return custom.emitError(
+      return custom->emitError(
           "context builtin symbol has incompatible signature");
     if (!callee) {
       builder.setInsertionPointToStart(module.getBody());
-      callee = builder.create<func::FuncOp>(custom.getLoc(),
+      callee = builder.create<func::FuncOp>(custom->getLoc(),
                                             kernel->symbol_name, type);
       callee.setPrivate();
       callee->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
@@ -267,7 +298,7 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     if (!uses || !uses->empty())
       return function.emitError(
           "context entry must not have model-level callers");
-    Location loc = custom.getLoc();
+    Location loc = custom->getLoc();
     function.getBody().dropAllReferences();
     function.getBody().getBlocks().clear();
     function.setFunctionType(type);
@@ -286,6 +317,9 @@ LogicalResult lowerContextKernelEntries(ModuleOp module) {
     auto call = builder.create<func::CallOp>(
         loc, kernel->symbol_name, TypeRange{status}, ValueRange{callContext});
     builder.create<func::ReturnOp>(loc, call.getResults());
+    if (bridgeDeclaration &&
+        SymbolTable::symbolKnownUseEmpty(bridgeDeclaration, module))
+      bridgeDeclaration.erase();
   }
   return success();
 }

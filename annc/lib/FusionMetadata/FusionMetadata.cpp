@@ -304,6 +304,7 @@ FusionInfo fusionInfoFromMetadataEntries(
   info.args = fusionArgArrayFromMetadata(rawValue("args"));
   info.outputs = fusionArgArrayFromMetadata(rawValue("outputs"));
   info.memberNodeNames = parseStringArray(rawValue("member_node_names"));
+  info.outputAliases = parseStringArray(rawValue("output_aliases"));
   info.abi = stringValue("abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayValue("dynamic_dims");
@@ -472,6 +473,7 @@ llvm::Expected<FusionInfo> readFusionInfo(func::FuncOp func) {
   info.args = fusionArgArrayAttr(metadata, "args");
   info.outputs = fusionArgArrayAttr(metadata, "outputs");
   info.memberNodeNames = stringArrayAttr(metadata, "member_node_names");
+  info.outputAliases = stringArrayAttr(metadata, "output_aliases");
   info.abi = stringAttr(metadata, "abi");
   if (info.abi.empty()) info.abi = "mlir_ciface";
   info.dynamicDims = intArrayAttr(metadata, "dynamic_dims");

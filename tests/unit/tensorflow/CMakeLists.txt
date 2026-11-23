@@ -74,3 +74,22 @@ foreach(_standard IN ITEMS 14 17)
     endif()
   endforeach()
 endforeach()
+
+# A standalone executable needs the native TF SDK libraries. Preload builds
+# resolve them from Python and cannot run this native-host test.
+if(TARGET annc_fused_op_1_15 AND NOT ANNC_TENSORFLOW_PRELOAD)
+  get_target_property(_tf_sdk_standard annc_optimizer_1_15 CXX_STANDARD)
+  add_executable(tf_threadpool_sdk_limit plugin/threadpool_callbacks_test.cpp
+    "${_plugin}/1_15/threadpool_callbacks.cc")
+  set_target_properties(tf_threadpool_sdk_limit PROPERTIES
+    CXX_STANDARD ${_tf_sdk_standard} CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(tf_threadpool_sdk_limit PRIVATE
+    $<TARGET_PROPERTY:annc_optimizer_1_15,COMPILE_DEFINITIONS>)
+  target_include_directories(tf_threadpool_sdk_limit PRIVATE
+    "${_plugin}/1_15" "${PROJECT_SOURCE_DIR}/addons/tensorflow/support")
+  target_include_directories(tf_threadpool_sdk_limit SYSTEM PRIVATE
+    $<TARGET_PROPERTY:annc_optimizer_1_15,INCLUDE_DIRECTORIES>)
+  target_link_libraries(tf_threadpool_sdk_limit PRIVATE
+    $<TARGET_PROPERTY:annc_optimizer_1_15,LINK_LIBRARIES>)
+  add_test(NAME tf_threadpool_sdk_limit COMMAND tf_threadpool_sdk_limit)
+endif()

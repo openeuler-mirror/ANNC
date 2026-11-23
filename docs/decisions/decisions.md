@@ -184,7 +184,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| **状态** | proposed，2026-10-20；历史提案，实际实现已偏离，见下方 2026-11-11 说明 |
+| **状态** | proposed，2026-10-20；待评审 |
 | **责任人** | ANNC TF1.15 支持开发负责人 |
 | **源码基线** | `c1622b8`；构建入口同时参考当前工作区的 `build.sh` |
 | **上下文** | TF1.15 需要使用 ANNC 已有图融合和常量折叠，并用 tensordot 测试已有优化效果。继续在同一插件实现中叠加 TF 版本分支会混合公共流程与接口差异；TF 图处理也尚未按 ONNX 的职责划分集中到 `frontends/`。 |
@@ -193,13 +193,6 @@
 | **后果** | 版本差异有独立位置，前端语义集中，公共工具只构建一套。过渡期间新公共代码先由 TF1.15 使用，与 TF2.20 原目录存在必要重复；TF2.20 后续迁移单独实施。 |
 | **备选方案** | 在原插件中继续堆叠版本条件会增加后续维护成本；立即迁移 TF2.20 会扩大本次交付范围；复制两套 TF 前端缺乏源码差异依据，因此均不采用。 |
 | **详细方案** | [ANNC 支持 TensorFlow 1.15 设计方案](../design/tensorflow-1-15-support/overall.md) |
-
-**实现状态补充（2026-11-11，源码 `20d0f8a`）**：以上保留原提案，不追认其评审状态。
-当前 TF1.15 使用 `addons/tensorflow/plugin` 与独立 `support` 静态库，C 接口隔离
-TF SDK 与 C++17 / ABI=1；优化器文件和子进程管理仍在 `plugin/optimizer.cc`。
-构建按目标 Python 选择一个 TF 版本，TF1.15 与 ORT EP 组合被拒绝；tensordot
-已有整段匹配，TF 静态形状走 AOT、动态形状走 JIT。预打包沿用 ADR-017 的代码与
-权重分离契约。当前模块、接口、限制及验收入口以[更新后的设计说明](../design/tensorflow-1-15-support/overall.md)为准。
 
 <a id="adr-017"></a>
 
@@ -255,10 +248,48 @@ TF SDK 与 C++17 / ABI=1；优化器文件和子进程管理仍在 `plugin/optim
 
 ## ADR-022：Kernel Context 与统一 Runtime ABI
 
-状态：**手写 builtin 迁移已实现；整体统一 ABI 仍为 proposed**，更新 2026-10-24。详细边界见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。
+状态：**手写 builtin 迁移已实现；整体统一 ABI 仍为 proposed**，更新 2026-11-11。详细边界见 [Kernel Context 与统一 Runtime ABI 设计](../design/runtime/kernel-context-runtime-design.md)。
 
 | 项目 | 内容 |
 | --- | --- |
 | **决策** | 新产物使用版本化 `annc_context_v3`，kernel 与融合函数外部入口统一为 `AnncStatusCode (*)(AnncKernelContext*)`。Context 包含借用的 tensor view、typed attrs 和 C 服务表；输出预绑定与执行时分配属于同一 slot 协议。复用现有 registry/backend 选择、分配实现、线程池和公共 lowering，在临近 LLVM 调用时封装 payload。 |
-| **线程池调用** | kernel 使用 `context.getThreadPool()` 获取借用句柄，以 `Shard(maxParallelism, workers, total, costPerUnit, work)` 分片。服务表追加可选 C `shard` 回调并逐字段检查 `struct_size`；旧服务表缺少 shard 时串行回退。 |
+| **线程池调用** | 服务结构用 `AnncThreadPool*` 替换四个调度回调，复用原有虚函数接口。kernel 通过 `getThreadPool()` 获取 services 中的借用指针；`getKernelThreadPool()` 返回使用同一线程池的 `KernelThreadPool` 包装；分片沿用 `Shard(maxParallelism, workers, total, costPerUnit, work)`，包装调用线程池虚函数并处理 Context 错误与任务异常。空池不查询 TLS；生成式代码的旧 TLS 路径暂时保留，显式 Context 获取仍待迁移。Context 和服务结构继续共用版本号 3，入口名仍为 v3；版本号不区分本次布局变更。宿主与 kernel 必须匹配 C++ ABI 并配套重编译。 |
 | **后果** | 调用签名、动态输出和错误契约统一，输入数量不再受旧参数 switch 限制；需要协调 schema、fusion、lowering、运行时和测试迁移，并验证 C/LLVM 布局与生命周期。 |
+
+<a id="adr-023"></a>
+
+## ADR-023：pb2stablehlo 前端的 wheel 隔离构建域
+
+状态：**已实施**（批 1 合入 build 骨架与 common 层），2026-11-11。
+
+| 项目 | 内容 |
+| --- | --- |
+| **上下文** | V2 stablehlo 路线的生产端（TF GraphDef → StableHLO 前端）需调用 TF 自身 C++ transform passes（`odml::AddLegalizeTFToStablehloPasses`、`GraphConstructor`、`GraphProperties` 等），其符号只存在于 pip TF wheel 的 `libtensorflow_cc.so.2`；该 .so 内嵌 vendored MLIR 21.0.0git，与项目 LLVM/MLIR 20 工具链的 C++ ABI 不可混用。 |
+| **决策** | 前端作为一个独立构建域编译链接：仅依赖 TF 2.20 wheel（头 + `libtensorflow_cc.so.2`），不引用项目任何 LLVM/MLIR 头或库；挂载在 V2 统一开关（`ANNC_ENABLE_TF2ATIR_V2`，TF-2.20 分支内）之下；llvm 头按三级来源解析（本地快照 → 显式目录 → 官方仓 sparse clone），快照不入库；生成的 `llvm-config.h` 作为构建资产入库；该域的测试用纯 CHECK 宏，不引入项目 GTest。 |
+| **理由** | ① 混链会产生 ilist/ABI 宏层面的错位，链接期以晦涩的 relocation 错误表现（1030 实测）；② 前端是开发机离线工具（产物 `.mlir`，不进 predictor），wheel 依赖不违反部署形态纪律；③ 单一开关保持 V2 路线与 sink/转换器侧的构建一致性；④ 快照不入库、按官方源拉取，避免第三方代码副本长期漂移。 |
+| **备选方案** | 与项目工具链混编（ABI 不可行）；宿主源码树自建 TF C++ SDK（成本远超收益，且 odml passes 需要 wheel 的完整符号面）；vendored 头整体入库（体积与漂移成本高，仅保留 1 个生成头为构建资产）。 |
+| **后果** | ✅ 前端与 v1/V2 其余组件解耦，默认构建零影响；✅ host 侧可用官方 llvm-project 源复现。❌ 构建需可 `import tensorflow` 的 2.20 wheel（配置期强门禁）；❌ 前端工具不可用项目 GTest/工具链调试设施；❌ llvm 头来源依赖网络或本地预置（FATAL 信息含三条出路）。 |
+| **详细设计** | [frontend-transform.md](../design/tf-stablehlo-frontend/frontend-transform.md) |
+
+<a id="adr-024"></a>
+
+## ADR-024：Context 融合函数的手写 Customize 与 codegen 路线互斥
+
+状态：**accepted（既有架构变更追记）**；本条记录当前调用边界，不追认变更发生时间或引入提交。
+
+| 项目 | 内容 |
+| --- | --- |
+| **历史背景** | 早期逐算子 Customize pattern 可以只替换融合函数体中的部分算子，与其他 codegen 计算共存；当前 Context 调用约定下，该组合已不属于同一导出函数的执行模型。原架构文档未明确记录这一变化，故在此补记。 |
+| **当前边界** | 一个融合函数由手写 Customize kernel 接管完整区域，或由 codegen 执行完整区域；两条路线在同一导出函数内互斥。Context 的输入、输出槽位按整个融合函数边界编号，不提供内部子算子的局部槽位映射。 |
+| **调用协议** | 手写 Customize 路线将 kernel 返回的 i32 status 用作融合函数返回值；普通 codegen 路线把计算结果绑定到 Context 输出槽位，函数返回 void。部分替换的 Customize 调用不能直接借用整个融合函数的槽位与返回协议。 |
+| **实现现状** | 后端 Customize lowering 校验其结果直接流向函数 return；尚未另行校验函数体是否完全由 Customize 接管。`ANNC_ENABLE_LOWERING_CONTEXT_ABI` 是后续增量实现的临时开关，不是函数级互斥架构的来源。 |
+
+<a id="adr-025"></a>
+
+## ADR-025：ONNX 可选 StableHLO 前端复用公共后端和 EP
+
+状态 **implemented（分支实现）**。
+
+StableHLO 保留了匹配所需的计算、类型和数据流。匹配器直接生成融合候选，ONNX 绑定负责确认原图成员和连线。提取后的标准 kernel IR 交给公共后端，EP 读取其中的 FusionMetadata 并通过原有接口接管会话内的节点。私有 `com.microsoft.FusedTensordotMatMul` 在转换时保留为 `atir.opaque`，由 ORT 执行。
+
+统一入口默认使用 ATIR，StableHLO 由环境变量启用。转换工具与公共后端通过 IR 文件交接，各自使用配套的 MLIR。

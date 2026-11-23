@@ -7,7 +7,9 @@ layered contract that a plain `success` from brpc_client does not prove:
 
   1. ANNCOptimizer is loaded and the graph rewrite ran;
   2. no JIT kernel failed to compile and no model run failed;
-  3. at least one JIT kernel .so was produced in ANNC_WORK_DIR.
+  3. at least one JIT kernel was compiled and dlopen'd (the on-disk work
+     directory is deleted eagerly after load, so no `annc_jit_*` residue
+     may remain under ANNC_WORK_DIR).
 
 Required environment:
   ANNC_PREFIX    install prefix containing bin/annc-tf-pipeline, lib/libannc_optimizer.so
@@ -106,7 +108,11 @@ checks = {
     "graph rewrite completed": "graph rewrite completed successfully" in text,
     "no compile_failed": "compile_failed" not in text,
     "no Running model failed": "Running model failed" not in text,
-    "JIT kernel .so produced": any(work_dir.rglob("kernel.so")),
+    "JIT kernel compiled and loaded":
+        "[ANNC-JIT-TRACE] dlopen completed" in text,
+    # Eager cleanup removes each annc_jit_* work directory right after its
+    # kernel is loaded; any residue means a compile failed without cleanup.
+    "no JIT work dir leaked": not any(work_dir.rglob("annc_jit_*")),
 }
 for name, ok in checks.items():
     print(f"{'PASS' if ok else 'FAIL'}: {name}")

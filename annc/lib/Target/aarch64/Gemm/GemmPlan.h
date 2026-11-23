@@ -11,7 +11,14 @@
 #include "llvm/Support/Error.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
+
+namespace mlir {
+namespace func {
+class FuncOp;
+}
+}  // namespace mlir
 
 namespace annc::aarch64::gemm {
 
@@ -139,6 +146,7 @@ struct GemmTuningConfig {
   // Execution tiles remain the user configuration. The worker planner consumes
   // these exact values; it does not derive an independent cache-blocking plan.
   GemmThreadPlannerCostModel costModel;
+  std::optional<int64_t> maxThreadCount = std::nullopt;
 };
 
 struct GemmKernelABI {
@@ -236,6 +244,19 @@ struct GemmExecutionContext {
 bool isGemmAnchor(mlir::Operation *op);
 mlir::Value getGemmInput(mlir::Operation *op, unsigned index);
 mlir::Value getGemmOutput(mlir::Operation *op, unsigned index);
+// Traces a GEMM operand through transparent rewrites (memref casts,
+// unrealized conversion casts, bufferization wrappers, context-ABI descriptor
+// loads) back to the kernel entry input slot it reads: either a function
+// argument (V1) or an annc_context_get_input_memref call with a constant slot
+// (context ABI, where the slot equals the erased entry argument index).
+// Returns the slot, or -1 when the origin is not an entry input. When
+// `exclusive` is non-null it receives whether the whole chain is single-use.
+int64_t resolveEntryInputSlot(mlir::Value value, mlir::func::FuncOp func,
+                              bool *exclusive = nullptr);
+// Whether the kernel entry input `slot` is an immutable boundary input per the
+// function's fusion.metadata. Mirrors the runtime prepack admission contract,
+// which admits both the "constant" and "fixed" boundary roles.
+bool entrySlotRoleImmutable(mlir::func::FuncOp func, int64_t slot);
 mlir::FailureOr<GemmProblem> readProblem(mlir::Operation *op);
 mlir::FailureOr<GemmTuningStrategy> readStrategy(mlir::Operation *op);
 mlir::FailureOr<GemmTuningStrategy> readTuningStrategy(
@@ -251,6 +272,7 @@ void writeThreadPlanningInput(mlir::Operation *op,
 void writeCandidate(mlir::Operation *op,
                     const GemmThreadPlanningResult &result);
 void setCandidateRhsPacking(mlir::Operation *op, RhsPacking packing);
+mlir::LogicalResult planGemmThreads(mlir::Operation *op);
 void copyStrategyReference(mlir::Operation *source, mlir::Operation *dest);
 void copyGemmMetadata(mlir::Operation *source, mlir::Operation *destination);
 mlir::DictionaryAttr encodePrepackedRhsBinding(mlir::Operation *op, int64_t k,

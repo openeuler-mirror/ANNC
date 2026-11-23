@@ -27,9 +27,7 @@ ANNC 面向 CPU 推理场景，重点解决搜索/推荐/广告（搜推广）�
 | TensorFlow 接入   | 会话启用 Grappler 插件 `ANNCOptimizer` 并加载 `ANNCFused` Op（均由本仓库构建）；模型与业务代码无需改动                         |
 | ONNX Runtime 接入 | 注册 `libannc_ep.so` 并把其执行设备加入 `SessionOptions`（见[注册示例](addons/onnxruntime/README.md#运行)）；模型文件无需改动 |
 
-TF 插件当前可选择 1.15.x 或 2.20.x SDK，一次构建一个版本；TF1.15 + ORT EP 组合暂不接受。TF1.15 的实现与验收范围见 [TF1.15 设计](docs/design/tensorflow-1-15-support/overall.md)。
-
-ONNX 的判定依据与验收范围见 [ONNX 支持整体方案](docs/design/onnx-support/overall.md) 与 [addons/onnxruntime/README.md](addons/onnxruntime/README.md)。
+判定依据与验收范围见 [ONNX 支持整体方案](docs/design/onnx-support/overall.md) 与 [addons/onnxruntime/README.md](addons/onnxruntime/README.md)。
 
 ## 快速开始
 
@@ -86,7 +84,7 @@ ONNX .onnx
 ATIR MLIR
   ├─→ annc-opt（--atir-rank-inference、--atir-identity-canonicalize、--atir-op-fusion；epilogue 融合仅在 ANNC_GEMM=2 时启用）→ 融合后的 ATIR
   ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
-  ├─→ annc-asm（--atir-fast-codegen、--annc-aarch64-gemm-pipeline）
+  ├─→ annc-asm（--annc-fast-codegen、--annc-aarch64-gemm-pipeline）
   │     └─→ lowered MLIR（linalg/affine/scf）
   ├─→ annc → .so / 可执行文件（driver：mlir-opt → mlir-translate → opt → llc → clang link）
   ├─→ annc-verify → kernel 正确性验证

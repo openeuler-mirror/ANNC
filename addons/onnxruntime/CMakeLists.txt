@@ -70,6 +70,13 @@ if(ABSL_LOG_FOUND AND ABSL_CHECK_OP_FOUND)
 endif()
 target_link_libraries(annc_ep PRIVATE ${CMAKE_THREAD_LIBS_INIT})
 
+# Read the standard kernel IR's shared FusionMetadata directly. Compiler
+# symbols stay private under annc_ep.map; StableHLO libraries are not needed.
+target_include_directories(annc_ep SYSTEM PRIVATE
+    ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+target_link_libraries(annc_ep PRIVATE
+    ANNCFusionMetadata MLIRParser MLIRArithDialect MLIRLLVMDialect)
+
 # The EP performs the one-time packed-B conversion in CreateState, using the
 # same MLAS headers the builtin kernels compile against. PackB entry points
 # are private to ORT, so link the host build's MLAS/KleidiAI archives into the
@@ -115,13 +122,13 @@ target_link_libraries(annc_ep PRIVATE
     "${ANNC_EP_ORT_COMMON_ARCHIVE}"
     "${ANNC_EP_ORT_CPUINFO_ARCHIVE}"
     "-Wl,--end-group")
-# Keep the archives' ORT symbols out of the plugin's dynamic symbol table:
-# the host resolves exactly two entry points from this library
-# (onnxruntime/core/session/plugin_ep/ep_library_plugin.cc), and an
-# exported copy of ORT's thread pool could interpose on other dynamically
-# loaded libraries binding the same names.
+# Export only the ORT factory entries and generated-kernel memref accessors.
+# The archives' ORT symbols must remain local to prevent thread-pool symbol
+# interposition on other dynamically loaded libraries.
 target_link_options(annc_ep PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/annc_ep.map")
+set_property(TARGET annc_ep APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/annc_ep.map")
 
 set_target_properties(annc_ep PROPERTIES
     PREFIX "lib"
@@ -143,3 +150,4 @@ install(TARGETS annc_ep DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 # Framework-neutral kernel context definitions and runtime services.
 target_link_libraries(annc_ep PRIVATE ANNCContext)
+target_sources(annc_ep PRIVATE $<TARGET_OBJECTS:ANNCContextMemRefObjects>)

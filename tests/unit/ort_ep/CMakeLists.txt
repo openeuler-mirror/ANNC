@@ -74,4 +74,5 @@ set_target_properties(annc-ep-execution-test PROPERTIES CXX_STANDARD 17
 gtest_discover_tests(annc-ep-execution-test PROPERTIES TIMEOUT 60)
 
 # Common tensor views and kernel context ABI used by the ORT adapter.
-target_link_libraries(annc-ep-execution-test PRIVATE ANNCContext)
+target_link_libraries(annc-ep-execution-test PRIVATE
+    ANNCContext ANNCContextMemRef ANNCThreadPool)

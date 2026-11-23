@@ -1,3 +1,4 @@
+// REQUIRES: legacy-aarch64-pipeline
 // RUN: rm -rf %t.dir && mkdir -p %t.dir && split-file %s %t.dir
 // RUN: env ANNC_GEMM=2 annc-opt --split-input-file %t.dir/discovery.mlir -atir-gemm-epilogue-fusion -o %t.discovery.mlir
 // RUN: FileCheck %t.dir/discovery.mlir < %t.discovery.mlir
@@ -10,7 +11,15 @@
 // RUN: env ANNC_GEMM=2 annc-opt %t.dir/neon-vecmat-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.neon-vecmat.mlir
 // RUN: env ANNC_GEMM=2 annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
 // RUN: env ANNC_GEMM=2 annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
-// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=THREAD-EPILOGUE
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=1)))' < %S/Inputs/gemm-tuning-test.json > %t.serial-gemm.json
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.serial-gemm.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=SERIAL-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=2)))' < %S/Inputs/gemm-tuning-test.json > %t.limited-gemm.json
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.limited-gemm.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=TWO-TASK-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.limited-gemm.json intra-thread-count=1' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=SERIAL-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=0)))' < %S/Inputs/gemm-tuning-test.json > %t.invalid-gemm.json
+// RUN: env ANNC_GEMM=2 not annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.invalid-gemm.json intra-thread-count=4' 2>&1 | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=INVALID-THREAD-LIMIT
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=PARALLEL-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=PARALLEL-EPILOGUE
 // Euler dev selects direct/packed/prepacked from the target plan; the legacy
 // ANNC_GEMM_RHS_PACKING override is intentionally not part of this contract.
 // RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
@@ -560,14 +569,21 @@ func.func @main(
 
 //--- threaded-epilogue.mlir
 
-// The thread planner must keep the ordinary dispatcher ABI unchanged while
-// transporting binary epilogue inputs through the epilogue-aware task ABI.
-// THREAD-EPILOGUE-LABEL: func.func @threaded_add_relu(
-// THREAD-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
-// THREAD-EPILOGUE: func.func private @__annc_gemm_thread_task_
-// THREAD-EPILOGUE-SAME: memref<*xf32>
-// THREAD-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
-// THREAD-EPILOGUE-NOT: arith.addf
+// A limit of one from either the config or the caller keeps the fused
+// epilogue on the serial path.
+// SERIAL-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// SERIAL-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// SERIAL-EPILOGUE-NOT: arith.addf
+// TWO-TASK-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// TWO-TASK-EPILOGUE: %[[TASK_COUNT:.*]] = arith.constant 2 : i64
+// TWO-TASK-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue(%[[TASK_COUNT]],
+// INVALID-THREAD-LIMIT: requires positive integer field max_thread_count
+// PARALLEL-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// PARALLEL-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
+// PARALLEL-EPILOGUE: func.func private @__annc_gemm_thread_task_
+// PARALLEL-EPILOGUE-SAME: memref<*xf32>
+// PARALLEL-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// PARALLEL-EPILOGUE-NOT: arith.addf
 func.func @threaded_add_relu(
     %a: !atir.tensor<128x128xf32>, %b: !atir.tensor<128x128xf32>,
     %out: !atir.tensor<128x128xf32>, %bias: !atir.tensor<128xf32>) {

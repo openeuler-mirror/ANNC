@@ -79,7 +79,7 @@ void CopyAndPad(annc::kernels::KernelContext& context, const float* input_data,
     return;
   }
 
-  auto workers = context.getThreadPool();
+  auto workers = context.getKernelThreadPool();
   const int64_t work_threads = total_elements / kParallelThresholdElements;
   const int requested_threads = static_cast<int>(std::min<int64_t>(
       {work_threads, workers.numThreads(), kMaxParallelThreads}));

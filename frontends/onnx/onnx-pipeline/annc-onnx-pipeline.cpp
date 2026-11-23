@@ -1,25 +1,16 @@
 // annc-onnx-pipeline — whole-model ONNX -> AOT kernel pipeline for the ANNC
 // ONNX Runtime EP (the runtime-compile mode).
 //
-// The EP exports the OrtGraph it partitions to an ONNX model and runs this tool
-// once per (model, toolchain) on a cold cache, from GetCapability. It performs
-// the same stages the offline flow documents, with two deliberate differences:
-//
-//   * intermediates are MLIR bytecode, not text: the target models' textual
-//     ATIR reaches 465 MB for a 116 MB model (measured);
-//   * the site report is written here, by parsing the fused module in-process.
-//     annc-fusion-metadata reads textual MLIR only, and the report must carry
-//     the fused region's member nodes so the EP can claim exactly that set.
+// The EP exports its graph to ONNX and runs this driver on a cold cache.
+// ANNC_ONNX_USE_STABLEHLO=1 selects the optional StableHLO frontend.
 //
 // Usage:
 //   annc-onnx-pipeline --model <model.onnx> --out-dir <dir>
 //                      [--work-dir <dir>] [--execution-modes aot] [--verbose]
 //   annc-onnx-pipeline --toolchain-info
 //
-// Outputs in --out-dir: sites.json, libannc_kernels.so (the latter only when at
-// least one site was fused). Exit status: 0 when the pipeline ran (even with
-// zero sites), non-zero when a stage failed -- the caller then falls back to
-// the CPU EP rather than failing the session.
+// The ATIR frontend publishes sites.json and StableHLO publishes model.fused.mlir.
+// Both produce libannc_kernels.so when at least one site was fused.
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -38,6 +29,8 @@
 
 #include "Dialect/Atir/AtirOps.h"
 #include "FusionMetadata/FusionMetadataJson.h"
+#include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -57,11 +50,17 @@ constexpr const char *kContractVersion = "1.0.0";
 // fingerprint covers all of them: a rebuilt codegen must not reuse kernels
 // compiled by the previous one.
 constexpr const char *kPipelineTools[] = {
-    "annc-onnx-pipeline", "annc-onnx2atir", "annc-opt",
-    "annc-asm",           "annc",           "mlir-opt",
-    "mlir-translate",     "opt",            "llc",
-    "clang",
+    "annc-onnx-pipeline", "annc-asm", "annc", "mlir-opt", "mlir-translate",
+    "opt", "llc", "clang",
 };
+
+std::string stablehloToolDir() {
+#ifdef ANNC_STABLEHLO_TOOL_DIR
+  return ANNC_STABLEHLO_TOOL_DIR;
+#else
+  return "";
+#endif
+}
 
 struct Options {
   std::string model;
@@ -78,7 +77,8 @@ void printUsage() {
       << "Usage: annc-onnx-pipeline --model <model.onnx> --out-dir <dir>\n"
          "                           [--work-dir <dir>] [--execution-modes aot]\n"
          "                           [--keep-temps] [--verbose]\n"
-         "       annc-onnx-pipeline --toolchain-info\n";
+         "       annc-onnx-pipeline --toolchain-info\n"
+         "  Set ANNC_ONNX_USE_STABLEHLO=1 to enable the StableHLO frontend.\n";
 }
 
 bool hasArg(int argc, char **argv, const std::string &name) {
@@ -90,13 +90,32 @@ bool hasArg(int argc, char **argv, const std::string &name) {
 
 std::string takeValue(int argc, char **argv, const std::string &name,
                       const std::string &fallback = "") {
-  for (int i = 1; i + 1 < argc; ++i) {
-    if (name == argv[i]) return argv[i + 1];
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == name && i + 1 < argc) return argv[i + 1];
+    if (arg.rfind(name + "=", 0) == 0) return arg.substr(name.size() + 1);
   }
   return fallback;
 }
 
-bool parseOptions(int argc, char **argv, Options *opts) {
+bool parseOptions(int argc, char **argv, bool stablehlo, Options *opts) {
+  if (stablehlo) {
+    for (int i = 1; i < argc; ++i) {
+      const std::string raw = argv[i];
+      const std::string arg = raw.substr(0, raw.find('='));
+      if (arg == "--model" || arg == "--out-dir" || arg == "--work-dir" ||
+          arg == "--execution-modes") {
+        if (raw != arg || (++i < argc && argv[i][0] != '-')) continue;
+        std::cerr << "[annc-onnx-pipeline] missing value for " << arg << "\n";
+        return false;
+      }
+      if (raw == "--toolchain-info" || raw == "--verbose" || raw == "-v" ||
+          raw == "--keep-temps")
+        continue;
+      std::cerr << "[annc-onnx-pipeline] unknown option: " << arg << "\n";
+      return false;
+    }
+  }
   opts->model = takeValue(argc, argv, "--model");
   opts->outDir = takeValue(argc, argv, "--out-dir");
   opts->workDir = takeValue(argc, argv, "--work-dir", opts->outDir);
@@ -113,7 +132,21 @@ bool parseOptions(int argc, char **argv, Options *opts) {
 }
 
 std::string selfDir(const char *argv0) {
-  return fs::absolute(fs::path(argv0)).lexically_normal().parent_path().string();
+  fs::path executable(argv0);
+  if (!executable.has_parent_path()) {
+    const char *searchPath = std::getenv("PATH");
+    std::stringstream path(searchPath ? searchPath : "");
+    std::string directory;
+    while (std::getline(path, directory, ':')) {
+      const fs::path candidate = fs::path(directory) / executable;
+      if (fs::is_regular_file(candidate) &&
+          ::access(candidate.c_str(), X_OK) == 0) {
+        executable = candidate;
+        break;
+      }
+    }
+  }
+  return fs::canonical(executable).parent_path().string();
 }
 
 std::string sibling(const char *argv0, const std::string &name) {
@@ -138,6 +171,10 @@ struct ToolFingerprint {
 ToolFingerprint fingerprintOf(const char *argv0, const char *name) {
   ToolFingerprint entry{name, 0, 0, false};
   std::vector<std::string> candidates;
+  if (std::strcmp(name, "onnx-mlir-opt") == 0) {
+    const std::string upstream = stablehloToolDir();
+    if (!upstream.empty()) candidates.push_back((fs::path(upstream) / name).string());
+  }
   for (const std::string &dir : toolSearchDirs(argv0)) {
     candidates.push_back((fs::path(dir) / name).string());
   }
@@ -162,17 +199,27 @@ ToolFingerprint fingerprintOf(const char *argv0, const char *name) {
   return entry;
 }
 
-void printToolchainInfo(const char *argv0) {
+void printToolchainInfo(const char *argv0, bool stablehlo) {
   std::ostringstream out;
-  out << "{\"schema\":\"annc-toolchain-info/1\",\"tools\":[";
+  out << "{\"schema\":\"annc-toolchain-info/1\",\"frontend\":\""
+      << (stablehlo ? "stablehlo" : "atir") << "\",\"tools\":[";
   bool first = true;
-  for (const char *name : kPipelineTools) {
+  auto emit = [&](const char *name) {
     ToolFingerprint entry = fingerprintOf(argv0, name);
-    if (!entry.found) continue;
+    if (!entry.found) return;
     if (!first) out << ",";
     first = false;
     out << "{\"name\":\"" << entry.name << "\",\"size\":" << entry.size
         << ",\"mtime_ns\":" << entry.mtimeNs << "}";
+  };
+  for (const char *name : kPipelineTools) emit(name);
+  if (stablehlo) {
+    for (const char *name : {"annc-onnx2stablehlo", "annc-onnx-framework-opt",
+                            "annc-stablehlo-opt", "onnx-mlir-opt"})
+      emit(name);
+  } else {
+    emit("annc-onnx2atir");
+    emit("annc-opt");
   }
   out << "]}";
   std::cout << out.str() << "\n";
@@ -356,17 +403,20 @@ bool writeFile(const std::string &path, const std::string &content) {
 // The fused module carries one kernel func per site; the report is the
 // serialized FusionInfo list, which already names the kernel, its arguments,
 // the ABI and the fused region's member nodes.
-bool writeSiteReport(const std::string &fusedModulePath, const std::string &outPath,
-                     size_t *siteCount, std::string *error) {
+bool writeFusionArtifact(const fs::path &fusedModulePath,
+                         const fs::path &outPath, bool stablehlo,
+                         size_t *siteCount, std::string *error) {
   DialectRegistry registry;
-  registry.insert<func::FuncDialect, LLVM::LLVMDialect, atir::AtirDialect>();
+  registry.insert<func::FuncDialect, arith::ArithDialect, LLVM::LLVMDialect>();
+  // The EP reads the published StableHLO kernel IR with this same registry.
+  if (!stablehlo) registry.insert<atir::AtirDialect>();
   MLIRContext context(registry);
   context.loadAllAvailableDialects();
-  context.allowUnregisteredDialects();
+  if (!stablehlo) context.allowUnregisteredDialects();
 
-  auto module = parseSourceFile<ModuleOp>(fusedModulePath, &context);
+  auto module = parseSourceFile<ModuleOp>(fusedModulePath.string(), &context);
   if (!module) {
-    *error = "cannot parse the fused module '" + fusedModulePath + "'";
+    *error = "cannot parse the fused module '" + fusedModulePath.string() + "'";
     return false;
   }
 
@@ -391,143 +441,211 @@ bool writeSiteReport(const std::string &fusedModulePath, const std::string &outP
     return false;
   }
 
-  nlohmann::json report;
-  report["schema"] = kReportSchema;
-  report["contract_version"] = kContractVersion;
-  report["sites"] = annc::fusion::fusionInfosToJson(infos)["fusions"];
   *siteCount = infos.size();
-  return writeFile(outPath, report.dump(1) + "\n");
+  std::string content;
+  if (stablehlo) {
+    // Publish the same extracted module that enters the common backend.
+    llvm::raw_string_ostream stream(content);
+    module->print(stream);
+    stream << "\n";
+  } else {
+    nlohmann::json report;
+    report["schema"] = kReportSchema;
+    report["contract_version"] = kContractVersion;
+    report["sites"] = annc::fusion::fusionInfosToJson(infos)["fusions"];
+    content = report.dump(1) + "\n";
+  }
+  if (writeFile(outPath.string(), content)) return true;
+  *error = "cannot write '" + outPath.string() + "'";
+  return false;
 }
 
-int runPipeline(int argc, char **argv, const Options &opts) {
+int runPipeline(const char *argv0, const Options &opts, bool stablehlo) {
   if (opts.executionModes != "aot") {
-    // The GEMM/MatMul family is jit-mode and needs a different stage sequence
-    // (select-kernel + specialize-shapes, shape-driven); refusing here keeps
-    // the EP on the CPU path instead of producing an empty kernel library.
     std::cerr << "[annc-onnx-pipeline] execution mode '" << opts.executionModes
               << "' is not implemented (only 'aot')\n";
     return 2;
   }
-  std::error_code code;
-  fs::create_directories(opts.workDir, code);
-  fs::create_directories(opts.outDir, code);
-  if (!fs::exists(opts.model)) {
-    std::cerr << "[annc-onnx-pipeline] model not found: " << opts.model << "\n";
+
+  const fs::path model = fs::absolute(opts.model).lexically_normal();
+  const fs::path work = fs::absolute(opts.workDir).lexically_normal();
+  const fs::path out = fs::absolute(opts.outDir).lexically_normal();
+  const fs::path raw = work / "model.mlirbc";
+  const fs::path hlo = work / "model.stablehlo.mlir";
+  const fs::path hloMetadata = work / "model.stablehlo.json";
+  const fs::path partitioned = work / "model.partitioned.mlir";
+  const fs::path bound = work / "model.bound.mlir";
+  const fs::path fused = work / "model.fused.mlirbc";
+  const fs::path aot = stablehlo ? fused : work / "model.aot.mlirbc";
+  const fs::path lowered = work / "model.low.mlir";
+  const fs::path jsonReport = out / "sites.json";
+  const fs::path kernelIr = out / "model.fused.mlir";
+  const fs::path kernelSo = out / "libannc_kernels.so";
+
+  const std::vector<fs::path> intermediates =
+      stablehlo ? std::vector<fs::path>{hlo, hloMetadata, partitioned, bound,
+                                       fused, lowered}
+                : std::vector<fs::path>{raw, fused, aot, lowered};
+  if (!fs::is_regular_file(model)) {
+    std::cerr << "[annc-onnx-pipeline] model not found: " << model << "\n";
     return 2;
   }
-  // Fail before the (expensive) frontend run when the toolchain cannot link:
-  // the annc driver resolves every archive -- the ANNC kernels and the LLVM
-  // support libraries -- from this single directory.
-  {
-    const fs::path kernelLib = kernelLibPathOf(argv[0]);
-    const fs::path llvmLib = llvmLibDir();
-    // The annc driver resolves the ANNC archives from the kernel lib directory
-    // and the LLVM support archives from the LLVM 20 toolchain lib directory.
-    const std::pair<fs::path, const char *> required[] = {
-        {kernelLib, "libANNCBuiltinKernels.a"},
-        {llvmLib, "libLLVMSupport.a"},
-        {llvmLib, "libLLVMDemangle.a"},
-    };
-    for (const auto &[dir, name] : required) {
-      if (!fs::exists(dir / name)) {
-        std::cerr << "[annc-onnx-pipeline] " << (dir / name).string()
-                  << " is missing; set ANNC_KERNEL_LIB_PATH to a complete ANNC "
-                     "install lib directory (install/lib64 or install/lib), "
-                     "install llvm-toolset-20-llvm-static, or run `ninja install`\n";
-        return 2;
-      }
+  auto outputs = intermediates;
+  outputs.insert(outputs.end(), {jsonReport, kernelIr, kernelSo});
+  for (const auto &output : outputs) {
+    std::error_code ignored;
+    if (model == output || fs::equivalent(model, output, ignored)) {
+      std::cerr << "[annc-onnx-pipeline] ONNX input conflicts with pipeline output: "
+                << output << "\n";
+      return 2;
+    }
+    if (fs::exists(output) && !fs::is_regular_file(output)) {
+      std::cerr << "[annc-onnx-pipeline] output must be a regular file: " << output
+                << "\n";
+      return 2;
     }
   }
 
-  const fs::path work(opts.workDir);
-  const fs::path rawModule = work / "model.mlirbc";
-  const fs::path fusedModule = work / "model.fused.mlirbc";
-  const fs::path aotModule = work / "model.aot.mlirbc";
-  const fs::path loweredModule = work / "model.low.mlir";
-  const fs::path reportPath = fs::path(opts.outDir) / "sites.json";
-  const fs::path kernelSo = fs::path(opts.outDir) / "libannc_kernels.so";
-
-  const std::string anncOnnx2Atir = sibling(argv[0], "annc-onnx2atir");
-  const std::string anncOpt = sibling(argv[0], "annc-opt");
-  const std::string anncAsm = sibling(argv[0], "annc-asm");
-  const std::string annc = sibling(argv[0], "annc");
-  const std::vector<std::string> env = buildChildEnv(argv[0]);
-  const std::string cwd = work.string();
-
-  // 1. ONNX -> ATIR. The frontend exits 2 when the import succeeded but some
-  //    nodes fell back to atir.opaque (annc-onnx2atir.cpp:585); that is normal
-  //    for real models and does not affect the sites we fuse.
-  int rc = runTool({anncOnnx2Atir, opts.model, "--quiet", "--emit-bytecode",
-                    "-o", rawModule.string()},
-                   cwd, env, opts.verbose);
-  if (rc != 0 && rc != 2) return rc;
-
-  // 2. Canonicalize + fuse. Every pattern runs here, including ones this EP
-  //    does not support yet; the report decides what is claimed, not this tool.
-  rc = runTool({anncOpt, rawModule.string(), "--atir-identity-canonicalize",
-                "--atir-op-fusion", "--emit-bytecode", "-o", fusedModule.string()},
-               cwd, env, opts.verbose);
-  if (rc != 0) return rc;
-
-  // 3. Site report, in-process (see the file header).
-  auto dropIntermediates = [&]() {
-    if (opts.keepTemps) return;
-    std::error_code ignored;
-    fs::remove(rawModule, ignored);
-    fs::remove(fusedModule, ignored);
-    fs::remove(aotModule, ignored);
-    fs::remove(loweredModule, ignored);
+  // The annc driver links the kernel and LLVM support archives.
+  const std::pair<fs::path, const char *> required[] = {
+      {kernelLibPathOf(argv0), "libANNCBuiltinKernels.a"},
+      {llvmLibDir(), "libLLVMSupport.a"},
+      {llvmLibDir(), "libLLVMDemangle.a"},
   };
+  for (const auto &[dir, name] : required) {
+    if (!fs::is_regular_file(dir / name)) {
+      std::cerr << "[annc-onnx-pipeline] " << (dir / name)
+                << " is missing; set ANNC_KERNEL_LIB_PATH to a complete ANNC "
+                   "install and select an LLVM toolchain with static archives\n";
+      return 2;
+    }
+  }
+
+  fs::create_directories(work);
+  fs::create_directories(out);
+  const auto env = buildChildEnv(argv0);
+  auto runStage = [&](const char *name, const std::vector<std::string> &args,
+                      int allowedStatus = 0) {
+    if (opts.verbose)
+      std::cerr << "[annc-onnx-pipeline] stage: " << name << "\n";
+    const int status = runTool(args, work.string(), env, opts.verbose);
+    if (status != 0 && status != allowedStatus)
+      std::cerr << "[annc-onnx-pipeline] " << name << " failed (exit " << status
+                << ")\n";
+    return status == allowedStatus ? 0 : status;
+  };
+
+  int rc;
+  if (stablehlo) {
+    std::vector<std::string> command{
+        sibling(argv0, "annc-onnx2stablehlo"), model.string(), "-o", hlo.string(),
+        "--metadata", hloMetadata.string()};
+    const std::string upstream = stablehloToolDir();
+    if (!upstream.empty())
+      command.insert(command.end(), {"--tool-dir", upstream});
+    rc = runStage("ONNX to StableHLO", command);
+    if (rc != 0) return rc;
+
+    // Generic assembly preserves provenance across the matcher and binder.
+    const std::string reader = sibling(argv0, "annc-stablehlo-opt");
+    rc = runStage("StableHLO fusion",
+                  {reader, hlo.string(), "--annc-stablehlo-partition",
+                   "--mlir-print-debuginfo", "--mlir-print-op-generic", "-o",
+                   partitioned.string()});
+    if (rc != 0) return rc;
+    rc = runStage("ONNX binding",
+                  {reader, partitioned.string(), "--annc-stablehlo-bind-onnx",
+                   "--mlir-print-debuginfo", "--mlir-print-op-generic", "-o",
+                   bound.string()});
+    if (rc != 0) return rc;
+    rc = runStage("kernel extraction",
+                  {reader, bound.string(), "--annc-stablehlo-kernels",
+                   "--emit-bytecode", "-o", fused.string()});
+  } else {
+    // The importer exits 2 when unsupported nodes were imported as opaque ops.
+    rc = runStage("ONNX to ATIR",
+                  {sibling(argv0, "annc-onnx2atir"), model.string(), "--quiet",
+                   "--emit-bytecode", "-o", raw.string()},
+                  2);
+    if (rc != 0) return rc;
+    rc = runStage("ATIR fusion",
+                  {sibling(argv0, "annc-opt"), raw.string(),
+                   "--atir-identity-canonicalize", "--atir-op-fusion",
+                   "--emit-bytecode", "-o", fused.string()});
+  }
+  if (rc != 0) return rc;
 
   size_t siteCount = 0;
   std::string error;
-  if (!writeSiteReport(fusedModule.string(), reportPath.string(), &siteCount, &error)) {
-    std::cerr << "[annc-onnx-pipeline] site report failed: " << error << "\n";
+  if (!writeFusionArtifact(fused, stablehlo ? kernelIr : jsonReport, stablehlo,
+                           &siteCount, &error)) {
+    std::cerr << "[annc-onnx-pipeline] kernel metadata failed: " << error << "\n";
     return 1;
   }
-  if (siteCount == 0) {
-    // Zero sites is a valid outcome (a graph with no fusable region); skipping
-    // codegen keeps the cold path short for such models.
-    dropIntermediates();
-    std::cerr << "[annc-onnx-pipeline] no fusion sites; skipping codegen\n";
-    return 0;
+
+  if (siteCount != 0) {
+    if (!stablehlo) {
+      rc = runStage("AOT kernel extraction",
+                    {sibling(argv0, "annc-opt"), fused.string(),
+                     "--atir-prune-func=execution-mode=aot", "--emit-bytecode",
+                     "-o", aot.string()});
+      if (rc != 0) return rc;
+    }
+    std::string fastCodegenPass = "--annc-fast-codegen";
+#ifdef ANNC_ENABLE_KDNN_ADAPTOR
+    fastCodegenPass += "=enable-kdnn=true";
+#endif
+    rc = runStage("backend lowering",
+                  {sibling(argv0, "annc-asm"), aot.string(), fastCodegenPass,
+                   "--annc-aarch64-gemm-pipeline", "-o", lowered.string()});
+    if (rc != 0) return rc;
+    rc = runStage("kernel compilation",
+                  {sibling(argv0, "annc"), lowered.string(), "--shared", "-o",
+                   kernelSo.string()});
+    if (rc != 0) return rc;
   }
 
-  // 4-6. Prune to the AOT kernels, lower, link one library per model.
-  rc = runTool({anncOpt, fusedModule.string(),
-                "--atir-prune-func=execution-mode=aot", "--emit-bytecode",
-                "-o", aotModule.string()},
-               cwd, env, opts.verbose);
-  if (rc != 0) return rc;
-  std::string fastCodegenPass = "--atir-fast-codegen";
-#ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  fastCodegenPass = "--atir-fast-codegen=enable-kdnn=true";
-#endif
-  rc = runTool({anncAsm, aotModule.string(), fastCodegenPass,
-                "--annc-aarch64-gemm-pipeline", "-o", loweredModule.string()},
-               cwd, env, opts.verbose);
-  if (rc != 0) return rc;
-  rc = runTool({annc, loweredModule.string(), "--shared", "-o", kernelSo.string()},
-               cwd, env, opts.verbose);
-  if (rc != 0) return rc;
-
-  dropIntermediates();
-  std::cerr << "[annc-onnx-pipeline] " << siteCount << " site(s) -> "
-            << kernelSo.string() << "\n";
+  // The EP prefers kernel IR. Remove an earlier run's inactive report.
+  fs::remove(stablehlo ? jsonReport : kernelIr);
+  if (siteCount == 0) fs::remove(kernelSo);
+  if (!opts.keepTemps) {
+    for (const auto &path : intermediates) {
+      std::error_code ignored;
+      fs::remove(path, ignored);
+    }
+  }
+  std::cerr << "[annc-onnx-pipeline] " << siteCount << " site(s)";
+  if (siteCount != 0)
+    std::cerr << " -> " << kernelSo.string();
+  else
+    std::cerr << "; skipping codegen";
+  std::cerr << "\n";
   return 0;
 }
 
 }  // namespace
 
 int main(int argc, char **argv) {
+  if (hasArg(argc, argv, "--help") || hasArg(argc, argv, "-h")) {
+    printUsage();
+    return 0;
+  }
+
+  const char *frontend = std::getenv("ANNC_ONNX_USE_STABLEHLO");
+  const bool stablehlo = frontend && std::strcmp(frontend, "1") == 0;
   Options opts;
-  if (!parseOptions(argc, argv, &opts)) {
+  if (!parseOptions(argc, argv, stablehlo, &opts)) {
     printUsage();
     return 2;
   }
-  if (opts.toolchainInfo) {
-    printToolchainInfo(argv[0]);
-    return 0;
+  try {
+    if (opts.toolchainInfo) {
+      printToolchainInfo(argv[0], stablehlo);
+      return 0;
+    }
+    return runPipeline(argv[0], opts, stablehlo);
+  } catch (const std::exception &error) {
+    std::cerr << "[annc-onnx-pipeline] " << error.what() << "\n";
+    return 1;
   }
-  return runPipeline(argc, argv, opts);
 }

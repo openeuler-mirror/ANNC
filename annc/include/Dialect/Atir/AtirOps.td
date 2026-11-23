@@ -72,10 +72,12 @@ def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
     convert it into the standard operations with `--graph-plugin` or 
     `--grouping-plugin` is highly recommend. 
   }];
-  let arguments = (ins Variadic<Atir_Tensor>:$inputs,
+  // V2 route: the mixed carrier keeps builtin ranked tensors here; the
+  // fast-codegen Customize rewrite reads either carrier.
+  let arguments = (ins Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$inputs,
                        StrAttr:$opType,
                        OptionalAttr<DictionaryAttr>:$metadata);
-  let results = (outs Variadic<Atir_Tensor>:$output);
+  let results = (outs Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$output);
   let assemblyFormat = [{
     ( `(` $inputs^ `)` )?
     attr-dict `:` functional-type(operands, results)

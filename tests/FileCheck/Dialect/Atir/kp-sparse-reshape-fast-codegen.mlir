@@ -1,4 +1,4 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s
 // KP-style sparse reshape fusion, second level, Context V3: inside the
 // kernel func (signature 4 tensor inputs, 2 results) the chain folds
 // into a single KPFusedSparseReshapeI64 CustomizeOp; the two .Result()

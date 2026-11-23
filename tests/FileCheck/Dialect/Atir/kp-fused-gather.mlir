@@ -1,5 +1,5 @@
 // RUN: annc-opt --split-input-file %s --atir-identity-canonicalize --atir-config-fusion="config=%S/config-fusion-kp-fused-gather.json run-builtin-after=false" | FileCheck %s
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=FAST
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s --check-prefix=FAST
 
 // CHECK-LABEL: func.func private @fused_kp_fused_gather_external_
 // CHECK-SAME: %arg0: !atir.tensor<2x4xf32>, %arg1: !atir.tensor<4x3xi64>, %arg2: !atir.tensor<2xi32>

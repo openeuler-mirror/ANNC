@@ -29,6 +29,9 @@ class ThreadPoolAdapter final : public annc::threadpool::AnncThreadPool {
                                    : 0;
     const int64_t cost =
         std::max<int64_t>(options.cost_per_unit.value_or(1), 1);
+    const int max_parallelism = options.max_parallelism.has_value()
+                                    ? std::max(1, *options.max_parallelism)
+                                    : 0;
     struct Task {
       const std::function<void(int64_t, int64_t)>& fn;
       std::mutex mutex;
@@ -46,7 +49,8 @@ class ThreadPoolAdapter final : public annc::threadpool::AnncThreadPool {
       }
     };
     const int status = callbacks_.parallel_for(callbacks_.context, total,
-                                               block_size, cost, invoke, &task);
+                                               block_size, cost,
+                                               max_parallelism, invoke, &task);
     if (task.error) std::rethrow_exception(task.error);
     if (status)
       throw std::runtime_error("TensorFlow thread-pool callback failed");

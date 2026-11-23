@@ -1,5 +1,5 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=FAST
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen -lower-context-kernel-entries -convert-atir-to-linalg | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s --check-prefix=FAST
 
 // CHECK-LABEL: func.func private @fused_matmul_add_relu(
 // CHECK-SAME: %[[CTX:[A-Za-z0-9_]+]]: !llvm.ptr) -> i32

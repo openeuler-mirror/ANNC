@@ -85,7 +85,7 @@ AnncStatusCode maskedMulSiteImpl(annc::kernels::KernelContext& context,
   const auto divisorBits = attrs[6];
   const auto padding = attrs[7];
   if (!ids) return context.status();
-  auto thread_pool = context.getThreadPool();
+  auto thread_pool = context.getKernelThreadPool();
   // 实参个数是 data + Sum 的其它输入；输出个数是 Mul 的个数（raw + fed），两者
   // 不必相等——同一份 data 被多个 Mul 读时实参只出现一次（见 argMap）。
   if (dataArgs < 1 || rawMuls < 1 || rawMuls > 16 || fedMuls < 0 ||

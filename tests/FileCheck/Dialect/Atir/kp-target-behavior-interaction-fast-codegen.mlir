@@ -1,4 +1,4 @@
-// RUN: annc-asm --atir-fast-codegen %s | FileCheck %s
+// RUN: annc-asm --annc-fast-codegen %s | FileCheck %s
 // KP-style target-behavior interaction fusion, second level: inside the
 // kernel func extracted by OpFusion (args = batch_input/weight/bias/
 // tile_input/output), the BatchMatMul->Add->Abs->Add->Mul(0.5) + Tile +
