@@ -66,7 +66,7 @@ ninja && ninja install
 - `--clean`：清理构建目录后重新构建
 - `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
 - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party 保持原构建类型、不重编
-- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF + ORT 加速栈。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
+- 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF 前端、当前 TF 环境对应的插件（1.15 或 2.20）、ONNX 前端和 ORT EP。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
 - `--dry-run`：打印解析后的框架开关并退出，不 configure/build
 - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
 - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
