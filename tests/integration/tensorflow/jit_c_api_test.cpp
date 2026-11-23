@@ -1,7 +1,4 @@
-#include <unistd.h>
-
 #include <array>
-#include <cerrno>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -86,10 +83,10 @@ bool CheckCache(AnncJitCompileRequest request) {
   auto second = cache.GetOrCompile({"second"}, compile);
   CHECK(second.ok() && second.executable != first.executable);
   CHECK(ComputesSum(first.executable->kernelFunction()));
-  const std::string path = first.executable->workDir();
-  CHECK(access(path.c_str(), F_OK) == 0);
+  // The work directory is removed eagerly right after the successful dlopen,
+  // so no path is reported and the kernel destructor has nothing to delete.
+  CHECK(first.executable->workDir().empty());
   first.executable.reset();
-  CHECK(access(path.c_str(), F_OK) != 0 && errno == ENOENT);
   CHECK(ComputesSum(second.executable->kernelFunction()));
   return true;
 }
