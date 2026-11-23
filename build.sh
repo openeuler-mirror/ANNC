@@ -25,6 +25,7 @@ ENABLE_TENSORFLOW="ON"
 ENABLE_TENSORFLOW_ADDON=""
 ENABLE_ONNX="ON"
 ENABLE_ONNXRUNTIME_EP="OFF"
+ENABLE_ONNX_STABLEHLO="OFF"
 ENABLE_TF2ATIR_V2="OFF"
 # Mutually exclusive framework selection. Empty keeps the legacy default
 # (TensorFlow + ONNX frontend, ORT EP off). --enable-tf / --enable-ort / --all
@@ -138,6 +139,10 @@ while [[ $# -gt 0 ]]; do
       FRAMEWORK_MODE="ort"
       shift
       ;;
+    --enable-onnx-stablehlo)
+      ENABLE_ONNX_STABLEHLO="ON"
+      shift
+      ;;
     --all|--enable-all)
       if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "all" ]; then
         echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
@@ -223,6 +228,8 @@ while [[ $# -gt 0 ]]; do
       echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
       echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
       echo "                                (legacy/custom mode; conflicts with --enable-ort/--all)"
+      echo "  --enable-onnx-stablehlo       Build ONNX-MLIR and enable the ONNX StableHLO frontend"
+      echo "                                (requires ONNX; default OFF; uses the installed LLVM/MLIR)"
       echo "  --enable-tf2atir-v2           Build the TF stablehlo V2 route (pb2stablehlo,"
       echo "                                annc-stablehlo-sink, annc-tf-pipeline-v2; default OFF;"
       echo "                                requires the LLVM/MLIR 20.1.8 toolchain,"
@@ -306,6 +313,10 @@ case "${FRAMEWORK_MODE}" in
     exit 1
     ;;
 esac
+if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ] && [ "${ENABLE_ONNX}" != "ON" ]; then
+  echo "ERROR: --enable-onnx-stablehlo requires the ONNX frontend." >&2
+  exit 1
+fi
 if [ "${ENABLE_TF2ATIR_V2}" = "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
   echo "ERROR: --enable-tf2atir-v2 requires the TensorFlow frontend/addon:" >&2
   echo "ERROR: annc-converter-v2 reads ANNC_TENSORFLOW_CXX11_ABI from that" >&2
@@ -336,6 +347,8 @@ if [ "${DRY_RUN}" == "YES" ]; then
   echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
   echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
   echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
+  echo "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=${ENABLE_ONNX_STABLEHLO}"
+  echo "ANNC_ENABLE_STABLEHLO_FRONTEND=${ENABLE_ONNX_STABLEHLO}"
   echo "ANNC_ENABLE_TF2ATIR_V2=${ENABLE_TF2ATIR_V2}"
   exit 0
 fi
@@ -779,8 +792,36 @@ fi
 
 # Read a value from CMakeCache.txt (format: KEY:TYPE=VALUE).
 get_cache_value() {
-  grep "^$1:" CMakeCache.txt 2>/dev/null | tail -n1 | cut -d= -f2-
+  grep "^$1:" "${2:-CMakeCache.txt}" 2>/dev/null | tail -n1 | cut -d= -f2-
 }
+
+onnx_stablehlo_cmake_args=()
+if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ]; then
+  onnx_mlir_source="../third-party/onnx-mlir"
+  if [ ! -f "${onnx_mlir_source}/third_party/onnx/CMakeLists.txt" ] ||
+     [ ! -f "${onnx_mlir_source}/third_party/stablehlo/CMakeLists.txt" ]; then
+    git -C .. submodule update --init --recursive -- third-party/onnx-mlir || exit 1
+  fi
+
+  onnx_mlir_build_dir="${ANNC_ONNX_MLIR_BUILD_DIR:-${ANNC_STABLEHLO_BUILD_ROOT:-${PWD}/third-party}/onnx-mlir-build}"
+  ANNC_ONNX_MLIR_BUILD_DIR="${onnx_mlir_build_dir}" \
+    CC="${C_COMPILER}" CXX="${CXX_COMPILER}" \
+    bash ../addons/onnxruntime/stablehlo/build_onnx_mlir.sh \
+      --jobs "${ANNC_ONNX_MLIR_BUILD_JOBS:-$(nproc)}" || exit 1
+  onnx_mlir_build_dir=$(cd "${onnx_mlir_build_dir}" && pwd -P) || exit 1
+  onnx_mlir_cache="${onnx_mlir_build_dir}/CMakeCache.txt"
+  stablehlo_llvm_dir=$(get_cache_value LLVM_DIR "${onnx_mlir_cache}")
+  stablehlo_mlir_dir=$(get_cache_value MLIR_DIR "${onnx_mlir_cache}")
+  if [ -z "${stablehlo_llvm_dir}" ] || [ -z "${stablehlo_mlir_dir}" ]; then
+    echo "ERROR: ONNX-MLIR did not record its LLVM/MLIR configuration." >&2
+    exit 1
+  fi
+  onnx_stablehlo_cmake_args+=(
+    "-DANNC_ONNX_MLIR_BUILD_DIR=${onnx_mlir_build_dir}"
+    "-DLLVM_DIR=${stablehlo_llvm_dir}"
+    "-DMLIR_DIR=${stablehlo_mlir_dir}"
+  )
+fi
 
 # Check that key build options still match an existing cache.  CMake does not
 # automatically reconfigure when -D arguments change; silently reusing the old
@@ -822,6 +863,13 @@ check_cache_consistency() {
     "ANNC_TENSORFLOW_CXX11_ABI:${ANNC_TENSORFLOW_CXX11_ABI}"
     "ANNC_TENSORFLOW_CXX_STANDARD:${ANNC_TENSORFLOW_CXX_STANDARD}"
   )
+  if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ]; then
+    cache_checks+=(
+      "ANNC_ONNX_MLIR_BUILD_DIR:${onnx_mlir_build_dir}"
+      "LLVM_DIR:${stablehlo_llvm_dir}"
+      "MLIR_DIR:${stablehlo_mlir_dir}"
+    )
+  fi
 
   for entry in "${cache_checks[@]}"; do
     key="${entry%%:*}"
@@ -868,6 +916,8 @@ check_framework_switch_cache() {
     "ANNC_ENABLE_TENSORFLOW_ADDON:${ENABLE_TENSORFLOW_ADDON}:ON"
     "ANNC_ENABLE_ONNX:${ENABLE_ONNX}:ON"
     "ANNC_ENABLE_ONNXRUNTIME_EP:${ENABLE_ONNXRUNTIME_EP}:OFF"
+    "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO:${ENABLE_ONNX_STABLEHLO}:OFF"
+    "ANNC_ENABLE_STABLEHLO_FRONTEND:${ENABLE_ONNX_STABLEHLO}:OFF"
     "ANNC_ENABLE_TF2ATIR_V2:${ENABLE_TF2ATIR_V2}:OFF"
   )
   local -a mismatches=()
@@ -1014,6 +1064,7 @@ else
   echo "  TensorFlow Addon: ${ENABLE_TENSORFLOW_ADDON}"
   echo "  ONNX Frontend: ${ENABLE_ONNX}"
   echo "  ONNXRuntime EP: ${ENABLE_ONNXRUNTIME_EP}"
+  echo "  ONNX StableHLO Frontend: ${ENABLE_ONNX_STABLEHLO}"
   if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
     echo "  ONNXRuntime Include Dir: ${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
     echo "  ORT Build Tree: ${ANNC_EP_ORT_BUILD_TREE:-<unset>}"
@@ -1051,6 +1102,9 @@ else
     -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
     -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
     -DANNC_ENABLE_ONNXRUNTIME_EP="${ENABLE_ONNXRUNTIME_EP}" \
+    -DANNC_ENABLE_ONNXRUNTIME_STABLEHLO="${ENABLE_ONNX_STABLEHLO}" \
+    -DANNC_ENABLE_STABLEHLO_FRONTEND="${ENABLE_ONNX_STABLEHLO}" \
+    "${onnx_stablehlo_cmake_args[@]}" \
     -DANNC_ENABLE_TF2ATIR_V2="${ENABLE_TF2ATIR_V2}" \
     -DANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR}" \
     -DANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE}" \

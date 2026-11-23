@@ -65,7 +65,12 @@ serialization applies to pure HLO. The addon produces the converted IR with
 source attributes. For fusion, backend compilation and ORT execution, see the
 [ONNX pipeline workflow](../../../docs/guides/cli-workflows.md#onnx-的-stablehlo-前端).
 
-ONNX-MLIR v0.5.0.2 is pinned as the `third-party/onnx-mlir` Git submodule at
+To build the converter, ANNC backend and ORT EP from the repository root, run
+`./build.sh --enable-ort --enable-onnx-stablehlo`. This prepares ONNX-MLIR using
+the same LLVM/MLIR installation used for ANNC.
+
+For a manual CMake build, prepare ONNX-MLIR first. It is pinned as the
+`third-party/onnx-mlir` Git submodule at
 `128f8b716fdbed4ff05a5ba493ac48fcac761b40`. Its nested StableHLO submodule is
 pinned with it. The submodule provides the source; CMake must still build the
 ONNX-MLIR tools. Initialize the sources with:
