@@ -176,6 +176,11 @@ def test_sdk_without_compile_flags(project):
     check_plugins(targets, path / "include", 14, 0)
 
 
+def test_tf115_sdk_with_ort_enabled(project):
+    targets = configure(project, sdk(project / "sdk"), ENABLE_ONNXRUNTIME_EP="ON")
+    assert {"libannc_optimizer", "libannc_fused_op"}.issubset(targets)
+
+
 def test_tf220_sdk_selection(project):
     path = project / "sdk"
     python = sdk(
@@ -189,7 +194,6 @@ def test_tf220_sdk_selection(project):
     "version, options, error",
     [
         ("2.19.0", {}, "Unsupported TensorFlow version"),
-        ("1.15.0", {"ENABLE_ONNXRUNTIME_EP": "ON"}, "with ORT"),
         ("1.15.0", {"TENSORFLOW_CXX_STANDARD": 17}, "conflicts"),
         ("1.15.0", {"TENSORFLOW_CXX11_ABI": 1}, "conflicts"),
         ("1.15.0", {"TENSORFLOW_PRELOAD": "AUTO"}, "ANNC_TENSORFLOW_PRELOAD"),

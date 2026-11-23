@@ -80,10 +80,6 @@ message(STATUS "ANNC TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI}")
 message(STATUS "ANNC TensorFlow CXX Standard: ${ANNC_TENSORFLOW_CXX_STANDARD}")
 
 if(_tf_version MATCHES "^1\\.15(\\.|$)")
-  if(ANNC_ENABLE_ONNXRUNTIME_EP)
-    message(FATAL_ERROR
-      "TensorFlow 1.15 with ORT (--all) is not validated; use --enable-tf.")
-  endif()
   add_subdirectory(plugin/1_15)
 else()
   add_subdirectory("${PROJECT_SOURCE_DIR}/tensorflow_addons"
