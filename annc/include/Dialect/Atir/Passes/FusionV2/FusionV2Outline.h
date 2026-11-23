@@ -162,7 +162,8 @@ mlir::LogicalResult outlineSite(mlir::func::FuncOp main,
                                 mlir::StringRef patternName,
                                 mlir::ArrayRef<std::string> tailAnchors,
                                 llvm::ArrayRef<int64_t> contextI64Attrs,
-                                CallPortTable &portTable);
+                                CallPortTable &portTable,
+                                mlir::ArrayRef<std::string> outputAliases = {});
 
 }  // namespace fusionv2
 }  // namespace atir

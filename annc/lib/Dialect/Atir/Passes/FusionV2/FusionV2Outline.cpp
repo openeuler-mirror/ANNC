@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -50,8 +51,7 @@ std::string anchorFromLoc(Location loc) {
 
 // Single-name anchor: only a lone NameLoc is trusted; CSE-merged shared
 // constants carry a FusedLoc of all use points - an arbitrary use name
-// wired back to the pb points at an unrelated node (2026-11-05 A'-form
-// begin mis-wiring).
+// wired back to the pb points at an unrelated node.
 std::string singleAnchorName(Location loc) {
   if (auto nl = dyn_cast<NameLoc>(loc))
     return stripAnchorSuffixes(nl.getName());
@@ -410,7 +410,38 @@ struct AuxClosure {
     }
   }
 
+  // Memoized canInternalize rejections: shared subexpressions must not be
+  // re-walked (diamond chains would otherwise cost exponential time).
+  llvm::SmallDenseSet<Operation *, 32> notInternalizable;
+
   void seeOperand(Value o, SmallVectorImpl<Operation *> &work);
+
+  // A pure def whose operand closure resolves to site values, constants, or
+  // boundary values is internalized instead of promoted, keeping the ABI at
+  // the pattern's declared arity. Depth-bounded; fail-closed.
+  bool canInternalize(Operation *def, unsigned depth) {
+    if (depth > 32) return false;
+    if (notInternalizable.count(def)) return false;
+    if (siteOps.contains(def)) return true;
+    // Same criterion as isPureDoRegion: isPure() can be false for
+    // conditionally-speculatable stablehlo ops with dynamic dims.
+    if (!mlir::isMemoryEffectFree(def) &&
+        !def->hasTrait<OpTrait::AlwaysSpeculatableImplTrait>()) {
+      notInternalizable.insert(def);
+      return false;
+    }
+    for (Value o : def->getOperands()) {
+      if (boundaryVals.contains(o)) continue;
+      Operation *d = o.getDefiningOp();
+      if (!d) return false;
+      if (isa<stablehlo::ConstantOp, arith::ConstantOp>(d)) continue;
+      if (!canInternalize(d, depth + 1)) {
+        notInternalizable.insert(def);
+        return false;
+      }
+    }
+    return true;
+  }
 };
 
 void AuxClosure::seeOperand(Value o, SmallVectorImpl<Operation *> &work) {
@@ -436,6 +467,12 @@ void AuxClosure::seeOperand(Value o, SmallVectorImpl<Operation *> &work) {
       def->getDialect() ? def->getDialect()->getNamespace() : StringRef();
   if (!isa<stablehlo::ConstantOp>(def) && ns != "shape" && ns != "arith" &&
       ns != "tensor") {
+    if (canInternalize(def, 0)) {
+      auxSet.insert(def);
+      siteOps.insert(def);
+      work.push_back(def);
+      return;
+    }
     auto tensorTy = dyn_cast<RankedTensorType>(o.getType());
     std::string anchor = anchorFromLoc(def->getLoc());
     if (tensorTy == nullptr || anchor.empty() ||
@@ -490,7 +527,8 @@ static void attachFusionMetadata(PatternRewriter &rewriter, func::FuncOp fn,
                                  ArrayRef<Operation *> members,
                                  const std::string &name,
                                  StringRef patternName,
-                                 ArrayRef<int64_t> contextI64Attrs) {
+                                 ArrayRef<int64_t> contextI64Attrs,
+                                 ArrayRef<std::string> outputAliases) {
   SmallVector<Attribute> argAttrs;
   for (const ProbeArg &arg : args)
     argAttrs.push_back(probeArgAttr(rewriter, arg));
@@ -528,6 +566,13 @@ static void attachFusionMetadata(PatternRewriter &rewriter, func::FuncOp fn,
   if (!contextI64Attrs.empty())
     metadataAttrs.push_back(rewriter.getNamedAttr(
         "context_i64_attrs", rewriter.getI64ArrayAttr(contextI64Attrs)));
+  if (!outputAliases.empty()) {
+    SmallVector<Attribute> aliasAttrs;
+    for (const auto &alias : outputAliases)
+      aliasAttrs.push_back(rewriter.getStringAttr(alias));
+    metadataAttrs.push_back(rewriter.getNamedAttr(
+        "output_aliases", rewriter.getArrayAttr(aliasAttrs)));
+  }
   fn->setAttr("fusion.metadata",
               DictionaryAttr::get(rewriter.getContext(), metadataAttrs));
   fn->setAttr("fusion.pattern", rewriter.getStringAttr(patternName));
@@ -554,7 +599,8 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
                           StringRef patternName,
                           ArrayRef<std::string> tailAnchors,
                           ArrayRef<int64_t> contextI64Attrs,
-                          CallPortTable &portTable) {
+                          CallPortTable &portTable,
+                          ArrayRef<std::string> outputAliases) {
   ModuleOp module =
       validateSiteInputs(main, tailOps, outputs, tailAnchors);
   if (!module) return failure();
@@ -604,6 +650,23 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
   SmallPtrSet<Operation *, 2> tailSet(tailOps.begin(), tailOps.end());
   SmallPtrSet<Operation *, 32> stays = collectStaySet(aux.siteOps, tailSet);
 
+  // Outputs whose host-side users precede the tails cannot take call results
+  // (the call needs those very chains as arguments); keep their producers in
+  // the host via a stays clone and leave the uses as-is.
+  SmallPtrSet<Value, 2> hostKept;
+  {
+    Block *hostBlock = tailOps.front()->getBlock();
+    for (Value out : outputs) {
+      for (Operation *user : out.getUsers()) {
+        if (user->getBlock() != hostBlock) continue;
+        if (!user->isBeforeInBlock(tailOps.front())) continue;
+        hostKept.insert(out);
+        if (Operation *def = out.getDefiningOp()) stays.insert(def);
+        break;
+      }
+    }
+  }
+
   SmallPtrSet<Operation *, 32> emittedM;
   SmallPtrSet<Operation *, 16> emittedA;
   std::function<LogicalResult(Operation *)> emitOp;
@@ -643,7 +706,17 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
 
   SmallVector<Value> callArgs;
   for (const ProbeArg &arg : args) callArgs.push_back(arg.value);
-  rewriter.setInsertionPoint(tailOps.front());
+  Block *hostBlock = tailOps.front()->getBlock();
+  Operation *callBefore = tailOps.front();
+  auto consider = [&](Operation *owner) {
+    if (owner == callBefore || owner->getBlock() != hostBlock) return;
+    if (owner->isBeforeInBlock(callBefore)) callBefore = owner;
+  };
+  for (Value out : outputs) {
+    if (hostKept.contains(out)) continue;
+    for (OpOperand &use : out.getUses()) consider(use.getOwner());
+  }
+  rewriter.setInsertionPoint(callBefore);
   auto call = rewriter.create<func::CallOp>(tailOps.front()->getLoc(), name,
                                             tailTypes, callArgs);
   portTable.entries[call.getOperation()] = {
@@ -658,24 +731,56 @@ LogicalResult outlineSite(func::FuncOp main, PatternRewriter &rewriter,
     for (Value o : tailDeps) {
       if (failed(emitValue(o))) return failure();
     }
-    emittedM.insert(tail);
-    rewriter.moveOpBefore(tail, body, body->end());
+    // A tail may already have been emitted through another member's
+    // dependency walk; re-emitting would insert a second clone (or a
+    // duplicate move) and invert the definition order.
+    if (!emittedM.insert(tail).second) continue;
+    if (stays.contains(tail)) {
+      // Host-kept tail: clone into the kernel, forward the results.
+      rewriter.setInsertionPointToEnd(body);
+      Operation *cloned = tail->clone(mapping);
+      rewriter.insert(cloned);
+      for (auto [oldR, newR] :
+           llvm::zip(tail->getResults(), cloned->getResults()))
+        mapping.map(oldR, newR);
+    } else {
+      rewriter.moveOpBefore(tail, body, body->end());
+    }
   }
   rewriter.setInsertionPointToEnd(body);
-  rewriter.create<func::ReturnOp>(
-      tailOps.front()->getLoc(),
-      SmallVector<Value>(outputs.begin(), outputs.end()));
+  SmallVector<Value> returnVals;
+  for (Value out : outputs) returnVals.push_back(mapping.lookupOrDefault(out));
+  rewriter.create<func::ReturnOp>(tailOps.front()->getLoc(), returnVals);
   for (auto &it : mapping.getValueMap())
     rewriter.replaceUsesWithIf(it.first, it.second, [&](OpOperand &operand) {
       return operand.getOwner()->getParentOfType<func::FuncOp>() == fn;
     });
-  for (auto [out, callResult] : llvm::zip(outputs, call->getResults()))
+  for (auto [out, callResult] : llvm::zip(outputs, call->getResults())) {
+    if (hostKept.contains(out)) continue;
     rewriter.replaceUsesWithIf(out, callResult, [&](OpOperand &operand) {
       return operand.getOwner()->getParentOfType<func::FuncOp>() != fn;
     });
+  }
+
+  // Defensive re-anchor: consumers can be rewritten after the call was
+  // placed (greedy rounds re-entry), so re-anchor to the earliest in-block
+  // result user. No-op when ordering is already correct.
+  {
+    Operation *before = nullptr;
+    for (Value r : call->getResults())
+      for (OpOperand &use : r.getUses()) {
+        Operation *owner = use.getOwner();
+        if (owner->getBlock() != hostBlock) continue;
+        if (!before || owner->isBeforeInBlock(before)) before = owner;
+      }
+    if (before && before->isBeforeInBlock(call.getOperation()))
+      call.getOperation()->moveBefore(before);
+  }
+
 
   attachFusionMetadata(rewriter, fn, args, outputs, tailAnchors, members,
-                       name, patternName, contextI64Attrs);
+                       name, patternName, contextI64Attrs, outputAliases);
+
   return success();
 }
 

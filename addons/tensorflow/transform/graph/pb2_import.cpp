@@ -1,5 +1,7 @@
 #include "common/pb2_common.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+
 #include <fstream>
 #include <memory>
 
@@ -643,11 +645,70 @@ int ImportOfficial(const Options& opt, const GraphDef& gp,
   opts.graph_as_function = false;
   opts.enable_shape_inference = true;
 
-  std::string gp_str = gp.SerializeAsString();
+  // Data edges reading an output-less node (Grappler's group_deps NoOp) are
+  // rejected by the official translator ("Invalid output index 0"); rewrite
+  // them as control deps on the same node (idempotent).
+  tensorflow::GraphDef gpFixed = gp;
+  {
+    llvm::DenseMap<llvm::StringRef, const tensorflow::NodeDef*> byName;
+    for (const auto& n : gpFixed.node()) byName.try_emplace(n.name(), &n);
+    for (tensorflow::NodeDef& n : *gpFixed.mutable_node()) {
+      auto* ins = n.mutable_input();
+      for (int i = 0; i < ins->size(); ++i) {
+        llvm::StringRef in = ins->Get(i);
+        if (in.empty() || in.starts_with("^")) continue;
+        llvm::StringRef name = in.substr(0, in.find(':'));
+        auto it = byName.find(name);
+        if (it == byName.end()) continue;
+        llvm::StringRef op = it->second->op();
+        if (op != "NoOp" && op != "ControlTrigger") continue;
+        (*ins)[i] = ("^" + name).str();
+      }
+    }
+  }
+
+  std::string gp_str = gpFixed.SerializeAsString();
   auto res = tensorflow::GraphdefToMlirTranslateFunction(
       llvm::StringRef(gp_str), in_names, in_dtypes, in_shapes, out_names, "",
       opts, &context);
   if (!res.ok()) {
+    // Control-only decoration subgraphs (all fetches target output-less
+    // NoOp/ControlTrigger) are rejected by the translator and cannot carry a
+    // fusion site: degrade to an empty module; anything else fails loud.
+    llvm::DenseMap<llvm::StringRef, const tensorflow::NodeDef*> byName;
+    for (const auto& n : gp.node()) byName.try_emplace(n.name(), &n);
+    // A non-empty feed means real computation lives in the subgraph; the
+    // empty-module degradation below would strand its consumers.
+    bool controlOnly = !opt.outputs.empty() && feeds.empty();
+    for (const std::string& fetch : opt.outputs) {
+      auto it = byName.find(std::string(fetch.substr(0, fetch.rfind(':'))));
+      if (it == byName.end() ||
+          (it->second->op() != "NoOp" &&
+           it->second->op() != "ControlTrigger")) {
+        controlOnly = false;
+        break;
+      }
+    }
+    if (controlOnly) {
+      std::cerr << "[import-route] control-only subgraph (output-less "
+                << "fetches); emitting an empty module\n";
+      module = mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
+      // An empty @main keeps the downstream restore/pipeline contract
+      // (a resolvable entry with zero feeds) so the zero-site path runs.
+      mlir::OpBuilder builder(module->getBody(), module->getBody()->end());
+      auto fn = builder.create<mlir::func::FuncOp>(
+          mlir::UnknownLoc::get(&context), "main",
+          mlir::FunctionType::get(&context, {}, {}));
+      mlir::NamedAttrList entry;
+      entry.set("inputs", builder.getStringAttr(""));
+      entry.set("outputs", builder.getStringAttr(""));
+      entry.set("control_outputs", builder.getStringAttr(""));
+      fn->setAttr("tf.entry_function",
+                  entry.getDictionary(&context));
+      fn->setAttr("tf.arg_names", builder.getArrayAttr({}));
+      (*module)->setAttr("annc.control_only", builder.getUnitAttr());
+      return 0;
+    }
     std::cerr << "[FATAL] official import failed: " << res.status().ToString()
               << "\n";
     return kExitInternal;
@@ -770,6 +831,13 @@ int RunOfficialRoute(const Options& opt, BuildCtx& ctx, const GraphDef& graph,
     VerifyBuiltModule(context, *module);
   }
 
+  // Control-only subgraphs carry no sites and no restorable ops: skip the
+  // transform stages (several assume a populated entry) and go straight to
+  // artifact emission.
+  if ((*module)->hasAttr("annc.control_only")) {
+    mlir::ModuleOp m = *module;
+    return RunPipelines(opt, ctx, graph, context, m);
+  }
   {
     mlir::PassManager mpm(&context);
     mpm.enableVerifier(false);

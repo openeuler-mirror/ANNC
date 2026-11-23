@@ -990,6 +990,29 @@ const std::pair<llvm::StringRef, unsigned> kShapeSlots[] = {
     {"stablehlo.dynamic_update_slice", 2},
 };
 
+// odml emits real_dynamic_slice with index/i32-mixed index vectors; the
+// pinned sink verifier requires identical types. Normalize all three to
+// i32 (same target as the shape-slot casts; dims fit i32 by construction).
+void NormalizeRealDynamicSliceIndexVectors(mlir::Operation* op, int& fixed) {
+  if (op->getName().getStringRef() != "stablehlo.real_dynamic_slice" ||
+      op->getNumOperands() < 4)
+    return;
+  bool changed = false;
+  for (unsigned slot : {1u, 2u, 3u}) {
+    mlir::Value v = op->getOperand(slot);
+    auto t = llvm::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (t && t.getElementType().isIndex()) {
+      mlir::OpBuilder b(op);
+      auto i32Ty = mlir::RankedTensorType::get(t.getShape(), b.getI32Type());
+      auto cast =
+          b.create<mlir::arith::IndexCastOp>(op->getLoc(), i32Ty, v);
+      op->setOperand(slot, cast.getResult());
+      changed = true;
+    }
+  }
+  if (changed) ++fixed;
+}
+
 // odml's compare pattern skips broadcasting on mixed shapes, which the
 // ODS rejects. Restore the TF comparison as a residue carrier (operand
 // order unchanged). Returns 0 fine / 1 restored / 2 unrepresentable.
@@ -1039,6 +1062,7 @@ struct NormalizeShapeVectorsPass
     llvm::SmallVector<mlir::Operation*, 4> toErase;
     module->walk([&](mlir::Operation* op) {
       llvm::StringRef nm = op->getName().getStringRef();
+      NormalizeRealDynamicSliceIndexVectors(op, fixed);
       if (nm == "stablehlo.compare") {
         int r = RestoreCompareResidue(op, toErase);
         if (r == 1) ++fixed;

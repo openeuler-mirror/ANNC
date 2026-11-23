@@ -47,6 +47,11 @@ struct FusionInfo {
   std::string templateFingerprint;
   std::vector<FusionArg> args;
   std::vector<FusionArg> outputs;
+
+  // Node names whose values equal an output above (declared by the
+  // pattern); the rewriter re-points their consumers at the fused node and
+  // drops them. Empty unless the pattern records such wrappers.
+  std::vector<std::string> outputAliases;
   std::vector<std::string> memberNodeNames;
   std::map<std::string, std::string> patternAttrs;
   std::string abi = "mlir_ciface";
