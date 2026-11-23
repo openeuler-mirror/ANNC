@@ -461,6 +461,13 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   kernel->kernel_function = kernel_function;
   kernel->set_thread_pool_function = set_thread_pool;
   kernel->get_thread_pool_function = get_thread_pool;
+  // The mapped kernel image stays pinned by dlopen and nothing reads the work
+  // directory by path afterwards, so delete it eagerly: hosts that exit
+  // without running destructors (e.g. main() ends with exit()) would
+  // otherwise leak one directory per compiled kernel. CleanupAnncJitWorkDir
+  // clears work_dir, making ~AnncJitKernel a no-op; ANNC_KEEP_TEMPS keeps
+  // both the directory and the destructor path for debugging.
+  CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
   return ANNC_JIT_OK;
 }
 
