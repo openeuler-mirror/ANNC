@@ -351,9 +351,17 @@ Status CompileAnncJitKernel(
     set_thread_pool = nullptr;
     get_thread_pool = nullptr;
   }
+  // The mapped kernel image stays pinned by dlopen and the packed-RHS specs
+  // are copied into JitExecutable below, so the on-disk work directory is
+  // deleted eagerly: hosts that exit without running destructors would
+  // otherwise leak one directory per compiled kernel. Passing an empty
+  // work_dir keeps the JitExecutable destructor a no-op; ANNC_KEEP_TEMPS
+  // preserves the directory for debugging.
+  const bool keep_temps = EnvFlagEnabled("ANNC_KEEP_TEMPS");
+  if (!keep_temps) CleanupAnncJitWorkDir(work_dir);
   *executable = std::make_shared<annc::jit::JitExecutable>(
-      work_dir, so_path, handle, kernel_function, set_thread_pool,
-      get_thread_pool, EnvFlagEnabled("ANNC_KEEP_TEMPS"));
+      keep_temps ? work_dir : std::string(), so_path, handle, kernel_function,
+      set_thread_pool, get_thread_pool, keep_temps);
   if (request.enable_constant_folding) {
     auto getter = reinterpret_cast<AnncGetPackedRhsSpecs>(
         dlsym(handle, "annc_jit_packed_rhs_v1"));

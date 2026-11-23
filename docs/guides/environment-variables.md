@@ -62,7 +62,7 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_NO_STRIDED_SLICE_DYN` | pb2stablehlo：关闭动态输入 StridedSlice 直译（常量界限归一化 + real_dynamic_slice）；关闭后走残差通道 |
 | `ANNC_NO_STRING_TRANSPORT` | pb2stablehlo：关闭 string 载荷数据操作的 encodeString/decodeString 编解码包裹；关闭后 string op 保持残差 |
 | `ANNC_NO_STRING_UNWRAP` | pb2stablehlo：关闭 legalize 后的编解码包裹回滚（tf 副本未转换时还原 string 操作数） |
-| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
+| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`）。运行时 JIT 的 `annc_jit_*` 工作目录默认在 kernel `dlopen` 成功后立即删除（宿主进程不执行析构也不泄漏）；置 `1` 时保留目录用于排障 |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
 | `ANNC_V2_REWRITE_INPROC` | `1` | 未设置 | 置 `1` 时 Grappler 改写走 v2 进程内路径：`dlopen` 加载 `libannc_graph_rewriter.so` 并调用其 C 入口；任何失败向 stderr 告警并自动回退 v1 pipeline 路径 |
 | `ANNC_V2_FUSION_METADATA` | JSON 文件路径 | 无 | v2 进程内改写的 `fusion_metadata.json` 路径（由 `annc-fusion-metadata` 产出）；未设置时 v2 改写失败并回退 |
