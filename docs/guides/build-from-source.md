@@ -292,8 +292,18 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 
 ## ONNX 的 StableHLO 前端
 
-按 [ONNX-MLIR 构建步骤](../../addons/onnxruntime/stablehlo/README.md) 准备配套工具链。在同一个配套 MLIR 构建目录中打开 `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` 与 `ANNC_ENABLE_STABLEHLO_FRONTEND`，构建 `annc_onnx_stablehlo_addon` 和 `annc-stablehlo-opt`。
+ONNX-MLIR 和 StableHLO 与 ANNC 后端共用 openEuler 安装的 LLVM/MLIR 20.1.8。
+[依赖准备脚本](../../addons/onnxruntime/stablehlo/README.md)会把兼容补丁应用到构建目录里的源码副本。
 
-公共后端、`annc-onnx-pipeline` 和 EP 在启用 ONNX 与 EP 的系统 LLVM 构建中生成。配套 ONNX-MLIR 位于当前 CMake 构建目录下的 `third-party/onnx-mlir-build` 时，无需手动指定目录。分开构建且 ONNX-MLIR 位于其他目录时，配置 ANNC 时用 `-DANNC_ONNX_MLIR_BUILD_DIR=<ONNX-MLIR 构建目录>` 指定实际位置。CMake 会把 `onnx-mlir-opt` 的目录写入流水线。
+```bash
+export ANNC_LLVM_BIN=/opt/openEuler/llvm-toolset-20/root/usr/bin
+addons/onnxruntime/stablehlo/build_onnx_mlir.sh --jobs 16
+```
 
-将配套的三个可执行文件 `annc-onnx2stablehlo`、`annc-onnx-framework-opt`、`annc-stablehlo-opt` 放在 `annc-onnx-pipeline` 的同一 `bin` 目录。[CLI 工作流](cli-workflows.md#onnx-的-stablehlo-前端)
+随后在原有的 ONNX 和 ORT EP CMake 配置中开启
+`ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=ON` 和 `ANNC_ENABLE_STABLEHLO_FRONTEND=ON`。
+前端、公共后端、`annc-onnx-pipeline` 和 EP 一起构建和安装。
+
+配套 ONNX-MLIR 构建在默认的 `build/third-party/onnx-mlir-build` 时，CMake 能找到工具
+和对应源码。依赖放在其他目录时，用 `-DANNC_ONNX_MLIR_BUILD_DIR=<目录>` 指定。
+[CLI 工作流](cli-workflows.md#onnx-的-stablehlo-前端)
