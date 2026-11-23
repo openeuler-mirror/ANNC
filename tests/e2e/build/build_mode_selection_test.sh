@@ -38,6 +38,10 @@ expect "ANNC_ENABLE_TENSORFLOW=OFF" --enable-ort
 expect "ANNC_ENABLE_TENSORFLOW_ADDON=OFF" --enable-ort
 expect "ANNC_ENABLE_ONNX=ON" --enable-ort
 expect "ANNC_ENABLE_ONNXRUNTIME_EP=ON" --enable-ort
+expect "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=OFF" --enable-ort
+expect "ANNC_ENABLE_STABLEHLO_FRONTEND=OFF" --enable-ort
+expect "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=ON" --enable-ort --enable-onnx-stablehlo
+expect "ANNC_ENABLE_STABLEHLO_FRONTEND=ON" --enable-ort --enable-onnx-stablehlo
 # --enable-ort-ep is the compatibility alias.
 expect "Framework selection: ort" --enable-ort-ep
 expect "ANNC_ENABLE_TENSORFLOW=OFF" --enable-ort-ep
@@ -65,6 +69,7 @@ expect_fail --all --disable-onnx
 expect_fail --all --disable-tensorflow
 expect_fail --enable-tf --disable-tensorflow
 expect_fail --enable-ort --disable-onnx
+expect_fail --enable-tf --enable-onnx-stablehlo
 
 # Consistent fine-grained flags are accepted in a mode.
 expect "Framework selection: tf" --enable-tf --disable-onnx
