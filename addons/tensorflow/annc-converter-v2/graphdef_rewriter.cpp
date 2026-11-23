@@ -374,8 +374,25 @@ tensorflow::NodeDef *ANNCFusedNodeBuilder::appendNode(
   fused->set_name(fusion.name);
   fused->set_op("ANNCFused");
   fused->set_device(chooseFusionDevice(original, args, outputs));
+  // Self-wired args keep reading the original node; rewriting them to the
+  // fusion's own output would make the node its own producer.
+  std::set<std::string> selfOutputs;
+  for (const FusionArg &output : outputs) {
+    auto endpoint = parseTensorEndpoint(output.tfName);
+    if (endpoint.ok() && !endpoint.value.control)
+      selfOutputs.insert(endpoint.value.canonicalDataName());
+  }
+  for (const std::string &alias : fusion.outputAliases) {
+    auto endpoint = parseTensorEndpoint(alias);
+    if (endpoint.ok() && !endpoint.value.control)
+      selfOutputs.insert(endpoint.value.canonicalDataName());
+  }
   for (const FusionArg &arg : args) {
-    fused->add_input(rewriteDataInput(resolveDataName(original, arg.tfName)));
+    std::string resolved = resolveDataName(original, arg.tfName);
+    auto endpoint = parseTensorEndpoint(resolved);
+    const bool selfWired = endpoint.ok() && !endpoint.value.control &&
+                           selfOutputs.count(endpoint.value.canonicalDataName()) != 0;
+    fused->add_input(selfWired ? resolved : rewriteDataInput(resolved));
   }
 
   auto *attrs = fused->mutable_attr();
@@ -561,6 +578,14 @@ void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
         }
       }
     }
+    // Aliases are equivalent outputs: a dependency on them is a dependency
+    // on the declaring site (mirrors the real-output wiring above).
+    for (const FusionInfo &fusion : fusionInfos)
+      for (const std::string &alias : fusion.outputAliases) {
+        auto endpoint = parseTensorEndpoint(alias);
+        if (endpoint.ok() && !endpoint.value.control)
+          outputOwner[endpoint.value.canonicalDataName()] = &fusion.name;
+      }
     // Fusion-to-fusion dependency edges for the peeling pass.
     std::map<std::string, std::set<std::string>> deps;
     for (const FusionInfo &fusion : fusionInfos)
@@ -570,7 +595,9 @@ void dropUnresolvableFusions(std::vector<FusionInfo> &fusionInfos,
         auto endpoint = parseTensorEndpoint(arg.tfName);
         if (!endpoint.ok() || endpoint.value.control) continue;
         auto owner = outputOwner.find(endpoint.value.canonicalDataName());
-        if (owner != outputOwner.end())
+        // A self-wired arg (the segment kernel's begin is the strided_slice
+        // it also returns) is not a dependency: the node stays in the graph.
+        if (owner != outputOwner.end() && *owner->second != fusion.name)
           deps[fusion.name].insert(*owner->second);
       }
     }
@@ -629,6 +656,31 @@ bool rewriteGraphDefInPlace(tensorflow::GraphDef *graph,
     return fail("no ANNCFused metadata entries");
 
   dropUnresolvableFusions(fusionInfos, *graph);
+  // Segment sites stay out of the rewritten graph: the kernel only nets a
+  // win on linear-heavy graphs and regresses -3..-7pt elsewhere, while V1
+  // keeps the equivalent value in TF anyway.
+  static const char *kExcludedPatterns[] = {"kp_sparse_segment_reduce"};
+  {
+    std::vector<FusionInfo> kept;
+    int dropped = 0;
+    for (const FusionInfo &fusion : fusionInfos) {
+      bool excluded = false;
+      for (const char *p : kExcludedPatterns)
+        if (fusion.pattern == p) {
+          excluded = true;
+          break;
+        }
+      if (excluded) {
+        ++dropped;
+        continue;
+      }
+      kept.push_back(fusion);
+    }
+    if (dropped)
+      std::cerr << "[annc-converter-v2] excluded " << dropped
+                << " segment site(s) by policy\n";
+    fusionInfos = std::move(kept);
+  }
   if (fusionInfos.empty()) {
     std::cerr << "[annc-converter-v2] Warning: no usable fusion site; "
                  "keeping the input graph unchanged\n";
@@ -679,13 +731,54 @@ bool rewriteGraphDefInPlace(tensorflow::GraphDef *graph,
     }
   }
 
+  // Pattern-declared output aliases carry the same value as the site output;
+  // re-pointing their consumers at the fused node starves the wrapper chain.
+  // Must run before the builder snapshots fusionByOutput.
+  for (const FusionInfo &fusion : fusionInfos) {
+    if (!fusion.outputAliases.empty() && fusion.outputs.size() > 1)
+      return fail("output_aliases require a single-output fusion: " +
+                  fusion.name);
+    for (const std::string &alias : fusion.outputAliases) {
+      auto endpoint = parseTensorEndpoint(alias);
+      if (!endpoint.ok() || endpoint.value.control) continue;
+      fusionByOutput.emplace(
+          endpoint.value.canonicalDataName(),
+          ANNCFusedNodeBuilder::FusionOutputTarget{&fusion, 0});
+    }
+  }
+
   ANNCFusedNodeBuilder fusedNodeBuilder(*graph, paths.sharedLibPath,
                                         paths.atirModulePath, fusionByOutput);
+  // Only self-wired args read the original node post-rewrite (appendNode);
+  // other args are rewired to the fused node, so their producers may go.
+  std::set<std::string> argReferencedNodes;
+  for (const FusionInfo &fusion : fusionInfos) {
+    std::set<std::string> own;
+    for (const FusionArg &output : fusion.outputs) {
+      auto endpoint = parseTensorEndpoint(output.tfName);
+      if (endpoint.ok() && !endpoint.value.control)
+        own.insert(endpoint.value.node);
+    }
+    for (const std::string &alias : fusion.outputAliases) {
+      auto endpoint = parseTensorEndpoint(alias);
+      if (endpoint.ok() && !endpoint.value.control)
+        own.insert(endpoint.value.node);
+    }
+    for (const FusionArg &arg : fusion.args) {
+      auto endpoint = parseTensorEndpoint(arg.tfName);
+      if (!endpoint.ok() || endpoint.value.control) continue;
+      auto resolved = cleanTensorName(resolveDataName(*graph, arg.tfName));
+      if (own.count(endpoint.value.node) != 0 || own.count(resolved) != 0)
+        argReferencedNodes.insert(endpoint.value.node);
+    }
+  }
   // Preserve graph-level metadata, including versions, expected by Grappler.
   tensorflow::GraphDef rewritten = *graph;
   rewritten.clear_node();
   for (const auto &node : graph->node()) {
-    if (fusedNodeBuilder.replacesOutputNode(node.name())) continue;
+    if (fusedNodeBuilder.replacesOutputNode(node.name()) &&
+        argReferencedNodes.count(node.name()) == 0)
+      continue;
     tensorflow::NodeDef *out = rewritten.add_node();
     *out = node;
 

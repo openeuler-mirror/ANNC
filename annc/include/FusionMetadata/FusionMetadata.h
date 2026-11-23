@@ -70,6 +70,11 @@ struct FusionInfo {
   // graph edges replaced by the generated ANNCFused node.
   std::vector<FusionArg> outputs;
 
+  // TF node names whose values are equivalent to an output above (declared
+  // by the pattern). The converter re-points their consumers at the fused
+  // node and drops them. Empty unless the pattern records such wrappers.
+  std::vector<std::string> outputAliases;
+
   // Names of the graph nodes this fusion subsumes (the members of the fused
   // region), recorded by the pattern that captured them. For ONNX imports the
   // name is the ONNX *node* name (the frontend writes it to tf.name; Constant

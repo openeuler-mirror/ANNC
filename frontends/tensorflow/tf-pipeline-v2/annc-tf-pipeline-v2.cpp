@@ -286,11 +286,28 @@ bool runV2Chain(int argc, char **argv) {
   // The context-ABI switch is set before both steps so the asm children
   // and the linker see the same route.
   ::setenv("ANNC_ENABLE_LOWERING_CONTEXT_ABI", "1", /*overwrite=*/1);
-  bool ok =
-      runCommand(pb2Args) &&
+  bool ok = runCommand(pb2Args);
+  if (ok) {
+    // A control-only decoration subgraph has nothing to fuse: the frontend
+    // degrades it to an empty @main tagged annc.control_only, which the sink
+    // rightly refuses; report success with the identity graph.
+    std::ifstream probe(stablehlo, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(probe)),
+                     std::istreambuf_iterator<char>());
+    if (text.find("annc.control_only") != std::string::npos) {
+      ANNC_LOG_INFO("tf-pipeline-v2")
+          << "control-only subgraph; emitting the identity graph\n";
+      if (!opts.skipConverter)
+        fs::copy_file(opts.inputGraphDef, opts.outputGraphDef,
+                      fs::copy_options::overwrite_existing);
+      return true;
+    }
+  }
+  ok = ok &&
       runCommand({anncTf2AtirV2, stablehlo.string(), "-o", sunk.string()}) &&
-      runCommand({anncAsm, sunk.string(), "-atir-op-fusion-v2", "-o",
-                  fusedAtir.string()}) &&
+      runCommand({anncAsm, sunk.string(), "-atir-inline-shape-assumings",
+                  "-atir-op-fusion-v2", "-atir-drop-shape-only-subgraphs",
+                  "-o", fusedAtir.string()}) &&
       runCommand({anncAsm, fusedAtir.string(), "--annc-fast-codegen", "-o",
                   customizeAtir.string()}) &&
       runCommand({anncFusionMetadata, customizeAtir.string(), "-o",
