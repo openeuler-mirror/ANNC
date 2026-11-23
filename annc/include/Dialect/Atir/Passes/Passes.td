@@ -67,9 +67,9 @@ def AtirConfigFusion : Pass<"atir-config-fusion", "ModuleOp"> {
 }
 
 /* matmul add relu Fusion */
-def AtirFastCodegen : Pass<"atir-fast-codegen", "ModuleOp"> {
+def AnncFastCodegen : Pass<"annc-fast-codegen", "ModuleOp"> {
   let summary = "fast codegen";
-  let constructor = "createAtirFastCodegenPass()";
+  let constructor = "createAnncFastCodegenPass()";
   let dependentDialects = [
     "AtirDialect"
   ];
@@ -100,14 +100,14 @@ def AtirPruneFunc : Pass<"atir-prune-func", "ModuleOp"> {
 }
 
 /* Select one fused kernel from a fusion-only runtime template. */
-def AtirSelectKernel : Pass<"atir-select-kernel", "ModuleOp"> {
+def AnncSelectKernel : Pass<"annc-select-kernel", "ModuleOp"> {
   let summary = "select one fused kernel function for runtime compilation";
-  let constructor = "createAtirSelectKernelPass()";
+  let constructor = "createAnncSelectKernelPass()";
   let options = [
     Option<"kernelName", "kernel-name", "std::string", "",
            "Symbol name of the fused kernel to retain">
   ];
-  let dependentDialects = ["AtirDialect"];
+  let dependentDialects = ["mlir::func::FuncDialect"];
 }
 
 /* Bind runtime argument shapes before lowering. */
@@ -118,6 +118,27 @@ def AtirSpecializeShapes : Pass<"atir-specialize-shapes", "ModuleOp"> {
     Option<"shapeSpec", "shape-spec", "std::string", "",
            "Path to the runtime shape specification JSON">
   ];
+  let dependentDialects = ["AtirDialect"];
+}
+
+/* StableHLO runtime shape specialization. */
+def AnncSpecializeShapes : Pass<"annc-specialize-shapes", "ModuleOp"> {
+  let summary = "specialize StableHLO kernel arguments with runtime shapes";
+  let constructor = "createAnncSpecializeShapesPass()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+  let options = [
+    Option<"shapeSpec", "shape-spec", "std::string", "",
+           "Path to the runtime shape specification JSON">
+  ];
+}
+
+/* Commit StableHLO GEMM epilogue chains to a bufferless ATIR operation. */
+def AnncGemmEpilogueCommit
+    : Pass<"annc-gemm-epilogue-commit", "ModuleOp"> {
+  let summary = "commit StableHLO GEMM epilogues without candidate metadata";
+  let constructor = "createAnncGemmEpilogueCommitPass()";
   let dependentDialects = ["AtirDialect"];
 }
 

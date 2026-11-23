@@ -72,7 +72,7 @@ kernel 通过 `getInput(slot)`、`getI64Attr(slot)` 和 `allocateOutput<T>(slot,
 | 临时分配 | ORT allocator；支持显式 ZERO，Compute 结束统一释放 |
 | 错误 | 保留首错，结合 kernel 返回码与所有输出绑定状态生成 `OrtStatus` |
 | 调度 | 同步 `parallel_for` / `shard`，沿用原生 operator pool 与公开 API 路径，嵌套串行 |
-| 原生池 | 可选 C 尾回调 `native_thread_pool("onnxruntime")`，供 MLAS 借用，缺失或不可用为 null |
+| 原生池 | `getKernelThreadPool().nativePool("onnxruntime")` 内部调用线程池虚函数，供 MLAS 借用，不可用为 null |
 
 `site.args` / `site.outputs` 按 schema 的规范顺序报告。EP 在初始化/绑定阶段按图名称
 解析输入/输出映射；无名称时只允许 rank+dtype 唯一确定，二义映射拒绝。
@@ -171,7 +171,7 @@ matcher，因此不会生成该融合算子；EP 申报循环保留过滤作为�
 指纹，切换会产生新的缓存条目。注意：开关只关闭该特定融合算子，其他 pattern（例如通用
 `matmul`）仍可能融合同一子图中的节点。
 
-FTDMM/BMM 仅在编译启用 MLAS 且 `nativePool("onnxruntime")` 非空时调用 `MlasGemmBatch`；否则执行
+FTDMM/BMM 仅在编译启用 MLAS 且 `native_pool("onnxruntime")` 非空时调用 `MlasGemmBatch`；否则执行
 标量行路径，空池（如 intra-op=1）也不执行串行 MLAS。driver 将上述归档路径写入 kernel
 链接命令；EP 与 kernel 必须同源构建。
 

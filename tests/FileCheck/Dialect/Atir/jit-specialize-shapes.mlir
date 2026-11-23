@@ -1,4 +1,4 @@
-// RUN: annc-opt %s --atir-select-kernel='kernel-name=fused_matmul_a' --atir-specialize-shapes='shape-spec=%S/Inputs/jit-runtime-shapes.json' | FileCheck %s
+// RUN: annc-opt %s --annc-select-kernel='kernel-name=fused_matmul_a' --atir-specialize-shapes='shape-spec=%S/Inputs/jit-runtime-shapes.json' | FileCheck %s
 
 module {
   func.func private @fused_matmul_a(

@@ -48,13 +48,6 @@ AnncTensorView makeView(float* data, const int64_t* dims,
 
 struct TestServices {
   AnncStatusCode code = ANNC_STATUS_OK;
-  static AnncStatusCode parallel(void*, int64_t total, int64_t,
-                                 AnncContextTask task, void* task_data) {
-    if (task == nullptr || total < 0) return ANNC_STATUS_INVALID_ARGUMENT;
-    if (total != 0) task(task_data, 0, total);
-    return ANNC_STATUS_OK;
-  }
-  static int32_t threads(void*) { return 1; }
   static void report(void* opaque, AnncStatusCode code, const char*) {
     auto& current = static_cast<TestServices*>(opaque)->code;
     if (current == ANNC_STATUS_OK) current = code;
@@ -83,15 +76,9 @@ std::array<float, 4> runMatMulKernel(const std::string& backend) {
   auto output = makeView(outputData, outDims, rhsStrides);
   TestServices host;
   AnncRuntimeServices services{sizeof(AnncRuntimeServices),
-                               ANNC_CONTEXT_ABI_VERSION,
-                               &host,
-                               TestServices::output,
-                               TestServices::temp,
-                               TestServices::report,
-                               TestServices::status,
-                               TestServices::parallel,
-                               TestServices::threads,
-                               nullptr,
+                               ANNC_CONTEXT_ABI_VERSION, &host,
+                               TestServices::output, TestServices::temp,
+                               TestServices::report, TestServices::status,
                                nullptr};
   AnncKernelContext context{sizeof(AnncKernelContext),
                             ANNC_CONTEXT_ABI_VERSION,

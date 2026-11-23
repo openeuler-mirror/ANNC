@@ -334,9 +334,9 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
 
   std::string gemm_pipeline_arg = "--annc-aarch64-gemm-pipeline";
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  const std::string fast_codegen_arg = "--atir-fast-codegen=enable-kdnn=true";
+  const std::string fast_codegen_arg = "--annc-fast-codegen=enable-kdnn=true";
 #else
-  const std::string fast_codegen_arg = "--atir-fast-codegen";
+  const std::string fast_codegen_arg = "--annc-fast-codegen";
 #endif
   std::string gemm_pipeline_options;
   if (request.enable_prepack)
@@ -353,8 +353,14 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   std::vector<std::string> asm_args = {
       AnncToolPath("annc-asm"),
       request.atir_module_path,
-      "--atir-select-kernel=kernel-name=" + request.kernel_name,
+      "--annc-select-kernel=kernel-name=" + request.kernel_name,
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+      "--shape-legalize-to-stablehlo",
+      "--reconcile-unrealized-casts",
+      "--annc-specialize-shapes=shape-spec=" + shape_spec,
+#else
       "--atir-specialize-shapes=shape-spec=" + shape_spec,
+#endif
       fast_codegen_arg,
       gemm_pipeline_arg,
       "-o",
@@ -443,6 +449,9 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
     if (!specs || !prepare || count < 0 ||
         static_cast<size_t>(count) > request.immutable_arguments.size()) {
       error = "Missing or invalid JIT packed RHS ABI v1";
+      dlclose(handle);
+      kernel->library_handle = nullptr;
+      CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
       return ANNC_JIT_INTERNAL;
     }
     kernel->packed_rhs_specs = specs;
@@ -452,6 +461,13 @@ AnncJitStatus CompileAnncJitKernel(const JitCompileRequest& request,
   kernel->kernel_function = kernel_function;
   kernel->set_thread_pool_function = set_thread_pool;
   kernel->get_thread_pool_function = get_thread_pool;
+  // The mapped kernel image stays pinned by dlopen and nothing reads the work
+  // directory by path afterwards, so delete it eagerly: hosts that exit
+  // without running destructors (e.g. main() ends with exit()) would
+  // otherwise leak one directory per compiled kernel. CleanupAnncJitWorkDir
+  // clears work_dir, making ~AnncJitKernel a no-op; ANNC_KEEP_TEMPS keeps
+  // both the directory and the destructor path for debugging.
+  CleanupAnncJitWorkDir(work_dir, request.log, request.log_context);
   return ANNC_JIT_OK;
 }
 

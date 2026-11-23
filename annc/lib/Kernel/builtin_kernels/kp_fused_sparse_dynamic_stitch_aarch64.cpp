@@ -193,7 +193,7 @@ void CopyRuntime(const int64_t* indices, int64_t start, int64_t end,
 template <typename Work>
 void RunSharded(annc::kernels::KernelContext* context, int64_t num_elems,
                 int64_t stride, Work work) {
-  auto workers = context->getThreadPool();
+  auto workers = context->getKernelThreadPool();
   annc::kernels::Shard(workers.numThreads(), workers, num_elems,
                        ShardCost(stride), work);
 }

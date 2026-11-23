@@ -1,6 +1,8 @@
 #include "Conversion/Passes.h"
+#include "Support/ContextABISwitch.h"
 #include "Dialect/Atir/Passes/Passes.h"
 #include "Target/aarch64/Passes.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -30,16 +32,64 @@ namespace annc
                            "for runtime packing")};
     };
 
+    class AArch64PipelineFeatureGuard
+        : public PassWrapper<AArch64PipelineFeatureGuard,
+                             OperationPass<ModuleOp>> {
+     public:
+        MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+            AArch64PipelineFeatureGuard)
+
+        void runOnOperation() override {
+#if defined(ANNC_ENABLE_TF2ATIR_V2)
+            getOperation().emitError(
+                "AArch64 GEMM pipeline requires both "
+                "ANNC_ENABLE_TF2ATIR_V2 and "
+                "ANNC_ENABLE_LOWERING_CONTEXT_ABI; this build has V2 enabled "
+                "but the context ABI route is disabled");
+#else
+            getOperation().emitError(
+                "AArch64 GEMM pipeline requires both "
+                "ANNC_ENABLE_TF2ATIR_V2 and "
+                "ANNC_ENABLE_LOWERING_CONTEXT_ABI; the context ABI route is "
+                "enabled but this build has V2 disabled");
+#endif
+            signalPassFailure();
+        }
+    };
+
     void buildAArch64CodegenPipelineImpl(OpPassManager& passManager,
                                          StringRef configPath,
                                          StringRef packedCPath,
                                          int64_t intraThreadCount,
                                          StringRef jitInputsPath = {})
     {
+#if defined(ANNC_ENABLE_TF2ATIR_V2)
+        if (!annc::loweringContextABIEnabled()) {
+            passManager.addPass(
+                std::make_unique<AArch64PipelineFeatureGuard>());
+            return;
+        }
+
+        passManager.addPass(atir::createAnncGemmEpilogueCommitPass());
+        passManager.addPass(atir::createConvertContextKernelABIPass());
+        passManager.addPass(atir::createConvertAtirV2ToLinalg());
+#else
+        if (annc::loweringContextABIEnabled()) {
+            passManager.addPass(
+                std::make_unique<AArch64PipelineFeatureGuard>());
+            return;
+        }
+
         passManager.addPass(createAArch64AtirGemmEpilogueCommit());
         passManager.addPass(atir::createLowerContextKernelEntriesPass());
         passManager.addPass(atir::createConvertAtirToLinalg());
+#endif
         passManager.addPass(createKPGemmOneShotBufferize());
+        if (annc::loweringContextABIEnabled()) {
+            bufferization::BufferDeallocationPipelineOptions options;
+            bufferization::buildBufferDeallocationPipeline(passManager,
+                                                            options);
+        }
         passManager.addPass(createAArch64ExtractGemmProblem());
         const bool enablePrepack = !packedCPath.empty();
         passManager.addPass(createAArch64SelectGemmStrategy(configPath,

@@ -4,13 +4,18 @@
 #include "mlir/IR/MLIRContext.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringExtras.h"
 
 using namespace mlir;
 
 namespace annc::tfcompat {
 namespace {
 
+struct TfStringType : public Type::TypeBase<TfStringType, Type, TypeStorage> {
+  using Base::Base;
+  static constexpr llvm::StringRef name = "string";
+};
+
+// Parameterized storage keyed by the source tag (resource/variant/...).
 struct TfTagTypeStorage : public TypeStorage {
   TfTagTypeStorage(StringRef tag, ArrayRef<Type> params)
       : tag(tag), params(params) {}
@@ -33,6 +38,8 @@ struct TfTagTypeStorage : public TypeStorage {
 
 struct TfTagType : public Type::TypeBase<TfTagType, Type, TfTagTypeStorage> {
   using Base::Base;
+  // Required by addTypes registration; never used for parsing — the
+  // dialect-level parseType hook handles every tag.
   static constexpr llvm::StringRef name = "tf_tag";
   static TfTagType get(MLIRContext* context, StringRef tag,
                        ArrayRef<Type> params = {}) {
@@ -42,6 +49,40 @@ struct TfTagType : public Type::TypeBase<TfTagType, Type, TfTagTypeStorage> {
   ArrayRef<Type> getParams() const { return getImpl()->params; }
 };
 
+// Parameterized attribute storage: dimension list with negatives encoding `?`
+// (unknown extent); `unranked` (*) carries an empty dim list.
+struct TfShapeAttrStorage : public AttributeStorage {
+  using KeyTy = std::pair<ArrayRef<int64_t>, bool>;
+  explicit TfShapeAttrStorage(KeyTy key)
+      : shape(key.first), unranked(key.second) {}
+  bool operator==(const KeyTy& key) const {
+    return shape == key.first && unranked == key.second;
+  }
+  static llvm::hash_code hashKey(const KeyTy& key) {
+    return llvm::hash_combine(key.first, key.second);
+  }
+  static TfShapeAttrStorage* construct(AttributeStorageAllocator& allocator,
+                                       KeyTy key) {
+    return new (allocator.allocate<TfShapeAttrStorage>())
+        TfShapeAttrStorage({allocator.copyInto(key.first), key.second});
+  }
+  ArrayRef<int64_t> shape;
+  bool unranked;
+};
+
+struct TfShapeAttr
+    : public Attribute::AttrBase<TfShapeAttr, Attribute, TfShapeAttrStorage> {
+  using Base::Base;
+  static constexpr llvm::StringRef name = "shape";
+  static TfShapeAttr get(MLIRContext* context, ArrayRef<int64_t> shape,
+                         bool unranked = false) {
+    assert((!unranked || shape.empty()) && "unranked shape carries no dims");
+    return Base::get(context, TfShapeAttrStorage::KeyTy{shape, unranked});
+  }
+  ArrayRef<int64_t> getShape() const { return getImpl()->shape; }
+  bool isUnranked() const { return getImpl()->unranked; }
+};
+
 class TfTypeCompatDialect : public Dialect {
  public:
   static StringRef getDialectNamespace() { return "tf_type"; }
@@ -49,13 +90,16 @@ class TfTypeCompatDialect : public Dialect {
   explicit TfTypeCompatDialect(MLIRContext* context)
       : Dialect(getDialectNamespace(), context,
                 TypeID::get<TfTypeCompatDialect>()) {
-    addTypes<TfTagType>();
+    addTypes<TfStringType, TfTagType>();
+    addAttributes<TfShapeAttr>();
   }
 
-  // Any `!tf_type.<tag>` parses (params round-trip); `string` is a bare tag.
+  // `string` gets the dedicated carrier type; every other tag round-trips as
+  // an opaque type with its parameter list.
   Type parseType(DialectAsmParser& parser) const override {
     std::string tag;
     if (parser.parseKeywordOrString(&tag)) return Type();
+    if (tag == "string") return TfStringType::get(parser.getContext());
     SmallVector<Type> params;
     if (succeeded(parser.parseOptionalLess())) {
       if (parser.parseCommaSeparatedList([&]() -> ParseResult {
@@ -71,21 +115,180 @@ class TfTypeCompatDialect : public Dialect {
   }
 
   void printType(Type type, DialectAsmPrinter& printer) const override {
-    auto tagType = cast<TfTagType>(type);
-    printer.printKeywordOrString(tagType.getTag());
-    ArrayRef<Type> params = tagType.getParams();
-    if (params.empty()) return;
-    printer << "<";
-    llvm::interleaveComma(params, printer,
-                          [&](Type param) { printer.printType(param); });
-    printer << ">";
+    if (auto tagType = dyn_cast<TfTagType>(type)) {
+      printer.printKeywordOrString(tagType.getTag());
+      ArrayRef<Type> params = tagType.getParams();
+      if (params.empty()) return;
+      printer << "<";
+      llvm::interleaveComma(params, printer,
+                            [&](Type param) { printer.printType(param); });
+      printer << ">";
+      return;
+    }
+    printer << "string";
+  }
+
+  Attribute parseAttribute(DialectAsmParser& parser, Type) const override {
+    llvm::StringRef mnemonic;
+    if (parser.parseKeyword(&mnemonic)) return Attribute();
+    if (mnemonic != "shape") {
+      parser.emitError(parser.getNameLoc())
+          << "unsupported 'tf_type' attribute: #" << mnemonic;
+      return Attribute();
+    }
+    if (parser.parseLess()) return Attribute();
+    SmallVector<int64_t> dims;
+    bool unranked = false;
+    auto parseDimSegment = [&](llvm::StringRef seg) -> bool {
+      int64_t value = -1;
+      if (seg.getAsInteger(10, value) || value < 0) return false;
+      dims.push_back(value);
+      return true;
+    };
+    auto emitInvalid = [&]() {
+      parser.emitError(parser.getCurrentLocation())
+          << "invalid dimension in 'tf_type.shape' attribute";
+    };
+    // afterSeparator tracks a bare `x` separator: the token right after it
+    // must be a dimension, so `3x>` (dangling) fails while `2x?>` and
+    // `3x16x?>` parse (the single-char x is a separator, never dangling).
+    bool afterSeparator = false;
+    while (true) {
+      if (succeeded(parser.parseOptionalGreater())) {
+        if (afterSeparator) {
+          emitInvalid();
+          return Attribute();
+        }
+        break;
+      }
+      if (succeeded(parser.parseOptionalLSquare())) {
+        // List spelling: the safe transport for dynamic dims (a compact
+        // spelling with a leading digit and a trailing `?` gets captured
+        // by the generic attribute parser before this hook runs).
+        bool closed = succeeded(parser.parseOptionalRSquare());
+        while (!closed) {
+          if (succeeded(parser.parseOptionalQuestion())) {
+            dims.push_back(-1);
+          } else {
+            int64_t dim = -1;
+            if (failed(parser.parseInteger(dim)) || dim < 0) {
+              emitInvalid();
+              return Attribute();
+            }
+            dims.push_back(dim);
+          }
+          closed = succeeded(parser.parseOptionalRSquare());
+          if (!closed && failed(parser.parseOptionalComma())) {
+            emitInvalid();
+            return Attribute();
+          }
+        }
+        if (failed(parser.parseGreater())) return Attribute();
+        break;
+      }
+      if (succeeded(parser.parseOptionalStar())) {
+        if (unranked || !dims.empty() ||
+            failed(parser.parseOptionalGreater())) {
+          emitInvalid();
+          return Attribute();
+        }
+        unranked = true;
+        break;
+      }
+      if (succeeded(parser.parseOptionalQuestion())) {
+        dims.push_back(-1);
+      } else {
+        int64_t dim = -1;
+        // MLIR auto-senses the radix, so `0x3` parses as 3 by design;
+        // dimensions are decimal-only at the pb source, and the accepted
+        // spelling is locked by the sink component test.
+        OptionalParseResult parsed = parser.parseOptionalInteger(dim);
+        if (!parsed.has_value() || failed(*parsed) || dim < 0) {
+          emitInvalid();
+          return Attribute();
+        }
+        dims.push_back(dim);
+      }
+      afterSeparator = false;
+      llvm::StringRef sep;
+      if (failed(parser.parseOptionalKeyword(&sep))) {
+        // No keyword: only '>' may follow a dimension. Whitespace- or
+        // comma-separated dims do not belong to the compact spelling.
+        if (succeeded(parser.parseOptionalGreater())) break;
+        emitInvalid();
+        return Attribute();
+      }
+      if (sep.empty() || sep.front() != 'x') {
+        parser.emitError(parser.getCurrentLocation())
+            << "expected 'x' separator in 'tf_type.shape', got '" << sep
+            << "'";
+        return Attribute();
+      }
+      bool dangling = sep.size() > 1 && sep.back() == 'x';
+      bool bareSeparator = sep.size() == 1;
+      sep = sep.drop_front();
+      while (!sep.empty()) {
+        size_t x = sep.find('x');
+        llvm::StringRef seg =
+            (x == llvm::StringRef::npos) ? sep : sep.take_front(x);
+        if (!parseDimSegment(seg)) {
+          emitInvalid();
+          return Attribute();
+        }
+        sep = (x == llvm::StringRef::npos) ? llvm::StringRef()
+                                           : sep.drop_front(x + 1);
+      }
+      if (dangling) {
+        emitInvalid();
+        return Attribute();
+      }
+      afterSeparator = bareSeparator;
+    }
+    return TfShapeAttr::get(parser.getContext(), dims, unranked);
+  }
+
+  void printAttribute(Attribute attr,
+                      DialectAsmPrinter& printer) const override {
+    auto shape = cast<TfShapeAttr>(attr);
+    if (shape.isUnranked()) {
+      printer << "shape<*>";
+      return;
+    }
+    // Dynamic dims go through the list spelling: a compact `2x?` is
+    // captured by the generic attribute parser on re-parse (see the list
+    // branch in parseAttribute), so printing it would not round-trip.
+    if (llvm::is_contained(shape.getShape(), -1)) {
+      printer << "shape<[";
+      llvm::interleave(
+          shape.getShape(), printer,
+          [&](int64_t dim) {
+            if (dim < 0)
+              printer << '?';
+            else
+              printer << dim;
+          },
+          ", ");
+      printer << "]>";
+      return;
+    }
+    printer << "shape<";
+    llvm::interleave(
+        shape.getShape(), printer,
+        [&](int64_t dim) {
+          if (dim < 0)
+            printer << '?';
+          else
+            printer << dim;
+        },
+        "x");
+    printer << '>';
   }
 };
+
 }  // namespace
 
 bool isTfStringType(Type type) {
-  auto tag = dyn_cast<TfTagType>(type);
-  return tag && tag.getTag() == "string";
+  return isa<TfStringType>(type);
 }
 
 void registerTfTypeCompatDialect(DialectRegistry& registry) {

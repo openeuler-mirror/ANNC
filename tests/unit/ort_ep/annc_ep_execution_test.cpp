@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include "Context/KernelContextUtils.h"
 #include <deque>
 #include <functional>
@@ -339,6 +340,33 @@ class ExecutionContextFailureTest : public ::testing::Test {
   std::vector<OutputContract> contracts_{{3, ANNC_ELEMENT_TYPE_F32}};
 };
 
+TEST_F(ExecutionContextFailureTest, ExportsMemrefUsingOutputContractType) {
+  OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
+  auto* abi = context.abi();
+  EXPECT_EQ(abi->outputs[0].element_type, ANNC_ELEMENT_TYPE_F32);
+  EXPECT_EQ(abi->outputs[0].flags & ANNC_TENSOR_BOUND, 0u);
+  const int64_t dims[] = {2, 3, 5};
+  void* descriptor = annc_context_alloc_output_memref(abi, 0, 3, dims);
+  ASSERT_NE(descriptor, nullptr);
+  // Standard rank-three descriptor: two pointers, offset, inline sizes/strides.
+  struct MemRef {
+    void* allocated;
+    void* aligned;
+    int64_t offset;
+    int64_t sizes[3], strides[3];
+  };
+  MemRef result;
+  std::memcpy(&result, descriptor, sizeof(result));
+  EXPECT_EQ(result.aligned, fake_.tensor_data);
+  EXPECT_EQ(std::vector<int64_t>(result.sizes, result.sizes + 3),
+            (std::vector<int64_t>{2, 3, 5}));
+  EXPECT_EQ(std::vector<int64_t>(result.strides, result.strides + 3),
+            (std::vector<int64_t>{15, 5, 1}));
+  EXPECT_TRUE(context.AllOutputsAllocated());
+  EXPECT_TRUE(context.AllOutputsBound());
+  EXPECT_EQ(context.TakeError(), nullptr);
+}
+
 TEST_F(ExecutionContextFailureTest, KeepsTheFirstOrtStatusAndReleasesLaterOnes) {
   OnnxExecutionContext context(&fake_.api, fake_.kernel_context, contracts_);
   AnncKernelContext* abi = context.abi();
@@ -651,7 +679,7 @@ TEST_F(ExecutionContextFailureTest, ServiceViewsOwnShapeAndKeepRequestImmutable)
   dims[0] = 99;
   EXPECT_EQ(output.sizes[0], 2);
   EXPECT_EQ(output.strides[0], 15);
-  EXPECT_EQ(abi->services->native_thread_pool(abi->services->opaque, "unknown"),
+  EXPECT_EQ(abi->services->thread_pool->native_pool("unknown"),
             nullptr);
 }
 
@@ -662,7 +690,7 @@ TEST_F(ExecutionContextFailureTest, ScalarTempAndExplicitShardLimit) {
   ASSERT_EQ((context.allocateTemp<float, 0>(nullptr, &temp)), ANNC_STATUS_OK);
   EXPECT_EQ(fake_.last_alloc_bytes, sizeof(float));
   int64_t covered = 0;
-  auto pool = context.getThreadPool();
+  auto pool = context.getKernelThreadPool();
   EXPECT_EQ(annc::kernels::Shard(2, pool, 300000, 128,
                   [&](int64_t begin, int64_t end) { covered += end - begin; }),
             ANNC_STATUS_OK);

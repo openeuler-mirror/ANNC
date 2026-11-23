@@ -1,16 +1,16 @@
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true' | FileCheck %s --check-prefix=KDNN
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-custom-ops=MatMul' | FileCheck %s --check-prefix=ENABLED
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='disable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=ALLOW
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-custom-ops=MatMul disable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
-// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=ENABLED
-// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMulAdd annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true' | FileCheck %s --check-prefix=ALLOW
-// RUN: env ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS=Ignored,MatMul annc-asm --split-input-file %s -atir-fast-codegen | FileCheck %s --check-prefix=DISABLE
-// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=ALLOW
-// RUN: env ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -atir-fast-codegen='enable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=FUSED-ALLOW
-// RUN: annc-asm --split-input-file %s -atir-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAddRelu' | FileCheck %s --check-prefix=RELU-ALLOW
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true' | FileCheck %s --check-prefix=KDNN
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-custom-ops=MatMul' | FileCheck %s --check-prefix=ENABLED
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='disable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=ALLOW
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-custom-ops=MatMul disable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
+// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s --check-prefix=ENABLED
+// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMulAdd annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true' | FileCheck %s --check-prefix=ALLOW
+// RUN: env ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS=Ignored,MatMul annc-asm --split-input-file %s -annc-fast-codegen | FileCheck %s --check-prefix=DISABLE
+// RUN: env ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=ALLOW
+// RUN: env ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS=MatMul annc-asm --split-input-file %s -annc-fast-codegen='enable-custom-ops=MatMul' | FileCheck %s --check-prefix=DISABLE
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAdd' | FileCheck %s --check-prefix=FUSED-ALLOW
+// RUN: annc-asm --split-input-file %s -annc-fast-codegen='enable-kdnn=true enable-custom-ops=MatMulAddRelu' | FileCheck %s --check-prefix=RELU-ALLOW
 // FastCodegen: MatmulToCustomCallRewrite pattern，--enable-kdnn 给 module 加 annc.enable_kdnn 标记
 
 // Ordinary GEMM stays on the generated path. An allowlist must not resolve

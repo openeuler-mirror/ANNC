@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "Context/KernelContext.h"
-#include "Kernel/ExecutionContext.h"
 #include "compat.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -25,6 +24,10 @@ class AnncThreadPool;
 }  // namespace annc
 
 namespace tensorflow {
+
+std::vector<int> ResolveKernelArgOrder(const std::vector<int>& configured_order,
+                                       int num_inputs, int num_outputs,
+                                       bool has_input_ranks);
 
 struct AnncFusedProfileSample;
 struct AnncJitBinding {
@@ -59,16 +62,21 @@ class ANNCFusedOp : public OpKernel {
       const std::shared_ptr<annc::jit::JitExecutable>& executable,
       std::shared_ptr<AnncJitBinding>* binding);
 
+  // JIT prepack admission: both kernel ABIs consume the compile-time packed
+  // RHS spec table; the context path redirects the input view base pointers.
+  bool SupportsJitPrepack() const {
+    return abi_ == "mlir_ciface" || abi_ == ANNC_CONTEXT_ABI_NAME;
+  }
+
   Status ExecuteMlirCifaceKernel(OpKernelContext* context,
-                                 void* kernel_function, bool profile_enabled,
+                                 void* kernel_function,
+                                 bool profile_enabled,
                                  AnncFusedProfileSample* profile_sample,
                                  const AnncJitBinding* binding = nullptr);
-  Status ExecuteExecutionV2Kernel(OpKernelContext* context,
-                                  void* kernel_function,
-                                  bool profile_enabled,
-                                  AnncFusedProfileSample* profile_sample);
-  Status ExecuteContextV3Kernel(OpKernelContext* context,
-                                void* kernel_function);
+  Status ExecuteContextV3Kernel(
+      OpKernelContext* context, void* kernel_function, bool jit_mode,
+      annc::threadpool::AnncThreadPool* thread_pool,
+      const AnncJitBinding* binding = nullptr);
 
   // Input classification counts derived from FusionInfo::args during rewrite.
   int num_constants_;
@@ -110,8 +118,7 @@ class ANNCFusedOp : public OpKernel {
   std::string shared_lib_path_;
   // Fusion-only ATIR module consumed by runtime JIT compilation.
   std::string atir_module_path_;
-  // Calling convention: "mlir_ciface", "annc_execution_v2", or
-  // the single-pointer "annc_context_v3".
+  // Calling convention: "mlir_ciface" or the single-pointer "annc_context_v3".
   std::string abi_;
   // Whether runtime clears output tensors before calling the generated kernel.
   bool zero_initialize_outputs_;

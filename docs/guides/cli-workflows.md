@@ -15,9 +15,47 @@ annc-partition --version
 
 因此当前不能把该工具用于真实模型切分；下列其他既有工作流不受骨架接入影响。
 
+## ONNX 的 StableHLO 前端
+
+`annc-onnx-pipeline` 默认走 ATIR。部署配套转换和匹配工具后，设置 `ANNC_ONNX_USE_STABLEHLO=1` 选择 StableHLO，并按需启用算子融合。下面以 BMMAdd 为例。工具安装见 [从源码构建](build-from-source.md#onnx-的-stablehlo-前端)。
+
+```sh
+ANNC_ONNX_USE_STABLEHLO=1 ANNC_EP_FUSION_BATCHED_MATMUL_ADD=1 \
+  annc-onnx-pipeline --model model.onnx --out-dir output --keep-temps
+```
+
+输出目录保存 `model.fused.mlir`，有融合站点时同时生成 `libannc_kernels.so`。`--keep-temps` 保留转换、匹配和绑定的中间 IR。可用 `annc-fusion-metadata output/model.fused.mlir -o metadata.json` 查看交给 EP 的公共元数据。
+
+在 ORT 中运行时，注册原有的 `libannc_ep.so`，并在创建会话前设置相同的前端和融合开关。EP 调用同一个 pipeline，从 kernel IR 读取站点并在会话内接管执行，输入 ONNX 文件保持原样。[接入设计](../design/onnx-support/stablehlo-integration.md) · [ORT EP 使用说明](../../addons/onnxruntime/README.md)
+
 ## 端到端 GraphDef 重写
 
-`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：普通 GEMM pattern 默认走 JIT；TF `tensordot_matmul` 在输入形状全静态时走 AOT、含动态维度时走 JIT，其他 fusion 以各 pattern 的执行模式为准。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+`annc-tf-pipeline` 默认编排 `annc-tf2atir`、`annc-opt`、`annc-asm`、`annc` 和 `annc-converter`，适合直接把 TensorFlow GraphDef 重写为包含 `ANNCFused` 自定义 Op 的 GraphDef。`annc-opt` 在 fusion pattern 创建 kernel func 时写入 `annc.execution_mode`：GEMM pattern 默认走 JIT，其他已注册 fusion 默认走 AOT。pipeline 只把 AOT func 编译进共享库，同时保留完整 fusion-only ATIR 供 JIT func 使用。传入 `--fusion-config` 时，`annc-opt` 优先按外部 JSON 匹配，再运行内置 pattern 作为 fallback。传入 `--dump-fusion-metadata` 时额外调用 `annc-fusion-metadata` 保存 JSON。
+
+v2 的 predictor 进程内改写形态见
+[addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
+
+### V2 路线：annc-tf-pipeline-v2
+
+`annc-tf-pipeline-v2`（`ANNC_ENABLE_TF2ATIR_V2=ON` 构建产出）编排完整
+V2 离线链：pb2stablehlo → `annc-stablehlo-sink` → `annc-asm
+-atir-op-fusion-v2` → fast-codegen → `annc-fusion-metadata` →
+prune/lower →（AOT 站点时）`annc -shared` → `annc-converter-v2` 回写。
+产物三件套落在 `--work_dir`：`fusion_metadata.json`、
+`model_fused_atir.mlir`（JIT 模板）与 `annc_generated_kernel.so`（仅
+AOT 站点）；`--keep_temps` 额外保留全部中间产物。与 v1 的差异：
+入口名单经 `--input` 显式给出（feed 点，可重复）、metadata 为必产物、
+`--verbose` 等价 `ANNC_LOG_LEVEL=info`。predictor 进程内改写部署下用
+`--skip-converter` 跳过离线回写（rewritten.pb 不参与运行时）。
+
+```shell
+annc-tf-pipeline-v2 \
+  --input_graphdef input.pb \
+  --input <feed_node> \
+  --output_tensor <output_node> \
+  --work_dir /tmp/annc_v2_work \
+  --keep_temps --verbose
+```
 
 > **GEMM 融合需要先打开开关**：`ANNC_GEMM` 未设置时默认为 `0`，`OpFusion` 不做 MatMul/GEMM 融合，也不会产生 JIT kernel，且不会报错。需要 GEMM 融合时先 `export ANNC_GEMM=1`（plain MatMul）或 `ANNC_GEMM=2`（追加 epilogue 尾融合）。取值与依赖见[环境变量参考](environment-variables.md)。
 
@@ -46,7 +84,7 @@ annc-tf-pipeline \
 | `--keep_temps` / `--keep_temp_files` | 保留中间产物 |
 | `--verbose` / `-v` | 打印每一步命令 |
 
-## `annc-tf2atir-v2`（V2 路线）
+## `annc-stablehlo-sink`（V2 路线）
 
 V2 路线的图改写入口：读入前端产物（stablehlo + 残差载体的 `.mlir`），
 执行 residue-sink（映射残差 → `atir.*_v2`，未映射残差 →
@@ -56,12 +94,86 @@ debug 信息的 ATIR。随 `ANNC_ENABLE_TF2ATIR_V2=ON` 构建（默认 OFF），
 `tests/FileCheck/Conversion/tf-residue-v2-sink.mlir`。
 
 ```shell
-annc-tf2atir-v2 input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
+annc-stablehlo-sink input.mlir -o output.mlir   # 省略 -o 时输出到 stdout
 ```
+
+在启用 `ANNC_ENABLE_TF2ATIR_V2` 的 `annc-asm` 构建中，可以复用
+StableHLO 官方的 Shape dialect 规范化 pass：
+
+```shell
+annc-asm input.mlir --shape-legalize-to-stablehlo -o normalized.mlir
+```
+
+该选项直接注册上游 `shape-legalize-to-stablehlo`，只负责把 Shape/相关
+辅助方言转换为 StableHLO 表达；运行时 shape 特化由后续专用化 pass 负责。
 
 工具本身前端无关（sink 只认残差载体）；`ANNC_V2_REWRITE_INPROC=1` 的
 部署形态见
 [addons/tensorflow/annc-converter-v2/README.md](../addons/tensorflow/annc-converter-v2/README.md)。
+
+### `-atir-op-fusion-v2`（V2 融合）
+
+sink 之后由 `annc-opt` 执行 V2 融合（图优化职责，与 `annc-asm` 无关）：
+在 sink 产物上切分融合站点为 kernel 函数（当前 kp_gather、dot GEMM 两个
+pattern），主图以 `func.call` 回接，kernel 带 V1 契约的
+`fusion.metadata`。dot GEMM 的尾链吸收由 `ANNC_GEMM` 门控（2/99 启用，
+见 [环境变量参考](environment-variables.md)）。
+
+TF 路线（V2 前端）在融合前后追加两个归一 pass，均在 `annc-asm` 注册：
+
+- `-atir-inline-shape-assumings`：内联纯 `shape.assuming` 宿主（odml
+  前端把 shape 计算包进 region，不展开则站点匹配不到成员）；非纯
+  region 保留原样。
+- `-atir-drop-shape-only-subgraphs`：清除只服务 shape 的死闭包（站点
+  边界重接到 kernel 输出后，原 lookup/mask/shape 链值死）；同秩真
+  reshape（非 `shape_of` 描述链）受保护不替换。
+
+```shell
+annc-opt sunk.mlir -atir-op-fusion-v2 -o fused.mlir
+```
+
+后续的 fast-codegen（站点 Customize 化）由 `annc-asm` 执行，两段串联：
+
+```shell
+annc-opt sunk.mlir -atir-op-fusion-v2 | annc-asm - -atir-fast-codegen
+```
+
+## `pb2stablehlo`（V2 路线前端）
+
+TF GraphDef → StableHLO 的 V2 前端（wheel 隔离编译，TF 2.20 + 独立
+llvm 快照；构建开关同 `ANNC_ENABLE_TF2ATIR_V2`，TF 2.20 分支可达）。
+读入 GraphDef pb，产出 **stablehlo 主图 + 残差载体** 的 `.mlir`（即
+`annc-stablehlo-sink` 消费的前端产物）。
+
+```shell
+pb2stablehlo graph.pb --input x:DT_STRING --output y \
+  -o stablehlo.mlir
+```
+
+产物（stablehlo 主图 + 残差载体）默认写 **stdout**，`-o <file>` 改为写入
+文件（两者互斥）；`--output` 是图输出名（fetches）而非路径。示例中的
+`x`/`y` 按图内入口/输出节点名替换。
+
+| 选项 | 作用 |
+| --- | --- |
+| `--input name[:DT[:dims]]` | 入口声明（可多次；dtype 缺省从图推导，无法推导即拒绝；`dims` 为逗号分隔整数如 `2,3`，省略则从图推导或视为未知 shape） |
+| `--output name` | 输出名（可多次；决定 `tf.entry_function`） |
+| `-o <file>` | 产物写入文件（不给则写 stdout） |
+| `--dump` | 打印导入/改写后的 tf MLIR 后直接退出（诊断用，不产 stablehlo） |
+| `--no-dump-out` | 不向 stdout 输出最终产物（对 `-o` 无影响） |
+| `--skip-preprocess` | 跳过官方 preprocess/freeze（诊断 A/B） |
+| `--assume-opaque-i8` | 无 dtype 槽标记 DT_INT8 哨兵（回归辅助） |
+| `--crash_repro <file>` | crash reproducer 路径 |
+
+退出码：0 成功；1 IO/导入失败；2 用法；3 方言注册；4 类型/不变量；
+5 内部阶段（管线失败）；6 图结构。A/B 开关（`ANNC_NO_*`）见
+[环境变量参考](environment-variables.md)。产出交由
+`annc-stablehlo-sink`（见上）完成残差下沉。
+
+行为契约与阶段失败语义见
+[前端设计](../design/tf-stablehlo-frontend/frontend-transform.md)；
+端到端行为由 `tests/integration/tf_transform/`（30 用例）锚定，改动
+pipeline 或 wrap 层后应回归该目录。
 
 ## 分步编译命令
 
@@ -87,7 +199,7 @@ annc-fusion-metadata fused.mlir \
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 annc-opt fused.mlir --atir-prune-func=execution-mode=aot -o aot.mlir
 annc-asm aot.mlir \
-  --atir-fast-codegen \
+  --annc-fast-codegen \
   --annc-aarch64-gemm-pipeline \
   -o lowered.mlir
 
@@ -209,29 +321,46 @@ annc-fusion-metadata model_fused_atir.mlir -o fusion_metadata.json
 
 `annc-asm` 是注册了 ATIR、转换 pass 和 AArch64 target pass 的 `mlir-opt` 风格工具，用于将 ATIR lowering 到低层 MLIR。
 
+`--atir-fast-codegen` 与 `--atir-select-kernel` 已分别更名为
+`--annc-fast-codegen` 与 `--annc-select-kernel`，旧选项不再注册。升级外部
+命令、pipeline 字符串和脚本时，将旧选项名替换为对应的新名称即可；原有
+pass 参数保持不变。
+
+`--convert-atir-v2-to-linalg` 是 ATIR V2 的独立 conversion 入口。当前支持
+`atir.fused_matmul` 到 Linalg 的 lowering，并在 context ABI 路径复用
+`CustomizeOp` 的 V3 lowering。`atir.fused_matmul` 有 epilogue 输入时必须带
+`annc.gemm.epilogue` 描述，输入数量须与描述中的二元步骤数量一致；非法描述
+会报错，不会退化为普通矩阵乘。函数返回边界会把 builtin tensor 转为
+memref；其他尚未支持的 V2 Op 会保留，旧版 `--convert-atir-to-linalg`
+路径不受影响。AArch64 GEMM pipeline 在构建时启用
+`ANNC_ENABLE_TF2ATIR_V2` 且运行时启用 `ANNC_ENABLE_LOWERING_CONTEXT_ABI`
+时，依次运行 V2 `AnncGemmEpilogueCommit`、`ConvertContextKernelABI` 和
+`ConvertAtirV2ToLinalg`。两个开关都关闭时走旧路线；只开启其中一个时
+pipeline 会报错，因为两条路线都不支持这种组合。
+
 启用 `--annc-aarch64-gemm-pipeline` 时，若图中存在 GEMM anchor，必须提供调优配置：设置 `ANNC_GEMM_CONFIG=<file>`，或使用 `-annc-aarch64-gemm-pipeline='config-path=<file>'`；否则 GEMM strategy 会报错并使 pass 失败。
 
 ```shell
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 annc-opt model_fused_atir.mlir --atir-prune-func=execution-mode=aot -o model_aot_atir.mlir
 annc-asm model_aot_atir.mlir \
-  --atir-fast-codegen \
+  --annc-fast-codegen \
   --annc-aarch64-gemm-pipeline \
   -o model_lowered.mlir
 ```
 
-`--atir-fast-codegen` 在 allowlist 与 denylist 都为空时改写**所有已注册**的自定义算子类型。GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 只在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建中注册（例外：aarch64 原生的 `MatMulAddReluWithAddOutput` 无条件注册）：默认构建里这些类型一般交给 `--annc-aarch64-gemm-pipeline`；KDNN 构建中还需在 `--atir-fast-codegen` 里加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），默认 `enable-kdnn=false` 时 KDNN-only 的 GEMM kernel 不会被选中。可以按最终生成的 `custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist 优先级更高：
+`--annc-fast-codegen` 在 allowlist 与 denylist 都为空时改写**所有已注册**的自定义算子类型。GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 只在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 的构建中注册（例外：aarch64 原生的 `MatMulAddReluWithAddOutput` 无条件注册）：默认构建里这些类型一般交给 `--annc-aarch64-gemm-pipeline`；KDNN 构建中还需在 `--annc-fast-codegen` 里加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），默认 `enable-kdnn=false` 时 KDNN-only 的 GEMM kernel 不会被选中。可以按最终生成的 `custom.op_name` 使用 allowlist 或 denylist 控制改写；名称区分大小写，denylist 优先级更高：
 
 ```shell
 export ANNC_GEMM_CONFIG=<gemm_tuning.json>
 # KDNN 构建下只允许 MatMulAdd，其他自定义算子保持原 ATIR
 annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=enable-custom-ops=MatMulAdd enable-kdnn=true" \
+  "--annc-fast-codegen=enable-custom-ops=MatMulAdd enable-kdnn=true" \
   --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 
 # 禁用 MatMul，MatMulAdd / MatMulAddRelu 等其他类型仍可改写
 annc-asm model_fused_atir.mlir \
-  "--atir-fast-codegen=disable-custom-ops=MatMul enable-kdnn=true" \
+  "--annc-fast-codegen=disable-custom-ops=MatMul enable-kdnn=true" \
   --annc-aarch64-gemm-pipeline -o model_lowered.mlir
 ```
 

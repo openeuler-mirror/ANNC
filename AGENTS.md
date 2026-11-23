@@ -114,7 +114,7 @@ TF 路径：`annc-converter` 把元数据转为 GraphDef 节点属性供 `ANNCFu
 ### 安全
 
 - 不运行来源不明或未签名的第三方预编译 `.so` / 可执行文件；本地由可信源码构建的产物与受管依赖产物不在此限。加载用户提供的模型或自定义 op 库前校验格式与来源。
-- `ANNCOptimizer` 经 `fork/exec` 调用 `annc-tf-pipeline` 时限定子进程可访问目录；新增外部库链接、网络访问须显式评估安全影响。
+- `ANNCOptimizer` 经 `fork/exec` 调用 `annc-tf-pipeline` 时限定子进程可访问目录；`ANNC_V2_REWRITE_INPROC=1` 时改为进程内调用 `libannc_graph_rewriter`，插件自身的加载路径经 `ANNC_V2_GRAPH_REWRITER_PATH` 或与 `libannc_optimizer.so` 同目录解析，并从环境变量（`ANNC_V2_FUSION_METADATA` 等）指定的路径读取元数据与 kernel 产物，上述路径均须来自可信部署配置；新增外部库链接、网络访问须显式评估安全影响。
 
 ### 完成证据
 

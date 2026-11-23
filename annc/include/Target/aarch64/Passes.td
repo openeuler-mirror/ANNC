@@ -10,7 +10,8 @@ def KPGemmOneShotBufferize : Pass<"annc-one-shot-bufferize", "ModuleOp"> {
   let dependentDialects = [
     "mlir::linalg::LinalgDialect",
     "mlir::bufferization::BufferizationDialect",
-    "mlir::memref::MemRefDialect"
+    "mlir::memref::MemRefDialect",
+    "mlir::LLVM::LLVMDialect"
   ];
 }
 

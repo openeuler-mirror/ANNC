@@ -88,4 +88,12 @@ if(_tf_version MATCHES "^1\\.15(\\.|$)")
 else()
   add_subdirectory("${PROJECT_SOURCE_DIR}/tensorflow_addons"
                    "${PROJECT_BINARY_DIR}/tensorflow_addons")
+  # pb2stablehlo: wheel-isolated GraphDef -> StableHLO frontend, the producer
+  # half of the V2 route (its artifacts feed the sink-side entry tool). Own
+  # MLIR/LLVM headers (ABI-locked to the TF 2.20 wheel), so it deliberately
+  # shares nothing with the toolchain setup above. Same switch as the sink
+  # side: ANNC_ENABLE_TF2ATIR_V2.
+  if(ANNC_ENABLE_TF2ATIR_V2)
+    add_subdirectory(transform)
+  endif()
 endif()

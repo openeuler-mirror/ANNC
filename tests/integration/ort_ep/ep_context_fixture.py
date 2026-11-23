@@ -117,7 +117,7 @@ AnncStatusCode FixtureMatmul(annc::kernels::KernelContext& context) {
     return context.status();
   float* scratch = annc::kernels::contextData<float>(temp);
   if (m && n) std::fill_n(scratch, m * n, 0.0f);
-  auto pool = context.getThreadPool();
+  auto pool = context.getKernelThreadPool();
 
   std::mutex mutex;
   std::vector<std::thread::id> workers;
@@ -250,25 +250,46 @@ def run_pipeline(args):
     subprocess.run(["c++", "-std=c++17", "-shared", "-fPIC", "-O2",
                     "-I", str(include_dir),
                     "-I", str(include_dir.parents[1] / "context" / "include"), "-o",
-                    str(output / "libannc_kernels.so"), str(source)],
+                    str(output / "libannc_kernels.so"), str(source),
+                    str(include_dir.parents[1] / "context/lib/ThreadPool.cpp"),
+                    str(include_dir.parents[1] / "context/lib/Parallel.cpp")],
                    check=True)
     columns = model.graph.initializer[0].dims[1]
     # The fusion-toggle tests reuse this fixture as their pipeline; the
     # pattern is selectable so one kernel can stand in for any fused site.
     pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
     site = {
-        "pattern": pattern, "execution_mode": "aot",
+        "pattern": pattern,
+        "execution_mode": "aot",
         "abi": "annc_context_v3",
-        "kernel_name": kernel_name, "member_node_names": [nodes[0].name],
+        "kernel_name": kernel_name,
+        "member_node_names": [nodes[0].name],
         "kernel_arg_order": [],
         "args": [
-            {"tf_name": nodes[0].input[0], "role": "dynamic", "dtype": "f32",
-             "rank": 3, "shape": [-1, -1, -1]},
-            {"tf_name": nodes[0].input[1], "role": "fixed", "dtype": "f32",
-             "rank": 2, "shape": [4, columns]},
+            {
+                "tf_name": nodes[0].input[0],
+                "role": "dynamic",
+                "dtype": "f32",
+                "rank": 3,
+                "shape": [-1, 3, 4],
+            },
+            {
+                "tf_name": nodes[0].input[1],
+                "role": "fixed",
+                "dtype": "f32",
+                "rank": 2,
+                "shape": [4, columns],
+            },
         ],
-        "outputs": [{"tf_name": nodes[0].output[0], "role": "output",
-                     "dtype": "f32", "rank": 3, "shape": [-1, -1, -1]}],
+        "outputs": [
+            {
+                "tf_name": nodes[0].output[0],
+                "role": "output",
+                "dtype": "f32",
+                "rank": 3,
+                "shape": [-1, 3, columns],
+            }
+        ],
     }
     if pattern == "masked_mul":
         # The fixture kernel ignores attrs; exercise their report transport.
@@ -307,8 +328,9 @@ def session(model, providers, threads=1):
 
 def run_test(args):
     if args.mode == "packed-switch":
-        os.environ.update(ANNC_EP_FIXTURE_PATTERN="batched_matmul_add",
-                          ANNC_EP_PACKED_B="1")
+        # This fixture is a Tensordot context kernel. The real BMMAdd packed-B
+        # regression is AnncEpBatchedMatMulAddPackedContextE2e.
+        os.environ.update(ANNC_EP_PACKED_B="1")
     work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ep-context-"))
     work.mkdir(parents=True, exist_ok=True)
     # The optionless dispatch is cut into min(rows, DoP) blocks, so the
@@ -323,6 +345,10 @@ def run_test(args):
 
     runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
     ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
+    plugin = ctypes.CDLL(args.ep_library)
+    for symbol in ("annc_context_get_input_memref",
+                   "annc_context_alloc_output_memref"):
+        getattr(plugin, symbol)
     rtpy.register_execution_provider_library("AnncExecutionProvider",
                                              args.ep_library)
     os.environ.update({

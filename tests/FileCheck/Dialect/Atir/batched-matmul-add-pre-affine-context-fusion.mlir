@@ -1,5 +1,6 @@
 // RUN: annc-opt --atir-op-fusion %s | FileCheck %s
-// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | annc-asm --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER
+// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | annc-asm --annc-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg | FileCheck %s --check-prefix=LOWER
+// RUN: annc-opt --atir-op-fusion --atir-prune-func %s | env ANNC_ENABLE_LOWERING_CONTEXT_ABI=1 annc-asm --annc-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg --verify-each | FileCheck %s --check-prefix=CONTEXT
 
 // Pre-affine form: MatMul(X * scale + offset, W) + bias.  The fold must expose
 // X as the dynamic kernel input; keeping the affine Add as the input is not
@@ -18,6 +19,10 @@
 // LOWER: llvm.ptrtoint
 // LOWER: func.func @__annc_effective_weight_size_
 // LOWER: arith.constant 12 : i64
+// CONTEXT: llvm.mlir.global private constant @[[WEIGHT:.*_context_input_1_data]]
+// CONTEXT: annc.effective_weight_global = "[[WEIGHT]]"
+// CONTEXT: llvm.alloca {{.*}} x !llvm.struct<(ptr, ptr, i64, ptr, ptr, i32, i32, i32, i32)>
+// CONTEXT: call @ANNCKernel_ContextV3_BatchedMatMulAdd_float_auto
 module attributes {module.state = "atir", annc.contract_version = "1.0.0"} {
   func.func @main(%x: !atir.tensor<1x2x3xf32, name = "x">) -> !atir.tensor<1x2x4xf32, name = "y"> {
     %scale = atir.constant "public" @scale -> <3xf32, name = "scale", data = dense<[1.250000e+00, -5.000000e-01, 2.000000e+00]> : tensor<3xf32>>

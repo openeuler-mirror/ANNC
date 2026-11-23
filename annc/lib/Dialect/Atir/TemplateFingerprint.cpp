@@ -53,6 +53,13 @@ void removeSourceIdentity(mlir::Operation *root) {
   root->walk([](mlir::Operation *operation) {
     operation->removeAttr("tf.name");
     operation->removeAttr("tf_name");
+    // The frontend stamps annc.source_{node,op,ports} (TF pb node identity)
+    // on every op; clones keep them and generic-form printing includes all
+    // attrs, so they must be stripped like tf.name or isomorphic templates
+    // each hash with their own site names.
+    operation->removeAttr("annc.source_node");
+    operation->removeAttr("annc.source_op");
+    operation->removeAttr("annc.source_ports");
 
     auto metadata = operation->getAttrOfType<mlir::DictionaryAttr>("metadata");
     if (!metadata) return;

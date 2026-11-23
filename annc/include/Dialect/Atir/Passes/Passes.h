@@ -17,10 +17,13 @@ std::unique_ptr<OperationPass<ModuleOp>> createAtirIdentityCanonicalizePass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirGemmEpilogueFusionPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirFoldBatchNormPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirRankInferencePass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirFastCodegenPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncFastCodegenPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirPruneFuncPass();
-std::unique_ptr<OperationPass<ModuleOp>> createAtirSelectKernelPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncSelectKernelPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAtirSpecializeShapesPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAnncSpecializeShapesPass();
+std::unique_ptr<OperationPass<ModuleOp>>
+createAnncGemmEpilogueCommitPass();
 void populateAtirOpFusionPatterns(RewritePatternSet &patterns);
 
 #define GEN_PASS_REGISTRATION
@@ -28,5 +31,9 @@ void populateAtirOpFusionPatterns(RewritePatternSet &patterns);
 #include "Dialect/Atir/Passes/Passes.h.inc"
 
 void registerAllAtirPasses();
+
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+void registerAtirOpFusionV2Pass();
+#endif
 }  // namespace atir
 #endif // ATIR_PASS_H

@@ -1452,7 +1452,7 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
         return outlineContextBuiltin(
             module, rewriter, matmulOp, "MatMulAddReluWithAddOutput",
             "matmul_add_relu", boundaryInputs, boundaryOutputs, fusedOps,
-            kJitExecutionMode, 0, {"dynamic", "fixed", "fixed"});
+            kAotExecutionMode, 0, {"dynamic", "fixed", "fixed"});
       }
     }
 

@@ -30,7 +30,7 @@ option(ANNC_ENABLE_ONNX "Build the ONNX frontend (annc-onnx2atir) and its protob
 option(ANNC_ENABLE_ONNXRUNTIME_EP "Build the ANNC ONNX Runtime execution-provider plugin (addons/onnxruntime); requires ANNC_ENABLE_ONNX and ANNC_ONNXRUNTIME_INCLUDE_DIR" OFF)
 # TF stablehlo V2 route (one opt-in switch for the whole route): the stablehlo
 # dialect integration + sink layer, and the V2 tools (annc-converter-v2 now;
-# annc-tf2atir-v2 once merged). ON requires an external LLVM/MLIR 20.1.8
+# annc-stablehlo-sink once merged). ON requires an external LLVM/MLIR 20.1.8
 # toolchain, third_party/stablehlo and, from the converter's rewrite core
 # onward, the pip TensorFlow wheel. OFF (default) keeps the historical build
 # path untouched.
@@ -46,6 +46,34 @@ else()
   set(_annc_tf2atir_v2_default OFF)
 endif()
 option(ANNC_ENABLE_TF2ATIR_V2 "Build the TensorFlow stablehlo V2 route (sink layer and V2 tools)" ${_annc_tf2atir_v2_default})
+option(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO "Build the ONNX-to-StableHLO generation pipeline (addons/onnxruntime/stablehlo); does not change EP execution" OFF)
+option(ANNC_ENABLE_STABLEHLO_FRONTEND "Build the StableHLO/ATIR reader using the paired ONNX-MLIR StableHLO libraries" OFF)
+set(ANNC_ONNX_MLIR_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/onnx-mlir" CACHE PATH
+    "Pinned ONNX-MLIR source submodule")
+set(ANNC_ONNX_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/third-party/onnx-mlir-build" CACHE PATH
+    "Build tree for the pinned ONNX-MLIR source")
+if(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO OR ANNC_ENABLE_STABLEHLO_FRONTEND)
+  set(_onnx_mlir_lib_dirs
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/${CMAKE_BUILD_TYPE}/lib"
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/Release/lib"
+    "${ANNC_ONNX_MLIR_BUILD_DIR}/lib")
+  if(EXISTS "${ANNC_ONNX_MLIR_BUILD_DIR}/CMakeCache.txt")
+    load_cache("${ANNC_ONNX_MLIR_BUILD_DIR}" READ_WITH_PREFIX _paired_
+      CMAKE_BUILD_TYPE CMAKE_CONFIGURATION_TYPES)
+    # ANNC and the paired single-config build may use different build types.
+    if(DEFINED _paired_CMAKE_BUILD_TYPE AND NOT _paired_CMAKE_CONFIGURATION_TYPES)
+      set(_onnx_mlir_lib_dirs
+        "${ANNC_ONNX_MLIR_BUILD_DIR}/${_paired_CMAKE_BUILD_TYPE}/lib")
+    endif()
+  endif()
+  find_library(_annc_stablehlo_ops NAMES StablehloOps
+    PATHS ${_onnx_mlir_lib_dirs} NO_DEFAULT_PATH NO_CACHE)
+  if(NOT _annc_stablehlo_ops)
+    message(FATAL_ERROR
+      "StablehloOps not found in the paired ONNX-MLIR build: ${_onnx_mlir_lib_dirs}. Build ONNX-MLIR first or set ANNC_ONNX_MLIR_BUILD_DIR.")
+  endif()
+  get_filename_component(ANNC_ONNX_MLIR_LIBRARY_DIR "${_annc_stablehlo_ops}" DIRECTORY)
+endif()
 set(ANNC_ONNXRUNTIME_INCLUDE_DIR "" CACHE PATH "Directory holding onnxruntime_c_api.h and onnxruntime_ep_c_api.h, e.g. <ORT_ROOT>/include/onnxruntime/core/session (required by ANNC_ENABLE_ONNXRUNTIME_EP)")
 set(ANNC_EP_ORT_BUILD_TREE "" CACHE PATH "ORT build tree (the Release/ directory of the ORT build that will host the plugin, e.g. <ORT_WS>/build_wheel_fullstack/Release) providing libonnxruntime_common.a and libcpuinfo.a for the EP's native pool (always used by the EP); an install/SDK tree does not carry them")
 set(ANNC_EP_NATIVE_POOL_ORT_VERSION "1.26.0" CACHE STRING "ORT release the native-pool context layout and archives were verified against; the adapter refuses the native path in any other host and falls back to the public KernelContext_ParallelFor adapter")
@@ -188,7 +216,7 @@ foreach(_annc_root IN ITEMS
 endforeach()
 if(NOT DEFINED LLVM_DIR)
   find_program(ANNC_LLVM_CONFIG NAMES
-    llvm-config-22 llvm-config-21 llvm-config-20 llvm-config)
+    llvm-config-20 llvm-config-21 llvm-config-22 llvm-config)
   if(ANNC_LLVM_CONFIG)
     execute_process(COMMAND "${ANNC_LLVM_CONFIG}" --cmakedir
       OUTPUT_VARIABLE _annc_llvm_cmake_dir
@@ -326,6 +354,23 @@ include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
+# ANNC sources use try/catch; a source-built toolchain exports EH=OFF and
+# injects -fno-exceptions. Clear LLVMConfig's plain variables so the cached
+# values take effect (-D can override, but OFF is rejected by the guard
+# below); keep exceptions inside ANNC code (MLIR frames are built without EH).
+unset(LLVM_ENABLE_EH)
+unset(LLVM_ENABLE_RTTI)
+set(LLVM_ENABLE_EH ON CACHE BOOL "ANNC requires exceptions")
+set(LLVM_ENABLE_RTTI ON CACHE BOOL "ANNC requires RTTI")
+# A stale cache (OFF from an earlier toolchain) would fail the build without
+# context; fail loud with the fix instead.
+if(NOT LLVM_ENABLE_EH OR NOT LLVM_ENABLE_RTTI)
+  message(FATAL_ERROR
+      "ANNC requires LLVM_ENABLE_EH=ON and LLVM_ENABLE_RTTI=ON (ANNC sources "
+      "use C++ exceptions); reconfigure with -DLLVM_ENABLE_EH=ON "
+      "-DLLVM_ENABLE_RTTI=ON.")
+endif()
+
 # Entered only with ANNC_ENABLE_TF2ATIR_V2=ON; the default build never touches it.
 #
 # stablehlo registers its libraries into the MLIR_DIALECT_LIBS /
@@ -334,10 +379,19 @@ include(HandleLLVMOptions)
 # Snapshot/restore them so only explicitly linked stablehlo targets are built.
 if(ANNC_ENABLE_TF2ATIR_V2)
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/stablehlo/CMakeLists.txt")
-    message(FATAL_ERROR
-      "ANNC_ENABLE_TF2ATIR_V2=ON requires third_party/stablehlo (v1.9.7). "
-      "Fetch it with: git -C third_party clone --depth 1 --branch v1.9.7 "
-      "https://github.com/openxla/stablehlo.git stablehlo")
+    # Auto-fetch on first configure (third_party/* stays untracked); an
+    # existing checkout is reused as-is. The source is GitCode's platform-run
+    # GitHub mirror (gh_mirrors): its v1.9.7 tag resolves to the same commit
+    # (e34c3f6) as upstream openxla/stablehlo.
+    FetchContent_Declare(stablehlo
+      GIT_REPOSITORY https://gitcode.com/gh_mirrors/st/stablehlo.git
+      GIT_TAG        v1.9.7
+      GIT_SHALLOW    TRUE
+      SOURCE_DIR     ${CMAKE_SOURCE_DIR}/third_party/stablehlo
+    )
+    message(STATUS
+      "ANNC: fetching stablehlo v1.9.7 from gitcode.com/gh_mirrors/st/stablehlo.git ...")
+    FetchContent_Populate(stablehlo)
   endif()
   get_property(_annc_mlir_dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
   get_property(_annc_mlir_conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
@@ -462,7 +516,9 @@ add_subdirectory(frontends)
 if(ANNC_ENABLE_ONNXRUNTIME_EP)
   add_subdirectory(addons/onnxruntime)
 endif()
-
+if(ANNC_ENABLE_ONNXRUNTIME_STABLEHLO)
+  add_subdirectory(addons/onnxruntime/stablehlo)
+endif()
 if(BUILD_TESTING)
   add_subdirectory(tests)
 endif()

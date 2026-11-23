@@ -106,7 +106,7 @@ AnncStatusCode layerNormImpl(annc::kernels::KernelContext& context) {
   const auto* beta = context.getInput(2);
   const auto* eps = context.getInput(3);
   if (!input || !gamma || !beta || !eps) return context.status();
-  auto thread_pool = context.getThreadPool();
+  auto thread_pool = context.getKernelThreadPool();
 
   const int64_t rows = input->sizes[0];
   const int64_t cols = input->sizes[1];

@@ -1,4 +1,4 @@
-// RUN: annc-asm %s -atir-fast-codegen | FileCheck %s
+// RUN: annc-asm %s -annc-fast-codegen | FileCheck %s
 
 // CHECK-LABEL: func.func private @unsupported_f64
 // CHECK: "atir.MatMul"

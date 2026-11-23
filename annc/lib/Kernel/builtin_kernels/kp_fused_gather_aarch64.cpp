@@ -159,7 +159,7 @@ AnncStatusCode kpFusedGatherImpl(annc::kernels::KernelContext &context) {
       (dataColumns >= kParallelWorkThreshold ||
        uniqueCount >= (kParallelWorkThreshold + dataColumns - 1) / dataColumns);
   if (enoughWork) {
-    auto workers = context.getThreadPool();
+    auto workers = context.getKernelThreadPool();
     const int64_t costPerUnit = std::max<int64_t>(dataColumns, 1);
     return annc::kernels::Shard(workers.numThreads(), workers, uniqueCount,
                                 costPerUnit, work);

@@ -13,7 +13,7 @@ namespace annc::kernels::kdnn_adaptor {
 class KDNNThreadPoolAdaptor final : public KDNN::Threading::ThreadpoolIface {
  public:
   explicit KDNNThreadPoolAdaptor(KernelContext& context)
-      : workers_(context.getThreadPool()) {}
+      : workers_(context.getKernelThreadPool()) {}
 
   int GetNumThreads() const override { return workers_.numThreads(); }
 

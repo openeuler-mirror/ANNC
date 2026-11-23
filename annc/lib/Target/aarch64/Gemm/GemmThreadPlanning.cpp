@@ -7,14 +7,8 @@
 #include "mlir/IR/BuiltinAttributes.h"
 
 namespace annc {
-namespace {
 
-using aarch64::gemm::GemmProblem;
-using aarch64::gemm::GemmThreadPlannerConfig;
-using aarch64::gemm::GemmThreadPlanningInput;
-using aarch64::gemm::GemmThreadPlanningResult;
-
-LogicalResult planGemmThreads(Operation *op) {
+LogicalResult aarch64::gemm::planGemmThreads(Operation *op) {
   FailureOr<GemmProblem> problem = aarch64::gemm::readProblem(op);
   FailureOr<GemmThreadPlanningInput> policy =
       aarch64::gemm::readThreadPlanningInput(op);
@@ -75,6 +69,8 @@ LogicalResult planGemmThreads(Operation *op) {
   return success();
 }
 
+namespace {
+
 class AArch64GemmThreadPlanning
     : public AArch64GemmThreadPlanningBase<AArch64GemmThreadPlanning> {
  public:
@@ -88,8 +84,9 @@ class AArch64GemmThreadPlanning
       if (!candidate) return WalkResult::advance();
       auto state = candidate.getAs<StringAttr>("planning_state");
       if (!state || state.getValue() != "input") return WalkResult::advance();
-      return failed(planGemmThreads(op)) ? WalkResult::interrupt()
-                                         : WalkResult::advance();
+      return failed(aarch64::gemm::planGemmThreads(op))
+                 ? WalkResult::interrupt()
+                 : WalkResult::advance();
     });
     if (result.wasInterrupted()) signalPassFailure();
   }

@@ -6,6 +6,13 @@
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+#include "Conversion/StablehloToAtir/StablehloSink.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "stablehlo/dialect/StablehloOps.h"
+#endif
 
 using namespace mlir;
 
@@ -15,7 +22,22 @@ int main(int argc, char **argv) {
 
   DialectRegistry registry;
   registry.insert<mlir::func::FuncDialect, mlir::LLVM::LLVMDialect,
-                  atir::AtirDialect>();
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+                  // V2 artifacts carry stablehlo ops, shape scaffolding and
+                  // tf_type compat types; all three must parse here.
+                  mlir::arith::ArithDialect,
+                  mlir::shape::ShapeDialect,
+                  mlir::tensor::TensorDialect,
+#endif
+                  atir::AtirDialect
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+                  ,
+                  mlir::stablehlo::StablehloDialect
+#endif
+                  >();
+#ifdef ANNC_ENABLE_TF2ATIR_V2
+  annc::tfcompat::registerTfTypeCompatDialect(registry);
+#endif
 
   MLIRContext context(registry);
   context.loadAllAvailableDialects();

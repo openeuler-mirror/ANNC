@@ -90,7 +90,7 @@ AnncStatusCode kp_fused_target_behavior_interaction_aarch64_impl(
 
   try {
     const int64_t out_cols = 4 * N;
-    auto workers = context.getThreadPool();
+    auto workers = context.getKernelThreadPool();
     workers.parallelFor(B, [&](int64_t begin, int64_t end) {
       for (int64_t batch = begin; batch < end; ++batch) {
         const float* A_b = A + batch * M * K;

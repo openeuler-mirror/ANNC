@@ -98,7 +98,7 @@ AnncStatusCode kp_fused_embedding_hash_bucket_aarch64_impl(
   const float* weight = annc::kernels::contextData<float>(*embedding_weight);
 
   try {
-    auto workers = context.getThreadPool();
+    auto workers = context.getKernelThreadPool();
     workers.parallelFor(batch, [&](int64_t begin, int64_t end) {
       for (int64_t i = begin; i < end; ++i) {
         const AnncStringRef& item = strings[i];

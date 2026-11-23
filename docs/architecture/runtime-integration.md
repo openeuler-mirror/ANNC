@@ -3,9 +3,9 @@
 | 文档控制项 | 内容 |
 | ----- | ----- |
 | 文档编号 | ANNC-ARCH-002 |
-| 版本与日期 | 1.1，2026-11-11 |
+| 版本与日期 | 1.0，2026-10-20 |
 | 文档状态 | 架构说明。描述 TensorFlow 与 ONNX Runtime 两条运行时接入路径的产物契约与执行方式 |
-| 设计基线 | TF1.15 接入更新至 `20d0f8a`；TF2.20 仍在 `tensorflow_addons/`，ORT 接入见独立设计 |
+| 设计基线 | `tensorflow_addons/`、`addons/onnxruntime/`（源码基线 `11bef0d0`，分支 `upstream/dev`） |
 | 责任人 | 编译器开发团队 |
 | 上级文档 | [ANNC 架构设计文档](overview.md) |
 
@@ -13,30 +13,40 @@
 
 ## TensorFlow 接入
 
-TF1.15 由 `addons/tensorflow/plugin/` 提供 Grappler 优化器和 `ANNCFused`；本基线 TF2.20 仍由 `tensorflow_addons/` 提供。构建从目标 Python 选择一个 TF 版本，两版共用 `frontends/tensorflow/` 中的独立编译工具。
+`tensorflow_addons/` 提供 Grappler 插件和 `ANNCFused` 自定义 TensorFlow Op。
 
-| 职责 | TF1.15 | TF2.20（本基线） |
-| --- | --- | --- |
-| 优化器与注册 | `plugin/optimizer.cc`、`optimizer_register.cc` | `tensorflow_addons/annc_optimizer.cc`、`annc_optimizer_register.cc` |
-| Op 与 Context 适配 | `plugin/fused_op.cc`、`fused_op_context.cc` | `tensorflow_addons/context/annc_fused_op.cc`、`annc_fused_op_context.cc` |
-| Op 注册 | `plugin/fused_op_register.cc` | `tensorflow_addons/annc_fused_op_register.cc` |
-| JIT 编译与线程池桥接 | `addons/tensorflow/support/`，经 C 接口调用 | 旧插件内实现 |
-
-表中的 `plugin/` 相对 `addons/tensorflow/`。TF1.15 插件匹配 SDK 标准及 ABI，support 固定 C++17 / ABI=1，通过借用数组、回调和不透明句柄交互。插件安装在 `lib/tensorflow/1.15/`；优化器默认从自身目录加载 fused-op。SDK 选择、所有权与线程池生命周期见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md)。
-
-优化器调用 pipeline 失败、重写结果无法读取或补默认属性失败时返回原图。成功改写后的 `ANNCFused` 执行错误返回 TF 状态，不承诺运行时重新执行原子图。
+| 文件 | 说明 |
+|------|------|
+| `tensorflow_addons/annc_optimizer.cc` | Grappler 优化器插件，自动调用 `annc-tf-pipeline` 重写计算图 |
+| `tensorflow_addons/context/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
+| `tensorflow_addons/annc_fused_op_register.cc` | 注册 `ANNCFused` Op |
+| `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
 
 ### AOT 与 JIT
 
-Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 AOT 共享库 `annc_generated_kernel.so` 与 fusion-only ATIR。重写后的 GraphDef 按 fusion 的 `execution_mode` 写不同 attr：**AOT 节点**写 `shared_lib_path`（指向该 `.so`）且 `atir_module_path` 为空，运行时 `dlopen` 加载；**JIT 节点**（如普通 GEMM、动态形状 tensordot）写 `shared_lib_path=""` 与 `atir_module_path`（fusion-only ATIR 的绝对路径），运行时按实际 shape 现场编译，因此 AOT 节点需保留 `.so`，JIT 节点需保留 ATIR module；纯 JIT 模型可能不产生 `.so`。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
+Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 AOT 共享库 `annc_generated_kernel.so` 与 fusion-only ATIR。重写后的 GraphDef 按 fusion 的 `execution_mode` 写不同 attr：**AOT 节点**写 `shared_lib_path`（指向该 `.so`）且 `atir_module_path` 为空，运行时 `dlopen` 加载；**JIT 节点**（GEMM 家族）写 `shared_lib_path=""` 与 `atir_module_path`（fusion-only ATIR 的绝对路径），运行时按实际 shape 现场编译，因此 AOT 节点需保留 `.so`，JIT 节点需保留 ATIR module；纯 JIT 模型可能不产生 `.so`。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
 
-TF `tensordot_matmul` 对整段展平、MatMul、恢复形状做融合，静态输入形状走 AOT，动态形状走 JIT；两者均为 `mlir_ciface`，经公共 GEMM lowering 生成代码。其匹配条件见[TF1.15 设计](../design/tensorflow-1-15-support/overall.md#41-整段-tensordot-如何识别与执行)。
-
-JIT GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运行时按实际 shape
+GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运行时按实际 shape
 同步执行 `annc-asm` 与 `annc`。进程内有界缓存复用编译产物，预打包模式下每个
 `ANNCFusedOp` 独立持有 packed RHS。模板指纹、缓存身份、预打包准入与权重生命周期
 见[JIT 代码与预打包权重分离实现契约](../design/jit-constant-folding/cache-separation.md)。
 `ANNC_GEMM`、JIT 缓存和快速路径开关的默认值及生效时机见[环境变量参考](../guides/environment-variables.md)。
+
+TF 的 V3 调用路径使用已有的 `jit_mode` 选择函数签名：JIT 入口按
+`void(AnncKernelContext*)` 调用，非 JIT 入口按
+`AnncStatusCode(AnncKernelContext*)` 调用，不新增 Op 属性。
+两条分支都检查宿主错误状态和输出绑定，并使用现有异常捕获边界。
+该约定要求所有 JIT V3 入口实际返回 void；不能用于返回状态码或计算值的入口。
+双输出 `MatMulAddReluWithAddOutput` 的执行模式已由 JIT 调整为 AOT，
+与手写 builtin 的 `AnncStatusCode(AnncKernelContext*)` 返回约定一致。
+对应 fusion 元数据和端到端测试同步使用 AOT；模型编译时生成共享库，
+运行时按状态码入口加载调用。普通生成式 GEMM 的 JIT 路径保持不变。
+TF 1.15 的 Context 服务借用现有 support 层的线程池适配器指针；
+TF SDK 一侧不解引用 C++ 线程池对象，维持原有 C++ ABI 隔离；
+memref C 访问器作为独立的 C++17 对象嵌入插件，不继承 TF 1.15 的 C++14/ABI 设置。
+support 层的 C 调度回调保留 `max_parallelism`；指定上限时 TF 1.15 调用
+`tensorflow::Shard`，未指定时沿用成本或固定块调度。
+旧 `mlir_ciface` 路径和 ORT 的状态码调用方式保持不变；生成式 V3 入口生成仍需单独实现。
 
 ### 图重写与形状推导
 
@@ -46,7 +56,7 @@ MatMul fusion metadata 保持 `ANNCFused` 的运行时输入约定：fixed shape
 
 ### 日志与输出初始化
 
-`ANNCFused` 运行时默认只保留错误日志，避免 Serving 并发请求时 INFO 调试日志影响吞吐和日志可读性。`dlopen`/`dlsym` 以及兼容 `mlir_ciface` 路径的 memref 构造、输出分配、参数顺序和 kernel 调用失败会输出 `LOG(ERROR)`；上下文 ABI 路径的错误通过 status/执行上下文返回，不保证写日志。若另有 Serving 侧的 addon 副本（`tensorflow_serving_addons`，不在本仓库），需与所选 TF 版本的插件实现保持对应修改一致。
+`ANNCFused` 运行时默认只保留错误日志，避免 Serving 并发请求时 INFO 调试日志影响吞吐和日志可读性。`dlopen`/`dlsym` 以及兼容 `mlir_ciface` 路径的 memref 构造、输出分配、参数顺序和 kernel 调用失败会输出 `LOG(ERROR)`；上下文 ABI 路径的错误通过 status/执行上下文返回，不保证写日志。若另有 Serving 侧的 addon 副本（`tensorflow_serving_addons`，不在本仓库），需与 `tensorflow_addons` 保持对应修改一致。
 
 `ANNCFused` 通过 `zero_initialize_outputs` 控制输出 Tensor 是否在调用 kernel 前清零。该 attr 默认 `true`，保持旧 GraphDef 和非全量写输出 kernel 的保守行为；运行时对 `fusion_pattern=dnn_embedding_hash_bucket` 自动关闭清零，因为生成的 embedding kernel 会完整覆盖 `[batch, embedding_dim]` 输出，跳过清零可消除 `avg_output_init` 带来的主要包装层开销。该优化不要求 GraphDef 写入新 attr，避免不同 Serving OpDef 版本下 unknown attr 被忽略。
 
@@ -98,3 +108,26 @@ ANNC_FUSED_PROFILE=1 ANNC_FUSED_PROFILE_INTERVAL=100000 ...
 ## ONNX Runtime 接入
 
 ONNX Runtime 侧通过 EP 插件（`addons/onnxruntime/`）在 `GetCapability` 内导出整图、调用 [`annc-onnx-pipeline`](../guides/cli-workflows.md) 编译，并按站点报告 `sites.json` 精确申报融合区域。接入契约、缓存与降级设计见 [ONNX Runtime EP 接入设计](../design/onnx-support/ep-design.md)，编译侧见 [ONNX 前端设计](../design/onnx-support/frontend-design.md)。
+
+### Context memref 访问器
+
+`annc_context_get_input_memref` 导出输入的标准 actual-rank memref 描述符；
+`annc_context_alloc_output_memref` 按输出槽位、rank 和 dims 分配或复用输出，再导出描述符。
+该访问器保证返回的输出元素初始为零：新分配请求携带 `ANNC_ALLOCATION_ZERO`，
+复用已绑定输出时由访问器清零；普通手写 kernel 的分配接口不受此约定影响。
+原有 `AnncTensorView` 不变。描述符元数据复制到宿主临时空间，tensor 数据不复制；
+指针仅在本次同步执行期间有效。宿主需预填输出 dtype；失败返回空指针并记录 Context 错误。
+
+### Context 线程池对象
+
+`AnncRuntimeServices::thread_pool` 借用现有 `AnncThreadPool` 适配器对象，替代四个 C 调度回调。
+`KernelContext::getThreadPool()` 直接返回 services 中的线程池指针，可为空，不查询 TLS。
+`getKernelThreadPool()` 返回使用同一线程池的 `KernelThreadPool` 包装，保留现有 kernel 的调度和错误处理，空池串行执行。
+TF V3 执行内部创建适配器并将其指针绑定到 Context；外层生成式兼容桥接保持原有适配器。
+两者借用同一个 TF 线程池；ORT Context 指向本次执行的 `pool_`。
+生成式代码当前仍使用原 TLS 获取方式，迁移到显式 Context 是后续工作。
+
+入口仍是 `annc_context_v3`，Context 与服务结构共用版本号 3；本次不单独升级服务版本。
+服务布局已经改变，版本号不提供新旧布局区分，不能混用旧产物。
+线程池虚表及 `std::function` 依赖匹配的 C++ ABI，宿主与 kernel 须使用相同接口和兼容的
+工具链/标准库重编译。本次未同步修改所有宿主的缓存指纹；部署时应清理旧 JIT 缓存并重建 AOT 库。

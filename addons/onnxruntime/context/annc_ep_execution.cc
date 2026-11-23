@@ -276,6 +276,11 @@ void* OrtThreadPool::native_pool() const {
   return nullptr;
 }
 
+void* OrtThreadPool::native_pool(const char* provider) const {
+  return provider && std::strcmp(provider, "onnxruntime") == 0 ? native_pool()
+                                                               : nullptr;
+}
+
 // ANNC_EP_DEBUG=1: what the native dispatch actually did.  `shards` counts
 // range callbacks -- the shard count ORT chose, serial included (1 = it ran
 // the whole range on the caller) -- and is not the number of threads that
@@ -462,6 +467,8 @@ OnnxExecutionContext::OnnxExecutionContext(
       allocated_(outputs.size(), false),
       pool_(api, kernel_context) {
   output_views_.resize(outputs.size());
+  for (size_t i = 0; i < outputs.size(); ++i)
+    output_views_[i].element_type = outputs[i].element_type;
   allocated_output_views_.resize(outputs.size());
   services_ = {sizeof(AnncRuntimeServices),
                ANNC_CONTEXT_ABI_VERSION,
@@ -470,10 +477,7 @@ OnnxExecutionContext::OnnxExecutionContext(
                AllocateTemp,
                ReportError,
                GetStatus,
-               ParallelFor,
-               NumThreads,
-               Shard,
-               NativePool};
+               &pool_};
   context_.struct_size = sizeof(context_);
   context_.abi_version = ANNC_CONTEXT_ABI_VERSION;
   context_.outputs = output_views_.data();
@@ -779,57 +783,6 @@ void OnnxExecutionContext::ReportError(void* opaque, AnncStatusCode status,
 
 AnncStatusCode OnnxExecutionContext::GetStatus(void* opaque) {
   return static_cast<OnnxExecutionContext*>(opaque)->status_.load();
-}
-
-int32_t OnnxExecutionContext::NumThreads(void* opaque) {
-  return static_cast<OnnxExecutionContext*>(opaque)->pool_.num_threads();
-}
-
-void* OnnxExecutionContext::NativePool(void* opaque, const char* provider) {
-  if (!provider || std::strcmp(provider, "onnxruntime") != 0) return nullptr;
-  return static_cast<OnnxExecutionContext*>(opaque)->pool_.native_pool();
-}
-
-AnncStatusCode OnnxExecutionContext::Dispatch(
-    int64_t total, const annc::threadpool::ParallelForOptions& options,
-    AnncContextTask task, void* task_data) {
-  if (total < 0 || !task)
-    return Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid parallel request");
-  if (!total) return status_.load();
-  try {
-    if (pool_.in_parallel_region() || options.max_parallelism.value_or(0) == 1)
-      task(task_data, 0, total);
-    else
-      pool_.parallel_for(total, options, [&](int64_t first, int64_t last) {
-        try { task(task_data, first, last); }
-        catch (...) { Fail(ANNC_STATUS_INTERNAL, "parallel task raised an exception"); }
-      });
-  } catch (...) {
-    return Fail(ANNC_STATUS_INTERNAL, "parallel dispatch raised an exception");
-  }
-  return status_.load();
-}
-
-AnncStatusCode OnnxExecutionContext::ParallelFor(
-    void* opaque, int64_t total, int64_t grain, AnncContextTask task,
-    void* task_data) {
-  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
-  if (grain < 0) return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "negative grain");
-  annc::threadpool::ParallelForOptions options;
-  options.grain_size = grain;
-  return state.Dispatch(total, options, task, task_data);
-}
-
-AnncStatusCode OnnxExecutionContext::Shard(
-    void* opaque, int32_t max_parallelism, int64_t total, int64_t cost,
-    AnncContextTask task, void* task_data) {
-  auto& state = *static_cast<OnnxExecutionContext*>(opaque);
-  if (max_parallelism < 1 || cost < 0)
-    return state.Fail(ANNC_STATUS_INVALID_ARGUMENT, "invalid shard options");
-  annc::threadpool::ParallelForOptions options;
-  options.max_parallelism = max_parallelism;
-  options.cost_per_unit = cost;
-  return state.Dispatch(total, options, task, task_data);
 }
 
 OrtStatus* ComputeWithContext(const OrtApi* api,

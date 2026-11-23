@@ -1,5 +1,5 @@
-// RUN: annc-asm --atir-fast-codegen %s | FileCheck %s
-// RUN: annc-asm --atir-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg %s | FileCheck %s --check-prefix=LOWER
+// RUN: annc-asm --annc-fast-codegen %s | FileCheck %s
+// RUN: annc-asm --annc-fast-codegen --lower-context-kernel-entries --convert-atir-to-linalg %s | FileCheck %s --check-prefix=LOWER
 // LOWER: call @ANNCKernel_ContextV3_KPFusedDnnEmbeddingWithHashBucket_float_auto(%{{.*}}) : (!llvm.ptr) -> i32
 // The final output shape is [runtime_count, 16]. The fixed embedding width
 // must not be mistaken for a Tile multiplier.

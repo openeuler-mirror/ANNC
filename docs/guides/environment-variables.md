@@ -34,8 +34,9 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_FAST_CODEGEN_ENABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空（全部启用） | 全局 allowlist；非空时仅改写列出的类型 |
 | `ANNC_FAST_CODEGEN_DISABLE_CUSTOM_OPS` | 逗号分隔的 `custom.op_name` 类型 | 空 | 全局 denylist；始终优先于 allowlist |
 | `ANNC_GEMM_CONFIG` | JSON 文件路径 | 空 | AArch64 GEMM 调优配置；AOT 与 JIT 的 GEMM pipeline 均要求提供。使用 JSON v3，`cache.strategy` 与 `kernel.strategy` 分别选择策略，从同级同名对象读取参数；当前支持 `fixed`，未知策略报错。字段示例见 [GEMM codegen 设计](../design/gemm/aarch64-gemm-codegen.md#策略与规划数据) |
+| `ANNC_ENABLE_LOWERING_CONTEXT_ABI` | `1` / `true` / `on` / `yes` | 关闭 | 临时启用新的 Context ABI lowering 路径；未设置或其他值继续使用旧路径。待新路线端到端验证后移除 |
 
-环境变量是默认策略。`--atir-fast-codegen=enable-custom-ops=...` 非空时覆盖环境 allowlist；命令行和环境的 denylist 会合并。allowlist 与 denylist 都为空时，**所有已注册的自定义算子类型都可改写**；GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 构建中注册（`MatMulAddReluWithAddOutput` 例外，无条件注册），因此默认构建里对这些类型的 allowlist 设置多数不产生效果；KDNN 构建中还需加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），否则 KDNN-only 的 GEMM kernel 不会被选中。
+环境变量是默认策略。`--annc-fast-codegen=enable-custom-ops=...` 非空时覆盖环境 allowlist；命令行和环境的 denylist 会合并。allowlist 与 denylist 都为空时，**所有已注册的自定义算子类型都可改写**；GEMM 系列（`MatMul`、`MatMulAdd`、`MatMulAddRelu`）的改写 pattern 仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 构建中注册（`MatMulAddReluWithAddOutput` 例外，无条件注册），因此默认构建里对这些类型的 allowlist 设置多数不产生效果；KDNN 构建中还需加 `enable-kdnn=true`（`annc-tf-pipeline` 会自动传入），否则 KDNN-only 的 GEMM kernel 不会被选中。
 
 ## `ANNCOptimizer`（Grappler 插件）
 
@@ -49,8 +50,25 @@ ANNC 的工具与插件通过环境变量控制部分行为。下表汇总面向
 | `ANNC_BACKEND` | `generic` / `kdnn` 等 | `generic` | 后端类型（参数名：`backend`）。当前只被透传为 `annc-tf-pipeline --backend`，而该工具不解析此参数（静默忽略）；实际生效处只有 `ANNCFused` 运行时的 `openblas` 判断，且该 MatMul 直通路径未实现，设置后融合 MatMul 会报 `Unimplemented` |
 | `ANNC_VERBOSE` | `1`/`0`/`true`/`false` | `false` | 输出详细日志（参数名：`annc_verbose` / `verbose`） |
 | `ANNC_TIMEOUT` | 正整数（秒） | `300` | 图改写工具 `annc-tf-pipeline` 的调用超时（参数名：`timeout_seconds`）；JIT 编译工具 `annc-asm`、`annc` 也使用此环境变量，每次调用单独计时 |
-| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`） |
+| `PB_NO_FUNC` | pb2stablehlo：跳过 v1 控制流函数化（Switch/Merge→tf.If），图原样进入改写 |
+| `PB_NO_FLATTEN` | pb2stablehlo：跳过 tf_executor 结构扁平化（诊断用） |
+| `PB_VERBOSE` | pb2stablehlo：dead-Switch 清除的残留引用调试输出 |
+| `PB_VERIFY_STAGES` | pb2stablehlo：导入/扁平化/恢复各 stage 后打印模块校验诊断 |
+| `PB_DUMP_IMPORT_GRAPH` | pb2stablehlo：把改写后的 GraphDef 序列化转储到指定路径 |
+| `PB_DEBUG_IMPORT_INPUTS` | pb2stablehlo：打印导入输入规格统计（feeds/shape 覆盖） |
+| `ANNC_NO_OFFICIAL_INFER` | pb2stablehlo：关闭 pb 域官方 shape 富化（grappler GraphProperties），图保持原样；A/B 量测用，此时由 MLIR 侧 rank 规则引擎承担注册 op |
+| `ANNC_NO_TF_RANK_INFER` | pb2stablehlo：关闭 MLIR 侧 tf 方言 rank 规则引擎（legalize 前）；A/B 量测用，残差载体将无 rank 来源 |
+| `ANNC_NO_UNRANK_WRAP` | pb2stablehlo：关闭 unrank 一元 op 的 getDim/setDim 序列视图包装（legalize 前）；A/B 量测用，关闭后 unranked 实例由 Smuggle 护栏承接 |
+| `ANNC_NO_STRIDED_SLICE_DYN` | pb2stablehlo：关闭动态输入 StridedSlice 直译（常量界限归一化 + real_dynamic_slice）；关闭后走残差通道 |
+| `ANNC_NO_STRING_TRANSPORT` | pb2stablehlo：关闭 string 载荷数据操作的 encodeString/decodeString 编解码包裹；关闭后 string op 保持残差 |
+| `ANNC_NO_STRING_UNWRAP` | pb2stablehlo：关闭 legalize 后的编解码包裹回滚（tf 副本未转换时还原 string 操作数） |
+| `ANNC_KEEP_TEMPS` | `1`/`0`/`true`/`false` | `false` | 是否保留 Grappler pipeline 与运行时 JIT 临时文件（参数名：`keep_temp_files`）。运行时 JIT 的 `annc_jit_*` 工作目录默认在 kernel `dlopen` 成功后立即删除（宿主进程不执行析构也不泄漏）；置 `1` 时保留目录用于排障 |
 | `ANNC_FUSED_OP_PATH` | `.so` 路径 | 自动推导 | `libannc_fused_op.so` 路径 |
+| `ANNC_V2_REWRITE_INPROC` | `1` | 未设置 | 置 `1` 时 Grappler 改写走 v2 进程内路径：`dlopen` 加载 `libannc_graph_rewriter.so` 并调用其 C 入口；任何失败向 stderr 告警并自动回退 v1 pipeline 路径 |
+| `ANNC_V2_FUSION_METADATA` | JSON 文件路径 | 无 | v2 进程内改写的 `fusion_metadata.json` 路径（由 `annc-fusion-metadata` 产出）；未设置时 v2 改写失败并回退 |
+| `ANNC_V2_SHARED_LIB` | `.so` 路径 | 无 | v2 进程内改写的 AOT kernel 共享库 |
+| `ANNC_V2_ATIR_MODULE` | 文件路径 | 无 | v2 进程内改写的 JIT fusion-only ATIR |
+| `ANNC_V2_KERNEL_NAME` | 名称 | 无 | v2 进程内改写的 kernel 名覆盖（仅单 fusion 元数据有效） |
 
 TensorFlow Grappler 的普通 GEMM JIT 可按需配置：
 
@@ -93,6 +111,7 @@ export ANNC_DEMO_CHECKPOINT_DIR=/path/to/checkpoint
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
 | `ANNC_EP_PIPELINE` | 可执行文件路径 | 本 `.so` 同目录 → `../bin` → `PATH` | `annc-onnx-pipeline` 路径；设置但文件不存在时直接禁用运行时编译，不回退 |
+| `ANNC_ONNX_USE_STABLEHLO` | `0` / `1` | `0` | 为 `1` 时让 `annc-onnx-pipeline` 通过 StableHLO 转换和融合。各算子的融合开关独立生效 |
 | `ANNC_EP_CACHE_DIR` | 目录路径 | `$XDG_CACHE_HOME/annc-ep` → `$HOME/.cache/annc-ep` | 运行时编译缓存根 |
 | `ANNC_EP_COMPILE` | `0` 关闭 | 启用 | 关闭运行时编译，模型整体回落 CPU |
 | `ANNC_EP_COMPILE_TIMEOUT_S` | 正整数（秒） | `600` | 单次编译超时 |
@@ -106,7 +125,7 @@ export ANNC_DEMO_CHECKPOINT_DIR=/path/to/checkpoint
 | `ANNC_EP_FUSION_BATCHED_MATMUL_ADD` | `1` 开启；`0`/未设置关闭 | 关闭 | 控制 FusedBatchedMatmulAdd 站点申报 |
 | `ANNC_EP_PACKED_B` | 非空且非 `0` 开启（如 `1`）；`0`/空字符串/未设置关闭 | 关闭 | session 创建时为 MLAS 的固定 f32 B 权重打包，适用于 BMM / FTDMM；关闭保留融合并使用 raw-B。修改后须新建 session，详见[部署手册](../../tests/ort-ep-build-and-deploy.md#37-packed-b-特性) |
 
-四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0` 关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，`OpFusion` 在编译期跳过对应 matcher，因此不会生成该融合算子；开关进入 EP 缓存指纹。关闭只影响该特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
+四个 `ANNC_EP_FUSION_*` 开关默认关闭；设为非 `0` 值（如 `1`）开启，未设置或 `0` 关闭。开关会转发到 `annc-onnx-pipeline` 的编译子进程，所选前端在编译期跳过关闭的融合模式；开关进入 EP 缓存指纹。关闭只影响该特定融合算子，其他 pattern（例如通用 `matmul`）仍可能融合同一子图中的节点。
 
 EP 始终使用 ONNX Runtime 的线程池；不提供 `ANNC_EP_SHARDS` / `ANNC_EP_NATIVE_POOL` 开关。原生池代码始终编入 EP，宿主版本匹配时启用，不匹配时回落公开 `KernelContext_ParallelFor` 路径。
 
@@ -116,12 +135,11 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ANNC_TENSORFLOW_PYTHON_EXECUTABLE` | Python 解释器路径 | `build.sh` 跟随 `PYTHON`；CMake 跟随 `Python3_EXECUTABLE` | 查询目标 TF 版本 / SDK，当前接受 1.15.x 或 2.20.x；一次构建一个版本 |
-| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | 宿主提供 TF 符号；为 `ON` 时不得设置 `ANNC_TENSORFLOW_LIBRARIES`；`OFF` 显式链接同 SDK 库 |
+| `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
 | `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
-| `ANNC_TENSORFLOW_LIBRARIES` | 分号分隔的 TF 库路径 | 空 | linked 模式使用；TF1.15 要求恰好一份 cc 与 framework，空值从目标 Python 库目录查找 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 从 SDK 探测 | 未报告时须显式指定；与探测值冲突会报错，仅影响 TF 插件侧 |
-| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 从 SDK 探测 | 未报告时须显式指定；TF1.15 接受 14/17，与探测值冲突会报错 |
+| `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
+| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 自动检测 | TensorFlow 插件的 C++11 ABI，可显式指定 |
+| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 自动检测 | TensorFlow 插件的 C++ 标准，可显式指定 |
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |

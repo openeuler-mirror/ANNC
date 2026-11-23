@@ -205,7 +205,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
   std::string identityCanonicalizePass = "--atir-identity-canonicalize";
   std::string epilogueDiscoveryPass = "--atir-gemm-epilogue-fusion";
   std::string fusionPass = "--atir-op-fusion";
-  std::string fastCodegenPass = "--atir-fast-codegen";
+  std::string fastCodegenPass = "--annc-fast-codegen";
   if (!opts.fusionConfig.empty()) {
     std::error_code ec;
     if (!fs::is_regular_file(opts.fusionConfig, ec)) {
@@ -217,7 +217,7 @@ static bool runGraphDefRewrite(int argc, char **argv) {
                  " run-builtin-after=true";
   }
 #ifdef ANNC_ENABLE_KDNN_ADAPTOR
-  fastCodegenPass = "--atir-fast-codegen=enable-kdnn=true";
+  fastCodegenPass = "--annc-fast-codegen=enable-kdnn=true";
 #endif
 
   std::vector<std::string> tf2atirArgs = {
