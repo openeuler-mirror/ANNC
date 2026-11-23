@@ -248,7 +248,8 @@ AnncStatusCode ContextGetStatus(void* opaque) {
 
 Status ANNCFusedOp::ExecuteContextV3Kernel(
     OpKernelContext* context, void* kernel_function, bool jit_mode,
-    annc::threadpool::AnncThreadPool* thread_pool) {
+    annc::threadpool::AnncThreadPool* thread_pool,
+    const AnncJitBinding* binding) {
   if (!kernel_function) {
     return errors::FailedPrecondition("Context V3 kernel symbol is not loaded");
   }
@@ -280,6 +281,13 @@ Status ANNCFusedOp::ExecuteContextV3Kernel(
       }
       TF_RETURN_IF_ERROR(inputs[i].Bind(tensor, true));
       input_views[i] = inputs[i].view;
+      // Prepacked GEMM RHS: the microkernel addresses the buffer with the
+      // compile-time packing layout, so only the base pointers are redirected
+      // (mirrors the descriptor overwrite in ExecuteMlirCifaceKernel).
+      if (binding && !binding->packed.empty() && binding->packed[transport]) {
+        input_views[i].allocated = binding->packed[transport]->data;
+        input_views[i].aligned = binding->packed[transport]->data;
+      }
     }
     ContextExecutionState state{
         context, output_types_, output_ranks_, {}, {}, {}, {}, OkStatus()};

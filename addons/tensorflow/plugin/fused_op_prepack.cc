@@ -7,8 +7,18 @@ void ANNCFusedOp::InitializeJitWeights(OpKernelContext* context) {
   std::call_once(jit_weights_once_, [&] {
     jit_identity_ = jit_template_identity_ + ":packed-rhs-v1";
     const int inputs = context->num_inputs();
-    jit_argument_order_ = ResolveKernelArgOrder(
-        kernel_arg_order_, inputs, num_outputs_, !input_ranks_.empty());
+    // Under the context ABI the kernel argument index is the context input
+    // slot, so map it directly to the TensorFlow transport slot; falling into
+    // ResolveKernelArgOrder would apply a legacy heuristic permutation.
+    if (abi_ == ANNC_CONTEXT_ABI_NAME) {
+      jit_argument_order_.resize(inputs);
+      for (int i = 0; i < inputs; ++i)
+        jit_argument_order_[i] =
+            context_input_order_.empty() ? i : context_input_order_[i];
+    } else {
+      jit_argument_order_ = ResolveKernelArgOrder(
+          kernel_arg_order_, inputs, num_outputs_, !input_ranks_.empty());
+    }
     jit_weights_.resize(inputs);
     std::vector<size_t> input_bytes(inputs);
     std::vector<uint8_t> eligible(inputs);
