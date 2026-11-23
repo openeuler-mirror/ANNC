@@ -199,8 +199,16 @@ struct CustomFusionPatternBase : public mlir::OpRewritePattern<AnchorOp> {
                                 : mlir::func::ReturnOp{};
       if (!function || !boundaryReturn ||
           !llvm::equal(inputValues, function.getArguments()) ||
-          !llvm::equal(outputValues, boundaryReturn.getOperands()))
+          !llvm::equal(outputValues, boundaryReturn.getOperands())) {
+        ANNC_LOG_DEBUG("fusion-pattern")
+            << "context-abi boundary mismatch on '"
+            << function.getName().str() << "': inputs="
+            << inputValues.size() << " args="
+            << function.getNumArguments() << " outputs="
+            << outputValues.size() << " returns="
+            << (boundaryReturn ? boundaryReturn.getNumOperands() : 0) << "\n";
         return failure();
+      }
     }
     SmallVector<Type> inputTypes;
     inputTypes.reserve(inputValues.size());

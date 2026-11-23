@@ -463,11 +463,20 @@ TEST(GraphDefRewriterCore, DropsUnresolvableSites) {
     EXPECT_EQ(graph.node_size(), 3);
   }
   {
+    // Self-wired args are legal: the segment kernel reads as begin the same
+    // strided_slice it returns as slice_output. The original node must
+    // survive (the site reads it there) and the site must not wire itself.
     auto fusion = siteFusion();
     fusion.args.push_back({"dynamic", "m:0", {2}, 1, "float32"});
     auto graph = rewrite(fusion, kSampleTextGraph);
-    EXPECT_EQ(find(graph, "f0"), nullptr);  // self-cycle dropped
-    EXPECT_EQ(graph.node_size(), 3);
+    const auto *fused = find(graph, "f0");
+    ASSERT_NE(fused, nullptr);
+    ASSERT_NE(find(graph, "m"), nullptr);  // kept as the site's input
+    EXPECT_EQ(graph.node_size(), 4);
+    bool readsOriginal = false;
+    for (const auto &input : fused->input())
+      if (input == "m:0") readsOriginal = true;
+    EXPECT_TRUE(readsOriginal) << "self-wired arg must read the original node";
   }
   {
     // A control edge pointing at the replaced node would dangle after the
