@@ -10,7 +10,7 @@
 | JIT 常量折叠早期提案（历史记录；当前实现见右列） | [jit-constant-folding/overview.md](jit-constant-folding/overview.md) |
 | TensorFlow JIT 代码与预打包权重分离实现契约 | [jit-constant-folding/cache-separation.md](jit-constant-folding/cache-separation.md) |
 | ONNX 支持（整体方案 + 前端 / 融合 / EP 详设） | [onnx-support/](onnx-support/README.md) |
-| TensorFlow 1.15 支持（待评审） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
+| TensorFlow 1.15 支持（已实现） | [tensorflow-1-15-support/overall.md](tensorflow-1-15-support/overall.md) |
 | TF GraphDef → StableHLO 前端（pb2stablehlo，component HLD） | [tf-stablehlo-frontend/frontend-transform.md](tf-stablehlo-frontend/frontend-transform.md) |
 | StableHLO sink 层（组件 LLD） | [tf-stablehlo-frontend/sink-layer.md](tf-stablehlo-frontend/sink-layer.md) |
 | ANNC 异构图切分优化器（待评审，已搭建代码骨架） | [总体设计](annc-partition/overview.md) · [CLI 入口详细设计](annc-partition/cli-design.md) |
