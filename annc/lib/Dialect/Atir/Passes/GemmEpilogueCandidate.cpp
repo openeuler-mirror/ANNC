@@ -9,7 +9,7 @@
 namespace atir {
 namespace {
 constexpr llvm::StringLiteral kOpcodeNames[] = {"add", "mul", "relu",
-                                                "sigmoid"};
+                                                "sigmoid", "swish"};
 constexpr llvm::StringLiteral kBroadcastNames[] = {"scalar", "m", "n",
                                                    "matrix"};
 constexpr llvm::StringLiteral kViewNames[] = {"identity",
@@ -50,8 +50,9 @@ mlir::FailureOr<EpilogueStep> makeStep(EpilogueOpcode opcode,
                                        int64_t inputIndex,
                                        BroadcastKind broadcast,
                                        std::optional<float> reluLimit) {
-  const bool unary =
-      opcode == EpilogueOpcode::kRelu || opcode == EpilogueOpcode::kSigmoid;
+  const bool unary = opcode == EpilogueOpcode::kRelu ||
+                     opcode == EpilogueOpcode::kSigmoid ||
+                     opcode == EpilogueOpcode::kSwish;
   // V2 metadata may omit `limit` for an unbounded relu.
   if (inputIndex < 0 || (unary && inputIndex != 0) ||
       (!unary && inputIndex > 1) ||
@@ -78,6 +79,39 @@ bool setBinaryStep(MatMulOp matmul, Value current, Operation *operation,
   const unsigned externalInput = lhs == current ? 1 : 0;
   step = {opcode,       externalInput, *broadcast,
           std::nullopt, operation,     operation->getResult(0)};
+  return true;
+}
+
+bool setSwishStep(Value current, EpilogueStep &step) {
+  if (!llvm::hasNItems(current.getUses(), 2)) return false;
+  MulOp mul;
+  LogisticOp sigmoid;
+  for (Operation *user : current.getUsers()) {
+    if (auto candidate = llvm::dyn_cast<MulOp>(user)) {
+      if (mul) return false;
+      mul = candidate;
+    } else if (auto candidate = llvm::dyn_cast<LogisticOp>(user)) {
+      if (sigmoid) return false;
+      sigmoid = candidate;
+    } else {
+      return false;
+    }
+  }
+  if (!mul || !sigmoid || sigmoid.getInput() != current ||
+      !sigmoid.getResult().hasOneUse() ||
+      *sigmoid.getResult().getUsers().begin() != mul.getOperation())
+    return false;
+  Value lhs = mul.getX(), rhs = mul.getY();
+  if (!((lhs == current && rhs == sigmoid.getResult()) ||
+        (rhs == current && lhs == sigmoid.getResult())))
+    return false;
+  step = {EpilogueOpcode::kSwish,
+          0,
+          BroadcastKind::kScalar,
+          std::nullopt,
+          mul.getOperation(),
+          mul.getResult(),
+          sigmoid.getOperation()};
   return true;
 }
 
@@ -179,10 +213,16 @@ mlir::FailureOr<EpilogueProgram> discoverOrderedEpilogue(MatMulOp matmul) {
 
   EpilogueProgram program;
   Value current = matmul.getResult();
-  Operation *operation =
-      current.hasOneUse() ? *current.getUsers().begin() : nullptr;
-  while (operation) {
+  while (true) {
     EpilogueStep step;
+    if (setSwishStep(current, step)) {
+      program.steps.push_back(step);
+      current = step.result;
+      continue;
+    }
+    Operation *operation =
+        current.hasOneUse() ? *current.getUsers().begin() : nullptr;
+    if (!operation) break;
     bool supported = true;
     if (auto add = llvm::dyn_cast<AddOp>(operation)) {
       if (add.getInputs().size() != 2 || add.getScalar() || add.getDoRelu() ||
@@ -232,7 +272,6 @@ mlir::FailureOr<EpilogueProgram> discoverOrderedEpilogue(MatMulOp matmul) {
     if (!supported) break;
     program.steps.push_back(step);
     current = operation->getResult(0);
-    operation = current.hasOneUse() ? *current.getUsers().begin() : nullptr;
   }
 
   auto func = matmul->getParentOfType<func::FuncOp>();

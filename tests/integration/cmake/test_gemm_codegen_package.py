@@ -40,14 +40,15 @@ def configure(project, build, package, required=False):
     return result.returncode, result.stdout + result.stderr
 
 
-def package_stub(path, api=1):
+def package_stub(path, api=1, swish=True):
     """A discovery contract fixture; it is never linked or executed."""
     (path / "cmake").mkdir(parents=True)
     (path / "libannc_gemm_microkernels.a").write_bytes(b"matching archive")
     (path / "cmake/AnncGemmKernelsConfig.cmake").write_text(
         f"set(AnncGemmKernels_API_VERSION {api})\n"
         "set(AnncGemmKernels_KERNEL_ABI_VERSION 1)\n"
-        "set(AnncGemmKernels_VERSION test)\n"
+        + ("set(AnncGemmKernels_HAS_SWISH 1)\n" if swish else "")
+        + "set(AnncGemmKernels_VERSION test)\n"
         "set(AnncGemmKernels_BUILD_ID fixture)\n"
         "add_library(ANNC::GemmCodegen INTERFACE IMPORTED)\n"
         "add_library(ANNC::AArch64GemmMicrokernels INTERFACE IMPORTED)\n"
@@ -82,4 +83,11 @@ def test_matching_package_and_cached_path_recheck(project, tmp_path):
     assert status == 0, log
     assert (build / "capabilities").read_text() == "ON"
     status, log = configure(project, build, second, required=True)
-    assert status != 0 and "API 1 and kernel ABI 1 are required" in log
+    assert status != 0 and "Swish support are" in log
+
+
+def test_package_without_swish_is_rejected(project, tmp_path):
+    package = tmp_path / "without-swish"
+    package_stub(package, swish=False)
+    status, log = configure(project, tmp_path / "build", package, required=True)
+    assert status != 0 and "Swish support are" in log
