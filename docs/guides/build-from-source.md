@@ -135,8 +135,7 @@ CMake 配置和 manifest 必须作为一个版本化整体存在；不再支持�
 
 ```shell
 cmake -S . -B build -G Ninja \
-  -DANNC_GEMM_PACKAGE_DIR=/opt/annc-gemm-kernels \
-  -DANNC_TENSORFLOW_CXX11_ABI=1
+  -DANNC_GEMM_PACKAGE_DIR=/opt/annc-gemm-kernels
 cmake --build build
 cmake --install build
 ```
