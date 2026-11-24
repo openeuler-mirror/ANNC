@@ -361,6 +361,193 @@ static void excludeBeginChain(SparseSegmentReduceMatch &m) {
   m.beginChain = std::move(beginChain);
 }
 
+
+// ── Form C (odml frontend): linear weighted_sum without the constant-begin
+// scaffolding Forms A/B assume. Roles (keys/begin/data/indices) are located
+// by dataflow semantics; stay-set clones exempt out-of-site consumers.
+static LogicalResult matchOdmlSegmentReduce(stablehlo::ReshapeOp anchor,
+                                             SparseSegmentReduceMatch &m) {
+  std::string locStr;
+  llvm::raw_string_ostream(locStr) << anchor.getLoc();
+  auto reject = [&](const char *why) {
+    ANNC_LOG_DEBUG("op-fusion-v2")
+        << "kp_sparse_segment_reduce: C-chain reject(" << why << ") " << locStr
+        << "\n";
+    return failure();
+  };
+
+  SmallPtrSet<Operation *, 32> anchorClosure;
+  DenseSet<Value> anchorBoundary;
+  if (!collectArithClosure(anchor.getResult(), anchorClosure, anchorBoundary,
+                           {"atir.reshape"}))
+    return reject("anchor-closure");
+  if (anchorBoundary.size() != 1) return reject("anchor-boundary");
+  Value keys = *anchorBoundary.begin();
+  auto keysRes = dyn_cast<OpResult>(keys);
+  if (!keysRes || !isa<atir::SparseFillEmptyRowsV2Op>(keysRes.getOwner()) ||
+      keysRes.getResultNumber() != 0)
+    return reject("keys-port");
+  auto keysTy = dyn_cast<RankedTensorType>(keys.getType());
+  if (!keysTy || !keysTy.getElementType().isInteger(64) ||
+      keysTy.getRank() != 2)
+    return reject("keys-type");
+
+  // 2. sliceOut: the anchor's operand (rank-0 i32 count value); the anchor
+  //    reshape itself feeds the begin stack in main and stays out.
+  Operation *sliceOut = anchor.getOperand().getDefiningOp();
+  if (!sliceOut) return reject("slice-missing");
+  auto sliceTy =
+      dyn_cast<RankedTensorType>(anchor.getOperand().getType());
+  if (!sliceTy || !sliceTy.getElementType().isInteger(32) ||
+      sliceTy.getRank() != 0)
+    return reject("slice-type");
+
+  Operation *rds = nullptr;
+  for (Operation *user : keys.getUsers()) {
+    if (isa<stablehlo::RealDynamicSliceOp>(user)) {
+      if (rds) return reject("rds-dup");
+      rds = user;
+    }
+  }
+  if (!rds) return reject("rds-missing");
+  Value begin = rds->getOperand(1);
+  auto beginTy = dyn_cast<RankedTensorType>(begin.getType());
+  if (!beginTy || !beginTy.getElementType().isInteger(32) ||
+      beginTy.getRank() != 1 || beginTy.getShape()[0] != 2)
+    return reject("begin-type");
+
+  Operation *ssOp = nullptr;
+  Value ssOperand;
+  SmallVector<Value, 8> frontier{rds->getResult(0)};
+  DenseSet<Value> visited;
+  for (int hop = 0; hop < 10 && !frontier.empty() && !ssOp; ++hop) {
+    SmallVector<Value, 8> next;
+    for (Value v : frontier) {
+      for (Operation *user : v.getUsers()) {
+        if (isa<atir::SparseSegmentSumV2Op, atir::SparseSegmentMeanV2Op>(
+                user)) {
+          if (user->getOperand(2) == v) {
+            if (ssOp) return reject("ss-dup");
+            ssOp = user;
+            ssOperand = v;
+          }
+          continue;
+        }
+        if (!isa<stablehlo::DynamicReshapeOp, stablehlo::ReshapeOp,
+                  stablehlo::ConvertOp, stablehlo::GetDimensionSizeOp>(user))
+          continue;
+        if (visited.insert(user->getResult(0)).second)
+          next.push_back(user->getResult(0));
+      }
+    }
+    frontier = std::move(next);
+  }
+  if (!ssOp || ssOp->getNumResults() != 1) return reject("ss-missing");
+
+  int64_t combiner = -1;
+  Value data, indices, segIdArg, numSegments;
+  if (!dispatchSegmentOp(ssOp, combiner, data, indices, segIdArg,
+                         numSegments) ||
+      segIdArg != ssOperand)
+    return reject("ss-dispatch");
+  auto siteFn = anchor->getParentOfType<func::FuncOp>();
+  for (Value v : {keys, begin, data, indices, numSegments}) {
+    Operation *vd = v.getDefiningOp();
+    if (vd && vd->getParentOfType<func::FuncOp>() != siteFn)
+      return reject("contract-foreign");
+  }
+  // Hash-domain columns are handled by ordering: hash sites run first and
+  // consume those chains, so a segment site only matches the weights-side /
+  // linear columns left over.
+  if (combiner != 0 && combiner != 1) return reject("combiner");
+  if (!checkContract(numSegments, data, indices, m.indicesType))
+    return reject("contract");
+  DenseSet<Value> boundary{keys, begin, data, indices, numSegments};
+  DenseSet<Operation *> beginExcl;
+  {
+    SmallVector<Value, 8> bwork{begin};
+    DenseSet<Value> bseen;
+    while (!bwork.empty()) {
+      Value v = bwork.pop_back_val();
+      if (!bseen.insert(v).second) continue;
+      Operation *d = v.getDefiningOp();
+      if (!d || boundary.contains(v)) continue;
+      // The slice-output producer is a site tail: it must stay a member.
+      // (odml count chains share the gds between the begin stack and the
+      // slice output; excluding it here would strand the kernel output.)
+      if (d == sliceOut) continue;
+      StringRef ns = d->getName().getDialectNamespace();
+      if (ns != "stablehlo" && ns != "arith" && ns != "tensor" &&
+          ns != "shape")
+        continue;  // non-compute producer: leave it in main untouched
+      beginExcl.insert(d);
+      for (Value o : d->getOperands()) bwork.push_back(o);
+    }
+  }
+
+  SmallPtrSet<Operation *, 32> members(anchorClosure.begin(),
+                                       anchorClosure.end());
+  members.insert(ssOp);
+  members.insert(sliceOut);
+  for (Operation *op : beginExcl) members.erase(op);
+  SmallVector<Value, 16> work{ssOp->getResult(0), sliceOut->getResult(0)};
+  DenseSet<Value> seen;
+  while (!work.empty()) {
+    Value v = work.pop_back_val();
+    Operation *def = v.getDefiningOp();
+    if (!def || boundary.contains(v)) continue;
+    if (def == ssOp || def == sliceOut) {
+      for (Value o : def->getOperands()) work.push_back(o);
+      continue;
+    }
+    if (isa<stablehlo::ConstantOp, arith::ConstantOp>(def)) continue;
+    if (isa<atir::UnsupportedOp>(def)) continue;  // residue: stays in main
+    if (beginExcl.contains(def)) continue;        // begin stack stays in main
+    if (!seen.insert(v).second) continue;
+    if (def->getName().getDialectNamespace() != "stablehlo" &&
+        def->getName().getDialectNamespace() != "shape" &&
+        def->getName().getDialectNamespace() != "arith" &&
+        def->getName().getDialectNamespace() != "tensor")
+      return reject("member-dialect");
+    members.insert(def);
+    for (Value o : def->getOperands()) work.push_back(o);
+  }
+  for (Operation *op : members) {
+    for (Value o : op->getOperands()) {
+      if (boundary.contains(o)) continue;
+      Operation *od = o.getDefiningOp();
+      if (!od || isa<stablehlo::ConstantOp, arith::ConstantOp>(od))
+        continue;
+      if (!members.contains(od)) return reject("member-open");
+    }
+  }
+
+  m.sliceOut = sliceOut;
+  m.ssOp = ssOp;
+  m.combiner = combiner;
+  m.indices = indices;
+  m.keys = keys;
+  m.data = data;
+  m.begin = begin;
+  m.begin1 = Value();       // synthesized by the rewrite (begin1Static path)
+  m.begin1Static = 0;
+  m.shapeTailSlice = nullptr;
+  m.keysSliceOp = rds;
+  m.sliceClosure = std::move(anchorClosure);
+  m.keysClosure = std::move(members);
+  m.keysClosure.insert(ssOp);
+  m.beginChain = {anchor.getOperation()};
+  // Assemble members in body order (same contract as the generic tail:
+  // metadata/args order must be deterministic across runs).
+  auto func = anchor->getParentOfType<func::FuncOp>();
+  for (Operation &op : func.getBody().front().getOperations())
+    if ((m.keysClosure.contains(&op) || m.sliceClosure.contains(&op) ||
+         &op == m.ssOp) &&
+        !m.beginChain.contains(&op))
+      m.members.push_back(&op);
+  return success();
+}
+
 LogicalResult matchKpSparseSegmentReduce(stablehlo::ReshapeOp anchor,
                                          SparseSegmentReduceMatch &m) {
   std::string locStr;
@@ -372,14 +559,26 @@ LogicalResult matchKpSparseSegmentReduce(stablehlo::ReshapeOp anchor,
     return failure();
   };
   auto outTy = dyn_cast<RankedTensorType>(anchor.getResult().getType());
-  if (!outTy || !outTy.getElementType().isInteger(32) || outTy.getRank() != 0) {
+  // The odml frontend materializes the strided-slice size as a 1-element
+  // i32 vector (get_dimension_size -> minimum -> reshape); handcrafted
+  // fixtures use the scalar form. Accept both spellings of the count.
+  bool countTy = outTy && outTy.getElementType().isInteger(32) &&
+                 (outTy.getRank() == 0 ||
+                  (outTy.getRank() == 1 && outTy.getDimSize(0) == 1));
+  if (!countTy) {
     return reject("anchor-type");
   }
 
   Operation *ssOp = nullptr;
   Value begin1 = nullptr;
-  if (!matchShapeClosure(anchor, m, ssOp, begin1, m.begin1Static))
+  if (!matchShapeClosure(anchor, m, ssOp, begin1, m.begin1Static)) {
+    SparseSegmentReduceMatch cm;
+    if (succeeded(matchOdmlSegmentReduce(anchor, cm))) {
+      m = std::move(cm);
+      return success();
+    }
     return failure();
+  }
 
   int64_t combiner = -1;
   Value data, indices, segmentIds, numSegments;
@@ -406,6 +605,39 @@ LogicalResult matchKpSparseSegmentReduce(stablehlo::ReshapeOp anchor,
   m.begin1 = begin1;
   m.beginStackConst = beginStackConst;
   m.keysSliceOp = keysSliceOp;
+  // The slice limit stack is kernel-side compute rooted at the keys port;
+  // absorb its closure so the ABI keeps the V1 five-argument form. Only a
+  // keys/constants-bounded closure qualifies (fail-closed).
+  Operation *limitRds = keysSliceOp;
+  if (!limitRds) {
+    // Form A keeps begin as an external ABI input, so matchArithmeticKeys
+    // reports no keys-slice op; the segment_ids closure still holds the
+    // real_dynamic_slice over keys whose limit stack needs absorbing.
+    for (Operation *op : keysClosure)
+      if (isa<stablehlo::RealDynamicSliceOp>(op) &&
+          op->getOperand(0) == keys) {
+        limitRds = op;
+        break;
+      }
+  }
+  if (limitRds && limitRds->getOperand(0) == keys) {
+    Value limit = limitRds->getOperand(2);
+    SmallPtrSet<Operation *, 16> limitClosure;
+    DenseSet<Value> limitBoundary;
+    if (collectArithClosure(limit, limitClosure, limitBoundary,
+                            {"atir.reshape"})) {
+      bool absorbable = true;
+      for (Value b : limitBoundary) {
+        if (b == keys) continue;
+        Operation *bd = b.getDefiningOp();
+        if (bd && isa<stablehlo::ConstantOp, arith::ConstantOp>(bd)) continue;
+        absorbable = false;
+        break;
+      }
+      if (absorbable)
+        for (Operation *op : limitClosure) m.sliceClosure.insert(op);
+    }
+  }
   if (!closureInternal(keysClosure, ssOp, anchor.getOperation()) ||
       !closureInternal(m.sliceClosure, ssOp, anchor.getOperation()))
     return reject("closure-escape");
@@ -520,14 +752,16 @@ class FuseKpSparseSegmentReduceV2Pattern
       // name would wire :0 (deduped values) into the segment indices port.
       // Producer provenance (source_node + IR port) wins over loc names.
       auto idxRes = llvm::dyn_cast<OpResult>(m.indices);
+      // sourceNameOf already appends the producer port; only the loc-name
+      // fallback needs it, or the endpoint becomes "node:1:1".
       std::string idxName = fusionv2::sourceNameOf(m.indices);
-      if (idxName.empty())
+      if (idxName.empty()) {
         idxName =
             fusionv2::anchorFromLoc(m.indices.getDefiningOp()->getLoc());
-      if (idxRes && !idxName.empty() && idxRes.getResultNumber() != 0)
-        promoted.emplace_back(
-            m.indices,
-            idxName + ":" + std::to_string(idxRes.getResultNumber()));
+        if (idxRes && !idxName.empty() && idxRes.getResultNumber() != 0)
+          idxName += ":" + std::to_string(idxRes.getResultNumber());
+      }
+      if (!idxName.empty()) promoted.emplace_back(m.indices, idxName);
     }
 
     SmallVector<ProbeArg> args;

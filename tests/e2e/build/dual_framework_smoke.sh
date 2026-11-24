@@ -16,8 +16,6 @@ required=(
   bin/annc-tf2atir
   bin/annc-converter
   bin/annc-onnx-pipeline
-  lib/libannc_optimizer.so
-  lib/libannc_fused_op.so
 )
 for rel in "${required[@]}"; do
   if [[ ! -e "${ANNC_PREFIX}/${rel}" ]]; then
@@ -25,11 +23,6 @@ for rel in "${required[@]}"; do
     exit 1
   fi
 done
-if [[ ! -e "${ANNC_PREFIX}/lib/libannc_ep.so" &&
-      ! -e "${ANNC_PREFIX}/lib64/libannc_ep.so" ]]; then
-  echo "FAIL: missing libannc_ep.so in ${ANNC_PREFIX}/lib or lib64" >&2
-  exit 1
-fi
 
 help_text=$("${ANNC_SRC}/build.sh" --help)
 for var in ANNC_EP_ORT_BUILD_TREE ANNC_KERNEL_MLAS \
@@ -53,6 +46,18 @@ if [[ ! -f "${cache}" ]]; then
   echo "FAIL: ${cache} not found (run build.sh first)" >&2
   exit 1
 fi
+libdir=$(sed -n 's/^CMAKE_INSTALL_LIBDIR:[^=]*=//p' "${cache}")
+: "${libdir:?missing CMAKE_INSTALL_LIBDIR in ${cache}}"
+if [[ ${libdir} != /* ]]; then
+  libdir="${ANNC_PREFIX}/${libdir}"
+fi
+for plugin in libannc_optimizer.so libannc_fused_op.so libannc_ep.so; do
+  if [[ ! -e "${libdir}/${plugin}" ]]; then
+    echo "FAIL: missing ${libdir}/${plugin}" >&2
+    exit 1
+  fi
+done
+
 for entry in \
   "ANNC_ENABLE_TENSORFLOW:BOOL=ON" \
   "ANNC_ENABLE_TENSORFLOW_ADDON:BOOL=ON" \

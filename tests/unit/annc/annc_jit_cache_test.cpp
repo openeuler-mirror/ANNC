@@ -260,4 +260,20 @@ TEST(JitCompilationCacheTest, EvictionPreservesActiveExecutableLifetime) {
   EXPECT_FALSE(std::filesystem::exists(workDir));
 }
 
+TEST(JitExecutableTest, EmptyWorkDirDestructorIsNoOp) {
+  std::filesystem::path sentinel =
+      std::filesystem::temp_directory_path() /
+      ("annc_jit_cache_empty_guard_" + std::to_string(getpid()));
+  std::filesystem::create_directories(sentinel);
+  {
+    // The eager-cleanup compile path deletes the work directory itself and
+    // hands JitExecutable an empty work_dir; the destructor must not touch
+    // any directory in that case.
+    auto executable = MakeExecutable();
+    ASSERT_EQ(executable->workDir(), "");
+  }
+  EXPECT_TRUE(std::filesystem::exists(sentinel));
+  std::filesystem::remove_all(sentinel);
+}
+
 }  // namespace

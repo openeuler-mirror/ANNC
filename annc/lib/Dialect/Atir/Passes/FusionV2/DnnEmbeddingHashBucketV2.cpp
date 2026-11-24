@@ -30,6 +30,7 @@ struct HashBucketMatch {
   Value weight;
   Value output;
   SmallVector<Operation *, 40> members;
+  std::string outputAliasTfName;
 };
 
 bool isStringTensor(Value v) {
@@ -220,6 +221,74 @@ LogicalResult matchHashBucket(atir::StringToHashBucketFastV2Op anchor,
   if (!outTy || outTy.getRank() != 2 || !outTy.getElementType().isF32())
     return bail("output not rank2 f32");
 
+  // The odml carrier wraps the mean in a mask/select chain before the
+  // column-level Reshape (".../C<n>_embedding/Reshape"); the kernel value
+  // equals it, so declare it as an output alias. Unique candidate or veto.
+  {
+    auto isWrapper = [&](Operation *op) {
+      StringRef ns = op->getName().getDialectNamespace();
+      if (ns == "shape" || ns == "arith" || ns == "tensor") return true;
+      if (isa<atir::UnsupportedOp>(op))
+        return isResidueOf(op, "Where") || isResidueOf(op, "Reshape") ||
+               isResidueOf(op, "Select") || isResidueOf(op, "Tile") ||
+               isResidueOf(op, "NotEqual") || isResidueOf(op, "ZerosLike") ||
+               isResidueOf(op, "Shape") || isResidueOf(op, "Cast") ||
+               isResidueOf(op, "Slice") || isResidueOf(op, "StridedSlice") ||
+               isResidueOf(op, "Pack") || isResidueOf(op, "ConcatV2") ||
+               isResidueOf(op, "Prod") || isResidueOf(op, "ExpandDims") ||
+               isResidueOf(op, "Squeeze") || isResidueOf(op, "Fill");
+      return isa<stablehlo::SelectOp, stablehlo::ReshapeOp,
+                 stablehlo::DynamicReshapeOp, stablehlo::ConcatenateOp>(op);
+    };
+    auto sourceNodeOf = [&](Operation *op) -> std::string {
+      StringRef raw;
+      if (auto sn = op->getAttrOfType<StringAttr>("annc.source_node"))
+        raw = sn.getValue();
+      else if (auto meta = op->getAttrOfType<DictionaryAttr>("metadata"))
+        if (auto sn = dyn_cast<StringAttr>(meta.get("annc.source_node")))
+          raw = sn.getValue();
+      // A source_node tag may carry a port suffix ("node:1"); the alias must
+      // name the node, or appendOutputAliases' port checks reject the site.
+      return fusionv2::stripPortSuffix(raw);
+    };
+    auto isColumnReshape = [&](Operation *op) {
+      bool reshapeLike = isResidueOf(op, "Reshape") ||
+                         isa<stablehlo::DynamicReshapeOp, stablehlo::ReshapeOp>(op);
+      if (!reshapeLike) return false;
+      const std::string source = sourceNodeOf(op);
+      if (!llvm::StringRef(source).ends_with("/Reshape")) return false;
+      StringRef parent = llvm::StringRef(source).rsplit('/').first;
+      return parent.rsplit('/').second.ends_with("_embedding");
+    };
+    Operation *candidate = nullptr;
+    SmallVector<Operation *, 16> work;
+    DenseSet<Operation *> seen;
+    for (Operation *user : m.output.getUsers()) work.push_back(user);
+    int budget = 64;
+    while (!work.empty() && budget-- > 0) {
+      Operation *op = work.pop_back_val();
+      if (!seen.insert(op).second) continue;
+      if (isColumnReshape(op)) {
+        if (candidate != nullptr && candidate != op) {
+          candidate = nullptr;
+          break;
+        }
+        candidate = op;
+        continue;
+      }
+      if (!isWrapper(op)) continue;
+      for (Operation *user : op->getResult(0).getUsers()) work.push_back(user);
+    }
+    if (candidate != nullptr) {
+      const std::string source = sourceNodeOf(candidate);
+      if (!source.empty()) {
+        m.outputAliasTfName = source;
+        ANNC_LOG_DEBUG("op-fusion-v2")
+            << "dnn_embedding_hash_bucket: output alias " << source << "\n";
+      }
+    }
+  }
+
   bool invalid = false;
   m.input = findStringInput(anchor.getInput(), invalid);
   if (invalid || !m.input) return bail("string input chain invalid");
@@ -359,9 +428,12 @@ class FuseDnnEmbeddingHashBucketV2Pattern
     ANNC_LOG_DEBUG("op-fusion-v2")
         << "dnn_embedding_hash_bucket: pre-outline args=" << args.size()
         << " members=" << m.members.size() << "\n";
+    SmallVector<std::string, 1> outputAliases;
+    if (!m.outputAliasTfName.empty())
+      outputAliases.push_back(m.outputAliasTfName);
     if (failed(outlineSite(main, rewriter, args, m.members, tailOps, outputs,
                            name, "dnn_embedding_hash_bucket", tailAnchors,
-                           contextAttrs, *portTable))) {
+                           contextAttrs, *portTable, outputAliases))) {
       ANNC_LOG_DEBUG("op-fusion-v2")
           << "dnn_embedding_hash_bucket: outlineSite failed\n";
       return failure();

@@ -44,6 +44,7 @@ nlohmann::json fusionInfoToJson(const FusionInfo &info) {
   }
   json["pattern_attrs"] = info.patternAttrs;
   json["member_node_names"] = info.memberNodeNames;
+  json["output_aliases"] = info.outputAliases;
   json["abi"] = info.abi.empty() ? "mlir_ciface" : info.abi;
   json["dynamic_dims"] = info.dynamicDims;
   json["kernel_arg_order"] = info.kernelArgOrder;
@@ -107,6 +108,7 @@ llvm::Expected<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
     if (info.abi.empty()) info.abi = "mlir_ciface";
     info.memberNodeNames =
         json.value("member_node_names", std::vector<std::string>{});
+    info.outputAliases = json.value("output_aliases", std::vector<std::string>{});
     info.dynamicDims = jsonValue<int64_t>(json, "dynamic_dims");
     info.kernelArgOrder = jsonValue<int64_t>(json, "kernel_arg_order");
     info.contextI64Attrs = jsonValue<int64_t>(json, "context_i64_attrs");

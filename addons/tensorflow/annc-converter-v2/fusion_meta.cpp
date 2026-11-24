@@ -66,6 +66,7 @@ Result<FusionInfo> fusionInfoFromJson(const nlohmann::json &json) {
 
     info.abi = json.value("abi", "mlir_ciface");
     if (info.abi.empty()) info.abi = "mlir_ciface";
+    info.outputAliases = json.value("output_aliases", std::vector<std::string>{});
     info.memberNodeNames =
         json.value("member_node_names", std::vector<std::string>{});
     info.dynamicDims = jsonValue<int64_t>(json, "dynamic_dims");
