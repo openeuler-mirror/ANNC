@@ -34,6 +34,9 @@ std::vector<codegen::Step> convertEpilogueSteps(
       case atir::EpilogueOpcode::kSigmoid:
         converted.opcode = codegen::Opcode::Sigmoid;
         break;
+      case atir::EpilogueOpcode::kSwish:
+        converted.opcode = codegen::Opcode::Swish;
+        break;
     }
     if (atir::isBinaryEpilogueOpcode(step.opcode)) {
       switch (step.broadcast) {
@@ -158,8 +161,11 @@ LogicalResult materializeSuffix(linalg::GenericOp generic,
             if (step.reluLimit && *step.reluLimit >= 0.0f)
               value = nested.create<arith::MinNumFOp>(
                   loc, value, f32Constant(nested, loc, *step.reluLimit));
-          } else {
+          } else if (step.opcode == atir::EpilogueOpcode::kSigmoid) {
             value = buildSigmoid(nested, loc, value);
+          } else if (step.opcode == atir::EpilogueOpcode::kSwish) {
+            Value sigmoid = buildSigmoid(nested, loc, value);
+            value = nested.create<arith::MulFOp>(loc, value, sigmoid);
           }
         }
         nested.create<linalg::YieldOp>(loc, value);

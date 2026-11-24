@@ -29,7 +29,7 @@
 // RUN: rm -rf %t.aot && env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' -o %t.mlir
 // RUN: env ANNC_GEMM=2 annc-gemm-epilogue-kernel-compile %t.mlir --output-dir %t.aot
 // RUN: find %t.aot/model_generated_kernels -name '*.S' -print | count 0
-// RUN: find %t.aot/model_generated_kernels -name '*.o' -print | count 7
+// RUN: find %t.aot/model_generated_kernels -name '*.o' -print | count 8
 // RUN: env ANNC_GEMM=2 LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
 // RUN: python3 -c "import ctypes; ctypes.CDLL(r'%t.so')"
 // RUN: python3 -c "import glob,subprocess; objects=glob.glob(r'%t.aot/model_generated_kernels/*.o'); expected={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-g','--defined-only',*objects],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; actual={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-D','--defined-only',r'%t.so'],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; assert actual == expected, (actual-expected,expected-actual)"
@@ -172,6 +172,39 @@ func.func @add_then_m_mul(
   return
 }
 
+// An unsupported M-broadcast prefix forces both the external Mul and Swish
+// through the regular suffix, including the final multiply by the saved input.
+// SVE-DIRECT-LABEL: func.func @m_mul_then_swish(
+// SVE-DIRECT-NOT: annc.aarch64.generated_microkernel
+// SVE-DIRECT: arith.mulf
+// SVE-DIRECT: arith.mulf
+// NEON-DIRECT-LABEL: func.func @m_mul_then_swish(
+// NEON-DIRECT-NOT: annc.aarch64.generated_microkernel
+// NEON-DIRECT: arith.mulf
+// NEON-DIRECT: arith.mulf
+func.func @m_mul_then_swish(
+    %a: !atir.tensor<3x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<3x5xf32>, %scale: !atir.tensor<3x1xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<3x5xf32>
+  %mul_tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %mul = "atir.Mul"(%mul_tmp, %matmul, %scale) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+       !atir.tensor<3x1xf32>) -> !atir.tensor<3x5xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %mul) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>) ->
+      !atir.tensor<3x5xf32>
+  %swish = "atir.Mul"(%out, %mul, %sigmoid) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+       !atir.tensor<3x5xf32>) -> !atir.tensor<3x5xf32>
+  return
+}
+
 // Rank-1 length-one inputs use a constant-zero map and remain scalar through
 // cache and kernel tiling.
 // SVE-DIRECT-LABEL: func.func @single_scalar_add(
@@ -212,6 +245,33 @@ func.func @single_sigmoid(
   %sigmoid = "atir.Logistic"(%out, %matmul) :
       (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>) ->
       !atir.tensor<1x5xf32>
+  return
+}
+
+// Swish is discovered from the parallel Sigmoid/Mul pair and emitted entirely
+// by the generated NEON and SVE kernels, without an elementwise suffix.
+// SVE-DIRECT-LABEL: func.func @single_swish(
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// SVE-DIRECT-NOT: arith.mulf
+// NEON-DIRECT-LABEL: func.func @single_swish(
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+// NEON-DIRECT-NOT: arith.mulf
+func.func @single_swish(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %matmul) :
+      (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>) ->
+      !atir.tensor<1x5xf32>
+  %swish = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+       !atir.tensor<1x5xf32>) -> !atir.tensor<1x5xf32>
   return
 }
 
@@ -541,6 +601,13 @@ func.func @vecmat_epilogue(
 
 //--- jit-template.mlir
 
+// JIT-COMMIT-LABEL: func.func private @fused_matmul_swish_
+// JIT-COMMIT: "atir.MatMul"
+// JIT-COMMIT-SAME: annc.gemm.epilogue =
+// JIT-COMMIT-SAME: opcode = "swish"
+// JIT-COMMIT-NOT: annc.gemm.epilogue.candidate
+// JIT-COMMIT-NOT: atir.Logistic
+// JIT-COMMIT-NOT: atir.Mul
 // JIT-COMMIT-LABEL: func.func private @fused_matmul_add_relu_
 // JIT-COMMIT: "atir.MatMul"
 // JIT-COMMIT-SAME: annc.gemm.epilogue =
@@ -549,7 +616,8 @@ func.func @vecmat_epilogue(
 // JIT-COMMIT-NOT: "atir.Relu"
 func.func @main(
     %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
-    %out: !atir.tensor<4x4xf32>, %bias: !atir.tensor<4xf32>) {
+    %out: !atir.tensor<4x4xf32>, %bias: !atir.tensor<4xf32>,
+    %swish_out: !atir.tensor<4x4xf32>) {
   %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
   %matmul = "atir.MatMul"(%tmp, %a, %b) <{
     left_transpose = false, output_transpose = false,
@@ -564,6 +632,19 @@ func.func @main(
   %relu = "atir.Relu"(%out, %add) <{relu_limit = -1.0 : f32}> :
       (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
       !atir.tensor<4x4xf32>
+  %swish_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %swish_matmul = "atir.MatMul"(%swish_tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %swish_matmul) :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  %swish = "atir.Mul"(%swish_out, %sigmoid, %swish_matmul) :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+       !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
   return
 }
 

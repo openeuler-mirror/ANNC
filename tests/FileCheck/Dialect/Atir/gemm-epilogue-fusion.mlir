@@ -437,3 +437,174 @@ func.func @fuse_swapped_bias_inputs(
       -> !atir.tensor<2x4xf32>
   return %add : !atir.tensor<2x4xf32>
 }
+
+// -----
+
+// Case 15: Fuse x * sigmoid(x) into one unary Swish epilogue.
+// CANDIDATE-LABEL: func.func @matmul_swish(
+// CANDIDATE: "atir.MatMul"
+// CANDIDATE-SAME: steps = [{broadcast = "scalar", input = 0 : i64, opcode = "swish"}]
+// CHECK-LABEL: func.func @matmul_swish(
+// CHECK-SAME: %[[A:[^:]+]]: !atir.tensor<2x3xf32>, %[[B:[^:]+]]: !atir.tensor<3x4xf32>, %[[OUT:[^:]+]]: !atir.tensor<2x4xf32>)
+// CHECK-NEXT: "atir.buffer"
+// CHECK-NEXT: "atir.buffer"
+// CHECK-NEXT: %[[FUSED:.*]] = "atir.MatMul"(%[[OUT]], %[[A]], %[[B]])
+// CHECK-SAME: steps = [{broadcast = "scalar", input = 0 : i64, opcode = "swish"}]
+// CHECK-NEXT: return %[[FUSED]]
+func.func @matmul_swish(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32> {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  return %mul : !atir.tensor<2x4xf32>
+}
+
+// -----
+
+// Case 16: Multiplication is commutative; recognize sigmoid(x) * x too.
+// CHECK-LABEL: func.func @matmul_swish_swapped(
+// CHECK-SAME: %[[A:[^:]+]]: !atir.tensor<2x3xf32>, %[[B:[^:]+]]: !atir.tensor<3x4xf32>, %[[OUT:[^:]+]]: !atir.tensor<2x4xf32>)
+// CHECK-NEXT: "atir.buffer"
+// CHECK-NEXT: "atir.buffer"
+// CHECK-NEXT: %[[FUSED:.*]] = "atir.MatMul"(%[[OUT]], %[[A]], %[[B]])
+// CHECK-SAME: steps = [{broadcast = "scalar", input = 0 : i64, opcode = "swish"}]
+// CHECK-NEXT: return %[[FUSED]]
+func.func @matmul_swish_swapped(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32> {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %sigmoid, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  return %mul : !atir.tensor<2x4xf32>
+}
+
+// -----
+
+// Case 17: Do not call x * sigmoid(y) a Swish. The existing matrix Mul
+// candidate remains valid and preserves the independent Sigmoid input.
+// CANDIDATE-LABEL: func.func @reject_mismatched_swish_input(
+// CANDIDATE: "atir.MatMul"
+// CANDIDATE-SAME: steps = [{broadcast = "matrix", input = 1 : i64, opcode = "mul"}]
+// CANDIDATE-NOT: opcode = "swish"
+// CHECK-LABEL: func.func @reject_mismatched_swish_input(
+// CHECK: atir.Logistic
+// CHECK: "atir.MatMul"
+// CHECK-SAME: steps = [{broadcast = "matrix", input = 1 : i64, opcode = "mul"}]
+// CHECK-NOT: opcode = "swish"
+func.func @reject_mismatched_swish_input(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %other: !atir.tensor<2x4xf32>,
+    %out: !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32> {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %other) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  return %mul : !atir.tensor<2x4xf32>
+}
+
+// -----
+
+// Case 18: An escaping Sigmoid result must keep the original graph.
+// CHECK-LABEL: func.func @reject_shared_swish_sigmoid(
+// CHECK: "atir.MatMul"
+// CHECK: atir.Logistic
+// CHECK: atir.Mul
+// CHECK: return
+func.func @reject_shared_swish_sigmoid(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<2x4xf32>)
+    -> (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  return %mul, %sigmoid : !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>
+}
+
+// -----
+
+// Case 19: An additional MatMul consumer is not part of the Swish pair.
+// CHECK-LABEL: func.func @reject_shared_swish_input(
+// CHECK: "atir.MatMul"
+// CHECK: atir.Logistic
+// CHECK: atir.Mul
+// CHECK: "atir.Relu"
+func.func @reject_shared_swish_input(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<2x4xf32>,
+    %extra_out: !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32> {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %extra = "atir.Relu"(%extra_out, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  return %mul : !atir.tensor<2x4xf32>
+}
+
+// -----
+
+// Case 20: Do not absorb a Swish whose terminal result has another user.
+// CHECK-LABEL: func.func @reject_shared_swish_result(
+// CHECK: "atir.MatMul"
+// CHECK: atir.Logistic
+// CHECK: atir.Mul
+// CHECK: "atir.Relu"
+func.func @reject_shared_swish_result(
+    %a: !atir.tensor<2x3xf32>,
+    %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<2x4xf32>,
+    %extra_out: !atir.tensor<2x4xf32>)
+    -> (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) {
+  %buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %matmul = "atir.MatMul"(%buffer, %a, %b) <{withBias = false}> :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x3xf32>, !atir.tensor<3x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %sigmoid_buffer = "atir.buffer"() : () -> !atir.tensor<2x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_buffer, %matmul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  %mul = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>)
+      -> !atir.tensor<2x4xf32>
+  %extra = "atir.Relu"(%extra_out, %mul) :
+      (!atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>) -> !atir.tensor<2x4xf32>
+  return %mul, %extra : !atir.tensor<2x4xf32>, !atir.tensor<2x4xf32>
+}

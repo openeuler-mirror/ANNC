@@ -65,8 +65,10 @@ class AArch64AtirGemmEpilogueCommit
     newMatmul->setAttr(atir::kGemmEpilogueAttr, committedAttr);
 
     plan.steps.back().result.replaceAllUsesWith(newMatmul.getOutput());
-    for (auto it = plan.steps.rbegin(); it != plan.steps.rend(); ++it)
+    for (auto it = plan.steps.rbegin(); it != plan.steps.rend(); ++it) {
       it->source->erase();
+      if (it->auxiliarySource) it->auxiliarySource->erase();
+    }
     matmul.erase();
     return mlir::success();
   }

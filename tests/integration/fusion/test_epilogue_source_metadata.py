@@ -112,6 +112,48 @@ def _extract(tools, source):
     return text, header, body, fingerprints[0]
 
 
+def _swish_source(prefix):
+    return '''
+module {
+  func.func @main(%lhs: !atir.tensor<4x4xf32>,
+                  %rhs: !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32> {
+    %mm_out = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+    %mm = "atir.MatMul"(%mm_out, %lhs, %rhs) <{withBias = false}>
+        {metadata = {"tf.name" = "source/matmul", "tf.op" = "MatMul"}} :
+        (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+         !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+    %sigmoid_out = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+    %sigmoid = "atir.Logistic"(%sigmoid_out, %mm)
+        {metadata = {"tf.name" = "source/sigmoid", "tf.op" = "Sigmoid"}} :
+        (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>)
+        -> !atir.tensor<4x4xf32>
+    %out = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+    %swish = "atir.Mul"(%out, %sigmoid, %mm)
+        {metadata = {"tf.name" = "source/swish", "tf.op" = "Mul",
+                     "tf.output_tensors" = ["source/result:0"]}} :
+        (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+         !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+    return %swish : !atir.tensor<4x4xf32>
+  }
+}
+'''.replace("source/", f"{prefix}/")
+
+
+def test_swish_outlines_auxiliary_sigmoid_and_commits(tools):
+    left = _extract(tools, _swish_source("left"))
+    right = _extract(tools, _swish_source("right"))
+    assert left[3] == right[3]
+    assert left[2] == right[2]
+    assert 'fusion.pattern = "matmul_swish"' in left[1]
+    assert "atir.Logistic" in left[2] and "atir.Mul" in left[2]
+    assert "metadata" not in left[2] and "tf_name" not in left[2]
+    committed = _run(tools["annc-asm"], left[0], "--atir-prune-func",
+                     "--aarch64-atir-gemm-epilogue-commit")
+    assert 'opcode = "swish"' in committed
+    assert "annc.gemm.epilogue.candidate" not in committed
+    assert "atir.Logistic" not in committed and "atir.Mul" not in committed
+
+
 @pytest.mark.parametrize("view", [False, True], ids=["chain", "terminal-view"])
 def test_equivalent_epilogues_ignore_source_metadata(tools, view):
     left = _extract(tools, _source("left", view))

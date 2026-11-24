@@ -10,7 +10,7 @@ namespace annc::aarch64::gemm::codegen {
 
 // Public semantic inputs only. No register, template, or K-unroll knowledge.
 enum class Family { NeonPacked, NeonDirect, SvePacked, SveDirect, NeonMatvec };
-enum class Opcode { Add, Mul, Relu, Sigmoid };
+enum class Opcode { Add, Mul, Relu, Sigmoid, Swish };
 enum class Broadcast { None, Scalar, N, M, Matrix };
 struct KernelDesc {
   Family family = Family::NeonPacked;

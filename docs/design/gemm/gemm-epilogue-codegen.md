@@ -23,7 +23,8 @@ ANNC 保留既有语义分析、选核、分块、KC 角色、调用参数及 su
 编译期 codegen `.so`、公开头文件、CMake 配置、manifest 与许可证。
 ASM 仓库以 `annc-gemm-kernels.tar.gz` 作为交付归档；ANNC 构建前将其解压到该目录。
 CMake 导入 `ANNC::AArch64GemmMicrokernels` / `ANNC::GemmCodegen`，
-校验文件摘要、API 1 和 kernel ABI 1。
+校验文件摘要、API 1、kernel ABI 1 和 Swish 能力标记；不含该标记的旧包会在
+配置阶段明确拒绝。
 两个库整体升级。缺包可以构建普通工具；实际 epilogue 请求会在执行时明确失败。
 `ANNC_REQUIRE_GEMM_PACKAGE=ON` 是可选的构建期强校验，适合 CI、发布构建等场景，
 会在 CMake configure 阶段发现缺少兼容完整包时直接失败，避免运行时才报错。
@@ -41,7 +42,9 @@ K-unroll/余数归一化由库内部完成。
 
 现有范围为 NEON packed/direct/matvec、SVE packed/direct 的 F32，
 Add/Mul 支持 scalar/N 广播，Relu 保留可选上限，Sigmoid 保留原路径
-常量和运算顺序；M/matrix 等未支持部分保留 suffix。每个 binary step
+常量和运算顺序；Swish 将 `x * sigmoid(x)`（两个 Mul 输入顺序均可）折叠为
+一个无外部输入的一元步骤，并要求 MatMul 结果恰有这两个消费者、Sigmoid 结果
+仅被该 Mul 使用且 Swish 结果没有额外消费者；M/matrix 等未支持部分保留 suffix。每个 binary step
 占一个运行时输入槽，最多 8 槽。单次 prepare 接收完整候选并返回可生成前缀
 及该前缀的语义请求；不支持的首步返回空请求，ANNC 将其保留在常规 lowering。
 first/middle KC 不执行 epilogue。
