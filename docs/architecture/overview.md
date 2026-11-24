@@ -899,10 +899,10 @@ flowchart TB
 ### 9.1 假设
 
 - 目标硬件为 AArch64 服务器（当前优先支持鲲鹏 920X），未来可扩展至其他 CPU 架构。
-- 目标操作系统为 openEuler 24.03 LTS SP4（系统 `llvm-toolset-20`）或 22.03 LTS SP4（需自建 LLVM/MLIR 20/21）。
+- 目标操作系统为 openEuler 24.03 LTS SP4 或 22.03 LTS SP4。LLVM/MLIR 20 在 24.03 上由系统 `llvm-toolset-20` 提供，在 22.03 上需从源码构建。[工具链安装步骤](../getting-started/installation.md#4-llvm--mlir-与-nlohmannjson)
 - 构建 TensorFlow 插件所用的 Python 环境中已安装 TensorFlow 1.15 或 2.20。构建 Python 绑定时还需安装 pybind11 和 nanobind。
 - 构建环境具备足够的编译内存（ANNC 构建目录约数 GB）。
-- 构建依赖还包括 protobuf-devel、gtest-devel、ninja-build、LLVM/MLIR 20/21 工具链（24.03 为 `llvm-toolset-20`，含 clang 与 MLIR Python 绑定源码；22.03 需自建）；nlohmann/json v3.11.3 由 CMake FetchContent 获取。
+- 构建还需要 protobuf-devel、gtest-devel、ninja-build 和 clang。启用 Python 绑定时还需 MLIR Python 绑定源码。CMake 通过 FetchContent 获取 nlohmann/json v3.11.3。
 
 ### 9.2 约束
 
