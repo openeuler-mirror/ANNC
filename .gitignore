@@ -55,3 +55,4 @@ annc-oe2403-env/
 build-*.bak/
 install-*.bak
 third_party/.bak-*
+build-v1/

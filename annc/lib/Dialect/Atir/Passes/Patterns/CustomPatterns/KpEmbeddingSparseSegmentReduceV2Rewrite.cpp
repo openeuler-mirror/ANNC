@@ -58,19 +58,25 @@ bool classifySegmentReduceArgs(func::FuncOp func, SegmentReduceArgs &args) {
 LogicalResult matchSegmentReduceV2(Operation *ssOp, int64_t combiner,
                                    func::FuncOp func, Type &indicesType,
                                    SmallVectorImpl<Operation *> &fusedOps) {
+  auto why = [&](const char *r) {
+    ANNC_LOG_DEBUG("fusion-pattern")
+        << "seg-reduce-v2 reject(" << r << ") "
+        << func.getName().str() << "\n";
+    return failure();
+  };
   // Value-return contract: return carries dual values (ss result and the
   // i32 slice_output scalar); outputs are host-allocated.
   Block &body = func.getBody().front();
   auto returnOp = dyn_cast<func::ReturnOp>(body.getTerminator());
-  if (!returnOp || returnOp.getNumOperands() != 2) return failure();
-  if (returnOp.getOperand(0) != ssOp->getResult(0)) return failure();
+  if (!returnOp || returnOp.getNumOperands() != 2) return why("return-arity");
+  if (returnOp.getOperand(0) != ssOp->getResult(0)) return why("return-port0");
   auto sliceTy = dyn_cast<RankedTensorType>(returnOp.getOperand(1).getType());
   if (!sliceTy || !sliceTy.getElementType().isInteger(32) ||
       sliceTy.getRank() != 0)
-    return failure();
+    return why("return-port1");
 
   SegmentReduceArgs args;
-  if (!classifySegmentReduceArgs(func, args)) return failure();
+  if (!classifySegmentReduceArgs(func, args)) return why("arg-classify");
   indicesType = args.indices.getType();
 
   // num_segments constant 0 (the kernel infers batch from segment_ids).
@@ -82,11 +88,14 @@ LogicalResult matchSegmentReduceV2(Operation *ssOp, int64_t combiner,
       numDef ? numDef->getAttrOfType<DenseElementsAttr>("value") : nullptr;
   if (!numSplat || !numSplat.isSplat() ||
       !numSplat.getSplatValue<APInt>().isZero())
-    return failure();
+    return why("num-segments");
 
-  // fusedOps = every op in the kernel body except the terminator.
+  // fusedOps order drives the escaping-result order, which must match the
+  // kernel return (output, slice_output): the odml body lists the count /
+  // slice chain before the reduce, so anchor the reduce first explicitly.
+  fusedOps.push_back(ssOp);
   for (Operation &op : body.getOperations()) {
-    if (isa<func::ReturnOp>(op)) continue;
+    if (isa<func::ReturnOp>(op) || &op == ssOp) continue;
     fusedOps.push_back(&op);
   }
   return success();

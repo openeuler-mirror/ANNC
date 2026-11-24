@@ -62,6 +62,18 @@ inline bool operandProvOf(mlir::Operation *consumer, unsigned idx,
 // Producer provenance: source node via annc.source_node (fold/CSE-proof);
 // the port prefers annc.source_ports[resultNo] (-1/missing slot bails out);
 // a missing tag keeps the IR result number (residue forms are natural ports).
+// A source_node tag may already carry a port suffix ("node:1"); the port
+// must be appended exactly once or the metadata endpoint becomes
+// "node:1:1" and downstream validators reject it.
+inline std::string stripPortSuffix(llvm::StringRef name) {
+  size_t colon = name.rfind(':');
+  if (colon == llvm::StringRef::npos || colon + 1 >= name.size())
+    return name.str();
+  for (char c : name.drop_front(colon + 1))
+    if (c < '0' || c > '9') return name.str();
+  return name.take_front(colon).str();
+}
+
 inline std::string sourceNameOf(mlir::Value v) {
   auto res = mlir::dyn_cast<mlir::OpResult>(v);
   mlir::Operation *def = res ? res.getOwner() : nullptr;
@@ -76,7 +88,7 @@ inline std::string sourceNameOf(mlir::Value v) {
     if (!item || item.getInt() < 0) return "";
     port = item.getInt();
   }
-  return sn.getValue().str() + ":" + std::to_string(port);
+  return stripPortSuffix(sn.getValue()) + ":" + std::to_string(port);
 }
 
 }  // namespace fusionv2
