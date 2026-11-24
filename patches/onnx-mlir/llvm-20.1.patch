@@ -1,0 +1,360 @@
+--- a/src/Conversion/KrnlToLLVM/KrnlRandomNormal.cpp
++++ b/src/Conversion/KrnlToLLVM/KrnlRandomNormal.cpp
+@@ -80,10 +80,10 @@
+     // or
+     //  (memref<3x4x5xf64>, index, f64, f64, f64)
+     Type llvmVoidTy = LLVM::LLVMVoidType::get(context);
+-    Type llvmOptionsTy = FloatType::getF32(context);
++    Type llvmOptionsTy = Float32Type::get(context);
+     Type llvmOutputTy = getPointerType(context, llvmOptionsTy);
+     if (inType.isF64()) {
+-      llvmOptionsTy = FloatType::getF64(context);
++      llvmOptionsTy = Float64Type::get(context);
+       llvmOutputTy = getPointerType(context, llvmOptionsTy);
+     }
+     Type llvmI64Ty = IntegerType::get(context, 64);
+--- a/src/Conversion/KrnlToLLVM/KrnlUnaryMath.cpp
++++ b/src/Conversion/KrnlToLLVM/KrnlUnaryMath.cpp
+@@ -172,19 +172,19 @@
+     Type outType = op->getResultTypes().front();
+     Type llvmInType, llvmOutType;
+     if (inType.isF16())
+-      llvmInType = FloatType::getF16(context);
++      llvmInType = Float16Type::get(context);
+     else if (inType.isF32())
+-      llvmInType = FloatType::getF32(context);
++      llvmInType = Float32Type::get(context);
+     else if (inType.isF64())
+-      llvmInType = FloatType::getF64(context);
++      llvmInType = Float64Type::get(context);
+     else if (inType.isBF16())
+-      llvmInType = FloatType::getBF16(context);
++      llvmInType = BFloat16Type::get(context);
+     if (outType.isInteger(1))
+       llvmOutType = IntegerType::get(context, 1);
+     else if (outType.isF32())
+-      llvmOutType = FloatType::getF32(context);
++      llvmOutType = Float32Type::get(context);
+     else if (outType.isF64())
+-      llvmOutType = FloatType::getF64(context);
++      llvmOutType = Float64Type::get(context);
+ 
+     // Insert and/or get reference to elementary math function declaration.
+     assert(
+--- a/src/Conversion/KrnlToLLVM/KrnlVectorTypeCast.cpp
++++ b/src/Conversion/KrnlToLLVM/KrnlVectorTypeCast.cpp
+@@ -78,7 +78,7 @@
+ 
+     int64_t offset;
+     SmallVector<int64_t, 4> strides;
+-    if (failed(getStridesAndOffset(targetType, strides, offset)))
++    if (failed(targetType.getStridesAndOffset(strides, offset)))
+       return failure();
+ 
+     // Unhandled dynamic offset.
+--- a/src/Conversion/ONNXToKrnl/ML/CategoryMapper.cpp
++++ b/src/Conversion/ONNXToKrnl/ML/CategoryMapper.cpp
+@@ -281,7 +281,7 @@
+             SmallVector<int64_t, 4> strides;
+             int64_t alignmentOffset; // not used, just to make the function call
+                                      // completed.
+-            if (getStridesAndOffset(memRefType, strides, alignmentOffset)
++            if (memRefType.getStridesAndOffset(strides, alignmentOffset)
+                     .failed())
+               llvm_unreachable("Failed to get strides");
+             Value stringMemRef =
+--- a/src/Conversion/ONNXToKrnl/Math/LRN.cpp
++++ b/src/Conversion/ONNXToKrnl/Math/LRN.cpp
+@@ -52,7 +52,7 @@
+     float alphaLit = adaptor.getAlpha().convertToFloat();
+     float betaLit = adaptor.getBeta().convertToFloat();
+     int sizeLit = adaptor.getSize();
+-    auto f32Type = FloatType::getF32(rewriter.getContext());
++    auto f32Type = Float32Type::get(rewriter.getContext());
+     Value biasValue = create.math.constant(f32Type, biasLit);
+     Value alphaDivSizeValue =
+         create.math.constant(f32Type, alphaLit / static_cast<float>(sizeLit));
+--- a/src/Conversion/ONNXToKrnl/Math/Reduction.cpp
++++ b/src/Conversion/ONNXToKrnl/Math/Reduction.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include <functional>
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp"
+ #include "src/Dialect/Krnl/DialectBuilder.hpp"
+--- a/src/Conversion/ONNXToTOSA/DialectBuilder.cpp
++++ b/src/Conversion/ONNXToTOSA/DialectBuilder.cpp
+@@ -178,8 +178,11 @@
+   Type newValueType = RankedTensorType::get(
+       llvm::SmallVector<int64_t, 4>(lhsType.getRank(), ShapedType::kDynamic),
+       lhsType.getElementType());
++  int8_t shiftAmount = static_cast<int8_t>(shift);
++  Type shiftType = rewriter().getI8Type();
++  Value shiftValue = createConst<int8_t>(shiftAmount, {1}, shiftType);
+   return tosa::CreateOpAndInfer<mlir::tosa::MulOp>(
+-      rewriter(), loc(), newValueType, lhs, rhs, shift);
++      rewriter(), loc(), newValueType, lhs, rhs, shiftValue);
+ }
+ 
+ Value TosaBuilder::intdiv(Value &lhs, Value &rhs) {
+--- a/src/Dialect/ONNX/ElementsAttr/BType.cpp
++++ b/src/Dialect/ONNX/ElementsAttr/BType.cpp
+@@ -55,10 +55,10 @@
+     case BType::FLOAT          : return b.getF32Type();
+     case BType::FLOAT16        : return b.getF16Type();
+     case BType::BFLOAT16       : return b.getBF16Type();
+-    case BType::FLOAT8E4M3FN   : return b.getFloat8E4M3FNType();
+-    case BType::FLOAT8E4M3FNUZ : return b.getFloat8E4M3FNUZType();
+-    case BType::FLOAT8E5M2     : return b.getFloat8E5M2Type();
+-    case BType::FLOAT8E5M2FNUZ : return b.getFloat8E5M2FNUZType();
++    case BType::FLOAT8E4M3FN   : return Float8E4M3FNType::get(b.getContext());
++    case BType::FLOAT8E4M3FNUZ : return Float8E4M3FNUZType::get(b.getContext());
++    case BType::FLOAT8E5M2     : return Float8E5M2Type::get(b.getContext());
++    case BType::FLOAT8E5M2FNUZ : return Float8E5M2FNUZType::get(b.getContext());
+     default: llvm_unreachable("unsupported data type");
+   }
+   // clang-format on
+--- a/src/Dialect/ONNX/ElementsAttr/Strides.hpp
++++ b/src/Dialect/ONNX/ElementsAttr/Strides.hpp
+@@ -39,6 +39,7 @@
+ 
+ #include "src/Support/Arrays.hpp"
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "llvm/ADT/ArrayRef.h"
+ #include "llvm/ADT/STLExtras.h"
+--- a/src/Dialect/ONNX/ONNXOps/ML/OneHotEncoder.cpp
++++ b/src/Dialect/ONNX/ONNXOps/ML/OneHotEncoder.cpp
+@@ -96,7 +96,7 @@
+     return success();
+ 
+   ONNXOneHotEncoderOpShapeHelper shapeHelper(getOperation(), {});
+-  return shapeHelper.computeShapeAndUpdateType(FloatType::getF32(getContext()));
++  return shapeHelper.computeShapeAndUpdateType(Float32Type::get(getContext()));
+   return success();
+ }
+ 
+--- a/src/Dialect/ONNX/ONNXOps/Math/ElementwiseUnary.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Math/ElementwiseUnary.cpp
+@@ -452,7 +452,7 @@
+   ONNXUnaryOpShapeHelper shapeHelper(getOperation(), {});
+   RankedTensorType xType = mlir::dyn_cast<RankedTensorType>(getX().getType());
+   return shapeHelper.computeShapeAndUpdateType(
+-      FloatType::getF32(getContext()), xType.getEncoding());
++      Float32Type::get(getContext()), xType.getEncoding());
+ }
+ 
+ //===----------------------------------------------------------------------===//
+--- a/src/Dialect/ONNX/ONNXOps/Math/RandomNormal.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Math/RandomNormal.cpp
+@@ -50,21 +50,21 @@
+         static_cast<onnx::TensorProto_DataType>(op.getDtype());
+     if (elementTypeID ==
+         onnx::TensorProto_DataType::TensorProto_DataType_FLOAT16) {
+-      return FloatType::getF16(op.getContext());
++      return Float16Type::get(op.getContext());
+     } else if (elementTypeID ==
+                onnx::TensorProto_DataType::TensorProto_DataType_FLOAT) {
+-      return FloatType::getF32(op.getContext());
++      return Float32Type::get(op.getContext());
+     } else if (elementTypeID ==
+                onnx::TensorProto_DataType::TensorProto_DataType_DOUBLE) {
+-      return FloatType::getF64(op.getContext());
++      return Float64Type::get(op.getContext());
+     } else if (elementTypeID ==
+                onnx::TensorProto_DataType::TensorProto_DataType_BFLOAT16) {
+-      return FloatType::getBF16(op.getContext());
++      return BFloat16Type::get(op.getContext());
+     } else {
+       llvm_unreachable("dtype not supported for RandomNormal");
+     }
+   }
+-  return FloatType::getF32(op.getContext());
++  return Float32Type::get(op.getContext());
+ }
+ } // namespace
+ 
+--- a/src/Dialect/ONNX/ONNXOps/Math/RandomNormalLike.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Math/RandomNormalLike.cpp
+@@ -52,19 +52,19 @@
+     }
+     if (elementTypeID ==
+             onnx::TensorProto_DataType::TensorProto_DataType_FLOAT16 &&
+-        outputType != FloatType::getF16(getContext()))
++        outputType != Float16Type::get(getContext()))
+       return emitOpError("output tensor does not match float16 dtype.");
+     else if (elementTypeID ==
+                  onnx::TensorProto_DataType::TensorProto_DataType_FLOAT &&
+-             outputType != FloatType::getF32(getContext()))
++             outputType != Float32Type::get(getContext()))
+       return emitOpError("output tensor does not match float dtype.");
+     else if (elementTypeID ==
+                  onnx::TensorProto_DataType::TensorProto_DataType_DOUBLE &&
+-             outputType != FloatType::getF64(getContext()))
++             outputType != Float64Type::get(getContext()))
+       return emitOpError("output tensor does not match double dtype.");
+     else if (elementTypeID ==
+                  onnx::TensorProto_DataType::TensorProto_DataType_BFLOAT16 &&
+-             outputType != FloatType::getBF16(getContext()))
++             outputType != BFloat16Type::get(getContext()))
+       return emitOpError("output tensor does not match bfloat16 dtype.");
+   } else if (inputType != outputType) {
+     return emitOpError("output and input element types do not match.");
+--- a/src/Dialect/ONNX/ONNXOps/NN/Normalization.cpp
++++ b/src/Dialect/ONNX/ONNXOps/NN/Normalization.cpp
+@@ -12,6 +12,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+ 
+--- a/src/Dialect/ONNX/ONNXOps/OpHelper.cpp
++++ b/src/Dialect/ONNX/ONNXOps/OpHelper.cpp
+@@ -608,13 +608,13 @@
+     Builder &builder, onnx::TensorProto_DataType onnxType) {
+   switch (onnxType) {
+   case onnx::TensorProto_DataType::TensorProto_DataType_FLOAT8E4M3FN:
+-    return builder.getFloat8E4M3FNType();
++    return Float8E4M3FNType::get(builder.getContext());
+   case onnx::TensorProto_DataType::TensorProto_DataType_FLOAT8E4M3FNUZ:
+-    return builder.getFloat8E4M3FNUZType();
++    return Float8E4M3FNUZType::get(builder.getContext());
+   case onnx::TensorProto_DataType::TensorProto_DataType_FLOAT8E5M2:
+-    return builder.getFloat8E5M2Type();
++    return Float8E5M2Type::get(builder.getContext());
+   case onnx::TensorProto_DataType::TensorProto_DataType_FLOAT8E5M2FNUZ:
+-    return builder.getFloat8E5M2FNUZType();
++    return Float8E5M2FNUZType::get(builder.getContext());
+   case onnx::TensorProto_DataType::TensorProto_DataType_BFLOAT16:
+     return builder.getBF16Type();
+   case onnx::TensorProto_DataType::TensorProto_DataType_FLOAT16:
+--- a/src/Dialect/ONNX/ONNXOps/Quantize/DequantizeLinear.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Quantize/DequantizeLinear.cpp
+@@ -12,6 +12,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+ #include "llvm/Support/Debug.h"
+--- a/src/Dialect/ONNX/ONNXOps/Quantize/DynamicQuantizeLinear.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Quantize/DynamicQuantizeLinear.cpp
+@@ -61,7 +61,7 @@
+ 
+   IntegerType ui8Type =
+       IntegerType::get(getContext(), 8, IntegerType::Unsigned);
+-  FloatType f32Type = FloatType::getF32(getContext());
++  FloatType f32Type = Float32Type::get(getContext());
+ 
+   ONNXDynamicQuantizeLinearOpShapeHelper shapeHelper(getOperation(), {});
+   return shapeHelper.computeShapeAndUpdateTypes(
+--- a/src/Dialect/ONNX/ONNXOps/Sequence/SplitToSequence.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Sequence/SplitToSequence.cpp
+@@ -12,6 +12,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+ 
+--- a/src/Dialect/ONNX/ONNXOps/ShapeHelper.cpp
++++ b/src/Dialect/ONNX/ONNXOps/ShapeHelper.cpp
+@@ -16,6 +16,7 @@
+ #include "llvm/ADT/BitVector.h"
+ #include "llvm/Support/Debug.h"
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/DialectBuilder.hpp"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+--- a/src/Dialect/ONNX/ONNXOps/Tensor/Constant.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Tensor/Constant.cpp
+@@ -54,10 +54,10 @@
+   } else if (auto attr = getSparseValueAttr()) {
+     type = mlir::cast<ElementsAttr>(attr).getShapedType();
+   } else if (auto attr = getValueFloatAttr()) {
+-    type = RankedTensorType::get({}, FloatType::getF32(getContext()));
++    type = RankedTensorType::get({}, Float32Type::get(getContext()));
+   } else if (auto attr = getValueFloatsAttr()) {
+     int64_t size = attr.size();
+-    type = RankedTensorType::get({size}, FloatType::getF32(getContext()));
++    type = RankedTensorType::get({size}, Float32Type::get(getContext()));
+   } else if (auto attr = getValueIntAttr()) {
+     type = RankedTensorType::get({}, IntegerType::get(getContext(), 64));
+   } else if (auto attr = getValueIntsAttr()) {
+--- a/src/Dialect/ONNX/ONNXOps/Tensor/ConstantOfShape.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Tensor/ConstantOfShape.cpp
+@@ -12,6 +12,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+ 
+@@ -99,7 +100,7 @@
+   if (auto attr = getValueAttr()) {
+     elementType = mlir::cast<ElementsAttr>(attr).getElementType();
+   } else {
+-    elementType = FloatType::getF32(getContext());
++    elementType = Float32Type::get(getContext());
+   }
+   return {UnrankedTensorType::get(elementType)};
+ }
+@@ -125,7 +126,7 @@
+   } else {
+     // If 'value' attribute is not specified, it defaults to a tensor of
+     // value 0 and datatype float32.
+-    elementType = FloatType::getF32(getContext());
++    elementType = Float32Type::get(getContext());
+ 
+     llvm::SmallVector<int64_t, 2> dims(1, 1);
+     auto tensorType = RankedTensorType::get(dims, elementType);
+--- a/src/Dialect/ONNX/ONNXOps/Tensor/Upsample.cpp
++++ b/src/Dialect/ONNX/ONNXOps/Tensor/Upsample.cpp
+@@ -13,6 +13,7 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
+ 
+--- a/third_party/stablehlo/stablehlo/reference/NumPy.h
++++ b/third_party/stablehlo/stablehlo/reference/NumPy.h
+@@ -17,6 +17,7 @@
+ #define STABLEHLO_REFERENCE_NUMPY_H
+ 
+ #include "llvm/Support/ErrorOr.h"
++#include "mlir/IR/Attributes.h"
+ #include "mlir/IR/BuiltinTypeInterfaces.h"
+ #include "stablehlo/reference/Tensor.h"
+ 
+--- a/third_party/stablehlo/stablehlo/reference/Types.cpp
++++ b/third_party/stablehlo/stablehlo/reference/Types.cpp
+@@ -48,13 +48,11 @@
+ }
+ 
+ bool isSupportedFloatType(Type type) {
+-  return type.isFloat4E2M1FN() || type.isFloat6E2M3FN() ||
+-         type.isFloat6E3M2FN() || type.isFloat8E3M4() ||
+-         type.isFloat8E4M3B11FNUZ() || type.isFloat8E4M3() ||
+-         type.isFloat8E4M3FN() || type.isFloat8E4M3FNUZ() ||
+-         type.isFloat8E5M2() || type.isFloat8E5M2FNUZ() ||
+-         type.isFloat8E8M0FNU() || type.isF16() || type.isBF16() ||
+-         type.isF32() || type.isF64();
++  return isa<Float4E2M1FNType, Float6E2M3FNType, Float6E3M2FNType,
++             Float8E3M4Type, Float8E4M3B11FNUZType, Float8E4M3Type,
++             Float8E4M3FNType, Float8E4M3FNUZType, Float8E5M2Type,
++             Float8E5M2FNUZType, Float8E8M0FNUType>(type) ||
++         type.isF16() || type.isBF16() || type.isF32() || type.isF64();
+ }
+ 
+ bool isSupportedComplexType(Type type) {

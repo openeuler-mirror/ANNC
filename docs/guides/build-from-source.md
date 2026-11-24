@@ -67,6 +67,7 @@ ninja && ninja install
 - `--no-install-deps`：跳过 pybind11 / nanobind 自动安装（仅 `--enable-python` 相关）
 - `--annc-debug`：只以调试模式编译 ANNC 代码（`-g3 -O0 -UNDEBUG`），third_party 保持原构建类型、不重编
 - 框架选择（互斥）：`--enable-tf` 只构建 TF 前端/addon；`--enable-ort`（兼容别名 `--enable-ort-ep`）只构建 ORT 加速栈——ONNX 前端与 ORT EP 视为一个整体，总是同时构建；`--all` 构建 TF 前端、当前 TF 环境对应的插件（1.15 或 2.20）、ONNX 前端和 ORT EP。不传时保持历史默认（TF + ONNX 前端，ORT EP 关闭）
+- `--enable-onnx-stablehlo`：准备 ONNX-MLIR 并构建 ONNX 的 StableHLO 前端（默认关闭，需启用 ONNX）
 - `--dry-run`：打印解析后的框架开关并退出，不 configure/build
 - `--disable-tensorflow`：关闭 TensorFlow 前端（`annc-tf2atir`、`annc-converter`、`annc-tf-pipeline`）及其 addon（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
 - `--disable-tensorflow-addon`：只关闭 TF addon（`annc_optimizer`、`annc_fused_op`），TF 前端工具仍构建（legacy/custom 模式；与 `--enable-tf`/`--all` 冲突）
@@ -89,8 +90,8 @@ ninja && ninja install
 | `ANNC_ENABLE_TENSORFLOW_ADDON` | `ON`/`OFF` | 跟随 `ANNC_ENABLE_TENSORFLOW` | 构建并安装 TF addon（`annc_optimizer`、`annc_fused_op`、`annc_jit_cache`）及其测试；为 `ON` 要求 `ANNC_ENABLE_TENSORFLOW=ON`；对应 `build.sh --disable-tensorflow-addon` |
 | `ANNC_ENABLE_ONNX` | `ON`/`OFF` | `ON` | 构建 ONNX 前端（`annc-onnx2atir` 及其 GTest）并编译预生成的 ONNX proto（proto 由 `build.sh` 或脚本预生成）；对应 `build.sh --disable-onnx` |
 | `ANNC_ENABLE_ONNXRUNTIME_EP` | `ON`/`OFF` | `OFF` | 构建并安装 ONNX Runtime EP 插件 `libannc_ep.so`（`addons/onnxruntime/`）；要求 `ANNC_ENABLE_ONNX=ON`，对应 `build.sh --enable-ort`/`--all` |
-| `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 ONNX → StableHLO 转换工具，依赖 `third-party/onnx-mlir` 及其配套构建树 |
-| `ANNC_ENABLE_STABLEHLO_FRONTEND` | `ON`/`OFF` | `OFF` | 构建 `annc-stablehlo-opt`，用于在 StableHLO 上匹配、绑定原图和提取 kernel |
+| `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` | `ON`/`OFF` | `OFF` | 构建 ONNX → StableHLO 转换工具，依赖 `third-party/onnx-mlir` 及其配套构建树；由 `build.sh --enable-onnx-stablehlo` 开启 |
+| `ANNC_ENABLE_STABLEHLO_FRONTEND` | `ON`/`OFF` | `OFF` | 构建 `annc-stablehlo-opt`，用于在 StableHLO 上匹配、绑定原图和提取 kernel；由 `build.sh --enable-onnx-stablehlo` 开启 |
 | `ANNC_ENABLE_PYTHON` | `ON`/`OFF` | `OFF` | 构建 ANNC Python 绑定；开启时需要 pybind11/nanobind 与 `llvm-toolset-20-python3-mlir` 提供的 MLIR Python 绑定源码；对应 `build.sh --enable-python` |
 | `ANNC_ONNXRUNTIME_INCLUDE_DIR` | 路径 | 空 | ORT 1.26.0 的 session 头文件目录（含 `onnxruntime_c_api.h`、`onnxruntime_ep_c_api.h`）；EP 开启时必填，缺失即 configure 失败，不自动下载 SDK |
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
@@ -292,8 +293,23 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 
 ## ONNX 的 StableHLO 前端
 
-按 [ONNX-MLIR 构建步骤](../../addons/onnxruntime/stablehlo/README.md) 准备配套工具链。在同一个配套 MLIR 构建目录中打开 `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO` 与 `ANNC_ENABLE_STABLEHLO_FRONTEND`，构建 `annc_onnx_stablehlo_addon` 和 `annc-stablehlo-opt`。
+装好 ONNX 和 ORT EP 的构建依赖后，在仓库根目录执行：
 
-公共后端、`annc-onnx-pipeline` 和 EP 在启用 ONNX 与 EP 的系统 LLVM 构建中生成。配套 ONNX-MLIR 位于当前 CMake 构建目录下的 `third-party/onnx-mlir-build` 时，无需手动指定目录。分开构建且 ONNX-MLIR 位于其他目录时，配置 ANNC 时用 `-DANNC_ONNX_MLIR_BUILD_DIR=<ONNX-MLIR 构建目录>` 指定实际位置。CMake 会把 `onnx-mlir-opt` 的目录写入流水线。
+```bash
+./build.sh --enable-ort --enable-onnx-stablehlo
+```
 
-将配套的三个可执行文件 `annc-onnx2stablehlo`、`annc-onnx-framework-opt`、`annc-stablehlo-opt` 放在 `annc-onnx-pipeline` 的同一 `bin` 目录。[CLI 工作流](cli-workflows.md#onnx-的-stablehlo-前端)
+脚本会初始化缺失的 ONNX-MLIR 子模块，并把依赖构建到
+`build/third-party/onnx-mlir-build`。这条路径要求 ONNX-MLIR 和 ANNC 共用 LLVM/MLIR 20.1.x，
+已在 openEuler 的 20.1.8 工具链上验证。
+随后 ANNC 在同一个构建目录中编译并安装 StableHLO 前端、公共后端和 ORT EP。
+标准工具链路径可自动识别，自定义安装路径可通过 `ANNC_LLVM_BIN` 指定。
+
+`./build.sh --enable-ort` 仍构建默认 ATIR 路径。启用 StableHLO 的构建产物在推理时可用
+`ANNC_ONNX_USE_STABLEHLO=1` 选择 StableHLO 路径。
+
+手动调用 CMake 时，可先运行[依赖准备脚本](../../addons/onnxruntime/stablehlo/README.md)，
+再开启 `ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=ON` 和 `ANNC_ENABLE_STABLEHLO_FRONTEND=ON`。
+使用默认依赖构建目录时，CMake 会自动定位工具和源码。使用其他目录时，通过
+`-DANNC_ONNX_MLIR_BUILD_DIR=<目录>` 指定，并让两次构建使用相同的 LLVM/MLIR 配置。
+[CLI 工作流](cli-workflows.md#onnx-的-stablehlo-前端)

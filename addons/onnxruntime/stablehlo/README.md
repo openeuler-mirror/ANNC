@@ -65,7 +65,12 @@ serialization applies to pure HLO. The addon produces the converted IR with
 source attributes. For fusion, backend compilation and ORT execution, see the
 [ONNX pipeline workflow](../../../docs/guides/cli-workflows.md#onnx-的-stablehlo-前端).
 
-ONNX-MLIR v0.5.0.2 is pinned as the `third-party/onnx-mlir` Git submodule at
+To build the converter, ANNC backend and ORT EP from the repository root, run
+`./build.sh --enable-ort --enable-onnx-stablehlo`. This prepares ONNX-MLIR using
+the same LLVM/MLIR installation used for ANNC.
+
+For a manual CMake build, prepare ONNX-MLIR first. It is pinned as the
+`third-party/onnx-mlir` Git submodule at
 `128f8b716fdbed4ff05a5ba493ac48fcac761b40`. Its nested StableHLO submodule is
 pinned with it. The submodule provides the source; CMake must still build the
 ONNX-MLIR tools. Initialize the sources with:
@@ -74,28 +79,23 @@ ONNX-MLIR tools. Initialize the sources with:
 git submodule update --init --recursive third-party/onnx-mlir
 ```
 
-The build script constructs the complete LLVM/MLIR components required by the
-pinned ONNX-MLIR revision, followed by ONNX-MLIR and its paired StableHLO
-tools. It does not require a prebuilt LLVM/MLIR installation. It does require
-Git, CMake, Ninja, a C/C++ compiler, Python development headers, and the system
-protobuf compiler/library.
+The build script requires LLVM/MLIR 20.1.x and uses the same installation as the
+ANNC backend. The verified configuration is openEuler's LLVM/MLIR 20.1.8.
+The [compatibility patch](../../../patches/onnx-mlir/llvm-20.1.patch) is applied
+to a copy of the pinned ONNX-MLIR and StableHLO sources under the build directory.
+Install the LLVM/MLIR development packages, Git, CMake, Ninja, GNU tar,
+`sha256sum`, `mktemp`, `sed`, a C/C++ compiler, Python development headers, and
+the system protobuf compiler and libraries (including `protobuf-lite` on openEuler).
 
 ```sh
+export ANNC_LLVM_BIN=/opt/openEuler/llvm-toolset-20/root/usr/bin
 addons/onnxruntime/stablehlo/build_onnx_mlir.sh --jobs 16
-
-cmake -S . -B build \
-  -DLLVM_DIR="$PWD/build/third-party/llvm-build/lib/cmake/llvm" \
-  -DMLIR_DIR="$PWD/build/third-party/llvm-build/lib/cmake/mlir" \
-  -DANNC_ENABLE_ONNXRUNTIME_STABLEHLO=ON \
-  -DANNC_ONNX_MLIR_BUILD_DIR="$PWD/build/third-party/onnx-mlir-build"
-cmake --build build --target annc_onnx_stablehlo_addon -j16
 ```
 
-The script checks out the llvm-project revision paired with the ONNX-MLIR
-submodule (`b270525f730be6e7196667925f5a9bfa153262e9`) and caches its source
-and build under `build/third-party/`. `--llvm-source` can point to an existing
-checkout of that exact revision when network access is unavailable. The
-producer can also be used independently to inspect the converted IR.
+Use a new dependency build directory when migrating from the bundled LLVM
+build. The default is `build/third-party/onnx-mlir-build`. The [ANNC build
+guide](../../../docs/guides/build-from-source.md#onnx-的-stablehlo-前端) shows the
+compiler and EP build with the same toolchain.
 
 Producer tests are in `tests/integration/onnx2stablehlo/`. They exercise the
 pipeline boundary, preprocessing/postprocessing passes, and (when supplied)

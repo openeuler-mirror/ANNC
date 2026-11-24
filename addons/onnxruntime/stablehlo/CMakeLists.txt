@@ -12,13 +12,6 @@ if(NOT EXISTS "${_onnx_mlir_config_dir}/bin/onnx-mlir" OR
     "Build the pinned ONNX-MLIR submodule first or set ANNC_ONNX_MLIR_BUILD_DIR.")
 endif()
 
-set(ANNC_STABLEHLO_SOURCE_DIR
-    "${ANNC_ONNX_MLIR_SOURCE_DIR}/third_party/stablehlo" CACHE PATH
-    "StableHLO submodule paired with ONNX-MLIR")
-set(ANNC_STABLEHLO_BUILD_DIR
-    "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/stablehlo" CACHE PATH
-    "StableHLO build tree paired with ONNX-MLIR")
-
 add_subdirectory(pipeline)
 
 add_custom_target(annc_onnx_stablehlo_addon

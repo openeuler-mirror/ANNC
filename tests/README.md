@@ -94,7 +94,9 @@ bash tests/FileCheck/run.sh
   的构建；任一项未启用时，不注册该测试。
   `tf_threadpool_sdk_limit` 仅在 TF1.15 linked 构建注册，使用真实的 4 线程 TF 池
   验证 1/2 线程上限及其相对固定块选项的优先级；preload 构建不注册该原生宿主用例。
-- `integration/onnx2stablehlo/` 需要构建 addon 的
+- `integration/onnx2stablehlo/test_toolchain_build.py` 只需 Git 和已递归初始化的
+  ONNX-MLIR 子模块，可在编译前运行。
+- `integration/onnx2stablehlo/` 的转换与融合用例需要构建 addon 的
   `annc-onnx2stablehlo` / `annc-onnx-framework-opt`；真实 ORT 导出模型和
   StableHLO portable serializer 仅在设置对应环境变量时执行。
   来源与绑定用例通过 `ANNC_SOURCE_MAP_REAL_E2E=1` 启用，需指定
@@ -152,6 +154,7 @@ bash tests/FileCheck/run.sh
 | `FileCheck/**/*.mlir` | L1 | pass/IR 行为 |
 | `integration/annc_partition/test_cli.py` | L2 | 切分 CLI 查询、任务各阶段失败（参数/能力/配置/模型接入占位）及无副作用 |
 | `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
+| `integration/onnx2stablehlo/test_toolchain_build.py` | L2/build | LLVM 兼容补丁与锁定的 ONNX-MLIR、StableHLO 源码匹配 |
 | `integration/cmake/test_kdnn_build.py` | L2 | `cmake/ThirdPartyKDNN.cmake` import 能力探测 |
 | `integration/cmake/test_gemm_microkernel_availability.py` | L2 | 微内核归档有/无两种构建下的工具启动、普通 lowering 与预打包能力诊断（用 `ANNC_BUILD_DIR` 选择构建） |
 | `integration/cmake/test_gemm_codegen_package.py` | L2 | GEMM codegen 包发现、manifest 校验与基础归档一致性 |
