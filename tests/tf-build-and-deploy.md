@@ -34,6 +34,7 @@
 | `predictor_server` | `<TF_ROOT>/install/bin/predictor_server`；必须导出 Grappler 注册表符号（`LD_PRELOAD` 模式） |
 | TF headers SDK | `<TF_ROOT>/install/annc-tensorflow-headers/include`；与 `predictor_server` 同源 |
 | TF 运行库 | 与 headers、predictor 同一次源码构建，C++11 ABI 一致 |
+| TensorFlow Python 包 | `<TF_PYTHON>` 导入的包须与 `predictor_server` 加载的 TensorFlow 运行库使用相同的版本、C++ 标准和 C++11 ABI（`_GLIBCXX_USE_CXX11_ABI`）。优先安装与 `<TF_ROOT>` 中的运行库同一次构建的 Python 包 |
 | SavedModel | `<MODEL_ROOT>/{wd_dcn,bst_mmoe,din_mmoe}/1` |
 | 压测 TSV | `<MODEL_ROOT>/<model>/<model>.tsv`，表头 + `id<TAB>model_input` |
 | `brpc_client` | `<BRPC_CLIENT>` |
