@@ -9,15 +9,10 @@ find_package(LLVM REQUIRED CONFIG)
 find_package(Protobuf CONFIG QUIET)
 find_package(absl CONFIG QUIET)
 find_package(utf8_range CONFIG QUIET)
+# Keep the imported ONNX target paired when reconfiguring an existing build.
+set(ONNX_DIR "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/onnx")
 find_package(ONNX REQUIRED CONFIG
-  PATHS "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/onnx" NO_DEFAULT_PATH)
-
-set(ANNC_STABLEHLO_SOURCE_DIR
-    "${ANNC_ONNX_MLIR_SOURCE_DIR}/third_party/stablehlo" CACHE PATH
-    "StableHLO source paired with ONNX-MLIR")
-set(ANNC_STABLEHLO_BUILD_DIR
-    "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/stablehlo" CACHE PATH
-    "StableHLO build tree paired with ONNX-MLIR")
+  PATHS "${ONNX_DIR}" NO_DEFAULT_PATH)
 
 add_executable(annc-onnx2stablehlo annc-onnx2stablehlo.cpp)
 target_include_directories(annc-onnx2stablehlo PRIVATE ${LLVM_INCLUDE_DIRS})
@@ -48,8 +43,8 @@ target_include_directories(annc-onnx-framework-opt PRIVATE
   "${ANNC_ONNX_MLIR_SOURCE_DIR}"
   "${ANNC_ONNX_MLIR_SOURCE_DIR}/include"
   "${ANNC_ONNX_MLIR_BUILD_DIR}"
-  "${ANNC_STABLEHLO_SOURCE_DIR}"
-  "${ANNC_STABLEHLO_BUILD_DIR}"
+  "${ANNC_ONNX_MLIR_SOURCE_DIR}/third_party/stablehlo"
+  "${ANNC_ONNX_MLIR_BUILD_DIR}/third_party/stablehlo"
   "${CMAKE_CURRENT_SOURCE_DIR}/../passes/preprocessing"
   ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
 target_link_directories(annc-onnx-framework-opt PRIVATE
