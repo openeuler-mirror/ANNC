@@ -6,9 +6,9 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | openEuler-24.03-LTS-SP4（系统 `llvm-toolset-20`）；openEuler-22.03-LTS-SP4（需自建 LLVM/MLIR 20/21） |
+| 操作系统 | openEuler-24.03-LTS-SP4（系统 `llvm-toolset-20`）；openEuler-22.03-LTS-SP4（需自建 LLVM/MLIR 20） |
 | 处理器 | 鲲鹏 920X（AArch64） |
-| LLVM / MLIR | LLVM/MLIR 20 或 21（24.03 基线 20.1.8，22.03 自建示例 21.1.3，不锁定小版本）；CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链 |
+| LLVM / MLIR | LLVM/MLIR 20（24.03 基线 20.1.8，不锁定小版本）；CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链 |
 | 磁盘空间 | ANNC 构建目录约数 GB；22.03 自建 LLVM/MLIR 另需更多空间 |
 
 ## 前置条件
@@ -56,7 +56,7 @@ sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
   llvm-toolset-20-clang
 ```
 
-openEuler 22.03 没有 `llvm-toolset-20`：everything 仓库只提供 LLVM/MLIR 12.0.1，EPOL 只提供 `llvm15`/`clang15`（不含 MLIR），均不满足 ANNC 所需的 MLIR 20/21，需按步骤 4 自建。
+openEuler 22.03 没有 `llvm-toolset-20`：everything 仓库只提供 LLVM/MLIR 12.0.1，EPOL 只提供 `llvm15`/`clang15`（不含 MLIR），均不满足 ANNC 所需的 MLIR 20，需按步骤 4 自建。
 
 | 依赖 | 用途 |
 | --- | --- |
@@ -71,11 +71,11 @@ openEuler 22.03 没有 `llvm-toolset-20`：everything 仓库只提供 LLVM/MLIR 
 
 ### 4. LLVM / MLIR 与 nlohmann/json
 
-ANNC 需要 LLVM/MLIR 20 或 21（不锁定小版本；`annc/include/Support/LLVMCompat.h` 处理 21 的 API 差异），由 CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链。
+ANNC 需要 LLVM/MLIR 20（不锁定小版本），由 CMake `find_package(LLVM CONFIG)` / `find_package(MLIR CONFIG)` 使用外部工具链。
 
 **openEuler 24.03**：使用系统 `llvm-toolset-20-*`。标准安装路径（或 `llvm-config-20` 在 `PATH`）时无需额外环境变量；自定义前缀时导出 `ANNC_LLVM_BIN=<LLVM bin 目录>`，或传 `-DLLVM_DIR`/`-DMLIR_DIR`。
 
-**openEuler 22.03**：仓库的 LLVM/MLIR 12.0.1 与 ANNC 所需的 MLIR 20/21 跨越多个大版本，不能直接使用，需自建（本机以 llvm-project 21.1.3 验证）。在 llvm-project monorepo 根目录执行（`-S` 指向 `llvm/` 子目录）：
+**openEuler 22.03**：仓库的 LLVM/MLIR 12.0.1 与 ANNC 所需的 MLIR 20 跨越多个大版本，不能直接使用，需自建。在 llvm-project monorepo 根目录执行（`-S` 指向 `llvm/` 子目录）：
 
 ```shell
 cmake -G Ninja -S llvm -B llvm-build \
