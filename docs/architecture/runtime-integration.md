@@ -5,7 +5,7 @@
 | 文档编号 | ANNC-ARCH-002 |
 | 版本与日期 | 1.0，2026-10-20 |
 | 文档状态 | 架构说明。描述 TensorFlow 与 ONNX Runtime 两条运行时接入路径的产物契约与执行方式 |
-| 设计基线 | `tensorflow_addons/`、`addons/onnxruntime/`（源码基线 `11bef0d0`，分支 `upstream/dev`） |
+| 设计基线 | TensorFlow 1.15 接入见 `addons/tensorflow/`（`dev@846ac64`）。TensorFlow 2.20 和 ONNX Runtime 的原始基线为 `upstream/dev@11bef0d0` |
 | 责任人 | 编译器开发团队 |
 | 上级文档 | [ANNC 架构设计文档](overview.md) |
 
@@ -13,20 +13,19 @@
 
 ## TensorFlow 接入
 
-`tensorflow_addons/` 提供 Grappler 插件和 `ANNCFused` 自定义 TensorFlow Op。
+TensorFlow 1.15 和 2.20 两个版本的插件都注册 Grappler 优化器 `ANNCOptimizer` 和融合节点 `ANNCFused`。优化器调用共用的 `annc-tf-pipeline` 改写计算图，融合节点在 TensorFlow 执行到它时调用编译好的计算函数。
 
-| 文件 | 说明 |
-|------|------|
-| `tensorflow_addons/annc_optimizer.cc` | Grappler 优化器插件，自动调用 `annc-tf-pipeline` 重写计算图 |
-| `tensorflow_addons/context/annc_fused_op.cc` | `ANNCFused` Op，运行时 `dlopen` 加载 `.so` 并调用 `_mlir_ciface_` 接口 |
-| `tensorflow_addons/annc_fused_op_register.cc` | 注册 `ANNCFused` Op |
-| `tensorflow_addons/annc_optimizer_register.cc` | 注册 Grappler 优化器 |
+| 入口（相对各自的插件目录） | TensorFlow 1.15（`addons/tensorflow/plugin/`） | TensorFlow 2.20（`tensorflow_addons/`） |
+| --- | --- | --- |
+| 图优化器 | `optimizer.cc` | `annc_optimizer.cc` |
+| 融合节点 | `fused_op.cc` | `context/annc_fused_op.cc` |
+| 注册优化器和融合节点 | `optimizer_register.cc`、`fused_op_register.cc` | `annc_optimizer_register.cc`、`annc_fused_op_register.cc` |
 
 ### AOT 与 JIT
 
 Serving 场景下，`ANNCOptimizer` 调用 `annc-tf-pipeline` 后会保留 pipeline work_dir 中的产物，尤其是 AOT 共享库 `annc_generated_kernel.so` 与 fusion-only ATIR。重写后的 GraphDef 按 fusion 的 `execution_mode` 写不同 attr：**AOT 节点**写 `shared_lib_path`（指向该 `.so`）且 `atir_module_path` 为空，运行时 `dlopen` 加载；**JIT 节点**（GEMM 家族）写 `shared_lib_path=""` 与 `atir_module_path`（fusion-only ATIR 的绝对路径），运行时按实际 shape 现场编译，因此 AOT 节点需保留 `.so`，JIT 节点需保留 ATIR module；纯 JIT 模型可能不产生 `.so`。`annc` driver 生成 object/LLVM IR 的临时目录使用微秒时间、进程号和重试序号组成唯一目录，支持多个 Serving 实例或多个 Grappler 优化任务并发编译，避免不同进程删除彼此的 `step*.ll` 中间文件。
 
-GEMM fusion 的 GraphDef 节点写入 `atir_module_path` 和模板指纹；运行时按实际 shape
+采用 JIT 的 GEMM 融合节点在 GraphDef 中记录 `atir_module_path` 和模板指纹，运行时按实际 shape
 同步执行 `annc-asm` 与 `annc`。进程内有界缓存复用编译产物，预打包模式下每个
 `ANNCFusedOp` 独立持有 packed RHS。模板指纹、缓存身份、预打包准入与权重生命周期
 见[JIT 代码与预打包权重分离实现契约](../design/jit-constant-folding/cache-separation.md)。

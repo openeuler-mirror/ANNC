@@ -135,11 +135,12 @@ EP 插件的构建选项（`--enable-ort`、`ANNC_ONNXRUNTIME_INCLUDE_DIR`、`AN
 
 | 变量 | 取值 | 默认值 | 说明 |
 |------|------|--------|------|
+| `ANNC_TENSORFLOW_PYTHON_EXECUTABLE` | Python 解释器路径 | `build.sh` 使用 `PYTHON`，直接运行 CMake 时使用 `Python3_EXECUTABLE` | 构建时用该解释器导入 TensorFlow，查询其编译选项，并按查到的版本选择 1.15.x 或 2.20.x 插件 |
 | `ANNC_TENSORFLOW_PRELOAD` | `ON` / `OFF` | `ON` | TensorFlow addon 预加载模式 |
 | `ANNC_TENSORFLOW_INCLUDE_DIR` | TensorFlow include 根目录 | 自动检测 | CMake 配置时显式指定 TF 头文件路径 |
 | `ANNC_TENSORFLOW_LIBRARIES` | TensorFlow 库列表 | 空 | `ANNC_TENSORFLOW_PRELOAD=OFF` 时显式指定 TF 库 |
-| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 自动检测 | TensorFlow 插件的 C++11 ABI，可显式指定 |
-| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号，如 `14` / `17` | 自动检测 | TensorFlow 插件的 C++ 标准，可显式指定 |
+| `ANNC_TENSORFLOW_CXX11_ABI` | `0` / `1` | 从 TensorFlow 的编译选项读取 | 若编译选项未列出 ABI，须填写构建 TensorFlow 时使用的值。显式值与读到的值冲突时配置失败 |
+| `ANNC_TENSORFLOW_CXX_STANDARD` | C++ 标准编号（TensorFlow 1.15 支持 `14`、`17`） | 从 TensorFlow 的编译选项读取 | 若编译选项未列出 C++ 标准，须填写构建 TensorFlow 时使用的值。显式值与读到的值冲突时配置失败 |
 | `CC` / `CXX` | 编译器路径 | `gcc` / `g++` | `build.sh` 使用的 C/C++ 编译器 |
 | `PYTHON` | Python 解释器 | `python3` | `build.sh` 使用的 Python |
 | `VIRTUAL_ENV` / `CONDA_PREFIX` | 环境标识 | 空 | `build.sh` 据此判断是否在虚拟环境中 |

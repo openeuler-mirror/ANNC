@@ -17,6 +17,7 @@
 | `<ANNC_ROOT>` | ANNC 源码根目录 |
 | `<ANNC_PREFIX>` | 安装前缀（如 `/opt/ANNC` 或 `<ANNC_ROOT>/install`） |
 | `<TF_ROOT>` | TensorFlow 构建/安装根目录（含 `install/bin/predictor_server`） |
+| `<TF_PYTHON>` | 构建插件时用来导入 TensorFlow 的 Python 解释器路径 |
 | `<MODEL_ROOT>` | 模型与压测数据根目录 |
 | `<BRPC_CLIENT>` | brpc 压测客户端可执行文件 |
 | `<GEMM_CONFIG>` | 外部 AArch64 GEMM tuning JSON（仓库不跟踪） |
@@ -106,9 +107,9 @@ cd <ANNC_ROOT>
 ```shell
 cd <ANNC_ROOT>
 
+export ANNC_TENSORFLOW_PYTHON_EXECUTABLE="<TF_PYTHON>"
 export ANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include
 export ANNC_TENSORFLOW_PRELOAD=ON
-export ANNC_TENSORFLOW_CXX11_ABI=1
 # 构建前将完整 GEMM-ASM 二进制包放入 third_party/annc-gemm-kernels/
 
 ./build.sh --no-install-deps \
@@ -157,9 +158,9 @@ cmake -S <ANNC_ROOT> -B <ANNC_ROOT>/build -G Ninja \
   -DANNC_ENABLE_TENSORFLOW_ADDON=ON \
   -DANNC_ENABLE_ONNX=OFF \
   -DANNC_ENABLE_ONNXRUNTIME_EP=OFF \
+  -DANNC_TENSORFLOW_PYTHON_EXECUTABLE="<TF_PYTHON>" \
   -DANNC_TENSORFLOW_INCLUDE_DIR=<TF_ROOT>/install/annc-tensorflow-headers/include \
   -DANNC_TENSORFLOW_PRELOAD=ON \
-  -DANNC_TENSORFLOW_CXX11_ABI=1 \
   -DANNC_REQUIRE_GEMM_PACKAGE=ON
 ```
 
