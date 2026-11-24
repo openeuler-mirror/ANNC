@@ -300,7 +300,8 @@ Release 下行覆盖准确、分支覆盖为近似值；需精确分支覆盖须
 ```
 
 脚本会初始化缺失的 ONNX-MLIR 子模块，并把依赖构建到
-`build/third-party/onnx-mlir-build`。ONNX-MLIR 和 ANNC 共用 openEuler 安装的 LLVM/MLIR 20.1.8。
+`build/third-party/onnx-mlir-build`。这条路径要求 ONNX-MLIR 和 ANNC 共用 LLVM/MLIR 20.1.x，
+已在 openEuler 的 20.1.8 工具链上验证。
 随后 ANNC 在同一个构建目录中编译并安装 StableHLO 前端、公共后端和 ORT EP。
 标准工具链路径可自动识别，自定义安装路径可通过 `ANNC_LLVM_BIN` 指定。
 

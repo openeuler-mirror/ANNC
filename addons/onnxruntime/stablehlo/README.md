@@ -79,12 +79,12 @@ ONNX-MLIR tools. Initialize the sources with:
 git submodule update --init --recursive third-party/onnx-mlir
 ```
 
-The build script uses the same installed LLVM/MLIR as the ANNC backend.
-The verified configuration is openEuler's LLVM/MLIR 20.1.8. It applies the
-[compatibility patch](../../../patches/onnx-mlir/llvm-20.1.patch) to a copy of
-the pinned ONNX-MLIR and StableHLO sources under the build directory.
+The build script requires LLVM/MLIR 20.1.x and uses the same installation as the
+ANNC backend. The verified configuration is openEuler's LLVM/MLIR 20.1.8.
+The [compatibility patch](../../../patches/onnx-mlir/llvm-20.1.patch) is applied
+to a copy of the pinned ONNX-MLIR and StableHLO sources under the build directory.
 Install the LLVM/MLIR development packages, Git, CMake, Ninja, GNU tar,
-`sha256sum`, `mktemp`, a C/C++ compiler, Python development headers, and
+`sha256sum`, `mktemp`, `sed`, a C/C++ compiler, Python development headers, and
 the system protobuf compiler and libraries (including `protobuf-lite` on openEuler).
 
 ```sh
