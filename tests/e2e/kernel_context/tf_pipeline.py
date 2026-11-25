@@ -5,6 +5,7 @@ fail instead of skip. Each case retains its graph, IR, metadata and logs in
 pytest's --basetemp directory. No ANNCFused nodes or ABI wrappers are mocked.
 """
 
+import ctypes
 import importlib.util
 import json
 import os
@@ -240,6 +241,13 @@ def _worker(module_path, case, rewritten_path, addon_path, report_path):
         return graph
 
     baseline = import_graph(original)
+    if tf.__version__.startswith("1."):
+        sdk = Path(tf.sysconfig.get_lib())
+        for library in (
+            "libtensorflow_framework.so.1",
+            "python/_pywrap_tensorflow_internal.so",
+        ):
+            ctypes.CDLL(str(sdk / library), mode=ctypes.RTLD_GLOBAL)
     tf.load_op_library(os.fspath(addon_path))
     compiled = import_graph(rewritten)
     config = tf.compat.v1.ConfigProto(
