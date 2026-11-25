@@ -311,7 +311,10 @@ def prepare_fusion(args, graph):
 
 def rewrite_graph(args, graph, frontend):
     checked = None
-    if args.spec.get("fast_codegen") == "enable-kdnn=true":
+    if (
+        args.spec.get("check_kernel_call")
+        or args.spec.get("fast_codegen") == "enable-kdnn=true"
+    ):
         tools = args.work_dir / "tools"
         tools.mkdir()
         for name in (
@@ -502,7 +505,6 @@ def run_aot_threadpool(args):
     return {}
 
 
-
 def run_prepack(args):
     # Reuse the dynamic fusion graph with dimensions from the existing GEMM
     # prepack regression, including K/N tails and more than one batch shape.
@@ -638,21 +640,17 @@ def run_prepack(args):
 
 def run_existing_kernel(args):
     sys.path.insert(0, str(ROOT / "tests/e2e/kernel_context"))
+    from tf_graph import reference_graph
+
     module = importlib.import_module(args.spec["module"])
-    graph, frontend, outputs, scenarios = module.make_graph(args.spec["graph_case"])
+    original = module.make_graph(args.spec["graph_case"])
+    graph, frontend, outputs, scenarios = original
     args.spec["frontend"] = frontend
     data = graph, [feed for _, feed in scenarios], [name for name, _ in outputs], []
-    reference_data = None
-    if "reference_case" in args.spec:
-        reference, _, _, reference_scenarios = module.make_graph(
-            args.spec["reference_case"]
-        )
-        reference_feeds = [feed for _, feed in reference_scenarios]
-        for actual, expected in zip(data[1], reference_feeds):
-            for name in actual:
-                np.testing.assert_array_equal(actual[name], expected[name])
-        reference_data = reference, reference_feeds
-    return run_fusion(args, data, reference_data)
+    reference, _, _, reference_scenarios = reference_graph(
+        module.make_graph, args.spec, original
+    )
+    return run_fusion(args, data, (reference, [feed for _, feed in reference_scenarios]))
 
 
 def run_aot_prepack(args):
