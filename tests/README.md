@@ -162,7 +162,7 @@ bash tests/FileCheck/run.sh
 | `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
 | `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
 | `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
-| `integration/tensorflow/test_tf_acceptance.py` | L4 | TF 插件测试：算子融合、计算结果、JIT/AOT 预打包及编译失败回退 |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | 比较融合后和原图算出的结果，检查 tensordot 的输出尺寸。还会检查提前编译的内核第一次能否用上 TF 的线程池、用完能否恢复原状态，以及权重预打包和编译失败后能否继续跑原图 |
 | `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
 | `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
 | `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |

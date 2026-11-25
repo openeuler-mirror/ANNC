@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -115,8 +116,6 @@ class ANNCFusedOp : public OpKernel {
   // Runtime state
   // Snapshotted at construction; consulted only on JIT shape misses.
   const bool constant_folding_enabled_;
-  // Shared-library path associated with the currently resolved kernel symbol.
-  std::string current_so_path_;
   // dlopen handle owned by the process-wide library cache.
   void* handle_;
   // Resolved _mlir_ciface_<kernel_name_> entry point.
@@ -125,7 +124,7 @@ class ANNCFusedOp : public OpKernel {
   void (*annc_set_current_threadpool_)(annc::threadpool::AnncThreadPool*);
   annc::threadpool::AnncThreadPool* (*annc_get_current_threadpool_)();
   // True after the current shared library and kernel symbol are resolved.
-  bool loaded_;
+  std::atomic<bool> loaded_;
 
   // Per-op single-entry cache bypasses key hashing and the global cache lock
   // when consecutive calls have the same validated runtime signature.
