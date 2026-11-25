@@ -171,6 +171,15 @@ def test_tensordot_jit_incomplete_output_shape(sdk, tmp_path):
 
 
 
+def test_aot_threadpool(sdk, tmp_path):
+    kernel = sdk[2].get("aot_pool_kernel", "")
+    require_environment(Path(kernel).is_file(), "Build the tf_aot_pool_kernel target")
+    run_case(
+        sdk, tmp_path, "aot-threadpool", dict(handler="aot_threadpool", kernel=kernel)
+    )
+
+
+
 @pytest.mark.parametrize("admission", ["eligible", "mismatch"])
 def test_jit_prepack(sdk, tmp_path, admission):
     spec = dict(

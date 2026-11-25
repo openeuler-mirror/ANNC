@@ -475,6 +475,34 @@ def run_fusion(args, data, reference_data=None):
     return report
 
 
+def run_aot_threadpool(args):
+    from google.protobuf import text_format
+
+    path = args.spec["kernel"]
+    kernel = ctypes.CDLL(path)
+    graph = text_format.Parse(
+        (Path(__file__).parent / "Inputs/plugin_load.pbtxt").read_text(), tf.GraphDef()
+    )
+    fused = next(node for node in graph.node if node.name == "fused")
+    fused.attr["shared_lib_path"].s = path.encode()
+    del fused.attr["atir_module_path"]
+    del fused.attr["template_fingerprint"]
+    with open_session(graph, False, threads=4) as session:
+        for call in (1, 2):
+            x = np.arange(5, dtype=np.float32)[None, :] + call
+            actual, reference = execute(
+                session, {"lhs": x, "rhs": x}, ["fused", "reference"]
+            )
+            compare_outputs([reference], [actual], exact=True)
+            assert kernel.restored_pool_calls() == call, (
+                "AOT call {} did not use and restore the TensorFlow thread pool".format(
+                    call
+                )
+            )
+    return {}
+
+
+
 def run_prepack(args):
     # Reuse the dynamic fusion graph with dimensions from the existing GEMM
     # prepack regression, including K/N tails and more than one batch shape.
@@ -745,7 +773,11 @@ def main():
     if "module" in args.spec:
         report = run_existing_kernel(args)
     elif "handler" in args.spec:
-        handlers = {"prepack": run_prepack, "aot_prepack": run_aot_prepack}
+        handlers = {
+            "prepack": run_prepack,
+            "aot_prepack": run_aot_prepack,
+            "aot_threadpool": run_aot_threadpool,
+        }
         report = handlers[args.spec["handler"]](args)
     else:
         report = run_fusion(args, build_case(args.spec))
