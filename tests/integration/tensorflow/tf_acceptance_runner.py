@@ -392,7 +392,13 @@ def run_fusion(args, data, reference_data=None):
             + ").touch()\n"
             + "raise SystemExit(1)\n"
         )
-    if "module" in spec:
+    if "output_annotation" in spec:
+        output = next(node for node in graph.node if node.name == outputs[0])
+        shape = output.attr["_output_shapes"].list.shape[0]
+        shape.CopyFrom(tf.TensorShape(spec["output_annotation"]).as_proto())
+        # Feed the original annotation to the compiler before Session infers it.
+        optimized_graph = rewrite_graph(args, graph, outputs)
+    elif "module" in spec:
         optimized_graph = rewrite_graph(args, graph, spec["frontend"])
         nodes = [node for node in optimized_graph.node if node.op == "ANNCFused"]
         assert len(nodes) == 1, "Expected one fused kernel"
@@ -408,7 +414,10 @@ def run_fusion(args, data, reference_data=None):
     with open_session(
         reference_graph, False, threads=threads
     ) as reference, open_session(
-        optimized_graph, "module" not in spec, pipeline, threads=threads
+        optimized_graph,
+        "module" not in spec and "output_annotation" not in spec,
+        pipeline,
+        threads=threads,
     ) as optimized:
         for index, feed in enumerate(feeds):
             expected = execute(reference, reference_feeds[index], outputs)
