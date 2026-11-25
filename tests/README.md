@@ -121,6 +121,9 @@ bash tests/FileCheck/run.sh
 - `integration/tensorflow/test_tf_acceptance.py` 需要与目标 TF 版本匹配的
   ANNC 构建产物；缺少构建配置或产物时 skip，设置 `ANNC_REQUIRE_E2E=1` 后改为报错。
   同一源码目录下不要并行运行多组 TF 插件测试，以免覆盖前端临时文件导致测试失败。
+- 用 `--case all` 跑 [Embedding 测试](e2e/tf/e2e_kp_embedding_patterns.py) 时，
+  TF2.20 会跑全部用例。TF1.15 会跳过 `sparse_segment_mean` 和 `sparse_segment_sum`，
+  并打印原因。这两个用例用 `int64` 编号标记每条数据属于哪一组，TF1.15 自带的这两个算子只接受 `int32` 的分组编号。
 - `integration/ort_ep/` 与 `unit/ort_ep/` 只在
   `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
   `onnxruntime`。若默认解释器没有这两个包，configure 时用
