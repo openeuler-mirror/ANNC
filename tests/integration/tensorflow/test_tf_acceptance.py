@@ -162,6 +162,15 @@ def test_tensordot_empty_batch(sdk, tmp_path):
     run_case(sdk, tmp_path, "TF-F11-dynamic-empty", spec)
 
 
+def test_tensordot_jit_incomplete_output_shape(sdk, tmp_path):
+    spec = dict(FUSION_CASES["TF-F11-dynamic-b"], output_annotation=[None, 3, None])
+    result = run_case(sdk, tmp_path, "tensordot-incomplete-dynamic-b", spec)
+    for sites in result["fusions"]:
+        shape = sites[0]["metadata"]["outputs"][0]["shape"]
+        assert [size if size >= 0 else None for size in shape] == [None, 3, 4]
+
+
+
 @pytest.mark.parametrize("admission", ["eligible", "mismatch"])
 def test_jit_prepack(sdk, tmp_path, admission):
     spec = dict(

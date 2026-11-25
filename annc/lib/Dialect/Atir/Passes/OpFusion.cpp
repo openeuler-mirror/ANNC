@@ -18,6 +18,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <cstring>
@@ -2897,12 +2898,12 @@ static func::FuncOp createTensordotMatMulKernelFunc(
 // through common lowering.
 static func::FuncOp createTensordotGemmKernelFunc(
     ModuleOp module, PatternRewriter &rewriter, StringRef kernelName,
-    const TensordotMatMulMatch &match) {
+    const TensordotMatMulMatch &match, atir::TensorType outputType) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
 
   SmallVector<Type> inputTypes = {match.input.getType(), match.weight.getType(),
-                                  match.output.getType()};
+                                  outputType};
   auto funcType = rewriter.getFunctionType(inputTypes, TypeRange{});
   auto func =
       rewriter.create<func::FuncOp>(module.getLoc(), kernelName, funcType);
@@ -2913,9 +2914,8 @@ static func::FuncOp createTensordotGemmKernelFunc(
 
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
-  rewriter.create<atir::DotOp>(func.getLoc(), match.output.getType(),
-                               entry->getArgument(2), entry->getArgument(0),
-                               entry->getArgument(1));
+  rewriter.create<atir::DotOp>(func.getLoc(), outputType, entry->getArgument(2),
+                               entry->getArgument(0), entry->getArgument(1));
   rewriter.create<func::ReturnOp>(func.getLoc());
   return func;
 }
@@ -2974,6 +2974,7 @@ struct FuseTensordotMatMulAsFuncCallPattern
     StringRef abi;
     StringRef executionMode;
     const bool isOnnx = module->hasAttr("annc.contract_version");
+    auto outputType = cast<atir::TensorType>(match->output.getType());
     if (isOnnx) {
       // kernel 必须先确认可用，否则会留下无法 lower 的自定义算子。
       auto schema = getTensordotMatMulSchema();
@@ -2998,11 +2999,24 @@ struct FuseTensordotMatMulAsFuncCallPattern
       abi = "annc_context_v3";
       executionMode = kAotExecutionMode;
     } else {
-      kernelFunc =
-          createTensordotGemmKernelFunc(module, rewriter, kernelName, *match);
-      abi = "mlir_ciface";
       auto inputShape =
           cast<atir::TensorType>(match->input.getType()).getShape();
+      SmallVector<int64_t> shape(inputShape);
+      shape.back() =
+          cast<atir::TensorType>(match->weight.getType()).getShape()[1];
+      if (failed(verifyCompatibleShape(shape, outputType.getShape())))
+        return failure();
+      // The matched reshape restores the leading input axes and the RHS width.
+      outputType = atir::TensorType::get(
+          shape, outputType.getElementType(), outputType.getName(),
+          outputType.getEncoding(), outputType.getStride(),
+          outputType.getLayout(), outputType.getMemType(),
+          outputType.getAddress(), outputType.getDeviceParallel(),
+          outputType.getOnchipParallel(), outputType.getCacheData(),
+          outputType.getRankKnown());
+      kernelFunc = createTensordotGemmKernelFunc(module, rewriter, kernelName,
+                                                 *match, outputType);
+      abi = "mlir_ciface";
       const bool needsSpecialization =
           llvm::any_of(inputShape, [](int64_t dim) { return dim < 0; });
       executionMode =
@@ -3037,8 +3051,8 @@ struct FuseTensordotMatMulAsFuncCallPattern
     metadata.push_back(rewriter.getNamedAttr(
         "args", makeFusionArgArray(rewriter.getContext(), args)));
     SmallVector<FusionArgSpec> outputs;
-    outputs.push_back({"output", getFusionOutputName(match->output),
-                       match->output.getType()});
+    outputs.push_back(
+        {"output", getFusionOutputName(match->output), outputType});
     metadata.push_back(rewriter.getNamedAttr(
         "outputs", makeFusionArgArray(rewriter.getContext(), outputs)));
     metadata.push_back(
