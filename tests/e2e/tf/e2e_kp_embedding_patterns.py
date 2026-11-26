@@ -3,7 +3,9 @@
 
 Each case builds a small graph, runs the external fusion pipeline, loads the
 rewritten GraphDef, and compares its outputs with the unfused TensorFlow graph.
-Use ``--case all`` (the default) to run every graph in this file.
+Use ``--case all`` (the default) to run all cases supported by the TensorFlow
+version. The SparseSegment Mean and Sum cases use int64 segment IDs and
+require TensorFlow 2.
 """
 
 import argparse
@@ -19,6 +21,8 @@ import tensorflow as tf
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = ROOT / "configs" / "fusion" / "kp_embedding_patterns.json"
+USING_TF1 = tf.__version__.startswith("1.")
+INT64_SEGMENT_ID_CASES = ("sparse_segment_mean", "sparse_segment_sum")
 
 
 def _first_file(candidates, description):
@@ -74,16 +78,15 @@ def _parse_args():
     )
     parser.add_argument(
         "--case",
-        choices=("all", "sparse_select", "padding", "padding_fast",
-                 "sparse_reshape",
-                 "sparse_segment_mean", "sparse_segment_sum",
-                 "action_id_gather", "target_behavior_interaction",
-                 "sparse_dynamic_stitch_n2"),
+        choices=("all", *CASE_BUILDERS),
         default="all",
-        help="embedding pattern to verify (default: all)",
+        help="embedding pattern to verify (default: all supported cases)",
     )
     parser.add_argument("--verbose", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if USING_TF1 and args.case in INT64_SEGMENT_ID_CASES:
+        parser.error(f"{args.case} uses int64 segment_ids and requires TensorFlow 2")
+    return args
 
 
 def _build_graph_def():
@@ -397,14 +400,13 @@ def _load_fused_op(path):
     # libraries, which Python normally loads with local visibility.
     tf_lib_dir = Path(tf.sysconfig.get_lib())
     global_mode = getattr(ctypes, "RTLD_GLOBAL", os.RTLD_GLOBAL)
-    ctypes.CDLL(
-        os.fspath(tf_lib_dir / "libtensorflow_framework.so.2"),
-        mode=global_mode,
+    libraries = (
+        ("libtensorflow_framework.so.1", "python/_pywrap_tensorflow_internal.so")
+        if USING_TF1
+        else ("libtensorflow_framework.so.2", "libtensorflow_cc.so.2")
     )
-    ctypes.CDLL(
-        os.fspath(tf_lib_dir / "libtensorflow_cc.so.2"),
-        mode=global_mode,
-    )
+    for library in libraries:
+        ctypes.CDLL(os.fspath(tf_lib_dir / library), mode=global_mode)
     tf.load_op_library(os.fspath(path))
     _FUSED_OP_LOADED = True
 
@@ -523,6 +525,10 @@ def main():
     else:
         work_dir = Path(tempfile.mkdtemp(prefix="annc_kp_embedding_patterns_e2e_"))
     case_names = list(CASE_BUILDERS) if args.case == "all" else [args.case]
+    if USING_TF1 and args.case == "all":
+        for case_name in INT64_SEGMENT_ID_CASES:
+            case_names.remove(case_name)
+            print(f"SKIP: {case_name} uses int64 segment_ids and requires TensorFlow 2")
     failures = []
     for case_name in case_names:
         try:

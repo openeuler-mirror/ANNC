@@ -311,7 +311,10 @@ def prepare_fusion(args, graph):
 
 def rewrite_graph(args, graph, frontend):
     checked = None
-    if args.spec.get("fast_codegen") == "enable-kdnn=true":
+    if (
+        args.spec.get("check_kernel_call")
+        or args.spec.get("fast_codegen") == "enable-kdnn=true"
+    ):
         tools = args.work_dir / "tools"
         tools.mkdir()
         for name in (
@@ -392,7 +395,13 @@ def run_fusion(args, data, reference_data=None):
             + ").touch()\n"
             + "raise SystemExit(1)\n"
         )
-    if "module" in spec:
+    if "output_annotation" in spec:
+        output = next(node for node in graph.node if node.name == outputs[0])
+        shape = output.attr["_output_shapes"].list.shape[0]
+        shape.CopyFrom(tf.TensorShape(spec["output_annotation"]).as_proto())
+        # Feed the original annotation to the compiler before Session infers it.
+        optimized_graph = rewrite_graph(args, graph, outputs)
+    elif "module" in spec:
         optimized_graph = rewrite_graph(args, graph, spec["frontend"])
         nodes = [node for node in optimized_graph.node if node.op == "ANNCFused"]
         assert len(nodes) == 1, "Expected one fused kernel"
@@ -408,7 +417,10 @@ def run_fusion(args, data, reference_data=None):
     with open_session(
         reference_graph, False, threads=threads
     ) as reference, open_session(
-        optimized_graph, "module" not in spec, pipeline, threads=threads
+        optimized_graph,
+        "module" not in spec and "output_annotation" not in spec,
+        pipeline,
+        threads=threads,
     ) as optimized:
         for index, feed in enumerate(feeds):
             expected = execute(reference, reference_feeds[index], outputs)
@@ -464,6 +476,33 @@ def run_fusion(args, data, reference_data=None):
                 atol,
             )
     return report
+
+
+def run_aot_threadpool(args):
+    from google.protobuf import text_format
+
+    path = args.spec["kernel"]
+    kernel = ctypes.CDLL(path)
+    graph = text_format.Parse(
+        (Path(__file__).parent / "Inputs/plugin_load.pbtxt").read_text(), tf.GraphDef()
+    )
+    fused = next(node for node in graph.node if node.name == "fused")
+    fused.attr["shared_lib_path"].s = path.encode()
+    del fused.attr["atir_module_path"]
+    del fused.attr["template_fingerprint"]
+    with open_session(graph, False, threads=4) as session:
+        for call in (1, 2):
+            x = np.arange(5, dtype=np.float32)[None, :] + call
+            actual, reference = execute(
+                session, {"lhs": x, "rhs": x}, ["fused", "reference"]
+            )
+            compare_outputs([reference], [actual], exact=True)
+            assert kernel.restored_pool_calls() == call, (
+                "AOT call {} did not use and restore the TensorFlow thread pool".format(
+                    call
+                )
+            )
+    return {}
 
 
 def run_prepack(args):
@@ -601,21 +640,17 @@ def run_prepack(args):
 
 def run_existing_kernel(args):
     sys.path.insert(0, str(ROOT / "tests/e2e/kernel_context"))
+    from tf_graph import reference_graph
+
     module = importlib.import_module(args.spec["module"])
-    graph, frontend, outputs, scenarios = module.make_graph(args.spec["graph_case"])
+    original = module.make_graph(args.spec["graph_case"])
+    graph, frontend, outputs, scenarios = original
     args.spec["frontend"] = frontend
     data = graph, [feed for _, feed in scenarios], [name for name, _ in outputs], []
-    reference_data = None
-    if "reference_case" in args.spec:
-        reference, _, _, reference_scenarios = module.make_graph(
-            args.spec["reference_case"]
-        )
-        reference_feeds = [feed for _, feed in reference_scenarios]
-        for actual, expected in zip(data[1], reference_feeds):
-            for name in actual:
-                np.testing.assert_array_equal(actual[name], expected[name])
-        reference_data = reference, reference_feeds
-    return run_fusion(args, data, reference_data)
+    reference, _, _, reference_scenarios = reference_graph(
+        module.make_graph, args.spec, original
+    )
+    return run_fusion(args, data, (reference, [feed for _, feed in reference_scenarios]))
 
 
 def run_aot_prepack(args):
@@ -736,7 +771,11 @@ def main():
     if "module" in args.spec:
         report = run_existing_kernel(args)
     elif "handler" in args.spec:
-        handlers = {"prepack": run_prepack, "aot_prepack": run_aot_prepack}
+        handlers = {
+            "prepack": run_prepack,
+            "aot_prepack": run_aot_prepack,
+            "aot_threadpool": run_aot_threadpool,
+        }
         report = handlers[args.spec["handler"]](args)
     else:
         report = run_fusion(args, build_case(args.spec))

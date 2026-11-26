@@ -36,8 +36,9 @@ func.func @nonzero_maximum_is_not_captured(
 }
 
 // CHECK-LABEL: func.func @nonzero_maximum_is_not_captured
-// CHECK: stablehlo.maximum
-// CHECK-NOT: atir.fused_matmul
+// CHECK: %[[MAX_DOT:[^ ]+]] = atir.fused_matmul
+// CHECK-NOT: annc.gemm.epilogue
+// CHECK: stablehlo.maximum %[[MAX_DOT]],
 
 // -----
 
@@ -53,6 +54,6 @@ func.func @m_axis_vector_is_not_captured(
 }
 
 // CHECK-LABEL: func.func @m_axis_vector_is_not_captured
-// CHECK: stablehlo.dot
-// CHECK: stablehlo.add
-// CHECK-NOT: atir.fused_matmul
+// CHECK: %[[ROW_DOT:[^ ]+]] = atir.fused_matmul
+// CHECK-NOT: annc.gemm.epilogue
+// CHECK: stablehlo.add %[[ROW_DOT]],

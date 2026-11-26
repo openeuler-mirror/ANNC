@@ -77,11 +77,15 @@ elseif(TARGET annc_fused_op)
   set(_tf_fused_op annc_fused_op)
 endif()
 if(DEFINED _tf_fused_op AND TARGET annc-tf-pipeline)
+  add_library(tf_aot_pool_kernel MODULE integration/tensorflow/aot_pool_kernel.cpp)
+  target_link_libraries(tf_aot_pool_kernel PRIVATE ANNCContext)
+  target_include_directories(tf_aot_pool_kernel PRIVATE "${PROJECT_SOURCE_DIR}/annc/include")
   file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tensorflow-runtime.json"
     CONTENT "{
   \"python\": \"${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}\",
   \"optimizer\": \"$<TARGET_FILE:${_tf_optimizer}>\",
   \"fused_op\": \"$<TARGET_FILE:${_tf_fused_op}>\",
+  \"aot_pool_kernel\": \"$<TARGET_FILE:tf_aot_pool_kernel>\",
   \"pipeline\": \"$<TARGET_FILE:annc-tf-pipeline>\",
   \"preload\": $<IF:$<BOOL:${ANNC_TENSORFLOW_PRELOAD}>,true,false>,
   \"kdnn\": $<IF:$<BOOL:${ANNC_ENABLE_KDNN_ADAPTOR}>,true,false>
