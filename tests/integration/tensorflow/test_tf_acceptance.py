@@ -78,13 +78,6 @@ for module_name in (
             continue
         KERNEL_CASES[name] = dict(spec, module=module_name, graph_case=name)
 
-# TF1.15 has no native int64 SparseSegment CPU kernel. These existing inputs
-# fit int32, so use the same graph with int32 indices as the numeric reference.
-for combiner in ("sum", "mean"):
-    KERNEL_CASES["segment_i64_" + combiner]["reference_case"] = (
-        "segment_i32_" + combiner
-    )
-
 
 def require_environment(condition, reason):
     if not condition:
@@ -160,6 +153,22 @@ def test_tensordot_rejects(sdk, tmp_path, case):
 def test_tensordot_empty_batch(sdk, tmp_path):
     spec = dict(FUSION_CASES["TF-F11-dynamic-b"], variant="dynamic-empty")
     run_case(sdk, tmp_path, "TF-F11-dynamic-empty", spec)
+
+
+def test_tensordot_jit_incomplete_output_shape(sdk, tmp_path):
+    spec = dict(FUSION_CASES["TF-F11-dynamic-b"], output_annotation=[None, 3, None])
+    result = run_case(sdk, tmp_path, "tensordot-incomplete-dynamic-b", spec)
+    for sites in result["fusions"]:
+        shape = sites[0]["metadata"]["outputs"][0]["shape"]
+        assert [size if size >= 0 else None for size in shape] == [None, 3, 4]
+
+
+def test_aot_threadpool(sdk, tmp_path):
+    kernel = sdk[2].get("aot_pool_kernel", "")
+    require_environment(Path(kernel).is_file(), "Build the tf_aot_pool_kernel target")
+    run_case(
+        sdk, tmp_path, "aot-threadpool", dict(handler="aot_threadpool", kernel=kernel)
+    )
 
 
 @pytest.mark.parametrize("admission", ["eligible", "mismatch"])
