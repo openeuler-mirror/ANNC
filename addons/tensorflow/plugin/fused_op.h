@@ -52,7 +52,8 @@ class ANNCFusedOp : public OpKernel {
 
  private:
   // Load the shared library produced by ANNCOptimizerPass.
-  Status LoadLibrary(const std::string& so_path);
+  // Report whether this call initialized the Op's library symbols.
+  Status LoadLibrary(const std::string& so_path, bool& loaded_this_call);
   Status ResolveLibrarySymbols(const std::string& so_path);
 
   annc::jit::JitCompileResult CompileJitKernel(

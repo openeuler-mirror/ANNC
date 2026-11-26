@@ -1109,9 +1109,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
             jit_executable->getThreadPoolFunction());
   } else {
     if (!loaded_.load(std::memory_order_acquire)) {
-      OP_REQUIRES_OK(context, LoadLibrary(shared_lib_path_));
-      library_loaded_this_call = true;
-      steady_call = false;
+      OP_REQUIRES_OK(context,
+                     LoadLibrary(shared_lib_path_, library_loaded_this_call));
+      steady_call = !library_loaded_this_call;
     }
     kernel_function = mlir_ciface_func_;
     set_thread_pool = annc_set_current_threadpool_;
@@ -1195,7 +1195,9 @@ void ANNCFusedOp::Compute(OpKernelContext* context) {
   }
 }
 
-Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
+Status ANNCFusedOp::LoadLibrary(const std::string& so_path,
+                                bool& loaded_this_call) {
+  loaded_this_call = false;
   mutex_lock lock(lib_cache_mu_);
   if (loaded_.load(std::memory_order_relaxed)) return OkStatus();
 
@@ -1214,7 +1216,9 @@ Status ANNCFusedOp::LoadLibrary(const std::string& so_path) {
     lib_cache_[so_path] = handle_;
   }
 
-  return ResolveLibrarySymbols(so_path);
+  TF_RETURN_IF_ERROR(ResolveLibrarySymbols(so_path));
+  loaded_this_call = true;
+  return OkStatus();
 }
 
 Status ANNCFusedOp::ResolveLibrarySymbols(const std::string& so_path) {
