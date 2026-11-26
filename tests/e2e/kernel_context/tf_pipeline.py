@@ -16,6 +16,11 @@ import sys
 
 from e2e_utils import ROOT, _require, _run
 
+TF1_RUNTIME_LIBRARIES = (
+    "libtensorflow_framework.so.1",
+    "python/_pywrap_tensorflow_internal.so",
+)
+
 
 def run_pipeline(spec, make_graph, case, tmp_path):
     _require(
@@ -42,6 +47,13 @@ def run_pipeline(spec, make_graph, case, tmp_path):
         os.environ.get("ANNC_FUSED_OP_PATH", build / "lib/libannc_fused_op.so")
     ).resolve()
     _require(addon.is_file(), f"TensorFlow addon is not built: {addon}")
+    import tensorflow as tf
+
+    if tf.__version__.startswith("1."):
+        sdk = Path(tf.sysconfig.get_lib())
+        for library in TF1_RUNTIME_LIBRARIES:
+            path = sdk / library
+            _require(path.is_file(), f"TensorFlow runtime library is missing: {path}")
     env = os.environ.copy()
     env.update(spec.get("env", {}))
     if spec["abi"] == "mlir_ciface":
@@ -243,10 +255,7 @@ def _worker(module_path, case, rewritten_path, addon_path, report_path):
     baseline = import_graph(original)
     if tf.__version__.startswith("1."):
         sdk = Path(tf.sysconfig.get_lib())
-        for library in (
-            "libtensorflow_framework.so.1",
-            "python/_pywrap_tensorflow_internal.so",
-        ):
+        for library in TF1_RUNTIME_LIBRARIES:
             ctypes.CDLL(str(sdk / library), mode=ctypes.RTLD_GLOBAL)
     tf.load_op_library(os.fspath(addon_path))
     compiled = import_graph(rewritten)
