@@ -59,6 +59,8 @@ uint32_t opcode(Opcode value) {
       return ANNC_GEMM_EPILOGUE_RELU;
     case Opcode::Sigmoid:
       return ANNC_GEMM_EPILOGUE_SIGMOID;
+    case Opcode::Swish:
+      return ANNC_GEMM_EPILOGUE_SWISH;
   }
   return 0;
 }
