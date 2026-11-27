@@ -16,7 +16,7 @@
 
 namespace atir {
 
-enum class EpilogueOpcode { kAdd, kMul, kRelu, kSigmoid };
+enum class EpilogueOpcode { kAdd, kMul, kRelu, kSigmoid, kSwish };
 enum class BroadcastKind { kScalar, kM, kN, kMatrix };
 enum class OutputView { kIdentity, kTerminalInsertUnitDimension };
 
@@ -31,6 +31,8 @@ struct EpilogueStep {
   std::optional<float> reluLimit;
   mlir::Operation *source = nullptr;
   mlir::Value result;
+  // Additional source operations absorbed into a single semantic step.
+  mlir::Operation *auxiliarySource = nullptr;
 };
 
 struct EpilogueProgram {

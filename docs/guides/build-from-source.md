@@ -97,7 +97,7 @@ ninja && ninja install
 | `ANNC_EP_ORT_BUILD_TREE` | 路径 | 空 | 宿主 ORT 构建树的 `Release/` 目录，提供原生池所需的 common/cpuinfo 及 packed-B 所需的 MLAS/KleidiAI 四个归档；EP 开启时必填 |
 | `ANNC_KERNEL_MLAS` | `ON`/`OFF` | `OFF`（`ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时强制 `ON`） | 启用 MLAS GEMM kernel 后端；构建 ORT EP 时自动启用，无需手动设置；构建期需 `ANNC_MLAS_INCLUDE_DIR` 与宿主 MLAS/KleidiAI 归档，运行期由 `ANNC_EP_ORT_BUILD_TREE` 解析四个归档 |
 | `ANNC_MLAS_INCLUDE_DIR` | 路径 | 空 | ORT 源码树的 `onnxruntime/core/mlas/inc`（含 `mlas.h`）；`ANNC_KERNEL_MLAS=ON` 时必填 |
-| `ANNC_GEMM_PACKAGE_DIR` | 路径 | `third_party/annc-gemm-kernels` | GEMM-ASM 完整二进制包目录；包含基础归档、codegen 共享库、公开头文件、CMake 配置和 manifest，配置时校验 API 1、kernel ABI 1 及包内文件哈希；无需私有源码 |
+| `ANNC_GEMM_PACKAGE_DIR` | 路径 | `third_party/annc-gemm-kernels` | GEMM-ASM 完整二进制包目录；包含基础归档、codegen 共享库、公开头文件、CMake 配置和 manifest，配置时校验 API 1、kernel ABI 1、Swish 能力标记及包内文件哈希；无需私有源码 |
 | `ANNC_REQUIRE_GEMM_PACKAGE` | `ON`/`OFF` | `OFF` | 可选的构建期强校验；适合 CI、发布构建等场景。开启时 CMake configure 阶段缺少兼容完整 GEMM-ASM 包即失败，避免运行时才报错；关闭时允许只构建普通工具，但 GEMM microkernel、prepack 和 epilogue 请求会明确报错。`build.sh` 对应 `--require-gemm-package` |
 | `ANNC_ENABLE_KDNN_ADAPTOR` | `ON`/`OFF` | `OFF` | 构建 KDNN 后端的内置 kernel adaptor；对应 `build.sh --enable-kdnn-adaptor`，仅 AArch64 |
 | `ANNC_KDNN_SOURCE` | `LOCAL`/`REMOTE`/`RELEASE` | `LOCAL`（`build.sh` 默认覆盖为 `RELEASE`） | KDNN 来源模式；仅在 `ANNC_ENABLE_KDNN_ADAPTOR=ON` 时参与集成 |

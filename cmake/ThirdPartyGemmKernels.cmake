@@ -18,10 +18,11 @@ if(_annc_gemm_processor MATCHES "^(aarch64|arm64)$" AND
     PATHS "${ANNC_GEMM_PACKAGE_DIR}/cmake" NO_DEFAULT_PATH)
   if(NOT AnncGemmKernels_API_VERSION EQUAL 1 OR
      NOT AnncGemmKernels_KERNEL_ABI_VERSION EQUAL 1 OR
+     NOT AnncGemmKernels_HAS_SWISH OR
      NOT TARGET ANNC::GemmCodegen OR
      NOT TARGET ANNC::AArch64GemmMicrokernels)
     message(FATAL_ERROR
-      "Incompatible GEMM-ASM package: API 1 and kernel ABI 1 are required")
+      "Incompatible GEMM-ASM package: API 1, kernel ABI 1 and Swish support are required")
   endif()
   set(ANNC_GEMM_PACKAGE_AVAILABLE ON)
   install(DIRECTORY "${ANNC_GEMM_PACKAGE_DIR}/"

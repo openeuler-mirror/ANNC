@@ -87,6 +87,21 @@ TEST(GemmEpilogueCandidatePlanTest, RoundTripPreservesTerminalView) {
   EXPECT_EQ(parsed->steps[0].opcode, atir::EpilogueOpcode::kSigmoid);
 }
 
+TEST(GemmEpilogueCandidatePlanTest, RoundTripPreservesSwish) {
+  mlir::MLIRContext context;
+  mlir::Builder builder(&context);
+  atir::EpilogueProgram epilogueProgram;
+  epilogueProgram.steps.push_back(
+      {atir::EpilogueOpcode::kSwish, 0, atir::BroadcastKind::kScalar});
+  auto parsed = atir::parseEpilogueCandidatePlan(
+      atir::buildEpilogueCandidateAttr(builder, epilogueProgram));
+  ASSERT_TRUE(mlir::succeeded(parsed));
+  ASSERT_EQ(parsed->steps.size(), 1u);
+  EXPECT_EQ(parsed->steps[0].opcode, atir::EpilogueOpcode::kSwish);
+  EXPECT_EQ(parsed->steps[0].inputIndex, 0u);
+  EXPECT_EQ(parsed->steps[0].broadcast, atir::BroadcastKind::kScalar);
+}
+
 codegen::KernelDesc kernel(
     codegen::Family family = codegen::Family::NeonPacked) {
   codegen::KernelDesc value;
@@ -145,12 +160,15 @@ TEST(GemmCodegenAdapterTest, CompilesAllExistingFamiliesFromSemanticRequests) {
         {codegen::Opcode::Add, codegen::Broadcast::N},
         {codegen::Opcode::Mul, codegen::Broadcast::Scalar},
         {codegen::Opcode::Sigmoid},
+        {codegen::Opcode::Swish},
         {codegen::Opcode::Relu, codegen::Broadcast::None, 6.0f}};
     std::string error;
     codegen::PreparedKernel first, second;
     ASSERT_TRUE(codegen::prepare(selected, steps, first, error)) << error;
+    ASSERT_EQ(first.supportedPrefixLength, steps.size());
     selected.accumulate = true;
     ASSERT_TRUE(codegen::prepare(selected, steps, second, error)) << error;
+    ASSERT_EQ(second.supportedPrefixLength, steps.size());
     EXPECT_NE(first.entrySymbol, second.entrySymbol);
     EXPECT_EQ(first.artifactKey, second.artifactKey);
     EXPECT_EQ(first.normalizedRequest, second.normalizedRequest);

@@ -616,6 +616,8 @@ static StringRef epilogueOpcodeName(EpilogueOpcode opcode) {
       return "relu";
     case EpilogueOpcode::kSigmoid:
       return "sigmoid";
+    case EpilogueOpcode::kSwish:
+      return "swish";
   }
   llvm_unreachable("unknown epilogue opcode");
 }
@@ -681,6 +683,11 @@ static func::FuncOp createMatMulEpilogueKernelFunc(
 
   unsigned inputIndex = 3;
   for (const EpilogueStep &step : program.steps) {
+    if (step.auxiliarySource) {
+      mapOutput(step.auxiliarySource->getOperand(0));
+      clearClonedEpilogueSourceMetadata(
+          rewriter.clone(*step.auxiliarySource, mapper));
+    }
     mapOutput(step.source->getOperand(0));
     if (isBinaryEpilogueOpcode(step.opcode)) {
       Value input = epilogueExternalInput(step);
@@ -1595,8 +1602,10 @@ struct FuseMatMulAsFuncCallPattern : public OpRewritePattern<MatMulOp> {
       if (epilogue->terminalViewSource)
         rewriter.eraseOp(epilogue->terminalViewSource);
       for (auto it = epilogue->steps.rbegin(); it != epilogue->steps.rend();
-           ++it)
+           ++it) {
         rewriter.eraseOp(it->source);
+        if (it->auxiliarySource) rewriter.eraseOp(it->auxiliarySource);
+      }
       rewriter.eraseOp(matmulOp);
     } else {
       rewriter.create<func::CallOp>(
