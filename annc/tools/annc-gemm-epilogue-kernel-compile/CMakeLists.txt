@@ -1,0 +1,31 @@
+set(LLVM_LINK_COMPONENTS
+  Core
+  Support
+)
+set(LIBS
+  MLIRIR
+  MLIRParser
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRLLVMDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+)
+add_llvm_executable(annc-gemm-epilogue-kernel-compile
+  annc-gemm-epilogue-kernel-compile.cpp
+  DEPENDS
+  ${LIBS}
+)
+target_link_libraries(annc-gemm-epilogue-kernel-compile PRIVATE
+  ANNCGemmCodegenAdapter
+  MLIRIR
+  MLIRParser
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRLLVMDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  LLVMSupport
+)
+llvm_update_compile_flags(annc-gemm-epilogue-kernel-compile)
+install(TARGETS annc-gemm-epilogue-kernel-compile DESTINATION bin)

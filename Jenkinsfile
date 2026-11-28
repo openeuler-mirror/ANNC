@@ -1,0 +1,381 @@
+// ============================================================================
+// ANNC-Nightly-Build Jenkins Pipeline
+// ============================================================================
+// 部署与配置踩坑记录（请运维同学在首次启用前逐项确认）：
+//
+// 1. Jenkinsfile 必须提交并推送到远程仓库
+//    - 若 Jenkins 报 "Jenkinsfile not found"，请检查当前分支的远程仓库是否
+//      已包含 Jenkinsfile。本地修改未提交/推送会导致 Jenkins 拉不到文件。
+//
+// 2. 构建目录与产物目录统一放到 /home/jenkins，避免占用 root 分区
+//    - 本流水线使用 customWorkspace: /home/jenkins/workspace/ANNC-Nightly-Build
+//    - 构建产物放在 workspace 下的 .annc-nightly/ 目录中（即
+//      /home/jenkins/workspace/ANNC-Nightly-Build/.annc-nightly）
+//    - 首次运行前必须在 Jenkins 节点上执行：
+//        sudo mkdir -p /home/jenkins/workspace
+//        sudo chown -R jenkins:jenkins /home/jenkins
+//    - 若报 "AccessDeniedException: /home/jenkins"，说明目录未创建或权限不对。
+//
+// 3. Agent 必须预装 Python 依赖
+//    - tensorflow==2.15.0（TF addon 开启时；默认开启）
+//    - pybind11==2.11.1、nanobind>=2.4,<3（仅在勾选 ENABLE_PYTHON 时需要；
+//      ANNC Python 绑定默认不构建）
+//    - 建议为 jenkins 用户配置国内 PyPI 镜像，否则 TensorFlow 等大包下载极慢：
+//        sudo -u jenkins mkdir -p /var/lib/jenkins/.config/pip
+//        sudo -u jenkins tee /var/lib/jenkins/.config/pip/pip.conf <<'EOF'
+//        [global]
+//        index-url = https://mirrors.aliyun.com/pypi/simple/
+//        trusted-host = mirrors.aliyun.com
+//        EOF
+//      （清华镜像实测返回 403，建议优先使用阿里云镜像）
+//    - 使用 jenkins 用户安装：
+//        sudo -u jenkins pip3 install -r requirements.txt
+//    - 若 Deps Check 阶段报 "missing required python packages"，请按上述命令安装。
+//    - TensorFlow 只在构建 TF addon 时需要：勾选 DISABLE_TENSORFLOW 或
+//      DISABLE_TENSORFLOW_ADDON 参数后 Deps Check 不再要求 tensorflow；
+//      勾选 DISABLE_ONNX 则跳过 ONNX 前端的构建与安装校验。
+//
+// 4. 磁盘空间要求
+//    - LLVM/MLIR 20 使用系统 llvm-toolset-20 软件包，不再从源码编译
+//    - 构建目录（ANNC + json）通常数 GB；请确保 /home 分区空间充足
+//
+// 5. 部分第三方仓库需要 Git 账号授权
+//    - 当前配置方式：在 Jenkins 节点上为 jenkins 用户配置全局 git credential
+//      helper，使 CMake FetchContent 拉取私有/受限第三方仓库（如 KDNN）时
+//      能自动提供有权限的 Git 账号。
+//    - 配置步骤（以 gitcode 为例）：
+//        sudo cp /path/to/.git-credentials /var/lib/jenkins/.git-credentials
+//        sudo chown jenkins:jenkins /var/lib/jenkins/.git-credentials
+//        sudo chmod 600 /var/lib/jenkins/.git-credentials
+//        sudo -u jenkins git config --global credential.helper store
+//    - 验证凭据是否生效：
+//        sudo -u jenkins git clone --depth 1 https://gitcode.com/boostkit/kdnn.git /tmp/kdnn-test
+//    - 若 CMake configure 阶段报 "could not read Username for 'https://gitcode.com'"
+//      或 401 / 403，请检查 jenkins 用户的 Git 凭据是否已正确配置。
+//
+// 6. 其他系统依赖
+//    - agent 必须预装：cmake、ninja-build、llvm-toolset-20（含 clang/MLIR）
+//    - 安装示例（openEuler）：
+//        sudo dnf install -y cmake ninja-build \
+//          llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+//          llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+//          llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+//          llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+//          llvm-toolset-20-clang
+//    - 若 Prepare 阶段报 "clang: command not found" 或 Build 阶段报
+//      "./build.sh: Permission denied"，请检查 llvm-toolset-20 是否已安装、
+//      build.sh 是否具有可执行权限。
+//    - 可参考 jenkins/README.md 中的落地说明
+//
+// 7. KDNN RELEASE 模式（nightly 默认）
+//    - Build 阶段使用 --kdnn-source RELEASE。CMake configure 时从公开地址
+//      https://gitcode.com/boostkit/boostsra/releases/download/v1.2.0/
+//      BoostKit-boostcore-kdnn_3.1.0.zip 下载预编译包（无需鉴权），解 rpm
+//      后 staging 成 include/ + src/libkdnn.a，等价于 LOCAL 布局。
+//    - agent 必须预装：unzip、rpm2cpio、cpio
+//        sudo dnf install -y unzip rpm cpio
+//    - 变体默认 sve-threadpool，如需切换用 --kdnn-lib-variant 指定。
+//    - 下载产物缓存在 third_party/kdnn-release/，URL/变体不变则增量复用。
+//    - 若 Build 阶段报 "RELEASE mode requires 'rpm2cpio' but it is not
+//      installed" 或 "Failed to download KDNN release"，请按上述命令安装
+//      工具，或检查 agent 到 gitcode 的网络连通性。
+// ============================================================================
+
+pipeline {
+    // 将构建工作目录放到 /home 下，避免占用 root 分区空间。
+    // 运行前请确保 /home/jenkins 目录存在且 jenkins 用户可读写。
+    agent {
+        node {
+            label 'openeuler-aarch64'
+            customWorkspace '/home/jenkins/workspace/ANNC-Nightly-Build'
+        }
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 6, unit: 'HOURS')
+        buildDiscarder(logRotator(
+            numToKeepStr: '10',
+            artifactNumToKeepStr: '3'
+        ))
+    }
+
+    triggers {
+        cron('H 2 * * *')
+    }
+
+    parameters {
+        booleanParam(
+            name: 'CLEAN_BUILD',
+            defaultValue: false,
+            description: '是否清理 build 目录后全量重建'
+        )
+        booleanParam(
+            name: 'RUN_TESTS',
+            defaultValue: false,
+            description: '是否运行 pytest/ctest（当前预留）'
+        )
+        booleanParam(
+            name: 'DISABLE_TENSORFLOW',
+            defaultValue: false,
+            description: '关闭 TensorFlow 前端与其 addon（映射 build.sh --disable-tensorflow）'
+        )
+        booleanParam(
+            name: 'DISABLE_TENSORFLOW_ADDON',
+            defaultValue: false,
+            description: '只关闭 TF addon，TF 前端工具仍构建（映射 build.sh --disable-tensorflow-addon）'
+        )
+        booleanParam(
+            name: 'DISABLE_ONNX',
+            defaultValue: false,
+            description: '关闭 ONNX 前端（映射 build.sh --disable-onnx）'
+        )
+        booleanParam(
+            name: 'ENABLE_PYTHON',
+            defaultValue: false,
+            description: '构建 ANNC Python 绑定（映射 build.sh --enable-python；默认关闭）'
+        )
+    }
+
+    environment {
+        // 构建产物放到 workspace 下的 .annc-nightly 目录中。
+        // workspace 本身已配置在 /home/jenkins/workspace，因此仍然满足
+        // "不占用 root 分区" 的要求；同时 Jenkins archiveArtifacts 只能归档
+        // workspace 内的相对路径，放在这里才能被正常归档。
+        ANNC_NIGHTLY_HOME = "${WORKSPACE}/.annc-nightly"
+        INSTALL_PREFIX = "${env.ANNC_NIGHTLY_HOME}/install"
+        BUILD_INFO_FILE = "${env.ANNC_NIGHTLY_HOME}/build_info.txt"
+        BUILD_STATUS_FILE = "${env.ANNC_NIGHTLY_HOME}/build_status.json"
+
+        // pytest 显式使用本次构建目录，避免测试脚本回退到其他 build 目录
+        // （tests/integration/onnx2atir/test_onnx_frontend.py 等优先选择 build-v2/）。
+        ANNC_BUILD_DIR = "${WORKSPACE}/build"
+        // 依赖预检与安装校验随框架开关条件化；默认三项均为 1（与改动前
+        // 的默认任务等价）。TensorFlow Python 包只在构建 TF addon 时需要。
+        ANNC_TF_ENABLED = "${params.DISABLE_TENSORFLOW ? '0' : '1'}"
+        ANNC_TF_ADDON_ENABLED = "${params.DISABLE_TENSORFLOW || params.DISABLE_TENSORFLOW_ADDON ? '0' : '1'}"
+        ANNC_ONNX_ENABLED = "${params.DISABLE_ONNX ? '0' : '1'}"
+        ANNC_PYTHON_ENABLED = "${params.ENABLE_PYTHON ? '1' : '0'}"
+    }
+
+    stages {
+        stage('Prepare') {
+            steps {
+                script {
+                    echo "Running on node: ${env.NODE_NAME}"
+                }
+                sh '''
+                    set +x
+                    mkdir -p "${ANNC_NIGHTLY_HOME}"
+
+                    echo "===== Build Info =====" > "${BUILD_INFO_FILE}"
+                    echo "BUILD_NUMBER: ${BUILD_NUMBER}" >> "${BUILD_INFO_FILE}"
+                    echo "BUILD_URL: ${BUILD_URL}" >> "${BUILD_INFO_FILE}"
+                    echo "GIT_BRANCH: ${BRANCH_NAME:-unknown}" >> "${BUILD_INFO_FILE}"
+                    echo "WORKSPACE: ${WORKSPACE}" >> "${BUILD_INFO_FILE}"
+                    echo "" >> "${BUILD_INFO_FILE}"
+                    echo "===== Environment =====" >> "${BUILD_INFO_FILE}"
+                    uname -a >> "${BUILD_INFO_FILE}"
+                    cmake --version >> "${BUILD_INFO_FILE}" 2>&1 || true
+                    ninja --version >> "${BUILD_INFO_FILE}" 2>&1 || true
+                    clang --version >> "${BUILD_INFO_FILE}" 2>&1 || true
+                    python3 --version >> "${BUILD_INFO_FILE}" 2>&1 || true
+                    echo "=======================" >> "${BUILD_INFO_FILE}"
+                    cat "${BUILD_INFO_FILE}"
+
+                    # Clean previous install directory, keep build/ for incremental compile
+                    rm -rf "${INSTALL_PREFIX}"
+                '''
+            }
+        }
+
+        stage('Deps Check') {
+            steps {
+                sh '''
+                    set -e
+                    python3 - <<'PY'
+import os
+import sys
+required = []
+if os.environ.get('ANNC_PYTHON_ENABLED', '0') == '1':
+    required.extend(['pybind11', 'nanobind'])
+if os.environ.get('ANNC_TF_ADDON_ENABLED', '1') == '1':
+    required.append('tensorflow')
+missing = []
+for mod in required:
+    try:
+        __import__(mod)
+        print(f'[OK] {mod}')
+    except ImportError as e:
+        print(f'[MISSING] {mod}: {e}')
+        missing.append(mod)
+
+if missing:
+    print(f'ERROR: missing required python packages: {missing}', file=sys.stderr)
+    print('Please install them on the agent before running this pipeline.', file=sys.stderr)
+    sys.exit(1)
+
+print('All required python packages are available.')
+PY
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    def cleanFlag = params.CLEAN_BUILD ? '--clean' : ''
+                    // 框架开关默认全开；--disable-tensorflow 已隐含关闭 addon。
+                    def frameworkFlags = [
+                        params.DISABLE_TENSORFLOW ? '--disable-tensorflow' : '',
+                        (!params.DISABLE_TENSORFLOW && params.DISABLE_TENSORFLOW_ADDON) ? '--disable-tensorflow-addon' : '',
+                        params.DISABLE_ONNX ? '--disable-onnx' : '',
+                        params.ENABLE_PYTHON ? '--enable-python' : '',
+                    ].findAll { it }.join(' ')
+                    // 使用 RELEASE 模式拉取 KDNN：CMake 在 configure 阶段从
+                    // gitcode release 下载预编译 zip，解 rpm 后 staging 成
+                    // include/ + src/libkdnn.a，等价于 LOCAL 布局。
+                    // agent 需预装 unzip / rpm2cpio / cpio 并能访问 gitcode。
+                    sh """
+                        set -e
+                        ./build.sh \
+                          --build-type Release \
+                          --install-prefix "${env.INSTALL_PREFIX}" \
+                          --no-install-deps \
+                          --kdnn-source RELEASE \
+                          ${frameworkFlags} \
+                          ${cleanFlag}
+                    """
+                }
+            }
+        }
+
+        stage('Install Verify') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Checking install artifacts..."
+                    test -f "${INSTALL_PREFIX}/bin/annc-opt"
+                    test -f "${INSTALL_PREFIX}/bin/annc-asm"
+                    test -f "${INSTALL_PREFIX}/bin/annc"
+                    test -f "${INSTALL_PREFIX}/bin/annc-verify"
+                    # 前端与 addon 产物按本次构建的开关检查；默认（全开）时
+                    # 覆盖 TF 三工具、两个 addon 库与 ONNX 前端。
+                    if [ "${ANNC_TF_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/bin/annc-tf-pipeline"
+                      test -f "${INSTALL_PREFIX}/bin/annc-converter"
+                      test -f "${INSTALL_PREFIX}/bin/annc-tf2atir"
+                    fi
+                    if [ "${ANNC_TF_ADDON_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/lib/libannc_optimizer.so"
+                      test -f "${INSTALL_PREFIX}/lib/libannc_fused_op.so"
+                    fi
+                    if [ "${ANNC_ONNX_ENABLED}" = "1" ]; then
+                      test -f "${INSTALL_PREFIX}/bin/annc-onnx2atir"
+                    fi
+                    echo "Install directory size:"
+                    du -sh "${INSTALL_PREFIX}"
+                '''
+            }
+        }
+
+        stage('Tests') {
+            when {
+                expression { params.RUN_TESTS }
+            }
+            steps {
+                sh '''
+                    set -e
+                    export PATH="${INSTALL_PREFIX}/bin:${PATH}"
+                    echo "Running pytest with ANNC_BUILD_DIR=${ANNC_BUILD_DIR}..."
+                    ANNC_BUILD_DIR="${ANNC_BUILD_DIR}" python3 -m pytest tests/ -v || true
+                    echo "Tests stage completed (currently non-blocking)"
+                '''
+            }
+        }
+
+        stage('Archive') {
+            steps {
+                script {
+                    def duration = currentBuild.duration / 1000 / 60
+                    def installSize = sh(
+                        script: "du -sm \"${env.INSTALL_PREFIX}\" | awk '{print \$1}'",
+                        returnStdout: true
+                    ).trim()
+
+                    writeFile file: "${env.BUILD_STATUS_FILE}", text: """{
+  "build_number": ${env.BUILD_NUMBER},
+  "branch": "${env.BRANCH_NAME ?: 'unknown'}",
+  "status": "${currentBuild.currentResult}",
+  "duration_minutes": ${duration},
+  "install_size_mb": ${installSize}
+}"""
+                }
+                // install/ 目录约 100G+，归档到 /var/lib/jenkins 会占满 root 分区，
+                // 因此只归档体积较小的构建信息文件。如需完整安装产物，请直接到
+                // agent 的 /home/jenkins/workspace/ANNC-Nightly-Build/.annc-nightly/
+                // 目录下获取。
+                archiveArtifacts artifacts: '.annc-nightly/build_info.txt,.annc-nightly/build_status.json', fingerprint: true
+            }
+        }
+
+        stage('Notify') {
+            steps {
+                echo 'Build succeeded. No notification sent on success.'
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "Build completed with result: ${currentBuild.currentResult}"
+            }
+            sh '''
+                # Keep build/ directory for next incremental build.
+                # Clean up transient files if any.
+                echo "Build completed" >> "${BUILD_INFO_FILE}" || true
+            '''
+        }
+
+        failure {
+            script {
+                echo "Build failed: ${env.BUILD_URL}"
+
+                // 邮件通知（需在 Jenkins 系统管理中配置 SMTP 服务器）
+                // 插件 email-ext 已安装，但当前未配置 SMTP。
+                // 配置完成后取消下面注释：
+                // emailext(
+                //     subject: "[ANNC Nightly Build FAILED] #${env.BUILD_NUMBER} - ${env.BRANCH_NAME}",
+                //     body: """ANNC nightly build failed.
+                //     Build: ${env.BUILD_URL}
+                //     Branch: ${env.BRANCH_NAME}
+                //     Node: ${env.NODE_NAME}
+                //     Please check the console output for details.
+                //     """,
+                //     to: "${env.CHANGE_AUTHOR_EMAIL ?: 'team@example.com'}"
+                // )
+
+                // 钉钉/企业微信 webhook 通知示例
+                // 需在 Jenkins Credentials 中创建 dingtalk-webhook-token 后再启用
+                // withCredentials([string(credentialsId: 'dingtalk-webhook-token', variable: 'DING_TOKEN')]) {
+                //     sh """
+                //         curl -s -X POST \\
+                //           "https://oapi.dingtalk.com/robot/send?access_token=\${DING_TOKEN}" \\
+                //           -H 'Content-Type: application/json' \\
+                //           -d '{
+                //             "msgtype": "text",
+                //             "text": {
+                //               "content": "[ANNC Nightly Build FAILED] #\${BUILD_NUMBER} \${BUILD_URL}"
+                //             }
+                //           }'
+                //     """
+                // }
+            }
+        }
+
+        unstable {
+            echo "Build is unstable: ${env.BUILD_URL}"
+        }
+    }
+}

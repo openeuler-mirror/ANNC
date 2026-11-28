@@ -1,0 +1,436 @@
+#include "Conversion/Common/CustomizeCallLowering.h"
+
+#include "Dialect/Atir/CustomOpSchema.h"
+#include "Kernel/KernelPriorityResolver.h"
+#include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
+
+using namespace mlir;
+
+namespace atir {
+namespace {
+
+struct SchemaArg {
+  StringRef name;
+  StringRef kind;
+  int64_t rank = -1;
+  StringRef typeVar;
+};
+
+struct SchemaResult {
+  StringRef name;
+  int64_t rank = -1;
+  StringRef typeVar;
+};
+
+std::optional<ArrayAttr> getArrayAttr(DictionaryAttr metadata, StringRef name) {
+  if (!metadata) {
+    return std::nullopt;
+  }
+  if (auto attr = dyn_cast_or_null<ArrayAttr>(metadata.get(name))) {
+    return attr;
+  }
+  return std::nullopt;
+}
+
+std::optional<SmallVector<SchemaArg>> readSchemaArgs(DictionaryAttr metadata) {
+  auto names = getArrayAttr(metadata, "custom.arg_names");
+  auto kinds = getArrayAttr(metadata, "custom.arg_kinds");
+  auto ranks = getArrayAttr(metadata, "custom.arg_ranks");
+  auto typeVars = getArrayAttr(metadata, "custom.arg_type_vars");
+  if (!names || !kinds || !ranks || !typeVars) {
+    return std::nullopt;
+  }
+  if (names->size() != kinds->size() || kinds->size() != ranks->size() ||
+      kinds->size() != typeVars->size()) {
+    return std::nullopt;
+  }
+
+  SmallVector<SchemaArg> args;
+  args.reserve(kinds->size());
+  for (size_t i = 0; i < kinds->size(); ++i) {
+    auto name = dyn_cast<StringAttr>((*names)[i]);
+    auto kind = dyn_cast<StringAttr>((*kinds)[i]);
+    auto rank = dyn_cast<IntegerAttr>((*ranks)[i]);
+    auto typeVar = dyn_cast<StringAttr>((*typeVars)[i]);
+    if (!name || !kind || !rank || !typeVar) {
+      return std::nullopt;
+    }
+    args.push_back(SchemaArg{name.getValue(), kind.getValue(), rank.getInt(),
+                             typeVar.getValue()});
+  }
+  return args;
+}
+
+std::optional<SmallVector<SchemaResult>> readSchemaResults(
+    DictionaryAttr metadata) {
+  auto names = getArrayAttr(metadata, "custom.result_names");
+  auto ranks = getArrayAttr(metadata, "custom.result_ranks");
+  auto typeVars = getArrayAttr(metadata, "custom.result_type_vars");
+  if (!names || !ranks || !typeVars || names->size() != ranks->size() ||
+      ranks->size() != typeVars->size()) {
+    return std::nullopt;
+  }
+
+  SmallVector<SchemaResult> results;
+  results.reserve(names->size());
+  for (size_t i = 0; i < names->size(); ++i) {
+    auto name = dyn_cast<StringAttr>((*names)[i]);
+    auto rank = dyn_cast<IntegerAttr>((*ranks)[i]);
+    auto typeVar = dyn_cast<StringAttr>((*typeVars)[i]);
+    if (!name || !rank || !typeVar) return std::nullopt;
+    results.push_back(
+        SchemaResult{name.getValue(), rank.getInt(), typeVar.getValue()});
+  }
+  return results;
+}
+
+std::optional<int64_t> readI64AttrAt(DictionaryAttr metadata, size_t index) {
+  auto values = getArrayAttr(metadata, "custom.attr_values");
+  if (!values || index >= values->size()) return std::nullopt;
+  auto value = dyn_cast<IntegerAttr>((*values)[index]);
+  return value ? std::optional<int64_t>(value.getInt()) : std::nullopt;
+}
+
+std::optional<std::pair<ArrayRef<int64_t>, Type>> getShapeAndElementType(
+    Type type) {
+  if (auto memrefType = dyn_cast<MemRefType>(type)) {
+    return std::make_pair(memrefType.getShape(), memrefType.getElementType());
+  }
+  if (auto rankedTensorType = dyn_cast<RankedTensorType>(type)) {
+    return std::make_pair(rankedTensorType.getShape(),
+                          rankedTensorType.getElementType());
+  }
+  if (auto tensorType = dyn_cast<atir::TensorType>(type)) {
+    return std::make_pair(tensorType.getShape(), tensorType.getElementType());
+  }
+  return std::nullopt;
+}
+
+MemRefType getCanonicalMemRefType(MLIRContext *ctx, Type type, int64_t rank) {
+  auto shapeAndElement = getShapeAndElementType(type);
+  if (!shapeAndElement ||
+      static_cast<int64_t>(shapeAndElement->first.size()) != rank) {
+    return {};
+  }
+
+  SmallVector<int64_t> shape(rank, ShapedType::kDynamic);
+  SmallVector<int64_t> strides(rank, ShapedType::kDynamic);
+  auto layout = StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides);
+  return MemRefType::get(shape, shapeAndElement->second, layout);
+}
+
+bool isStringMemRefArg(StringRef opType, const SchemaArg &schemaArg) {
+  return opType == "KPFusedDnnEmbeddingWithHashBucket" &&
+         schemaArg.name == "input" && schemaArg.typeVar.empty();
+}
+
+MemRefType getCanonicalAbiMemRefType(MLIRContext *ctx, Type type,
+                                     const SchemaArg &schemaArg,
+                                     StringRef opType) {
+  auto canonicalType = getCanonicalMemRefType(ctx, type, schemaArg.rank);
+  if (!canonicalType || !isStringMemRefArg(opType, schemaArg)) {
+    return canonicalType;
+  }
+
+  SmallVector<int64_t> shape(schemaArg.rank, ShapedType::kDynamic);
+  SmallVector<int64_t> strides(schemaArg.rank, ShapedType::kDynamic);
+  auto layout = StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides);
+  return MemRefType::get(shape, IntegerType::get(ctx, 64), layout);
+}
+
+std::optional<annc::kernels::TypeConstraintInfo> bindTypeVar(StringRef typeVar,
+                                                             Type type) {
+  auto constraint = inferTypeConstraint(typeVar, type);
+  if (!constraint || constraint->cpp_type_name.empty()) {
+    return std::nullopt;
+  }
+  return constraint;
+}
+
+LogicalResult bindOrCheckTypeVar(
+    CustomizeOp op,
+    SmallVectorImpl<annc::kernels::TypeConstraintInfo> &bindings,
+    StringRef typeVar, Type type) {
+  if (typeVar.empty()) {
+    return success();
+  }
+  auto constraint = bindTypeVar(typeVar, type);
+  if (!constraint) {
+    return op.emitError() << "unsupported element type for type variable '"
+                          << typeVar << "'";
+  }
+  auto existing = llvm::find_if(
+      bindings, [&](const annc::kernels::TypeConstraintInfo &info) {
+        return info.name == constraint->name;
+      });
+  if (existing == bindings.end()) {
+    bindings.push_back(*constraint);
+    return success();
+  }
+  if (existing->cpp_type_name != constraint->cpp_type_name) {
+    return op.emitError() << "type variable '" << typeVar
+                          << "' is bound to both " << existing->cpp_type_name
+                          << " and " << constraint->cpp_type_name;
+  }
+  return success();
+}
+
+}  // namespace
+
+void lowerCustomizeOpToFuncCall(PatternRewriter &rewriter,
+                                CustomizeOpAdaptor adaptor, CustomizeOp op) {
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  auto parentFunc = op->getParentOfType<func::FuncOp>();
+  if (!module || !parentFunc) {
+    op.emitError() << "CustomizeOp must be nested in a function and module";
+    return;
+  }
+
+  StringRef abi = "mlir_ciface";
+  if (auto fusionMetadata =
+          parentFunc->getAttrOfType<DictionaryAttr>("fusion.metadata")) {
+    if (auto abiAttr =
+            dyn_cast_or_null<StringAttr>(fusionMetadata.get("abi"))) {
+      abi = abiAttr.getValue();
+    }
+  }
+  if (abi != "mlir_ciface" && abi != "annc_execution_v2") {
+    op.emitError() << "unsupported fusion ABI '" << abi << "'";
+    return;
+  }
+
+  // Explicit legacy IR may still request execution-v2. Current TF and ONNX
+  // builtins use the context entry pass and never enter this branch.
+  const bool isExecutionV2 = abi == "annc_execution_v2";
+
+  auto metadata = op->getAttrOfType<DictionaryAttr>("metadata");
+  auto schemaArgs = readSchemaArgs(metadata);
+  if (!schemaArgs) {
+    op.emitError() << "CustomizeOp '" << op.getOpType()
+                   << "' is missing custom op schema metadata";
+    return;
+  }
+
+  SmallVector<annc::kernels::TypeConstraintInfo> typeBindings;
+  SmallVector<Value> callOperands;
+  SmallVector<Type> callOperandTypes;
+  SmallVector<Value> outputOperands;
+
+  if (isExecutionV2) {
+    if (parentFunc.getNumArguments() == 0 ||
+        !isa<LLVM::LLVMPointerType>(parentFunc.getArgument(0).getType())) {
+      op.emitError()
+          << "annc_execution_v2 kernel function must start with !llvm.ptr";
+      return;
+    }
+    callOperands.push_back(parentFunc.getArgument(0));
+    callOperandTypes.push_back(parentFunc.getArgument(0).getType());
+  }
+
+  auto operands = adaptor.getOperands();
+  size_t operandIndex = 0;
+  size_t attributeIndex = 0;
+  for (const SchemaArg &schemaArg : *schemaArgs) {
+    if (schemaArg.kind == "i64_attr") {
+      auto value = readI64AttrAt(metadata, attributeIndex++);
+      if (!value) {
+        op.emitError() << "CustomizeOp '" << op.getOpType()
+                       << "' is missing i64 metadata argument '"
+                       << schemaArg.name << "'";
+        return;
+      }
+      auto constant =
+          rewriter.create<arith::ConstantIntOp>(op.getLoc(), *value, 64);
+      callOperands.push_back(constant.getResult());
+      callOperandTypes.push_back(rewriter.getI64Type());
+      continue;
+    }
+
+    if (schemaArg.kind != "memref") {
+      op.emitError() << "CustomizeOp '" << op.getOpType() << "' argument "
+                     << schemaArg.name << " uses unsupported ABI kind '"
+                     << schemaArg.kind << "'";
+      return;
+    }
+    if (operandIndex >= operands.size()) {
+      op.emitError() << "CustomizeOp '" << op.getOpType()
+                     << "' has fewer operands than memref schema arguments";
+      return;
+    }
+    Value operand = operands[operandIndex];
+    if (schemaArg.rank < 0) {
+      op.emitError()
+          << "dynamic-rank CustomizeOp ABI is not supported yet for op '"
+          << op.getOpType() << "'";
+      return;
+    }
+
+    auto canonicalType = getCanonicalAbiMemRefType(
+        rewriter.getContext(), operand.getType(), schemaArg, op.getOpType());
+    if (!canonicalType) {
+      op.emitError() << "CustomizeOp '" << op.getOpType() << "' argument "
+                     << schemaArg.name << " expects rank " << schemaArg.rank
+                     << " memref, got " << operand.getType();
+      return;
+    }
+    if (failed(bindOrCheckTypeVar(op, typeBindings, schemaArg.typeVar,
+                                  operand.getType()))) {
+      return;
+    }
+
+    Value callOperand = operand;
+    if (operand.getType() != canonicalType) {
+      callOperand =
+          rewriter.create<memref::CastOp>(op.getLoc(), canonicalType, operand);
+    }
+    callOperands.push_back(callOperand);
+    callOperandTypes.push_back(canonicalType);
+    if (schemaArg.name.str() == "output") {
+      outputOperands.push_back(operand);
+    }
+    ++operandIndex;
+  }
+
+  if (operandIndex != operands.size()) {
+    op.emitError() << "CustomizeOp '" << op.getOpType()
+                   << "' has more operands than memref schema arguments";
+    return;
+  }
+
+  func::ReturnOp boundaryReturn;
+  if (isExecutionV2) {
+    auto schemaResults = readSchemaResults(metadata);
+    if (!schemaResults || schemaResults->size() != op.getNumResults()) {
+      op.emitError() << "CustomizeOp '" << op.getOpType()
+                     << "' result schema does not match its results";
+      return;
+    }
+    for (auto [result, schemaResult] :
+         llvm::zip(op->getResults(), *schemaResults)) {
+      auto shapeAndElement = getShapeAndElementType(result.getType());
+      if (!shapeAndElement || schemaResult.rank < 0 ||
+          static_cast<int64_t>(shapeAndElement->first.size()) !=
+              schemaResult.rank) {
+        op.emitError() << "CustomizeOp '" << op.getOpType() << "' result "
+                       << schemaResult.name << " expects rank "
+                       << schemaResult.rank << ", got " << result.getType();
+        return;
+      }
+      if (failed(bindOrCheckTypeVar(op, typeBindings, schemaResult.typeVar,
+                                    result.getType()))) {
+        return;
+      }
+      if (result.use_empty()) {
+        op.emitError() << "annc_execution_v2 result has no boundary return use";
+        return;
+      }
+      for (OpOperand &use : result.getUses()) {
+        auto returnOp = dyn_cast<func::ReturnOp>(use.getOwner());
+        if (!returnOp ||
+            returnOp->getParentOfType<func::FuncOp>() != parentFunc) {
+          op.emitError() << "annc_execution_v2 results may only be used by "
+                            "the parent function return";
+          return;
+        }
+        if (boundaryReturn && boundaryReturn != returnOp) {
+          op.emitError() << "annc_execution_v2 results must share one "
+                            "boundary return";
+          return;
+        }
+        boundaryReturn = returnOp;
+      }
+    }
+    if (!boundaryReturn ||
+        boundaryReturn.getNumOperands() != op.getNumResults() ||
+        !llvm::equal(boundaryReturn.getOperands(), op.getResults())) {
+      op.emitError() << "annc_execution_v2 return must contain exactly the "
+                        "ordered CustomizeOp results";
+      return;
+    }
+  }
+
+  annc::kernels::KernelResolveRequest req;
+  req.op_type = op.getOpType().str();
+  req.type_constraints.assign(typeBindings.begin(), typeBindings.end());
+  req.abi = abi.str();
+  if (auto rhsFormat = op->getAttrOfType<StringAttr>("rhs_format")) {
+    req.rhs_format = rhsFormat.getValue().str();
+  }
+  auto attr = module->getAttrOfType<BoolAttr>("annc.enable_kdnn");
+  bool enableKdnn = attr && attr.getValue();
+  auto kernelInfo = annc::kernels::resolveBestKernelInfo(req, enableKdnn);
+  if (!kernelInfo.has_value()) {
+    op.emitError() << "failed to resolve kernel symbol for CustomizeOp '"
+                   << op.getOpType() << "'";
+    return;
+  }
+
+  // if (outputOperands.size() != op->getNumResults()) {
+  //   op.emitError() << "CustomizeOp '" << op.getOpType()
+  //                  << "' expects one schema output memref per result, got "
+  //                  << outputOperands.size() << " output operands for "
+  //                  << op->getNumResults() << " results";
+  //   return;
+  // }
+
+  auto statusType = rewriter.getI32Type();
+  auto funcType =
+      rewriter.getFunctionType(callOperandTypes, TypeRange{statusType});
+
+  PatternRewriter::InsertionGuard guard(rewriter);
+
+  auto funcOp = module.lookupSymbol<func::FuncOp>(kernelInfo->symbol_name);
+  if (!funcOp) {
+    rewriter.setInsertionPointToStart(module.getBody());
+    funcOp = rewriter.create<func::FuncOp>(op.getLoc(), kernelInfo->symbol_name,
+                                           funcType);
+    funcOp.setPrivate();
+    funcOp->setAttr("llvm.emit_c_interface",
+                    UnitAttr::get(rewriter.getContext()));
+  } else if (funcOp.getFunctionType() != funcType) {
+    op.emitError() << "resolved kernel callee '" << kernelInfo->symbol_name
+                   << "' already exists with mismatched function type";
+    return;
+  }
+
+  rewriter.setInsertionPoint(op);
+
+  auto callOp =
+      rewriter.create<func::CallOp>(op.getLoc(), kernelInfo->symbol_name,
+                                    TypeRange{statusType}, callOperands);
+  Value status = callOp.getResult(0);
+
+  if (isExecutionV2) {
+    parentFunc.setFunctionType(rewriter.getFunctionType(
+        parentFunc.getFunctionType().getInputs(), TypeRange{statusType}));
+    boundaryReturn->setOperands(status);
+    rewriter.eraseOp(op);
+    return;
+  }
+
+  if (parentFunc->hasAttr("annc.kernel") && parentFunc.getNumResults() == 0) {
+    parentFunc.setFunctionType(rewriter.getFunctionType(
+        parentFunc.getFunctionType().getInputs(), TypeRange{statusType}));
+    if (auto returnOp =
+            dyn_cast<func::ReturnOp>(op->getBlock()->getTerminator())) {
+      if (returnOp.getNumOperands() == 0) {
+        returnOp->setOperands(status);
+      }
+    }
+  }
+
+  SmallVector<Value> replacements;
+  for (auto [result, output] : llvm::zip(op->getResults(), outputOperands)) {
+    (void)result;
+    replacements.push_back(output);
+  }
+  rewriter.replaceOp(op, replacements);
+}
+
+}  // namespace atir

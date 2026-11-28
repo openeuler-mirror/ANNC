@@ -1,0 +1,5 @@
+set(LLVM_TARGET_DEFINITIONS OpVerify.td)
+mlir_tablegen(OpVerify.h.inc -gen-pass-decls -name Atir)
+mlir_tablegen(AtirOpVerify.capi.h.inc -gen-pass-capi-header --prefix Atir)
+mlir_tablegen(AtirOpVerify.capi.cpp.inc -gen-pass-capi-impl --prefix Atir)
+add_public_tablegen_target(MLIRAtirOpVerifyIncGen)

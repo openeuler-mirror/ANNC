@@ -1,143 +1,127 @@
-# ANNC (Accelerated Neural Network Compiler)
+# ANNC
 
-## 目录
+**ANNC（Accelerated Neural Network Compiler）** 是基于 MLIR 的 AI 推理编译器：把 TensorFlow GraphDef 与 ONNX 模型编译为 AArch64 原生 kernel，再回接到原框架执行。
 
-- [项目简介](#项目简介)
-- [主要特性](#主要特性)
-- [构建环境和依赖](#构建环境和依赖)
-- [构建与使用](#构建与使用)
-- [版本历史](#版本历史)
-- [许可证](#许可证)
-- [贡献声明](#贡献声明)
+- **统一中间表示 ATIR**：把 CPU 微架构优化（算子融合、多级 tiling、数据打包、向量化）从推理框架中解耦，一次优化、多框架复用。
+- **AOT 原生 kernel**：编译期产出 `.so`；TensorFlow GEMM 融合另支持运行时 JIT 特化。
+- **回接成本因框架而异**：TensorFlow 由 Grappler 插件在优化期自动重写图，业务代码无需改动；ONNX Runtime 需注册 EP 插件并把它的执行设备加入会话选项（一行注册代码，见下）。
 
 ## 项目简介
 
-ANNC (Accelerated Neural Network Compiler) 是一个基于 OpenXLA/XLA 框架的 AI 编译器，专注于 CPU 平台的神经网络推理优化。它在提供跨平台通用优化的基础上，特别针对 ARM 架构（尤其是鲲鹏处理器）进行了深度定制和性能调优，通过图融合、算子优化和常量折叠等技术，显著提升模型在目标平台上的推理性能。
+ANNC 面向 CPU 推理场景，重点解决搜索/推荐/广告（搜推广）模型中 Embedding 层与算子融合优化无法跨框架复用的问题。它把优化能力下沉到与框架无关的统一 IR，再由各框架前端/插件负责「取图—回接」：
 
-## 主要特性
+| 维度   | 说明                                                                             |
+| ---- | ------------------------------------------------------------------------------ |
+| 前端   | `annc-tf2atir`（TensorFlow GraphDef）、`annc-onnx2atir`（ONNX）                     |
+| 中间表示 | ATIR（AI Tensor IR），承载 shape 推导、算子融合与 kernel 选择                                 |
+| 后端   | AArch64 GEMM 规划/分块/微内核 lowering，产出原生 kernel                                    |
+| 回接   | TensorFlow Grappler 插件 `ANNCOptimizer` + 自定义 Op `ANNCFused`；ONNX Runtime EP 插件 |
 
-| 特性名称 | 说明 | 特性启用 |
-|---------|------|----------|
-| TensorFlow图融合 | 提供TensorFlow模型层面的图融合与图重写功能，并在后端提供自定义融合算子的手动实现 | `annc-opt -I input_model.pb -O output_dir embed_hash_bucket`<br>`export ENABLE_BISHENG_GRAPH_OPT=""` |
-| XLA图融合 | 提供ANNC XLA图融合特性，识别并消除融合后的重复计算 | `export ANNC_FLAGS="--graph-opt"` |
-| 算子优化 | 提供ANNC算子优化特性，将GEMM算子和Softmax算子通过模式匹配接入OpenBLAS和XNNPACK高性能后端 | `export ANNC_FLAGS="--gemm-opt"`<br>`export XLA_FLAGS="--xla_cpu_enable_xnnpack=true"` |
-| 常量折叠 | 提供GEMM算子常量折叠优化，消除运行时数据重排开销（[详细说明](docs/constant-folding.md)） | `annc-opt -I input_model.pb -O output_dir layout_matmul`<br>+ `export ANNC_FLAGS="--layout-matmul"` |
+## 支持范围与接入前提
 
-## 构建环境和依赖
+| 维度              | 现状                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------ |
+| 平台              | openEuler-24.03-LTS-SP4（系统 `llvm-toolset-20`）/ openEuler-22.03-LTS-SP4（自建 LLVM/MLIR 20/21）+ 鲲鹏 920X（AArch64）；其他平台组合未声明支持 |
+| 框架              | TensorFlow（GraphDef / SavedModel）；ONNX Runtime 1.26.0                                            |
+| 加速范围            | 命中 ANNC fusion pattern 的子图；未命中区域原样保留，继续由原框架 / CPU EP 执行                                          |
+| TensorFlow 接入   | 会话启用 Grappler 插件 `ANNCOptimizer` 并加载 `ANNCFused` Op（均由本仓库构建）；模型与业务代码无需改动                         |
+| ONNX Runtime 接入 | 注册 `libannc_ep.so` 并把其执行设备加入 `SessionOptions`（见[注册示例](addons/onnxruntime/README.md#运行)）；模型文件无需改动 |
 
-- **Bazel**: 6.5.0
-- **Python**: 3.x
-- **GCC/G++**: 支持 C++17 或更高版本
-- **依赖库**:
-  - OpenXLA/XLA (commit: 40008cb2c85749ae436be61c40d3279cb24705c7)
-  - OpenBLAS
-  - XNNPACK
+判定依据与验收范围见 [ONNX 支持整体方案](docs/design/onnx-support/overall.md) 与 [addons/onnxruntime/README.md](addons/onnxruntime/README.md)。
 
-## 构建与使用
+## 快速开始
 
-详细的构建和测试流程请参考 [ANNC 测试指南](TESTING.md)。
+环境要求与依赖安装见[安装 ANNC](docs/getting-started/installation.md)。
 
-### 构建指南
+```shell
+# 1. 获取源码
+git clone https://gitcode.com/openeuler/ANNC.git --branch dev
+cd ANNC
 
-#### 构建共享库
+# 2. 安装依赖（详见「安装 ANNC」）
+pip3 install -r requirements.txt
+sudo yum install -y cmake ninja-build gcc gcc-c++ python3-devel gtest-devel unzip rpm cpio
+sudo yum install -y protobuf-devel protobuf-compiler
+#    openEuler 24.03 使用系统 llvm-toolset-20；22.03 无该 toolset，需自建 LLVM/MLIR 20/21（见「安装 ANNC」步骤 4）
+sudo yum install -y llvm-toolset-20-llvm llvm-toolset-20-llvm-devel \
+  llvm-toolset-20-llvm-libs llvm-toolset-20-llvm-static \
+  llvm-toolset-20-llvm-mlir llvm-toolset-20-llvm-mlir-devel \
+  llvm-toolset-20-llvm-mlir-static llvm-toolset-20-python3-mlir \
+  llvm-toolset-20-clang
 
-```bash
-bazel --output_user_root=./output build -c opt annc/service/cpu:libannc.so
+# 3. 一键构建（LLVM/MLIR 使用系统 llvm-toolset-20 或 22.03 自建工具链；nlohmann/json 由 CMake FetchContent 获取）
+#    安装到无写权限前缀时请改用有权限的目录，或确保当前用户可写
+./build.sh --install-prefix "$HOME/ANNC" --build-type Debug
+
+# 4. 验证
+export PATH="$HOME/ANNC/bin:$PATH"
+which annc-opt annc-asm
+python3 -m pytest tests/
 ```
 
-#### 构建静态库
+全部构建选项、CMake 选项、C++ 单元测试与覆盖率流程见[从源码构建](docs/guides/build-from-source.md)。
 
-```bash
-bazel --output_user_root=./output build -c opt annc/service/cpu:annc
+## 从哪里开始
+
+| 你是              | 入口                                                                                                                                                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 第一次接触 ANNC      | [安装 ANNC](docs/getting-started/installation.md) → [从源码构建](docs/guides/build-from-source.md) → [CLI 工作流](docs/guides/cli-workflows.md)                                                                     |
+| TensorFlow 用户   | [端到端 GraphDef 重写](docs/guides/cli-workflows.md#端到端-graphdef-重写) → [运行时接入（Grappler / ANNCFused）](docs/architecture/runtime-integration.md)                                                                 |
+| ONNX Runtime 用户 | [addons/onnxruntime/README.md](addons/onnxruntime/README.md)：`--enable-ort`（别名 `--enable-ort-ep`）构建 → 注册 EP → 端到端验证（真实示例 `tests/e2e/kernel_context/ftdmm_context_e2e.py`）→ [EP 接入设计](docs/design/onnx-support/ep-design.md) |
+| 编译器开发者          | [AGENTS.md](AGENTS.md)（工作原则与导航）→ [总体架构](docs/architecture/overview.md) → [特性与模块设计](docs/design/README.md) → [文档索引](docs/README.md)                                                                     |
+
+完整文档索引（按分区组织）见 [docs/README.md](docs/README.md)。
+
+## 架构速览
+
+```text
+TF SavedModel/GraphDef
+  └─→ annc-tf2atir → ATIR MLIR（直接路径，跳过 JSON）
+
+ONNX .onnx
+  └─→ annc-onnx2atir → ATIR MLIR（同一 builder 引擎，ONNX 专表）
+
+ATIR MLIR
+  ├─→ annc-opt（--atir-rank-inference、--atir-identity-canonicalize、--atir-op-fusion；epilogue 融合仅在 ANNC_GEMM=2 时启用）→ 融合后的 ATIR
+  ├─→ annc-fusion-metadata → 提取 ANNCFused 元数据 JSON
+  ├─→ annc-asm（--annc-fast-codegen、--annc-aarch64-gemm-pipeline）
+  │     └─→ lowered MLIR（linalg/affine/scf）
+  ├─→ annc → .so / 可执行文件（driver：mlir-opt → mlir-translate → opt → llc → clang link）
+  ├─→ annc-verify → kernel 正确性验证
+  └─→ annc-converter → TF GraphDef（基于融合元数据重写为 ANNCFused 图）
+
+annc-tf-pipeline → 端到端编排上述所有步骤
+
+annc-onnx-pipeline → ONNX 端到端：annc-onnx2atir → annc-opt → 站点报告 → annc-asm → annc
+                     （bytecode 中间件；只把 AOT 站点编译进 kernel .so）
 ```
 
-#### 构建测试工具
+- 自定义方言 ATIR 位于 `annc/lib/Dialect/Atir/`，提供 `ShapeInfer`（形状推导）与 `Interpret`（解释执行）接口，以及 OpVerify kernel 正确性验证；Op / Pass 定义在 `annc/include/Dialect/Atir/`。
+- Lowering 路径：`annc/lib/Conversion/Common/`（公共 lowering 工具）、`annc/lib/Conversion/AtirToLinalg/`（ATIR → Linalg）、`annc/lib/Target/aarch64/`（AArch64 GEMM 规划、分块与微内核 lowering）。
+- 各模块职责与目录导航见 [总体架构设计](docs/architecture/overview.md)。
 
-```bash
-bazel --output_user_root=./output build -c opt annc/tools/kp-opt:kp-opt
-bazel-bin/annc/tools/kp-opt/kp-opt {test_hlo_cluster_file.dat}
-```
+## 工具矩阵
 
-#### 调试模式构建
+两条框架接入入口：**`annc-tf-pipeline`**（TensorFlow）与 **`annc-onnx-pipeline`**（ONNX Runtime）。
 
-```bash
-bazel --output_user_root=./output build -c opt --copt="-g" annc/service/cpu:libannc.so
-```
+| 工具                         | 功能                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------- |
+| `annc-tf-pipeline`         | TensorFlow 端到端：GraphDef → 融合 → AOT kernel `.so` → 重写后的 GraphDef                             |
+| `annc-onnx-pipeline`       | ONNX 端到端：模型 → AOT kernel `.so` + 站点报告 `sites.json`，供 ONNX Runtime EP 调用                     |
+| `annc-tf2atir`             | TF GraphDef → ATIR MLIR（直接转换，无需 JSON 中间步骤）                                                  |
+| `annc-onnx2atir`           | [ONNX 模型 → ATIR MLIR](docs/design/onnx-support/frontend-design.md)（复用 builder 引擎，op 表按框架分离） |
+| `annc-opt`                 | ATIR 优化（identity 规范化、算子融合、AOT 筛选等）                                                          |
+| `annc-fusion-metadata`     | 从融合 ATIR 提取 ANNCFused 元数据（JSON 格式）                                                          |
+| `annc-asm`                 | ATIR → lowered MLIR（linalg/affine/scf）                                                      |
+| `annc`                     | 编译驱动：lowered MLIR → `.so` / 可执行文件                                                           |
+| `annc-gemm-epilogue-kernel-compile` | 将 lowered MLIR 中的 epilogue GEMM kernel 请求编译为 `.o`，由 `annc` 在链接前自动调用 |
+| `annc-verify`              | Kernel 正确性验证                                                                                |
+| `annc-converter`           | 基于融合元数据重写 TF GraphDef（把融合子图替换为 `ANNCFused` 节点）                                              |
 
-#### 使用本地缓存目录
+各工具的典型用法与分步编译见[CLI 工作流](docs/guides/cli-workflows.md)。
 
-```bash
-bazel --output_user_root=./output --distdir=/path/to/proxy build -c opt annc/service/cpu:libannc.so
-```
+## 相关项目
 
-### 使用方法
-
-#### Python API
-
-提供 annc-opt 工具对 PB 模型进行预编译，配合 ANNC 编译优化，实现图优化和常量折叠特性。
-
-annc-opt 工具在模型部署前对 TensorFlow SavedModel 进行预处理，执行模式匹配和图重写操作，将复杂的算子组合融合为高效的自定义算子；同时在编译阶段通过常量折叠技术预先计算静态张量，减少运行时开销，提升推理性能。
-
-
-```bash
-# 工具安装
-cd /path_to_ANNC/python
-python3 setup.py bdist_wheel
-python3 -m pip install dist/*.whl --force-reinstall
-
-# 模型转换
-# 常量折叠预重排打包
-annc-opt -I input_model.pb -O output_dir layout_matmul
-# TensorFlow图融合
-annc-opt -I input_model.pb -O output_dir embed_hash_bucket
-```
-
-#### 特性开关配置
-
-ANNC 提供了丰富的特性开关，通过环境变量 `ANNC_FLAGS` 进行配置，可以精细控制各种优化策略的启用。
-
-| 开关名称 | 类型 | 说明 | 默认值 |
-|---------|------|------|--------|
-| `--gemm-opt` | 组合标志 | **启用所有 GEMM_OPT 类型优化**（包括 matmul、layout-matmul、disable-tf-matmul-fusion） | false |
-| `--graph-opt` | 组合标志 | **启用所有 GRAPH_OPT 类型优化**（包括 sps-emd-2） | false |
-| `--matmul` | GEMM_OPT | 注册标准 matmul 算子（使用 DNN_CUSTOM_CALL） | false |
-| `--layout-matmul` | GEMM_OPT | 注册 layout_matmul 算子，支持自定义内存布局（使用 FUSED_OPERATION） | false |
-| `--disable-tf-matmul-fusion` | GEMM_OPT | 禁用 TensorFlow 层面的 matmul 融合，交由 ANNC 处理 | false |
-| `--batch-matmul` | NONE | 注册 batch_matmul 算子，支持批量矩阵乘法 | false |
-| `--matmul-add` | NONE | 注册 matmul_add 融合算子（MatMul + Add） | false |
-| `--matmul-add-relu` | NONE | 注册 matmul_add_relu 融合算子（MatMul + Add + ReLU） | false |
-| `--sps-emd-2` | GRAPH_OPT | 启用 sparse_embedding2 融合优化，优化稀疏嵌入操作 | false |
-| `--pooling` | NONE | 启用 pooling 融合优化，将多个操作融合为单个 pooling 操作 | false |
-| `--annc-pass` | TF_OPT | 启用 ANNC 优化器 pass，对 TensorFlow 计算图进行优化 | **true** |
-
-##### 使用示例
-
-```bash
-# 启用所有 GEMM 和图优化
-export ANNC_FLAGS="--gemm-opt --graph-opt"
-
-# 启用特定的 GEMM 优化
-export ANNC_FLAGS="--layout-matmul --matmul-add-relu"
-
-# 只启用 matmul
-export ANNC_FLAGS="--matmul"
-```
-
-## 版本历史
-
-| 版本 | 发布日期 | 新增特性 |
-|------|----------|----------|
-| v0.0.4 | 2026-05 | 常量折叠优化 |
-| [v0.0.3](https://gitcode.com/openeuler/ANNC/-/tree/v0.0.3) | 2025-11 | TensorFlow图融合（9个Embedding融合算子）、算子优化（Kernel Selector智能路由 + XNNPACK集成） |
-| [v0.0.2](https://gitcode.com/openeuler/ANNC/-/tree/v0.0.2) | 2025-08 | XLA图融合（CPU感知图编译增强、多核搜索系统）、算子优化（ENABLE_ANNC编译控制） |
-| [v0.0.1-alpha](https://gitcode.com/openeuler/ANNC/-/tree/v0.0.1-alpha) | 2025-05 | XLA图融合（XLA/LLVM Patch机制）、算子优化（GEMM/Softmax接入OpenBLAS） |
-
-## 许可证
-
-- 本项目核心代码采用 Apache License 2.0
-- third_party/kpgemm 采用 BSD 3-Clause License (OpenBLAS)
-
-
-## 贡献声明
-
-欢迎大家为社区做贡献，如果使用过程中有任何问题/建议，或者需要反馈特性需求和bug报告，可以提交[Issues](https://gitcode.com/boostkit/community/blob/master/docs/contributor/issue-submit.md)联系我们，具体贡献方法可参考[这里](https://gitcode.com/boostkit/community/blob/master/docs/contributor/contributing.md)。同时也欢迎大家在[讨论专区](https://gitcode.com/boostkit/community/discussions)展开讨论交流。感谢您的支持。
+- [LLVM](https://llvm.org/)
+- [MLIR](https://mlir.llvm.org/)
+- [openEuler](https://openeuler.org/zh/)

@@ -1,0 +1,686 @@
+// REQUIRES: legacy-aarch64-pipeline
+// RUN: rm -rf %t.dir && mkdir -p %t.dir && split-file %s %t.dir
+// RUN: env ANNC_GEMM=2 annc-opt --split-input-file %t.dir/discovery.mlir -atir-gemm-epilogue-fusion -o %t.discovery.mlir
+// RUN: FileCheck %t.dir/discovery.mlir < %t.discovery.mlir
+// RUN: env ANNC_GEMM=2 annc-asm --split-input-file %t.discovery.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/discovery.mlir --check-prefix=COMMIT
+// RUN: env ANNC_GEMM=2 annc-asm --split-input-file %t.dir/conversion.mlir -convert-atir-to-linalg | FileCheck %t.dir/conversion.mlir
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/production.mlir -atir-gemm-epilogue-fusion -o %t.production.mlir
+// RUN: env ANNC_GEMM=2 not annc-opt %t.dir/invalid-candidate.mlir -atir-op-fusion 2>&1 | FileCheck %t.dir/invalid-candidate.mlir --check-prefix=INVALID
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/jit-template.mlir -atir-gemm-epilogue-fusion -atir-op-fusion -o %t.jit-template.mlir
+// RUN: env ANNC_GEMM=2 annc-asm %t.jit-template.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/jit-template.mlir --check-prefix=JIT-COMMIT
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/neon-vecmat-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.neon-vecmat.mlir
+// RUN: env ANNC_GEMM=2 annc-asm %t.neon-vecmat.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/neon-vecmat-epilogue.mlir --check-prefix=NEON-VECMAT
+// RUN: env ANNC_GEMM=2 annc-opt %t.dir/threaded-epilogue.mlir -atir-gemm-epilogue-fusion -o %t.threaded-epilogue.mlir
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=1)))' < %S/Inputs/gemm-tuning-test.json > %t.serial-gemm.json
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.serial-gemm.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=SERIAL-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=2)))' < %S/Inputs/gemm-tuning-test.json > %t.limited-gemm.json
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.limited-gemm.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=TWO-TASK-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.limited-gemm.json intra-thread-count=1' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=SERIAL-EPILOGUE --implicit-check-not=annc_threadpool_parallel_for_gemm --implicit-check-not=__annc_gemm_thread_task_
+// RUN: python3 -c 'import json, sys; print(json.dumps(dict(json.load(sys.stdin), max_thread_count=0)))' < %S/Inputs/gemm-tuning-test.json > %t.invalid-gemm.json
+// RUN: env ANNC_GEMM=2 not annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%t.invalid-gemm.json intra-thread-count=4' 2>&1 | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=INVALID-THREAD-LIMIT
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=PARALLEL-EPILOGUE
+// RUN: env ANNC_GEMM=2 annc-asm %t.threaded-epilogue.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json intra-thread-count=4' | FileCheck %t.dir/threaded-epilogue.mlir --check-prefix=PARALLEL-EPILOGUE
+// Euler dev selects direct/packed/prepacked from the target plan; the legacy
+// ANNC_GEMM_RHS_PACKING override is intentionally not part of this contract.
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=SVE,SVE-DIRECT,SVE-PACKED
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefixes=NEON,NEON-DIRECT,NEON-PACKED
+// RUN: env ANNC_GEMM=2 ANNC_ENABLE_EPILOGUE_MATVEC=0 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' | FileCheck %t.dir/production.mlir --check-prefix=NEON-MATVEC-OFF
+// RUN: env ANNC_GEMM=2 annc-asm %t.production.mlir -aarch64-atir-gemm-epilogue-commit | FileCheck %t.dir/production.mlir --check-prefix=COMMIT
+// RUN: rm -rf %t.aot && env ANNC_GEMM=2 annc-asm %t.production.mlir -annc-aarch64-gemm-pipeline='config-path=%S/Inputs/gemm-tuning-hip09-neon-test.json' -o %t.mlir
+// RUN: env ANNC_GEMM=2 annc-gemm-epilogue-kernel-compile %t.mlir --output-dir %t.aot
+// RUN: find %t.aot/model_generated_kernels -name '*.S' -print | count 0
+// RUN: find %t.aot/model_generated_kernels -name '*.o' -print | count 8
+// RUN: env ANNC_GEMM=2 LIBRARY_PATH="${LIBRARY_PATH:?}" annc %t.mlir --shared -o %t.so
+// RUN: python3 -c "import ctypes; ctypes.CDLL(r'%t.so')"
+// RUN: python3 -c "import glob,subprocess; objects=glob.glob(r'%t.aot/model_generated_kernels/*.o'); expected={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-g','--defined-only',*objects],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; actual={l.split()[-1] for l in subprocess.check_output(['llvm-nm','-D','--defined-only',r'%t.so'],text=True).splitlines() if l.split() and l.split()[-1].startswith('annc_gemm_agc')}; assert actual == expected, (actual-expected,expected-actual)"
+// RUN: llvm-nm -D --defined-only %t.so | FileCheck %t.dir/production.mlir --check-prefix=AOT-LINK
+
+//--- production.mlir
+
+// AOT-LINK: T annc_gemm_agc{{[a-zA-Z0-9_]+}}
+
+// SVE-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
+// SVE-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
+// NEON-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, i32, !llvm.ptr)
+// NEON-DAG: llvm.func @annc_gemm_agc{{[a-zA-Z0-9_]+}}(!llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32, !llvm.ptr)
+
+// SVE-DIRECT-LABEL: func.func @smallshape_gemm(
+// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_
+// NEON-DIRECT-LABEL: func.func @smallshape_gemm(
+// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_mr1_n5_kg_r1_f32
+func.func @smallshape_gemm(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>) {
+  %matmul = "atir.MatMul"(%out, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  return
+}
+
+// The NEON matrix-vector family retains its specialized leaf when an epilogue
+// is present; K=641 spans multiple KC blocks and only Final-K is generated.
+// NEON-DIRECT-LABEL: func.func @gemv_suffix_add_relu(
+// NEON-DIRECT: llvm.call @annc_aarch64_neon_matvec_mr4_k8_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_tail_acc
+// NEON-DIRECT-SAME: normalized_request =
+// NEON-DIRECT-NOT: arith.maxnumf
+// NEON-MATVEC-OFF-LABEL: func.func @gemv_suffix_add_relu(
+// NEON-MATVEC-OFF: llvm.call @annc_aarch64_neon_kernel_rm_
+// NEON-MATVEC-OFF-NOT: llvm.call @annc_aarch64_neon_matvec
+func.func @gemv_suffix_add_relu(
+    %a: !atir.tensor<8x641xf32>, %b: !atir.tensor<641x1xf32>,
+    %out: !atir.tensor<8x1xf32>, %bias: !atir.tensor<1xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<8x1xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<8x1xf32>, !atir.tensor<8x641xf32>,
+        !atir.tensor<641x1xf32>) -> !atir.tensor<8x1xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<8x1xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<8x1xf32>, !atir.tensor<8x1xf32>,
+        !atir.tensor<1xf32>) -> !atir.tensor<8x1xf32>
+  %relu = "atir.Relu"(%out, %add) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<8x1xf32>, !atir.tensor<8x1xf32>) ->
+      !atir.tensor<8x1xf32>
+  return
+}
+
+// A destination-style GEMM just above the smallshape threshold exercises
+// planner-selected packed RHS, Single-K fusion, and both K/N tails.
+// COMMIT-LABEL: func.func @single_tail_add_relu(
+// COMMIT: "atir.MatMul"
+// COMMIT-SAME: withBias = false
+// COMMIT-SAME: annc.gemm.epilogue =
+// COMMIT-NOT: "atir.Add"
+// COMMIT-NOT: "atir.Relu"
+// SVE-PACKED-LABEL: func.func @single_tail_add_relu(
+// SVE-PACKED: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// SVE-PACKED-SAME: normalized_request =
+// SVE-PACKED-NOT: arith.maxnumf
+// NEON-PACKED-LABEL: func.func @single_tail_add_relu(
+// NEON-PACKED: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+// NEON-PACKED-SAME: normalized_request =
+// NEON-PACKED-NOT: arith.maxnumf
+func.func @single_tail_add_relu(
+    %a: !atir.tensor<2x5xf32>, %b: !atir.tensor<5x501xf32>,
+    %out: !atir.tensor<2x501xf32>, %bias: !atir.tensor<501xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<2x501xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<2x501xf32>, !atir.tensor<2x5xf32>,
+        !atir.tensor<5x501xf32>) -> !atir.tensor<2x501xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<2x501xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<2x501xf32>, !atir.tensor<2x501xf32>,
+        !atir.tensor<501xf32>) -> !atir.tensor<2x501xf32>
+  %relu = "atir.Relu"(%out, %add) <{relu_limit = 6.0 : f32}> :
+      (!atir.tensor<2x501xf32>, !atir.tensor<2x501xf32>) ->
+      !atir.tensor<2x501xf32>
+  return
+}
+
+// This Single-K call and multi_k_add's Final-K call select different callee
+// symbols but share one generated macro family and therefore one AOT file.
+func.func @single_add(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>, %bias: !atir.tensor<5xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5xf32>) -> !atir.tensor<1x5xf32>
+  return
+}
+
+// M broadcast is not supported by the fused leaf. The fixed candidate keeps
+// the preceding N-broadcast Add and materializes Mul as a suffix.
+// SVE-DIRECT-LABEL: func.func @add_then_m_mul(
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// SVE-DIRECT: arith.mulf
+// NEON-DIRECT-LABEL: func.func @add_then_m_mul(
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+// NEON-DIRECT: arith.mulf
+func.func @add_then_m_mul(
+    %a: !atir.tensor<3x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<3x5xf32>, %bias: !atir.tensor<5xf32>,
+    %scale: !atir.tensor<3x1xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<3x5xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+        !atir.tensor<5xf32>) -> !atir.tensor<3x5xf32>
+  %mul = "atir.Mul"(%out, %add, %scale) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+       !atir.tensor<3x1xf32>) -> !atir.tensor<3x5xf32>
+  return
+}
+
+// An unsupported M-broadcast prefix forces both the external Mul and Swish
+// through the regular suffix, including the final multiply by the saved input.
+// SVE-DIRECT-LABEL: func.func @m_mul_then_swish(
+// SVE-DIRECT-NOT: annc.aarch64.generated_microkernel
+// SVE-DIRECT: arith.mulf
+// SVE-DIRECT: arith.mulf
+// NEON-DIRECT-LABEL: func.func @m_mul_then_swish(
+// NEON-DIRECT-NOT: annc.aarch64.generated_microkernel
+// NEON-DIRECT: arith.mulf
+// NEON-DIRECT: arith.mulf
+func.func @m_mul_then_swish(
+    %a: !atir.tensor<3x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<3x5xf32>, %scale: !atir.tensor<3x1xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<3x5xf32>
+  %mul_tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %mul = "atir.Mul"(%mul_tmp, %matmul, %scale) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+       !atir.tensor<3x1xf32>) -> !atir.tensor<3x5xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<3x5xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %mul) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>) ->
+      !atir.tensor<3x5xf32>
+  %swish = "atir.Mul"(%out, %mul, %sigmoid) :
+      (!atir.tensor<3x5xf32>, !atir.tensor<3x5xf32>,
+       !atir.tensor<3x5xf32>) -> !atir.tensor<3x5xf32>
+  return
+}
+
+// Rank-1 length-one inputs use a constant-zero map and remain scalar through
+// cache and kernel tiling.
+// SVE-DIRECT-LABEL: func.func @single_scalar_add(
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// NEON-DIRECT-LABEL: func.func @single_scalar_add(
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+func.func @single_scalar_add(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>, %scalar: !atir.tensor<1xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  %add = "atir.Add"(%out, %matmul, %scalar) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<1xf32>) -> !atir.tensor<1x5xf32>
+  return
+}
+
+// A unary epilogue still receives a valid EpilogueArgs directory even though
+// it has no external pointer slots to populate.
+// SVE-DIRECT-LABEL: func.func @single_sigmoid(
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// NEON-DIRECT-LABEL: func.func @single_sigmoid(
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+func.func @single_sigmoid(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  %sigmoid = "atir.Logistic"(%out, %matmul) :
+      (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>) ->
+      !atir.tensor<1x5xf32>
+  return
+}
+
+// Swish is discovered from the parallel Sigmoid/Mul pair and emitted entirely
+// by the generated NEON and SVE kernels, without an elementwise suffix.
+// SVE-DIRECT-LABEL: func.func @single_swish(
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_overwrite
+// SVE-DIRECT-NOT: arith.mulf
+// NEON-DIRECT-LABEL: func.func @single_swish(
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_groups
+// NEON-DIRECT-NOT: arith.mulf
+func.func @single_swish(
+    %a: !atir.tensor<1x5xf32>, %b: !atir.tensor<5x5xf32>,
+    %out: !atir.tensor<1x5xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5x5xf32>) -> !atir.tensor<1x5xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %matmul) :
+      (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>) ->
+      !atir.tensor<1x5xf32>
+  %swish = "atir.Mul"(%out, %matmul, %sigmoid) :
+      (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+       !atir.tensor<1x5xf32>) -> !atir.tensor<1x5xf32>
+  return
+}
+
+// K=17 with KC=8 creates First, Middle, and Final blocks. Only Final may use
+// the generated fused symbol; the earlier blocks remain ordinary kernels.
+// SVE-DIRECT-LABEL: func.func @multi_k_add(
+// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_f32
+// SVE-DIRECT: llvm.call @annc_aarch64_sve_kernel_rm_{{.*}}_acc_f32
+// SVE-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_accumulate
+// NEON-DIRECT-LABEL: func.func @multi_k_add(
+// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_kg_r0_f32
+// NEON-DIRECT: llvm.call @annc_aarch64_neon_kernel_rm_{{.*}}_kg_r0_acc_f32
+// NEON-DIRECT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}_tail_acc
+func.func @multi_k_add(
+    %a: !atir.tensor<1x17xf32>, %b: !atir.tensor<17x5xf32>,
+    %out: !atir.tensor<1x5xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x5xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x17xf32>,
+        !atir.tensor<17x5xf32>) -> !atir.tensor<1x5xf32>
+  %bias = "atir.buffer"() : () -> !atir.tensor<5xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<1x5xf32>, !atir.tensor<1x5xf32>,
+        !atir.tensor<5xf32>) -> !atir.tensor<1x5xf32>
+  return
+}
+
+//--- discovery.mlir
+
+// CHECK-LABEL: func.func @ordered_add_relu(
+// CHECK: "atir.MatMul"
+// CHECK-SAME: annc.gemm.epilogue.candidate =
+// CHECK-SAME: output_role = "main_d"
+// CHECK-SAME: broadcast = "n"
+// CHECK-SAME: input = 0 : i64
+// CHECK-SAME: opcode = "add"
+// CHECK-SAME: limit = 6.000000e+00 : f32
+// CHECK-SAME: opcode = "relu"
+// CHECK: "atir.Add"
+// CHECK: "atir.Relu"
+// COMMIT-LABEL: func.func @ordered_add_relu(
+// COMMIT: "atir.MatMul"
+// COMMIT-SAME: annc.gemm.epilogue =
+// COMMIT-NOT: "atir.Add"
+// COMMIT-NOT: "atir.Relu"
+func.func @ordered_add_relu(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<4x4xf32>, %bias: !atir.tensor<4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %add = "atir.Add"(%add_tmp, %bias, %matmul) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4xf32>,
+        !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+  %relu = "atir.Relu"(%out, %add) <{relu_limit = 6.0 : f32}> :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @terminal_reshape(
+// CHECK: "atir.MatMul"
+// CHECK-SAME: terminal_view = "insert_unit_dimension"
+// CHECK: "atir.Add"
+// CHECK: atir.Reshape
+func.func @terminal_reshape(
+    %a: !atir.tensor<3x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<3x1x4xf32>, %bias: !atir.tensor<4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<3x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<3x4xf32>, !atir.tensor<3x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<3x4xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<3x4xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<3x4xf32>, !atir.tensor<3x4xf32>,
+        !atir.tensor<4xf32>) -> !atir.tensor<3x4xf32>
+  %shape = atir.constant "private" @"shape" ->
+      <3xi64, data = dense<[3, 1, 4]> : tensor<3xi64>>
+  %reshape = atir.Reshape %out, %add, %shape :
+      <3x1x4xf32>, <3x4xf32>,
+      <3xi64, data = dense<[3, 1, 4]> : tensor<3xi64>> -> <3x1x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reshape_without_epilogue(
+// CHECK: "atir.MatMul"
+// CHECK-NOT: annc.gemm.epilogue.candidate
+// CHECK: atir.Reshape
+func.func @reshape_without_epilogue(
+    %a: !atir.tensor<3x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<3x1x4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<3x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<3x4xf32>, !atir.tensor<3x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<3x4xf32>
+  %shape = atir.constant "private" @"plain_shape" ->
+      <3xi64, data = dense<[3, 1, 4]> : tensor<3xi64>>
+  %reshape = atir.Reshape %out, %matmul, %shape :
+      <3x1x4xf32>, <3x4xf32>,
+      <3xi64, data = dense<[3, 1, 4]> : tensor<3xi64>> -> <3x1x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reject_branched_chain(
+// CHECK: "atir.MatMul"
+// CHECK-NOT: annc.gemm.epilogue.candidate
+// CHECK: "atir.Add"
+// CHECK: "atir.Relu"
+// CHECK: "atir.Relu"
+// COMMIT-LABEL: func.func @reject_branched_chain(
+func.func @reject_branched_chain(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %bias: !atir.tensor<4xf32>, %out0: !atir.tensor<4x4xf32>,
+    %out1: !atir.tensor<4x4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+        !atir.tensor<4xf32>) -> !atir.tensor<4x4xf32>
+  %relu0 = "atir.Relu"(%out0, %add) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  %relu1 = "atir.Relu"(%out1, %add) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reject_dynamic_broadcast(
+// CHECK: "atir.MatMul"
+// CHECK-NOT: annc.gemm.epilogue.candidate
+// CHECK: "atir.Add"
+func.func @reject_dynamic_broadcast(
+    %a: !atir.tensor<?x?xf32>, %b: !atir.tensor<?x?xf32>,
+    %out: !atir.tensor<?x?xf32>, %bias: !atir.tensor<?xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<?x?xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<?x?xf32>, !atir.tensor<?x?xf32>,
+        !atir.tensor<?x?xf32>) -> !atir.tensor<?x?xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<?x?xf32>, !atir.tensor<?x?xf32>,
+        !atir.tensor<?xf32>) -> !atir.tensor<?x?xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @matrix_candidate(
+// CHECK: "atir.MatMul"
+// CHECK-SAME: broadcast = "matrix"
+// CHECK: "atir.Add"
+// COMMIT-LABEL: func.func @matrix_candidate(
+// COMMIT: "atir.MatMul"
+// COMMIT-SAME: annc.gemm.epilogue =
+// COMMIT-NOT: annc.gemm.epilogue.candidate
+// COMMIT-NOT: "atir.Add"
+func.func @matrix_candidate(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<4x4xf32>, %addend: !atir.tensor<4x4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %add = "atir.Add"(%out, %matmul, %addend) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+        !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reject_transpose(
+// CHECK: "atir.MatMul"
+// CHECK-NOT: annc.gemm.epilogue.candidate
+// CHECK: "atir.Add"
+// COMMIT-LABEL: func.func @reject_transpose(
+// COMMIT: "atir.MatMul"
+// COMMIT: "atir.Add"
+func.func @reject_transpose(
+    %a: !atir.tensor<2x3xf32>, %b: !atir.tensor<3x4xf32>,
+    %out: !atir.tensor<4x2xf32>, %bias: !atir.tensor<2xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x2xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = true,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x2xf32>, !atir.tensor<2x3xf32>,
+        !atir.tensor<3x4xf32>) -> !atir.tensor<4x2xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x2xf32>, !atir.tensor<4x2xf32>,
+        !atir.tensor<2xf32>) -> !atir.tensor<4x2xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reject_legacy_postop(
+// CHECK: "atir.MatMul"
+// CHECK: do_relu = true
+// CHECK-NOT: annc.gemm.epilogue.candidate
+// CHECK: "atir.Add"
+func.func @reject_legacy_postop(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<4x4xf32>, %bias: !atir.tensor<4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    do_relu = true, left_transpose = false, output_transpose = false,
+    relu_limit = -1.0 : f32, right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+        !atir.tensor<4xf32>) -> !atir.tensor<4x4xf32>
+  return
+}
+
+//--- conversion.mlir
+
+// CHECK-LABEL: func @matrix_add
+// CHECK: linalg.generic
+// CHECK: arith.addf
+// CHECK-NOT: "atir.Add"
+// CHECK-NOT: builtin.unrealized_conversion_cast
+func.func @matrix_add(
+    %out: !atir.tensor<4x4xf32>, %a: !atir.tensor<4x4xf32>,
+    %b: !atir.tensor<4x4xf32>) {
+  %add = "atir.Add"(%out, %a, %b) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+        !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func @dynamic_matrix_add
+// CHECK: linalg.generic
+// CHECK-NOT: "atir.Add"
+// CHECK-NOT: builtin.unrealized_conversion_cast
+func.func @dynamic_matrix_add(
+    %out: !atir.tensor<?x?xf32>, %a: !atir.tensor<?x?xf32>,
+    %b: !atir.tensor<?x?xf32>) {
+  %add = "atir.Add"(%out, %a, %b) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<?x?xf32>, !atir.tensor<?x?xf32>,
+        !atir.tensor<?x?xf32>) -> !atir.tensor<?x?xf32>
+  return
+}
+
+//--- invalid-candidate.mlir
+
+// INVALID: epilogue candidate does not match the current source chain
+func.func @main(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<4x4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> {
+    annc.gemm.epilogue.candidate = {
+      output_role = "main_d",
+      steps = [{broadcast = "n", input = 1 : i64, opcode = "add"}],
+      terminal_view = "identity", version = 1 : i64
+    }
+  } : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %relu = "atir.Relu"(%out, %matmul) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  return
+}
+
+//--- neon-vecmat-epilogue.mlir
+
+// NEON-VECMAT: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// NEON-VECMAT-NOT: llvm.call @annc_aarch64_neon_vecmat
+func.func @vecmat_epilogue(
+    %a: !atir.tensor<1x400xf32>, %b: !atir.tensor<400x400xf32>,
+    %out: !atir.tensor<1x400xf32>, %bias: !atir.tensor<400xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<1x400xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<1x400xf32>, !atir.tensor<1x400xf32>,
+        !atir.tensor<400x400xf32>) -> !atir.tensor<1x400xf32>
+  %add = "atir.Add"(%out, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<1x400xf32>, !atir.tensor<1x400xf32>,
+        !atir.tensor<400xf32>) -> !atir.tensor<1x400xf32>
+  return
+}
+
+//--- jit-template.mlir
+
+// JIT-COMMIT-LABEL: func.func private @fused_matmul_swish_
+// JIT-COMMIT: "atir.MatMul"
+// JIT-COMMIT-SAME: annc.gemm.epilogue =
+// JIT-COMMIT-SAME: opcode = "swish"
+// JIT-COMMIT-NOT: annc.gemm.epilogue.candidate
+// JIT-COMMIT-NOT: atir.Logistic
+// JIT-COMMIT-NOT: atir.Mul
+// JIT-COMMIT-LABEL: func.func private @fused_matmul_add_relu_
+// JIT-COMMIT: "atir.MatMul"
+// JIT-COMMIT-SAME: annc.gemm.epilogue =
+// JIT-COMMIT-NOT: annc.gemm.epilogue.candidate
+// JIT-COMMIT-NOT: "atir.Add"
+// JIT-COMMIT-NOT: "atir.Relu"
+func.func @main(
+    %a: !atir.tensor<4x8xf32>, %b: !atir.tensor<8x4xf32>,
+    %out: !atir.tensor<4x4xf32>, %bias: !atir.tensor<4xf32>,
+    %swish_out: !atir.tensor<4x4xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+        !atir.tensor<4xf32>) -> !atir.tensor<4x4xf32>
+  %relu = "atir.Relu"(%out, %add) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  %swish_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %swish_matmul = "atir.MatMul"(%swish_tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<4x4xf32>, !atir.tensor<4x8xf32>,
+        !atir.tensor<8x4xf32>) -> !atir.tensor<4x4xf32>
+  %sigmoid_tmp = "atir.buffer"() : () -> !atir.tensor<4x4xf32>
+  %sigmoid = "atir.Logistic"(%sigmoid_tmp, %swish_matmul) :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>) ->
+      !atir.tensor<4x4xf32>
+  %swish = "atir.Mul"(%swish_out, %sigmoid, %swish_matmul) :
+      (!atir.tensor<4x4xf32>, !atir.tensor<4x4xf32>,
+       !atir.tensor<4x4xf32>) -> !atir.tensor<4x4xf32>
+  return
+}
+
+//--- threaded-epilogue.mlir
+
+// A limit of one from either the config or the caller keeps the fused
+// epilogue on the serial path.
+// SERIAL-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// SERIAL-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// SERIAL-EPILOGUE-NOT: arith.addf
+// TWO-TASK-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// TWO-TASK-EPILOGUE: %[[TASK_COUNT:.*]] = arith.constant 2 : i64
+// TWO-TASK-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue(%[[TASK_COUNT]],
+// INVALID-THREAD-LIMIT: requires positive integer field max_thread_count
+// PARALLEL-EPILOGUE-LABEL: func.func @threaded_add_relu(
+// PARALLEL-EPILOGUE: call @annc_threadpool_parallel_for_gemm_epilogue
+// PARALLEL-EPILOGUE: func.func private @__annc_gemm_thread_task_
+// PARALLEL-EPILOGUE-SAME: memref<*xf32>
+// PARALLEL-EPILOGUE: llvm.call @annc_gemm_agc{{[a-zA-Z0-9_]+}}
+// PARALLEL-EPILOGUE-NOT: arith.addf
+func.func @threaded_add_relu(
+    %a: !atir.tensor<128x128xf32>, %b: !atir.tensor<128x128xf32>,
+    %out: !atir.tensor<128x128xf32>, %bias: !atir.tensor<128xf32>) {
+  %tmp = "atir.buffer"() : () -> !atir.tensor<128x128xf32>
+  %matmul = "atir.MatMul"(%tmp, %a, %b) <{
+    left_transpose = false, output_transpose = false,
+    right_transpose = false, withBias = false
+  }> : (!atir.tensor<128x128xf32>, !atir.tensor<128x128xf32>,
+        !atir.tensor<128x128xf32>) -> !atir.tensor<128x128xf32>
+  %add_tmp = "atir.buffer"() : () -> !atir.tensor<128x128xf32>
+  %add = "atir.Add"(%add_tmp, %matmul, %bias) <{
+    do_relu = false, relu_limit = -1.0 : f32
+  }> : (!atir.tensor<128x128xf32>, !atir.tensor<128x128xf32>,
+        !atir.tensor<128xf32>) -> !atir.tensor<128x128xf32>
+  %relu = "atir.Relu"(%out, %add) <{relu_limit = -1.0 : f32}> :
+      (!atir.tensor<128x128xf32>, !atir.tensor<128x128xf32>) ->
+      !atir.tensor<128x128xf32>
+  return
+}

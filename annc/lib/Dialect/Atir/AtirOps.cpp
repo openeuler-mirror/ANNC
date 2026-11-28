@@ -1,0 +1,802 @@
+#include "Dialect/Atir/AtirOps.h"
+
+#include "Support/Log.h"
+
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/Value.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/TypeSwitch.h"
+
+using namespace mlir;
+using namespace atir;
+
+#include "Dialect/Atir/AtirDialect.cpp.inc"
+#include "Dialect/Atir/AtirEnums.cpp.inc"
+void AtirDialect::initialize() {
+  addAttributes<
+    #define GET_ATTRDEF_LIST
+    #include "Dialect/Atir/AtirAttr.cpp.inc"
+  >();
+  addOperations<
+    #define GET_OP_LIST
+    #include "Dialect/Atir/AtirOps.cpp.inc"
+  >();
+  addTypes<
+    #define GET_TYPEDEF_LIST
+    #include "Dialect/Atir/AtirTypes.cpp.inc"
+  >();
+}
+
+#define GET_ATTRDEF_CLASSES
+#include "Dialect/Atir/AtirAttr.cpp.inc"
+
+#define GET_OP_CLASSES
+#include "Dialect/Atir/AtirOps.cpp.inc"
+
+#define GET_TYPEDEF_CLASSES
+#include "Dialect/Atir/AtirTypes.cpp.inc"
+
+namespace atir {
+LogicalResult FusedMatMulOp::verify() {
+  Attribute attribute = (*this)->getAttr("annc.gemm.epilogue");
+  if (!attribute) {
+    if (!getEpilogueInputs().empty())
+      return emitOpError(
+          "requires annc.gemm.epilogue when epilogue inputs are present");
+    return success();
+  }
+  auto epilogue = dyn_cast<DictionaryAttr>(attribute);
+  if (!epilogue)
+    return emitOpError("requires annc.gemm.epilogue to be a dictionary");
+  auto steps = epilogue.getAs<ArrayAttr>("steps");
+  if (!steps || steps.empty())
+    return emitOpError("requires a nonempty epilogue steps array");
+  unsigned binaryInputCount = 0;
+  for (Attribute step : steps) {
+    auto encoded = dyn_cast<DictionaryAttr>(step);
+    auto opcode = encoded ? encoded.getAs<StringAttr>("opcode") : StringAttr{};
+    if (!opcode)
+      return emitOpError("requires an opcode string for each epilogue step");
+    if (opcode.getValue() == "add" || opcode.getValue() == "mul")
+      ++binaryInputCount;
+    else if (opcode.getValue() != "relu" && opcode.getValue() != "sigmoid")
+      return emitOpError("has an unsupported epilogue opcode");
+  }
+  if (getEpilogueInputs().size() != binaryInputCount)
+    return emitOpError("epilogue inputs must match the ordered binary steps");
+  return success();
+}
+
+#define PARSE_TENSOR_ERROR(err) {                              \
+  odsParser.emitError(odsParser.getCurrentLocation(),          \
+                   std::string(errPrintMsg)+std::string(err)); \
+  return {};}
+
+constexpr const char errPrintMsg[] = "Failed to parse: ";
+constexpr const char kTensorEncoding[] = "encoding";
+constexpr const char kTensorName[] = "name";
+constexpr const char kTensorStride[] = "stride";
+constexpr const char kTensorLayout[] = "layout";
+constexpr const char kTensorMemType[] = "memory";
+constexpr const char kTensorAddress[] = "address";
+constexpr const char kTensorDeviceParl[] = "device";
+constexpr const char kTensorOnchipParl[] = "onchip";
+constexpr const char kTensorData[] = "data";
+constexpr const char kTensorStringData[] = "strings";
+constexpr const char kTensorRankKnown[] = "rank_known";
+
+Type TensorType::parse(AsmParser &odsParser) {
+  if (odsParser.parseLess())
+    PARSE_TENSOR_ERROR("Less")
+  SmallVector<int64_t> shape;
+  BoolAttr rankKnown;
+  if (succeeded(odsParser.parseOptionalStar())) {
+    rankKnown = BoolAttr::get(odsParser.getContext(), false);
+    if (odsParser.parseXInDimensionList()) PARSE_TENSOR_ERROR("shape")
+  } else if (odsParser.parseDimensionList(shape, true)) {
+    PARSE_TENSOR_ERROR("shape")
+  }
+  Type elementType;
+  if (odsParser.parseType(elementType))
+    PARSE_TENSOR_ERROR("element-type")
+
+  DenseElementsAttr cacheData;
+  Attribute encoding;
+  StringAttr name;
+  ArrayAttr stride;
+  StringAttr layout;
+  MemTypeAttr memType;
+  IntegerAttr address;
+  TilingAttr device;
+  TilingAttr onchip;
+  while (!odsParser.parseOptionalComma()) {
+    if (!odsParser.parseOptionalKeyword(kTensorEncoding)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorEncoding)
+      if (odsParser.parseLess())
+        PARSE_TENSOR_ERROR("Less")
+      if (odsParser.parseAttribute(encoding))
+        PARSE_TENSOR_ERROR(kTensorEncoding)
+      if (odsParser.parseGreater())
+        PARSE_TENSOR_ERROR("Greater")
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorName)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorName)
+      if (odsParser.parseAttribute(name))
+        PARSE_TENSOR_ERROR(kTensorName)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorStride)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorStride)
+      if (odsParser.parseAttribute(stride))
+        PARSE_TENSOR_ERROR(kTensorStride)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorLayout)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorLayout)
+      if (odsParser.parseAttribute(layout))
+        PARSE_TENSOR_ERROR(kTensorLayout)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorMemType)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorMemType)
+      if (odsParser.parseAttribute(memType))
+        PARSE_TENSOR_ERROR(kTensorMemType)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorAddress)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorAddress)
+      if (odsParser.parseAttribute(address))
+        PARSE_TENSOR_ERROR(kTensorAddress)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorDeviceParl)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorDeviceParl)
+      if (odsParser.parseAttribute(device))
+        PARSE_TENSOR_ERROR(kTensorDeviceParl)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorOnchipParl)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorOnchipParl)
+      if (odsParser.parseAttribute(onchip))
+        PARSE_TENSOR_ERROR(kTensorOnchipParl)
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorData)) {
+      if (odsParser.parseEqual())
+        PARSE_TENSOR_ERROR(kTensorData)
+      auto stringEncoding = ::llvm::dyn_cast_or_null<StringAttr>(encoding);
+      if (stringEncoding && stringEncoding.getValue() == "string") {
+        if (odsParser.parseKeyword(kTensorStringData) ||
+            odsParser.parseLSquare())
+          PARSE_TENSOR_ERROR(kTensorData)
+        std::vector<std::string> strings;
+        if (failed(odsParser.parseOptionalRSquare())) {
+          if (failed(odsParser.parseCommaSeparatedList([&]() {
+                std::string value;
+                if (odsParser.parseString(&value)) return failure();
+                strings.push_back(std::move(value));
+                return success();
+              })) ||
+              odsParser.parseRSquare())
+            PARSE_TENSOR_ERROR(kTensorData)
+        }
+
+        auto dataType = RankedTensorType::get(shape, elementType);
+        if (!dataType.hasStaticShape())
+          PARSE_TENSOR_ERROR("static string data shape")
+        const int64_t elementCount = dataType.getNumElements();
+        if ((strings.empty() && elementCount != 0) ||
+            (!strings.empty() && strings.size() != 1 &&
+             strings.size() != static_cast<size_t>(elementCount)))
+          PARSE_TENSOR_ERROR("string data element count")
+        std::vector<StringRef> stringRefs;
+        stringRefs.reserve(strings.size());
+        for (const std::string& value : strings)
+          stringRefs.emplace_back(value.data(), value.size());
+        cacheData = DenseElementsAttr::get(dataType, stringRefs);
+      } else {
+        auto parsedCacheData = FieldParser<DenseElementsAttr>::parse(odsParser);
+        if (failed(parsedCacheData))
+          PARSE_TENSOR_ERROR(kTensorData)
+        cacheData = *parsedCacheData;
+      }
+    }
+    if (!odsParser.parseOptionalKeyword(kTensorRankKnown)) {
+      if (odsParser.parseEqual()) PARSE_TENSOR_ERROR(kTensorRankKnown)
+      if (odsParser.parseAttribute(rankKnown))
+        PARSE_TENSOR_ERROR(kTensorRankKnown)
+    }
+  }
+  
+  if (odsParser.parseGreater())
+    PARSE_TENSOR_ERROR("Greater")
+  auto tensor = TensorType::get(odsParser.getContext(), 
+    shape, elementType, name, encoding, stride, layout, memType, 
+    address, device, onchip, cacheData, rankKnown);
+  return tensor;
+}
+
+void TensorType::print(AsmPrinter &odsPrinter) const {
+  odsPrinter << "<";
+  if (!hasKnownRank()) {
+    odsPrinter << "*x";
+  } else {
+    for (auto dim : getShape()) {
+      if (dim == mlir::ShapedType::kDynamic)
+        odsPrinter << "?x";
+      else
+        odsPrinter << dim << "x";
+    }
+  }
+  odsPrinter << getElementType();
+
+  if (getEncoding()) {
+    odsPrinter << ", " << kTensorEncoding << " = <" << getEncoding() << ">";
+  }
+  if (!hasKnownRank()) {
+    odsPrinter << ", " << kTensorRankKnown << " = false";
+  }
+  if (getName()) {
+    odsPrinter << ", " << kTensorName << " = " << getName();
+  }
+  if (getStride()) {
+    odsPrinter << ", " << kTensorStride << " = " << getStride();
+  }
+  if (getLayout()) {
+    odsPrinter << ", " << kTensorLayout << " = " << getLayout();
+  }
+  if (getMemType()) {
+    odsPrinter << ", " << kTensorMemType << " = " << getMemType();
+  }
+  if (getAddress()) {
+    odsPrinter << ", " << kTensorAddress << " = " << getAddress();
+  }
+  if (getDeviceParallel()) {
+    odsPrinter << ", " << kTensorDeviceParl << " = " << getDeviceParallel();
+  }
+  if (getOnchipParallel()) {
+    odsPrinter << ", " << kTensorOnchipParl << " = " << getOnchipParallel();
+  }
+  if (getCacheData()) {
+    odsPrinter << ", " << kTensorData << " = ";
+    if (auto stringData = ::llvm::dyn_cast<DenseStringElementsAttr>(getCacheData())) {
+      odsPrinter << kTensorStringData << "[";
+      for (auto [index, value] : llvm::enumerate(
+               stringData.getValues<StringRef>())) {
+        if (index != 0) odsPrinter << ", ";
+        odsPrinter.printString(value);
+      }
+      odsPrinter << "]";
+    } else {
+      odsPrinter.printStrippedAttrOrType(getCacheData());
+    }
+  }
+  odsPrinter << ">";
+}
+
+TensorType getAtirTensorType(MLIRContext* ctx) {
+  llvm::SmallVector<int64_t> shape;
+  Type type = Float32Type::get(ctx);
+  return TensorType::get(shape, type);
+}
+
+void ForOp::build(::mlir::OpBuilder &odsBuilder,
+                  ::mlir::OperationState &odsState, int64_t idxCnt,
+                  ::mlir::ValueRange iterArgs, ::mlir::IntegerAttr axis,
+                  ::mlir::StringAttr postOp, ::mlir::BoolAttr parallel) {
+  odsState.addAttribute(odsBuilder.getStringAttr("idxCnt"),
+                        odsBuilder.getI64IntegerAttr(idxCnt));
+  odsState.addOperands(iterArgs);
+  for (size_t i = idxCnt; i < iterArgs.size(); i++)
+    odsState.addTypes(iterArgs[i].getType());
+  if (axis) {
+    odsState.addAttribute(odsBuilder.getStringAttr("axis"), axis);
+  }
+  if (postOp) {
+    odsState.addAttribute(odsBuilder.getStringAttr("postOp"), postOp);
+  }
+  if (parallel) {
+    odsState.addAttribute(odsBuilder.getStringAttr("parallel"), parallel);
+  }
+
+  Region *bodyRegion = odsState.addRegion();
+  bodyRegion->push_back(new Block);
+  Block &bodyBlock = bodyRegion->front();
+  for (auto i = 0; i < idxCnt; i++) {
+    bodyBlock.addArgument(odsBuilder.getIndexType(), odsState.location);
+  }
+  // for (Value v : iterArgs)
+  //   bodyBlock.addArgument(v.getType(), v.getLoc());
+}
+void ForOp::build(::mlir::OpBuilder &odsBuilder,
+                  ::mlir::OperationState &odsState, int64_t start, int64_t end,
+                  int64_t step, ::mlir::ValueRange iterArgs,
+                  ::mlir::IntegerAttr axis, ::mlir::StringAttr postOp,
+                  ::mlir::BoolAttr parallel) {
+  odsState.addAttributes({
+      NamedAttribute(odsBuilder.getStringAttr("start"),
+                     odsBuilder.getI64IntegerAttr(start)),
+      NamedAttribute(odsBuilder.getStringAttr("end"),
+                     odsBuilder.getI64IntegerAttr(end)),
+      NamedAttribute(odsBuilder.getStringAttr("step"),
+                     odsBuilder.getI64IntegerAttr(step)),
+  });
+  build(odsBuilder, odsState, 0, iterArgs, axis, postOp, parallel);
+}
+
+void printInitializationList(OpAsmPrinter &p,
+                                    Block::BlockArgListType blocksArgs,
+                                    ValueRange initializers,
+                                    StringRef prefix = "") {
+  assert(blocksArgs.size() == initializers.size() &&
+         "expected same length of arguments and initializers");
+  if (initializers.empty())
+    return;
+
+  p << prefix << '(';
+  llvm::interleaveComma(llvm::zip(blocksArgs, initializers), p, [&](auto it) {
+    p << std::get<0>(it) << " = " << std::get<1>(it);
+  });
+  p << ")";
+}
+
+void ForOp::print(OpAsmPrinter &p) {
+  if (getParallel().value_or(false)) {
+    p << " (parallel)";
+  }
+  if (getStart().has_value()) {
+    p << " " << getInductionVars()[0] << " = " << *getStart() << " to "
+      << *getEnd() << " step " << *getStep();
+    if (!getOperands().empty()) {
+      printInitializationList(p, getInductionVars().drop_front(), getOperands(), " iter_args");
+    }
+  } else {
+    if (!getOperands().empty()) {
+      printInitializationList(p, getInductionVars(), getOperands(), " iter_args");
+    }
+  }
+
+  if (!getOperands().empty())
+    p << " -> (" << getOperands().getTypes() << ')';
+  p << ' ';
+  p.printRegion(getRegion(),
+                /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+  p.printOptionalAttrDict((*this)->getAttrs());
+}
+
+ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto &builder = parser.getBuilder();
+
+  BoolAttr parallel;
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (succeeded(parser.parseOptionalKeyword("parallel"))) {
+      parallel = builder.getBoolAttr(true);
+      if (parser.parseRParen())
+        return failure();
+    }
+  }
+  OpAsmParser::Argument inductionVariable;
+  SmallVector<OpAsmParser::Argument, 4> regionArgs;
+  SmallVector<OpAsmParser::UnresolvedOperand, 4> operands;
+  inductionVariable.type = builder.getIndexType();
+  IntegerAttr start, end, step;
+
+  // Parse the induction variable followed by '='.
+  if (parser.parseOptionalArgument(inductionVariable).has_value()) {
+    if (parser.parseEqual() || parser.parseAttribute(start) ||
+        parser.parseKeyword("to") || parser.parseAttribute(end) ||
+        parser.parseKeyword("step") || parser.parseAttribute(step))
+      return failure();
+    regionArgs.push_back(inductionVariable);
+    ANNC_LOG_WARN("atir-parse") << "TODO: need check parse for op with start end step\n";
+  }
+
+  if (succeeded(parser.parseOptionalKeyword("iter_args"))) {
+    // Parse assignment list and results type list.
+    if (parser.parseAssignmentList(regionArgs, operands) ||
+        parser.parseArrowTypeList(result.types))
+      return failure();
+    if (regionArgs.size() != result.types.size())
+      return parser.emitError(
+          parser.getNameLoc(),
+          "mismatch in number of loop-carried values and defined values");
+
+    // Resolve input operands.
+    for (auto argOperandType : llvm::zip(regionArgs, operands, result.types)) {
+      Type type = std::get<2>(argOperandType);
+      std::get<0>(argOperandType).type = builder.getIndexType();
+      if (parser.resolveOperand(std::get<1>(argOperandType), type,
+                                result.operands))
+        return failure();
+    }
+  }
+
+  // Parse the body region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body, regionArgs))
+    return failure();
+
+  // Parse the optional attribute list.
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  // TMP
+  result.types.clear();
+  return success();
+}
+
+LogicalResult TensorToIndexOp::verify() {
+  auto inputType = dyn_cast<TensorType>(getInput().getType());
+  if (!inputType)
+    return emitOpError("input must be an atir tensor");
+  if (!inputType.getShape().empty())
+    return emitOpError("input must be a rank-0 tensor");
+  if (!inputType.getElementType().isIntOrIndex())
+    return emitOpError("input element type must be integer or index");
+  return success();
+}
+
+LogicalResult IndexToTensorOp::verify() {
+  TensorType resultType = getResult().getType();
+  if (!resultType.getShape().empty())
+    return emitOpError("result must be a rank-0 tensor");
+  if (!resultType.getElementType().isIntOrIndex())
+    return emitOpError("result element type must be integer or index");
+  return success();
+}
+
+static bool haveCompatibleMirrorTypes(Type lhs, Type rhs) {
+  if (lhs == rhs) return true;
+  auto lhsTensor = dyn_cast<TensorType>(lhs);
+  auto rhsTensor = dyn_cast<TensorType>(rhs);
+  if (!lhsTensor || !rhsTensor) return false;
+  return lhsTensor.getShape() == rhsTensor.getShape() &&
+         lhsTensor.getElementType() == rhsTensor.getElementType() &&
+         lhsTensor.getEncoding() == rhsTensor.getEncoding() &&
+         lhsTensor.getStride() == rhsTensor.getStride() &&
+         lhsTensor.getLayout() == rhsTensor.getLayout() &&
+         lhsTensor.getMemType() == rhsTensor.getMemType() &&
+         lhsTensor.getAddress() == rhsTensor.getAddress() &&
+         lhsTensor.getDeviceParallel() == rhsTensor.getDeviceParallel() &&
+         lhsTensor.getOnchipParallel() == rhsTensor.getOnchipParallel();
+}
+
+static LogicalResult verifyScalarBool(Operation *op, Type type) {
+  auto tensor = dyn_cast<TensorType>(type);
+  auto encoding = tensor ? dyn_cast_or_null<StringAttr>(tensor.getEncoding())
+                         : StringAttr();
+  if (!tensor || !tensor.getShape().empty() || !encoding ||
+      encoding.getValue() != "bool")
+    return op->emitOpError("predicate must be a scalar bool tensor");
+  return success();
+}
+
+LogicalResult SwitchOp::verify() {
+  if (failed(verifyScalarBool(*this, getPredicate().getType()))) return failure();
+  if (!haveCompatibleMirrorTypes(getData().getType(),
+                                 getFalseOutput().getType()) ||
+      !haveCompatibleMirrorTypes(getData().getType(),
+                                 getTrueOutput().getType()))
+    return emitOpError("both outputs must match the data input type");
+  return success();
+}
+
+static LogicalResult verifyPassthrough(Operation *op, Value input,
+                                       Value output) {
+  if (!haveCompatibleMirrorTypes(input.getType(), output.getType()))
+    return op->emitOpError("output must match the input type");
+  return success();
+}
+
+LogicalResult EnterOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult ExitOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult NextIterationOp::verify() {
+  return verifyPassthrough(*this, getInput(), getOutput());
+}
+
+LogicalResult LoopCondOp::verify() {
+  if (failed(verifyScalarBool(*this, getInput().getType()))) return failure();
+  return verifyScalarBool(*this, getOutput().getType());
+}
+
+//===----------------------------------------------------------------------===//
+// SizeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SizeOp::verify() {
+  // 
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  auto outputShape = outputType.getShape();
+  if (outputShape.size() != 0) {
+    return emitOpError("output must be a scalar tensor");
+  }
+  auto elementType = outputType.getElementType();
+  if (!elementType.isIntOrIndex()) {
+    return emitOpError("output element type must be integer or index");
+  }
+  return success();
+}
+
+OpFoldResult SizeOp::fold(FoldAdaptor adaptor) {
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  auto shape = inputType.getShape();
+  int64_t numElements = 1;
+  for (int64_t dim : shape) {
+    if (dim == ShapedType::kDynamic) {
+      return {};
+    }
+    numElements *= dim;
+  }
+  auto outputElementType = llvm::dyn_cast<TensorType>(getOutput().getType()).getElementType();
+  if (auto intType = llvm::dyn_cast<IntegerType>(outputElementType)) {
+    return IntegerAttr::get(intType, numElements);
+  } else if (outputElementType.isIndex()) {
+    return IntegerAttr::get(IndexType::get(getContext()), numElements);
+  }
+  return {};
+}
+
+//===----------------------------------------------------------------------===//
+// RangeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RangeOp::verify(){
+  auto input1Type = llvm::dyn_cast<TensorType>(getStart().getType());
+  auto input1Shape = input1Type.getShape();
+  auto input2Type = llvm::dyn_cast<TensorType>(getLimit().getType());
+  auto input2Shape = input2Type.getShape();
+  auto input3Type = llvm::dyn_cast<TensorType>(getDelta().getType());
+  auto input3Shape = input3Type.getShape();
+  auto outputType = llvm::dyn_cast<TensorType>(getResult().getType());
+  auto outputShape = outputType.getShape();
+  if (input1Shape.size() != 0 || input2Shape.size() != 0 || input3Shape.size() != 0) {
+    return emitOpError("input parameter must be a scalar");
+  }
+  if (outputShape.size() != 1) {
+    return emitOpError("output must be a one-dimensional tensor");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ParallelDynamicStitchOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ParallelDynamicStitchOp::verify() {
+  if (getIndices().size() != getData().size()) {
+    return emitOpError("number of index tensors must equal number of data tensors");
+  }
+  return success();
+} 
+
+//===----------------------------------------------------------------------===//
+// FillOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult FillOp::verify() {
+  auto input1Type = llvm::dyn_cast<TensorType>(getShapeInput().getType());
+  auto input1Shape = input1Type.getShape();
+  auto input2Type = llvm::dyn_cast<TensorType>(getValueInput().getType());
+  auto input2Shape = input2Type.getShape();
+  if (input1Shape.size() != 1) {
+    return emitOpError("shapeInput must be a one-dimensional tensor");
+  }
+  if (input2Shape.size() != 0) {
+    return emitOpError("valueInput must be a scalar");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// BatchMatMulOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult BatchMatMulOp::verify() {
+  auto AType = llvm::dyn_cast<TensorType>(getA().getType());
+  auto BType = llvm::dyn_cast<TensorType>(getB().getType());
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+
+  if (!AType || !BType || !outputType)
+    return emitOpError("expects TensorType operands and result");
+  
+  auto aElemType = AType.getElementType();
+  auto bElemType = BType.getElementType();
+  auto outElemType = outputType.getElementType();
+  
+  if (aElemType != bElemType || aElemType != outElemType) {
+    return emitOpError("all tensors must have the same element type");
+  }
+  if (!aElemType.isIntOrFloat()) {
+    return emitOpError("only integer and floating point types are supported");
+  }
+  auto aShape = AType.getShape();
+  auto bShape = BType.getShape();
+  auto outShape = outputType.getShape();
+
+  // An empty shape with rank_known=false means "rank is unknown", not a
+  // scalar.  Do not reject or index into such a shape: the missing rank and
+  // all matrix/batch dimensions must be checked later when they become known.
+  const bool aRankKnown = AType.hasKnownRank();
+  const bool bRankKnown = BType.hasKnownRank();
+  const bool outputRankKnown = outputType.hasKnownRank();
+  if (aRankKnown && aShape.size() < 2) {
+    return emitOpError("inputs must have at least 2 dimensions");
+  }
+  if (bRankKnown && bShape.size() < 2) {
+    return emitOpError("inputs must have at least 2 dimensions");
+  }
+  if (outputRankKnown && outShape.size() < 2) {
+    return emitOpError("output must have at least 2 dimensions");
+  }
+
+  // Without both input ranks there are no valid indices for the trailing
+  // matrix dimensions.  The element type checks above are still meaningful;
+  // defer the shape checks until a later stage has rank information.
+  if (!aRankKnown || !bRankKnown)
+    return success();
+
+  int64_t aRows = aShape[aShape.size() - 2];
+  int64_t aCols = aShape[aShape.size() - 1];
+  int64_t bRows = bShape[bShape.size() - 2];
+  int64_t bCols = bShape[bShape.size() - 1];
+  
+  if (getTransposeA()) std::swap(aRows, aCols);
+  if (getTransposeB()) std::swap(bRows, bCols);
+  
+  if (aCols != ShapedType::kDynamic && bRows != ShapedType::kDynamic &&
+      aCols != bRows) {
+    return emitOpError("incompatible inner dimensions for matrix multiplication");
+  }
+
+  if (!outputRankKnown)
+    return success();
+
+  if (outShape.size() != std::max(aShape.size(), bShape.size())) {
+    return emitOpError("output rank mismatch");
+  }
+
+  const int64_t outRows = outShape[outShape.size() - 2];
+  const int64_t outCols = outShape[outShape.size() - 1];
+  if ((outRows != ShapedType::kDynamic && aRows != ShapedType::kDynamic &&
+       outRows != aRows) ||
+      (outCols != ShapedType::kDynamic && bCols != ShapedType::kDynamic &&
+       outCols != bCols)) {
+    return emitOpError("output matrix dimensions incorrect");
+  }
+  
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TopKOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult TopKOp::verify() {
+    auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+    auto kType = llvm::dyn_cast<TensorType>(getK().getType());
+    auto valuesType = llvm::dyn_cast<TensorType>(getValues().getType());
+    auto indicesType = llvm::dyn_cast<TensorType>(getIndices().getType());
+    auto kElemType = kType.getElementType();
+    if (!kElemType.isInteger()) {
+      return emitOpError("k must have integer type, got ")
+             << kElemType;
+    }
+    
+    auto kShape = kType.getShape();
+    if (!kShape.empty() && kShape.size() != 0) {
+      return emitOpError("k must be a scalar");
+    }
+  
+    auto inputShape = inputType.getShape();
+    if (inputShape.empty()) {
+      return emitOpError("input must have at least 1 dimension");
+    }
+  
+    auto valuesShape = valuesType.getShape();
+    auto indicesShape = indicesType.getShape();
+    
+    if (valuesShape != indicesShape) {
+      return emitOpError("values and indices must have the same shape");
+    }
+
+    return success();
+  }
+
+//===----------------------------------------------------------------------===//
+// PadOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult PadOp::verify() {
+  auto paddingsType = llvm::dyn_cast<TensorType>(getPaddings().getType());
+  auto paddingsShape = paddingsType.getShape();
+  if (paddingsShape.size() != 2) {
+    return emitOpError("paddings must be a 2D tensor, got shape: ")
+           << paddingsShape;
+  }
+  
+  auto inputType = llvm::dyn_cast<TensorType>(getInput().getType());
+  unsigned inputRank = inputType.getShape().size();
+  if (paddingsShape[0] != inputRank) {
+    return emitOpError("paddings first dimension must equal input rank (")
+           << inputRank << "), got " << paddingsShape[0];
+  }
+  if (paddingsShape[1] != 2) {
+    return emitOpError("paddings second dimension must be 2, got ")
+           << paddingsShape[1];
+  }
+
+  auto valueType = llvm::dyn_cast<TensorType>(getValue().getType());
+  if (valueType.getShape().size() != 0) {
+    return emitOpError("value must be a scalar tensor");
+  }
+  if (valueType.getElementType() != inputType.getElementType()) {
+    return emitOpError("value element type must match input element type");
+  }
+  
+  auto outputType = llvm::dyn_cast<TensorType>(getOutput().getType());
+  auto outputShape = outputType.getShape();
+  if (outputShape.size() != inputRank) {
+    return emitOpError("output rank must equal input rank, got ")
+            << outputShape.size() << " vs " << inputRank;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// UnsupportedOp (artifact sink layer)
+//===----------------------------------------------------------------------===//
+
+::mlir::ParseResult UnsupportedOp::parse(::mlir::OpAsmParser &parser,
+                                           ::mlir::OperationState &result) {
+  // Format: attr-dict `(` operands `)` `:` functional-type
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return ::mlir::failure();
+  ::llvm::SmallVector<::mlir::OpAsmParser::UnresolvedOperand> operands;
+  auto loc = parser.getCurrentLocation();
+  if (parser.parseLParen() || parser.parseOperandList(operands) ||
+      parser.parseRParen() || parser.parseColon())
+    return ::mlir::failure();
+  ::mlir::Type allTypes;
+  if (parser.parseType(allTypes))
+    return ::mlir::failure();
+  auto fnType = llvm::dyn_cast<::mlir::FunctionType>(allTypes);
+  if (!fnType) {
+    parser.emitError(loc, "expected functional type");
+    return ::mlir::failure();
+  }
+  if (static_cast<size_t>(fnType.getNumInputs()) != operands.size()) {
+    parser.emitError(loc, "operand count mismatch with functional type");
+    return ::mlir::failure();
+  }
+  if (parser.resolveOperands(operands, fnType.getInputs(), loc,
+                             result.operands))
+    return ::mlir::failure();
+  result.addTypes(fnType.getResults());
+  return ::mlir::success();
+}
+
+void UnsupportedOp::print(::mlir::OpAsmPrinter &printer) {
+  printer.printOptionalAttrDict((*this)->getAttrs());
+  printer << " (";
+  llvm::interleaveComma(getInputs(), printer);
+  printer << ") : ";
+  printer.printFunctionalType(getOperation()->getOperandTypes(),
+                              getResultTypes());
+}
+
+LogicalResult UnsupportedOp::verify() {
+  if (getOpType().empty())
+    return emitOpError() << "requires a non-empty opType attribute";
+  return success();
+}
+
+} // namespace atir

@@ -1,0 +1,182 @@
+#ifndef ATIR_MLIR_AARCH64_CODEGEN_PASSES_TD
+#define ATIR_MLIR_AARCH64_CODEGEN_PASSES_TD
+
+include "mlir/Pass/PassBase.td"
+
+/* wrap one shot bufferize */
+def KPGemmOneShotBufferize : Pass<"annc-one-shot-bufferize", "ModuleOp"> {
+  let summary = "bufferize tensor to memref";
+  let constructor = "createKPGemmOneShotBufferize()";
+  let dependentDialects = [
+    "mlir::linalg::LinalgDialect",
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::LLVM::LLVMDialect"
+  ];
+}
+
+/* Prepack immutable MatMul RHS values for the AArch64 GEMM consumer. */
+def AArch64GemmPrepackRhs
+    : Pass<"aarch64-gemm-prepack-rhs", "ModuleOp"> {
+  let summary = "prepack immutable AArch64 GEMM RHS operands";
+  let constructor = "createAArch64GemmPrepackRhs()";
+  let options = [
+    Option<"packedCPath", "packed-c", "std::string", "",
+           "Path for the generated packed RHS C source">,
+    Option<"jitInputsPath", "jit-inputs", "std::string", "",
+           "JSON array of immutable JIT argument indices; generate runtime packing entries">
+  ];
+}
+
+/* Extract a validated GEMM problem before target tuning. */
+def AArch64ExtractGemmProblem
+    : Pass<"aarch64-extract-gemm-problem", "ModuleOp"> {
+  let summary = "extract static AArch64 GEMM dimensions and layout";
+  let constructor = "createAArch64ExtractGemmProblem()";
+  let dependentDialects = [
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def AArch64AtirGemmEpilogueCommit
+    : Pass<"aarch64-atir-gemm-epilogue-commit", "ModuleOp"> {
+  let summary = "commit ATIR GEMM epilogue candidates";
+  let constructor = "createAArch64AtirGemmEpilogueCommit()";
+  let dependentDialects = ["atir::AtirDialect"];
+}
+
+/* Select target policy before shape-dependent thread planning. */
+def AArch64SelectGemmStrategy
+    : Pass<"aarch64-select-gemm-strategy", "ModuleOp"> {
+  let summary = "select an AArch64 GEMM target policy";
+  let constructor = "createAArch64SelectGemmStrategy()";
+  let options = [
+    Option<"configPath", "config-path", "std::string", "",
+           "Path to the external AArch64 GEMM tuning configuration">,
+    Option<"enablePrepack", "enable-prepack", "bool", "false",
+           "Allow compile-time RHS prepacking">,
+    Option<"intraThreadCount", "intra-thread-count", "int64_t", "1",
+           "Number of intra-op threads available to GEMM planning "
+           "(1 = serial execution)">
+  ];
+  let dependentDialects = [
+    "mlir::linalg::LinalgDialect"
+  ];
+}
+
+/* Compute the thread topology for an explicitly selected planning policy. */
+def AArch64GemmThreadPlanning
+    : Pass<"aarch64-gemm-thread-planning", "ModuleOp"> {
+  let summary = "plan AArch64 GEMM thread topology";
+  let constructor = "createAArch64GemmThreadPlanning()";
+  let dependentDialects = [
+    "mlir::linalg::LinalgDialect"
+  ];
+}
+
+/* Materialize the selected static M/N task grid before cache blocking. */
+def AArch64GemmThreadTiling
+    : Pass<"aarch64-gemm-thread-tiling", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM static thread tiles";
+  let constructor = "createAArch64GemmThreadTiling()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
+/* Materialize cache blocking from the selected GEMM strategy. */
+def AArch64GemmCacheBlocking
+    : Pass<"aarch64-gemm-cache-blocking", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM cache blocking";
+  let constructor = "createAArch64GemmCacheBlocking()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
+/* Materialize the fixed MR/NR micro-tile loops. */
+def AArch64GemmKernelTiling
+    : Pass<"aarch64-gemm-kernel-tiling", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM kernel tiling";
+  let constructor = "createAArch64GemmKernelTiling()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
+/* Materialize target-private leaves from selected strategy metadata. */
+def AArch64GemmLeafMaterialization
+    : Pass<"aarch64-gemm-leaf-materialization", "ModuleOp"> {
+  let summary = "materialize AArch64 GEMM leaf calls";
+  let constructor = "createAArch64GemmLeafMaterialization()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+/* Bind the already selected microkernel symbol to every leaf call. */
+def AArch64GemmMicrokernelLowering
+    : Pass<"aarch64-gemm-microkernel-lowering", "ModuleOp"> {
+  let summary = "bind selected AArch64 handwritten GEMM microkernels";
+  let constructor = "createAArch64GemmMicrokernelLowering()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+}
+
+/* Convert target-private leaf calls to their raw-pointer assembly ABI. */
+def AArch64GemmABILowering
+    : Pass<"aarch64-gemm-abi-lowering", "ModuleOp"> {
+  let summary = "lower AArch64 GEMM leaf calls to the assembly ABI";
+  let constructor = "createAArch64GemmABILowering()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+/* Analyze and lower epilogues after the leaf has selected its microkernel. */
+def AArch64GemmEpilogueLowering
+    : Pass<"aarch64-gemm-epilogue-lowering", "ModuleOp"> {
+  let summary = "lower AArch64 GEMM epilogues after leaf selection";
+  let constructor = "createAArch64GemmEpilogueLowering()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+/* Reject partially lowered or internally inconsistent GEMM schedules. */
+def AArch64VerifyGemmSchedule
+    : Pass<"aarch64-verify-gemm-schedule", "ModuleOp"> {
+  let summary = "verify the lowered AArch64 GEMM schedule";
+  let constructor = "createAArch64VerifyGemmSchedule()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::LLVM::LLVMDialect"
+  ];
+}
+
+#endif // ATIR_MLIR_AARCH64_CODEGEN_PASSES_TD

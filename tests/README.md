@@ -1,0 +1,188 @@
+# ANNC 测试目录
+
+本目录是 ANNC 所有受跟踪测试的唯一归属地。生产目录（`annc/`、`frontends/`、
+`addons/`、`tensorflow_addons/`）只放实现，不得包含测试源码、GTest/Python
+测试发现、`gtest_discover_tests` 或 `add_test` 注册；测试到生产目录只允许
+单向依赖。
+
+## 整体端到端测试手册
+
+- [ORT EP 构建、部署与特性使能](ort-ep-build-and-deploy.md)
+- [TensorFlow predictor 构建与部署](tf-build-and-deploy.md)
+
+## 分层
+
+| 层 | 目录 | 内容 | 运行入口 |
+|---|---|---|---|
+| L0 单元 | `unit/` | C++ GTest，按生产子系统分目录 | `ctest --test-dir build` |
+| L1 IR/Pass | `FileCheck/` | ATIR/Conversion/Target 的 `// RUN:` + FileCheck 用例 | `bash tests/FileCheck/run.sh` |
+| L2 集成 | `integration/` | 驱动已构建二进制的 pytest；ORT EP 的 CTest Python fixture/e2e | `pytest tests/`、`ctest` |
+| L4 端到端 | `e2e/` | 需要外部模型、predictor、安装前缀或人工环境的脚本 | 见各目录说明 |
+| 夹具 | `fixtures/` | 跨套件共享的小输入 | 由用例引用 |
+
+```
+tests/
+├── CMakeLists.txt          # 测试注册的顶层入口（各套件 CMakeLists 由它引入；GTest/Python 发现、coverage）
+├── README.md
+├── unit/
+│   ├── annc/               # op_coverage、JIT cache、template fingerprint、ciface dispatch
+│   ├── kernels/            # kernel registry/priority、builtin spec、execution context、GEMM 等
+│   ├── onnx2atir/          # ONNX 前端 GTest
+│   ├── tensorflow/         # TF 前端、插件参数派发和跨 ABI 线程池回调
+│   └── ort_ep/             # ORT EP 编译/执行上下文 GTest
+├── FileCheck/              # FileCheck 用例 + 自制 runner（lit 迁移另立任务）
+├── integration/
+│   ├── annc_partition/     # annc-partition 查询与骨架阶段诊断 pytest
+│   ├── cmake/              # CMake 模块契约（含 TF 插件 SDK 选择与隔离）pytest
+│   ├── fusion/             # config fusion 集成 pytest
+│   ├── jit/                # JIT 缓存与预打包权重 pytest
+│   ├── onnx2atir/          # annc-onnx2atir CLI 契约 pytest
+│   ├── tensorflow/         # TF 插件测试 pytest、TF1.15 插件加载与 JIT C 接口 CTest
+│   ├── onnx2stablehlo/     # ONNX-MLIR 预处理、StableHLO 生成与后处理 pytest
+│   └── ort_ep/             # CTest 驱动的 EP Python fixture/e2e
+├── e2e/
+│   ├── annc-driver/        # 手工 driver/demo 资产（不接 CTest）
+│   ├── build/              # build.sh 选项契约、双框架安装冒烟
+│   ├── python/             # Python 绑定手工 smoke（需 --enable-python）
+│   ├── kernel_context/     # 按 kernel 拆分的 TF/ORT Context 全链路测试
+│   └── tf/                 # TF predictor / KP embedding / model zoo 脚本
+└── fixtures/
+    ├── kp_fused_gather_match.pbtxt
+    └── legacy/             # 尚未接线的历史输入
+```
+
+## 运行
+
+```bash
+# C++ GTest（全部已注册用例）
+ctest --test-dir build --output-on-failure
+
+# Python 集成用例；缺可选依赖或构建产物时 skip
+python3 -m pytest tests/ -v
+# 构建目录不在 build/ 时：
+ANNC_BUILD_DIR=/path/to/build python3 -m pytest tests/ -v
+
+# TF 插件 SDK 配置，以及 TF1.15 构建中的宿主加载和跨 ABI 调用
+python3 -m pytest tests/integration/cmake/test_tf_plugin_sdk.py -q
+ctest --test-dir build -R '^(TensorFlowPluginLoad|tf_(dispatch|threadpool|jit)_)' --output-on-failure
+
+# TF 插件融合与计算测试；build 替换为对应 TF 版本的构建目录
+# 包含 KDNN 的 MatMul、MatMulAdd、MatMulAddRelu 用例
+ANNC_BUILD_DIR=build ANNC_REQUIRE_E2E=1 \
+  python3 -m pytest tests/integration/tensorflow/test_tf_acceptance.py -v
+
+# Context kernel 全链路用例（需 AArch64 Linux、框架及 ANNC 构建产物）
+ANNC_REQUIRE_E2E=1 python3 -m pytest tests/e2e/kernel_context/ -v
+ctest --test-dir build -R 'AnncEp.*ContextE2e' --output-on-failure
+
+# Context kernel 独立检查，仅需 Python 和 C++17 编译器（CXX 可覆盖）
+ANNC_CONTEXT_SANITIZE=1 python3 tests/unit/kernels/run_context_kernels.py
+
+# FileCheck
+# ANNC_LLVM_BIN 不设置时读取 build/annc_llvm_bin.txt（configure 写入）
+PATH="$PWD/build/bin:$ANNC_LLVM_BIN:$PATH" \
+LIBRARY_PATH="$PWD/install/lib64:$PWD/build/lib" \
+bash tests/FileCheck/run.sh
+```
+
+前置条件与 skip 规则：
+
+- `pytest` 必须安装在所选 Python 解释器中；ONNX 前端用例还需要 `onnx` 包。
+- `integration/onnx2atir/` 需要 Python `onnx` 包与已构建的 `annc-onnx2atir`；
+  缺任一条件时模块整体 skip。
+- CTest 中的 `TensorFlowPluginLoad` 需要启用 TF1.15 插件和 `annc-tf-pipeline`
+  的构建；任一项未启用时，不注册该测试。
+  `tf_threadpool_sdk_limit` 仅在 TF1.15 linked 构建注册，使用真实的 4 线程 TF 池
+  验证 1/2 线程上限及其相对固定块选项的优先级；preload 构建不注册该原生宿主用例。
+- `integration/onnx2stablehlo/test_toolchain_build.py` 只需 Git 和已递归初始化的
+  ONNX-MLIR 子模块，可在编译前运行。
+- `integration/onnx2stablehlo/` 的转换与融合用例需要构建 addon 的
+  `annc-onnx2stablehlo` / `annc-onnx-framework-opt`；真实 ORT 导出模型和
+  StableHLO portable serializer 仅在设置对应环境变量时执行。
+  来源与绑定用例通过 `ANNC_SOURCE_MAP_REAL_E2E=1` 启用，需指定
+  `ANNC_SOURCE_MAP_PRODUCER`、`ANNC_SOURCE_MAP_FRAMEWORK_OPT` 和 `ANNC_ONNX_MLIR_OPT`。
+  绑定还需 `ANNC_STABLEHLO_READER`，开关测试通过 `ANNC_STABLEHLO_PIPELINE` 指定 `annc-onnx-pipeline`。
+  动态 BMMAdd 的真实 EP 执行和缓存切换入口为 `integration/ort_ep/stablehlo_context_e2e.py`。
+  真实导出图使用 `ANNC_FRAMEWORK_OPT` 指定的配套工具校验并往返读取，保留
+  ATIR fallback 和来源属性；纯 StableHLO 的 portable 序列化单独验证。
+- `integration/fusion/` 需要 `annc-tf2atir`、`annc-opt`、`annc-asm`。
+- `integration/jit/` 需要 `numpy`、原生 AArch64 执行环境与已构建的
+  `annc`/`annc-asm`；缺任一条件时 skip。
+- `integration/cmake/` 需要 `cmake`、`g++` 与 `ar`，缺任一时 skip。
+- GEMM epilogue 正例需要构建时发现兼容的完整二进制包；
+  `integration/fusion/test_gemm_epilogue_kernel_compile.py` 覆盖请求编译、旧对象隔离
+  与真实生成链接，`integration/cmake/test_gemm_codegen_package.py` 覆盖包发现
+  和版本/归档不匹配。缺库负例与数值正例分开记录；不再要求私有源码目录。
+- [test_tensorflow_matmul.py](e2e/kernel_context/test_tensorflow_matmul.py) 和
+  [test_tf_acceptance.py](integration/tensorflow/test_tf_acceptance.py) 默认使用仓库自带的
+  [GEMM 调优配置](FileCheck/Target/aarch64/Inputs/gemm-tuning-hip09-neon-test.json)，可通过
+  `ANNC_GEMM_CONFIG` 指定其他调优配置。
+- KDNN 用例要求 `ANNC_ENABLE_KDNN_ADAPTOR=ON`。
+- `integration/tensorflow/test_tf_acceptance.py` 需要与目标 TF 版本匹配的
+  ANNC 构建产物；缺少构建配置或产物时 skip，设置 `ANNC_REQUIRE_E2E=1` 后改为报错。
+  同一源码目录下不要并行运行多组 TF 插件测试，以免覆盖前端临时文件导致测试失败。
+- 用 `--case all` 跑 [Embedding 测试](e2e/tf/e2e_kp_embedding_patterns.py) 时，
+  TF2.20 会跑全部用例。TF1.15 会跳过 `sparse_segment_mean` 和 `sparse_segment_sum`，
+  并打印原因。这两个用例用 `int64` 编号标记每条数据属于哪一组，TF1.15 自带的这两个算子只接受 `int32` 的分组编号。
+- `integration/ort_ep/` 与 `unit/ort_ep/` 只在
+  `ANNC_ENABLE_ONNXRUNTIME_EP=ON` 时注册；Python 驱动还需要 `onnx` 与
+  `onnxruntime`。若默认解释器没有这两个包，configure 时用
+  `-DANNC_TEST_PYTHON=/path/to/venv/bin/python3` 指定测试解释器。
+  EP 在运行期现场编译 kernel 时要读进程环境里的 `ANNC_EP_ORT_BUILD_TREE`；
+  configure 时设置了同名缓存变量的话，`tests/integration/ort_ep/CMakeLists.txt`
+  会把它写进这些测试的 `ENVIRONMENT`，因此 `ctest` 前不必再手工导出（换 ORT
+  构建树后需重新 configure）。
+- `unit/annc/annc_jit_cache_test` 只在 `ANNC_ENABLE_TENSORFLOW_ADDON=ON` 时注册；
+  ONNX 前端 GTest 只在 `ANNC_ENABLE_ONNX=ON` 时注册。
+- `e2e/tf/` 的脚本需要外部 predictor、SavedModel、TSV、brpc client 等，
+  由脚本头部的环境变量说明控制；`test_model_zoo_annc.sh` 的默认
+  `TFSERVER_PATH` / `MODEL_BASE` 是外部路径，运行前必须覆盖。
+
+## 资产归属（迁移后）
+
+| 测试资产 | 层 | 说明 |
+|---|---|---|
+| `unit/tensorflow/frontend/op_coverage_test.cpp` | L0 | TF 算子表构建与控制流回边覆盖 |
+| `unit/annc/jit_template_fingerprint_test.cpp` | L0 | JIT 模板指纹 |
+| `unit/annc/annc_jit_cache_test.cpp` | L0 | JIT 编译缓存（TF addon 门控） |
+| `unit/transform/pb2_common_test.cpp` | L0 | pb2stablehlo common 层纯函数（V2 开关 + TF 2.20 门控；wheel 隔离域，CHECK 宏） |
+| `integration/tf_transform/` | L2 | pb2stablehlo 端到端：手工 GraphDef 经可执行产出断言（wrap/slice/string/rank；未构建则整文件 skip） |
+| `unit/annc/packed_rhs_test.cpp` | L0 | 权重缓存隔离、布局复用、并发准备和生命周期 |
+| `unit/annc/ciface_dispatch_test.cpp` | L0 | `mlir_ciface_` 参数派发 |
+| `unit/kernels/*_test.cpp` | L0 | Kernel registry/priority、builtin spec、execution context、GEMM planner/epilogue/smallshape、masked_mul、customcall |
+| `unit/kernels/run_context_kernels.py`、`kernel_context_driver.cpp` | L0 | 手写 Context kernel 数值与路径验证；CTest 名称 `KernelContext.ProductionKernels` |
+| `unit/onnx2atir/onnx_frontend_test.cpp` | L0 | ONNX 前端各 stage |
+| `unit/ort_ep/annc_ep_compile_test.cpp` | L0 | EP 编译/缓存签名 |
+| `unit/ort_ep/annc_ep_execution_test.cpp` | L0 | EP 执行上下文错误记账（fake OrtApi） |
+| `FileCheck/**/*.mlir` | L1 | pass/IR 行为 |
+| `integration/annc_partition/test_cli.py` | L2 | 切分 CLI 查询、任务各阶段失败（参数/能力/配置/模型接入占位）及无副作用 |
+| `integration/onnx2atir/test_onnx_frontend.py` | L2 | `annc-onnx2atir` CLI 契约 |
+| `integration/onnx2stablehlo/test_toolchain_build.py` | L2/build | LLVM 兼容补丁与锁定的 ONNX-MLIR、StableHLO 源码匹配 |
+| `integration/cmake/test_kdnn_build.py` | L2 | `cmake/ThirdPartyKDNN.cmake` import 能力探测 |
+| `integration/cmake/test_gemm_microkernel_availability.py` | L2 | 微内核归档有/无两种构建下的工具启动、普通 lowering 与预打包能力诊断（用 `ANNC_BUILD_DIR` 选择构建） |
+| `integration/cmake/test_gemm_codegen_package.py` | L2 | GEMM codegen 包发现、manifest 校验与基础归档一致性 |
+| `integration/fusion/test_config_fusion_kp_fused_gather.py` | L2 | config fusion 集成 |
+| `integration/fusion/test_epilogue_source_metadata.py` | L2 | epilogue kernel 克隆的源位置元数据 |
+| `integration/fusion/test_gemm_epilogue_kernel_compile.py` | L2 | 生成请求、object 编译与真实生成链接 |
+| `integration/jit/test_jit_prepack.py` | L2 | JIT 预打包权重缓存隔离与复用（数值） |
+| `integration/tensorflow/test_tf_acceptance.py` | L4 | 比较融合后和原图算出的结果，检查 tensordot 的输出尺寸。还会检查提前编译的内核第一次能否用上 TF 的线程池、用完能否恢复原状态，以及权重预打包和编译失败后能否继续跑原图 |
+| `integration/ort_ep/*.py` | L2 | EP AOT/context fixture、legacy FTDMM、fusion toggles |
+| `e2e/kernel_context/*.py` | L4 | 按 kernel 拆分的 TF GraphDef / ORT pipeline → 真实 kernel 数值对照；ORT 仍由 CTest 注册 |
+| `e2e/tf/e2e_tf_predictor.py` | L4 | TF predictor + addon 端到端 |
+| `e2e/tf/e2e_kp_embedding_patterns.py` | L4 | KP embedding pattern 端到端 |
+| `e2e/tf/test_model_zoo_annc.sh` | L4 | model zoo 性能/正确性对拍 |
+| `e2e/build/build_mode_selection_test.sh` | L2/build | `build.sh --dry-run` 选项契约 |
+| `e2e/build/dual_framework_smoke.sh` | L4/build | 双框架安装前缀冒烟 |
+| `e2e/python/matmul_api_smoke.py` | L4/manual | Python 绑定导入与 TensorType 手工 smoke（不被 pytest 收集；需 `--enable-python`） |
+| `e2e/annc-driver/` | L4/manual | 历史 driver/demo 资产，未接 CTest |
+| `fixtures/legacy/config-fusion-parser-smoke.json` | 夹具 | 暂未被引用的历史 parser-smoke 配置 |
+
+表中未逐一列出的辅助文件（GTest 的 `auto_kernel_*`、stub，FileCheck 的
+`Inputs/` JSON，套件内的 README 等）随所属套件目录归类；`git ls-files tests/`
+中的每个受跟踪文件都落在上表某个目录或通配模式内。
+
+融合相关用例（`op-fusion.mlir`、`identity-canonicalize-op-fusion.mlir`、
+`annc-aarch64-gemm-pipeline.mlir`）显式设置 `ANNC_GEMM=2`：dev 的
+`ANNC_GEMM` 门控默认关闭，未设置时 MatMul 不融合。`ANNC_GEMM=2/99` 才会消费
+`annc.gemm.epilogue.candidate`；`tests/test_epilogue_source_metadata.py` 已在子进程
+环境中注入默认值 `2`。

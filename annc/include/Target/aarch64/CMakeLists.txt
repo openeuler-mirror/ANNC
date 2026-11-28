@@ -1,0 +1,5 @@
+set(LLVM_TARGET_DEFINITIONS Passes.td)
+mlir_tablegen(Passes.h.inc -gen-pass-decls -name AArch64CodeGen)
+mlir_tablegen(AArch64CodeGenPasses.capi.h.inc -gen-pass-capi-header --prefix AArch64CodeGen)
+mlir_tablegen(AArch64CodeGenPasses.capi.cpp.inc -gen-pass-capi-impl --prefix AArch64CodeGen)
+add_public_tablegen_target(AArch64CodeGenPassIncGen)

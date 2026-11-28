@@ -1,0 +1,218 @@
+find_package(GTest REQUIRED)
+find_package(Threads REQUIRED)
+include(GoogleTest)
+
+set(ANNC_KERNEL_TEST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${ANNC_KERNEL_TEST_GENERATED_DIR}")
+
+set(ANNC_AUTO_KERNEL_WRAPPERS_GEN "${ANNC_KERNEL_TEST_GENERATED_DIR}/auto_kernel_wrappers.gen.cpp")
+file(WRITE "${ANNC_AUTO_KERNEL_WRAPPERS_GEN}" [=[
+#include "Kernel/MemRefTypes.h"
+#define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDeclare.h"
+#include "tests/unit/kernels/auto_kernel_impls.cpp"
+#define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDefine.h"
+]=])
+
+set(ANNC_AUTO_KERNEL_REGISTRY_GEN "${ANNC_KERNEL_TEST_GENERATED_DIR}/auto_kernel_registry.gen.cpp")
+file(WRITE "${ANNC_AUTO_KERNEL_REGISTRY_GEN}" [=[
+#include <utility>
+
+#include "Kernel/KernelAPIMacros.h"
+#include "Kernel/KernelRegistry.h"
+
+namespace annc::kernels::test {
+
+void registerAutoKernelSpecsForTest() {
+    using ::annc::kernels::Name;
+#undef ANNC_SPEC_TOKEN_PREFIX
+#define ANNC_SPEC_TOKEN_PREFIX auto_kernel_specs
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "tests/unit/kernels/auto_kernel_specs.inc"
+#define ANNC_KERNEL_SPEC(spec_token, builder_expr, args_decl, body)     ::annc::kernels::KernelRegistry::instance().registerKernel(         (builder_expr).Build(ANNC_AUTO_KERNEL_SYMBOL_STRING(spec_token), __FILE__, __LINE__));
+#include ANNC_BUILTIN_KERNEL_SPECS_FILE
+#undef ANNC_KERNEL_SPEC
+#undef ANNC_BUILTIN_KERNEL_SPECS_FILE
+#undef ANNC_SPEC_TOKEN_PREFIX
+}
+
+} // namespace annc::kernels::test
+]=])
+
+set(ANNC_BUILTIN_KERNEL_WRAPPERS_GEN "${ANNC_KERNEL_TEST_GENERATED_DIR}/builtin_kernel_wrappers.gen.cpp")
+set(ANNC_BUILTIN_KERNEL_WRAPPER_SOURCE [=[
+#include "Kernel/ExecutionContext.h"
+#include "Kernel/MemRefTypes.h"
+#define ANNC_SPEC_TOKEN_PREFIX matmul_kernel_specs_inc
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "matmul_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDeclare.h"
+#include "matmul_aarch64.cpp"
+#define ANNC_SPEC_TOKEN_PREFIX matmul_kernel_specs_inc
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "matmul_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDefine.h"
+#undef ANNC_SPEC_TOKEN_PREFIX
+]=])
+if(ANNC_ENABLE_KDNN_ADAPTOR)
+    string(APPEND ANNC_BUILTIN_KERNEL_WRAPPER_SOURCE [=[
+
+#define ANNC_SPEC_TOKEN_PREFIX kdnn_adaptor_matmul_kernel_specs_inc
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "kdnn_adaptor/matmul_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDeclare.h"
+#include "kdnn_adaptor/matmul_aarch64.cpp"
+#define ANNC_SPEC_TOKEN_PREFIX kdnn_adaptor_matmul_kernel_specs_inc
+#define ANNC_BUILTIN_KERNEL_SPECS_FILE "kdnn_adaptor/matmul_kernel_specs.inc"
+#include "Kernel/BuiltinKernelSpecDefine.h"
+#undef ANNC_SPEC_TOKEN_PREFIX
+]=])
+endif()
+file(WRITE "${ANNC_BUILTIN_KERNEL_WRAPPERS_GEN}" "${ANNC_BUILTIN_KERNEL_WRAPPER_SOURCE}")
+
+function(annc_add_kernel_gtest target)
+    add_executable(${target} ${ARGN})
+    target_include_directories(${target}
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/annc/lib/Kernel/builtin_kernels"
+        "${PROJECT_BINARY_DIR}/annc/include"
+    )
+    target_link_libraries(${target}
+        PRIVATE
+        GTest::gtest_main
+        ANNCContext
+        Threads::Threads
+        ${CMAKE_DL_LIBS}
+    )
+    if(UNIX AND NOT APPLE)
+        target_link_options(${target} PRIVATE -rdynamic)
+    endif()
+    gtest_discover_tests(${target})
+endfunction()
+
+annc_add_kernel_gtest(context_memref_output_test context_memref_output_test.cpp)
+target_link_libraries(context_memref_output_test PRIVATE ANNCContextMemRef)
+
+annc_add_kernel_gtest(masked_mul_context_test masked_mul_context_test.cpp)
+target_link_libraries(masked_mul_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(tensordot_matmul_context_test
+    tensordot_matmul_context_test.cpp)
+target_link_libraries(tensordot_matmul_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(batched_matmul_add_context_test
+    batched_matmul_add_context_test.cpp)
+target_link_libraries(batched_matmul_add_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(layer_norm_context_test
+    layer_norm_context_test.cpp)
+target_link_libraries(layer_norm_context_test PRIVATE
+    ANNCThreadPool LLVMSupport LLVMDemangle)
+
+annc_add_kernel_gtest(kernel_priority_resolver_test
+    kernel_priority_resolver_test.cpp
+)
+target_link_libraries(kernel_priority_resolver_test PRIVATE ANNCKernel)
+
+annc_add_kernel_gtest(execution_context_test
+    execution_context_test.cpp
+)
+target_link_libraries(execution_context_test
+    PRIVATE
+    ANNCThreadPool
+    LLVMSupport
+    LLVMDemangle
+)
+
+annc_add_kernel_gtest(kernel_registry_test
+    kernel_registry_test.cpp
+    "${ANNC_AUTO_KERNEL_WRAPPERS_GEN}"
+    "${ANNC_AUTO_KERNEL_REGISTRY_GEN}"
+)
+target_link_libraries(kernel_registry_test PRIVATE ANNCKernel)
+
+annc_add_kernel_gtest(customcall_symbol_resolution_test
+    customcall_symbol_resolution_stub.cpp
+)
+target_link_libraries(customcall_symbol_resolution_test PRIVATE ANNCKernel)
+
+annc_add_kernel_gtest(gemm_epilogue_test
+    gemm_epilogue_test.cpp
+)
+target_compile_definitions(gemm_epilogue_test PRIVATE
+    ANNC_GEMM_PACKAGE_AVAILABLE=$<BOOL:${ANNC_GEMM_PACKAGE_AVAILABLE}>)
+target_link_libraries(gemm_epilogue_test
+    PRIVATE
+    AArch64Codegen
+    AtirPasses
+    AtirDialect
+    MLIRDialect
+)
+
+if(ANNC_GEMM_PACKAGE_AVAILABLE)
+    annc_add_kernel_gtest(gemm_smallshape_microkernel_test
+        gemm_smallshape_microkernel_test.cpp
+    )
+    target_link_libraries(gemm_smallshape_microkernel_test
+        PRIVATE ANNC::AArch64GemmMicrokernels)
+endif()
+
+annc_add_kernel_gtest(gemm_context_dispatch_test
+    gemm_context_dispatch_test.cpp
+)
+target_link_libraries(gemm_context_dispatch_test PRIVATE ANNCGemmSupport)
+
+# The planner is deliberately separated from the handwritten execution leaf;
+# cover its static-grid invariants without requiring a generated kernel.
+annc_add_kernel_gtest(gemm_thread_planner_test
+    gemm_thread_planner_test.cpp
+)
+target_include_directories(gemm_thread_planner_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/annc/lib/Target/aarch64/Gemm"
+)
+target_link_libraries(gemm_thread_planner_test PRIVATE AArch64Codegen)
+
+annc_add_kernel_gtest(gemm_tiling_strategy_test
+    gemm_tiling_strategy_test.cpp
+)
+target_include_directories(gemm_tiling_strategy_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/annc/lib/Target/aarch64/Gemm"
+)
+target_link_libraries(gemm_tiling_strategy_test PRIVATE AArch64Codegen)
+
+annc_add_kernel_gtest(builtin_shared_spec_test
+    builtin_shared_spec_test.cpp
+    "${ANNC_BUILTIN_KERNEL_WRAPPERS_GEN}"
+)
+target_link_libraries(builtin_shared_spec_test
+    PRIVATE
+    ANNCKernel
+    ANNCThreadPool
+    LLVMSupport
+    LLVMDemangle
+)
+if(ANNC_ENABLE_KDNN_ADAPTOR)
+    target_compile_definitions(builtin_shared_spec_test PRIVATE ANNC_TEST_ENABLE_KDNN=1)
+    if(TARGET KDNN::kdnn)
+        target_link_libraries(builtin_shared_spec_test PRIVATE KDNN::kdnn)
+    else()
+        target_include_directories(builtin_shared_spec_test PRIVATE "${KDNN_INCLUDE_DIR}")
+        target_link_libraries(builtin_shared_spec_test PRIVATE "${KDNN_LIBRARY}")
+    endif()
+else()
+    target_compile_definitions(builtin_shared_spec_test PRIVATE ANNC_TEST_ENABLE_KDNN=0)
+endif()
+
+# Host numerical/protocol coverage for all production aarch64 context specs.
+# The runner builds isolated wrappers and does not need TensorFlow or KDNN.
+if(Python3_Interpreter_FOUND)
+  add_test(NAME KernelContext.ProductionKernels
+    COMMAND "${CMAKE_COMMAND}" -E env "CXX=${CMAKE_CXX_COMPILER}"
+      "${Python3_EXECUTABLE}" -I
+      "${CMAKE_CURRENT_SOURCE_DIR}/run_context_kernels.py")
+else()
+  message(STATUS "Python3 interpreter not found; KernelContext.ProductionKernels not registered")
+endif()

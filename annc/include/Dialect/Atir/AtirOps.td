@@ -1,0 +1,1817 @@
+//===----------------------------------------------------------------------===//
+// Atir Op definitions
+//===----------------------------------------------------------------------===//
+#ifndef ATIR_OPS_TD
+#define ATIR_OPS_TD
+
+
+include "Dialect/Atir/AtirDialect.td"
+include "Dialect/Atir/Interfaces/ShapeInfer.td"
+include "Dialect/Atir/Interfaces/Interpret.td"
+include "Dialect/Atir/AtirEnums.td"
+
+include "mlir/IR/OpBase.td"
+include "mlir/IR/BuiltinAttributes.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+
+defvar Traits = [NoTerminator, NativeOpTrait<"Atir_OpTrait">];
+defvar Interfaces = [DeclareOpInterfaceMethods<ShapeInferIntfc>,
+                     DeclareOpInterfaceMethods<InterpretIntfc>
+                    ];
+
+def MMLike : NativeOpTrait<"Atir_MM">;
+def DMALike : NativeOpTrait<"Atir_DMA">;
+def ACTLike : NativeOpTrait<"Atir_ACTIVATION">;
+
+class Atir_Op<string mnemonic, list<Trait> traits = []> :
+    Op<Atir_Dialect, mnemonic, !listconcat(traits, Traits)> {
+  let summary = "Astralax BaseOp";
+  let results = (outs );
+}
+
+def Atir_BufferOp : Atir_Op<"buffer", Interfaces> {
+  let summary = "Allocate an uninitialized buffer for intermediate computation";
+  let description = [{
+    A placeholder for a temporary tensor buffer.
+    The actual allocation is handled by the runtime or bufferization pass.
+  }];
+
+  let arguments = (ins);
+  let results = (outs Atir_Tensor:$output);
+}
+
+def Atir_NoneOp : Atir_Op<"None"> {
+  let summary = "None op, return a NoneType Value";
+  let description = [{ this op is used to define none type }];
+  let results = (outs NoneType:$output);
+  let assemblyFormat = [{ attr-dict }];
+}
+
+def Atir_LoadOp : Atir_Op<"Load", Interfaces> {
+  let summary = "Load from a tensor";
+  let description = [{Returns the element at the given location from within the tensor}];
+  let arguments = (ins Atir_Tensor:$input,
+                    I32ArrayAttr:$axes,
+                    I32ArrayAttr:$start,
+                    I32ArrayAttr:$size,
+                    BoolAttr:$copy
+                    );
+  let results = (outs Atir_Tensor:$output);
+}
+
+def Atir_CustomizeOp : Atir_Op<"Customize", Interfaces> {
+  let summary = "customize op";
+  let description = [{
+    Customize op is defined for user defined operations.
+    For example, 
+      `FastAttention` op would be parsed into atir.CustomizeOp.
+
+    Since the custom op will not be optimized in most of general passes,
+    convert it into the standard operations with `--graph-plugin` or 
+    `--grouping-plugin` is highly recommend. 
+  }];
+  // V2 route: the mixed carrier keeps builtin ranked tensors here; the
+  // fast-codegen Customize rewrite reads either carrier.
+  let arguments = (ins Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$inputs,
+                       StrAttr:$opType,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs Variadic<AnyTypeOf<[Atir_Tensor, AnyRankedTensor]>>:$output);
+  let assemblyFormat = [{
+    ( `(` $inputs^ `)` )?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_OpaqueOp : Atir_Op<"opaque"> {
+  let summary = "opaque placeholder for an unrecognized TF op";
+  let description = [{
+    Placeholder for a TF op that has no ATIR lowering yet. Inputs and
+    outputs pass through structurally (types/shapes from graph facts) so
+    the graph can still convert; the node is expected to be absorbed by a
+    fusion pattern and cut away. A warning is emitted at conversion time;
+    if the op survives to code generation (no fusion matched), the
+    lowering pass reports it there instead of silently dropping it.
+  }];
+  let arguments = (ins Variadic<AnyType>:$inputs,
+                       StrAttr:$opType,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs Variadic<AnyType>:$output);
+  let assemblyFormat = [{
+    ( `(` $inputs^ `)` )?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_ResourceIdentityOp : Atir_Op<"ResourceIdentity"> {
+  let summary = "forwards an opaque resource handle";
+  let arguments = (ins Atir_Resource:$input);
+  let results = (outs Atir_Resource:$result);
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($result)
+}];
+}
+
+def Atir_ResourceVariableOp : Atir_Op<"resource_variable"> {
+  let summary = "declares a runtime resource handle";
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$sym_visibility);
+  let results = (outs Atir_Resource:$handle);
+  let assemblyFormat = [{
+    ($sym_visibility^)? $sym_name `->` type($handle) attr-dict
+  }];
+}
+
+def Atir_ConstantOp : Atir_Op<"constant", Interfaces> {
+  let summary = "declare or define a constant";
+  let description = [{}];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$sym_visibility);
+  let results = (outs Atir_Tensor:$data);
+  let assemblyFormat = [{
+    ($sym_visibility^)? $sym_name 
+    `->` type($data) attr-dict
+  }];
+}
+
+def Atir_VariableOp : Atir_Op<"variable", Interfaces> {
+  let summary = "declare or define a variable";
+  let description = [{}];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$sym_visibility);
+  let results = (outs Atir_Tensor:$output);
+  let assemblyFormat = [{
+    ($sym_visibility^)? $sym_name 
+    `->` type($output) attr-dict
+  }];
+}
+
+def Atir_AddOp : Atir_Op<"Add", Interfaces> {
+  let summary = "add op";
+  let arguments = (ins
+      Atir_Tensor:$output,
+      Variadic<Atir_Tensor>:$inputs,
+      DefaultValuedAttr<BoolAttr, "false">:$do_relu,
+      DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit,
+      OptionalAttr<F32Attr>:$scalar
+  );
+  let results = (outs Atir_Tensor:$result);
+}
+
+def Atir_ConcatOp : Atir_Op<"Concat", Interfaces> {
+  let summary = "Concat operator";
+
+  let description = [{
+    1.Op Introduction
+    Concatenates the given sequence of seq tensors in the given dimension.
+    All tensors must either have the same shape (except in the concatenating dimension) or be empty.
+
+    2.Math formula
+    output = Concat(input1, input2, axis)
+           = input1[axis] + input2[axis];
+
+    3.activation and weight
+    input(act.): input tensor;
+
+    4.attribute
+    axis: the dimension along which the input tensors will be concated together.;
+    do_relu: If set true, the output will be activated via the ReLU function after the calculation is complete.
+    relu_limit: If set -1.0, it means that there is no upper limit and the output will only be affected by the ReLU function.;
+    round_mode: This determines how values are rounded during the conversion from higher precision to lower precision.;
+
+  }];
+
+  let arguments = (
+    ins Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$inputs,
+    DefaultValuedAttr<I32Attr, "1">:$axis,
+    DefaultValuedAttr<BoolAttr, "false">:$do_relu,
+    DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit,
+    DefaultValuedAttr<I32Attr, "0">:$round_mode,
+    OptionalAttr<BoolAttr>:$is_view
+  );
+
+  let results = (outs Atir_Tensor:$result);
+}
+
+def Atir_MatMulOp : Atir_Op<"MatMul", Interfaces> {
+  let summary = "matmul op";
+  let arguments = (
+    ins Atir_Tensor:$C, 
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs,
+    Variadic<Atir_Tensor>:$epilogueInputs,
+    BoolAttr:$withBias,
+    DefaultValuedAttr<BoolAttr, "false">:$right_transpose,
+    DefaultValuedAttr<BoolAttr, "false">:$left_transpose,
+    DefaultValuedAttr<BoolAttr, "false">:$output_transpose,
+    DefaultValuedAttr<BoolAttr, "false">:$do_relu,
+    DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit,
+    OptionalAttr<I32Attr>:$m_start,
+    OptionalAttr<I32Attr>:$n_start,
+    OptionalAttr<I32Attr>:$k_start,
+    OptionalAttr<I32Attr>:$m_size,
+    OptionalAttr<I32Attr>:$n_size,
+    OptionalAttr<I32Attr>:$k_size,
+    OptionalAttr<StrAttr>:$rhs_format
+  );
+  let results = (outs Atir_Tensor:$output);
+}
+
+def Atir_ReluOp : Atir_Op<"Relu", Interfaces> {
+  let summary = "relu op";
+  let arguments = (
+      ins Atir_Tensor:$output,
+      Atir_Tensor:$input,
+      DefaultValuedAttr<F32Attr, "-1.0">:$relu_limit
+  );
+  let results = (outs Atir_Tensor:$result);
+}
+
+def Atir_ForOp : Atir_Op<"for"> {
+  let summary = "for operation";
+  let description = [{
+    %0 = atir.alloc()
+    // concat
+    atir.for (i = 0; i < n; i+=s) {
+      %in = extract() {[0, %i, 0 , 0] [?, s, ?, ?]}
+      %1 = conv(%in)
+      %2 = conv(%1)
+      insert(%0, %2)
+    }
+
+    // reduce
+    %0 = atir.alloc()
+    atir.for (i = 0; i < n; i+=s; post_operation = ['reduce_sum'], iter_args = [%0]) {
+      %in = extract() {[0, %i, 0 , 0] [?, s, ?, ?]}
+      %1 = conv(%in)
+      %2 = conv(%1)
+      return %2
+    }
+
+    %0 = atir.alloc()
+    %1 = atir.alloc()
+    axt.for (i in [])
+    atir.for (i = 0; i < n; i+=s; post_operation = ['reduce_sum'], iter_args = [%0, %1], parallel) {
+      %in = extract() {[0, %i, 0 , 0] [?, s, ?, ?]}
+      %1 = conv(%in)
+      %2 = conv(%in)
+      return %1, %2
+    }
+
+    %start_in = arith.Constant{[0, 7]}
+    %step_in = arith.Constant{[9, 8]}
+    %start_out = arith.Constant([0, 4])
+    %step_out = arith.Constant([4, 4])
+    atir.for %arg_start_in, %arg_step_in, %arg_start_out, %arg_step_out in zip(%start_in, %step_in, %start_out, %step_out) {
+      %in = extract() {[0, %arg_start_in, 0, 0], [?, %arg_step_in, ?, ?]}
+      inset() {[0, %arg_start_out, 0, 0], [?, %arg_step_out, ?, ?]}
+    }
+  }];
+  let arguments = (ins I64Attr:$idxCnt,
+                       Variadic<AnyType>:$initArgs,
+                       /* arg order:
+                       [2]: iter idx0 constant
+                       [3]: iter idx1 constant
+                       ...
+                       [...] iter args
+                       */
+                       OptionalAttr<I64Attr>:$start,
+                       OptionalAttr<I64Attr>:$end,
+                       OptionalAttr<I64Attr>:$step,
+                       OptionalAttr<I64Attr>:$axis,
+                       /* reduce_sum/min/max, concat */
+                       OptionalAttr<StrAttr>:$postOp,
+                       OptionalAttr<BoolAttr>:$parallel);
+  let results = (outs Variadic<Atir_Tensor>:$results);
+  let regions = (region SizedRegion<1>:$region);
+
+  let extraClassDeclaration = [{
+    ::mlir::MutableArrayRef<mlir::BlockArgument> getInductionVars() {
+      return getRegion().getArguments();
+    }
+  }];
+  
+  let builders = [
+    OpBuilder<(ins CArg<"int64_t">:$idxCnt,
+      CArg<"::mlir::ValueRange", "std::nullopt">:$iterArgs,
+      CArg<"::mlir::IntegerAttr", "{}">:$axis,
+      CArg<"::mlir::StringAttr", "{}">:$postOp,
+      CArg<"::mlir::BoolAttr", "{}">:$parallel)>,
+    OpBuilder<(ins CArg<"int64_t">:$start,
+      CArg<"int64_t">:$end,
+      CArg<"int64_t">:$step,
+      CArg<"::mlir::ValueRange", "std::nullopt">:$iterArgs,
+      CArg<"::mlir::IntegerAttr", "{}">:$axis,
+      CArg<"::mlir::StringAttr", "{}">:$postOp,
+      CArg<"::mlir::BoolAttr", "{}">:$parallel)>,
+  ];
+  let hasCustomAssemblyFormat = 1;
+}
+
+def Atir_IfOp : Atir_Op<"if"> {
+  let summary = "if-then-else operation";
+  let description = [{}];
+  let arguments = (ins AnyType:$lhs,
+                       AnyType:$rhs,
+                       StrAttr:$LogicOperation,
+                       OptionalAttr<F32Attr>:$constValue
+                       );
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
+
+  let builders = [];
+  // let hasCustomAssemblyFormat = 1;
+}
+
+def Atir_TensorToIndexOp : Atir_Op<"tensor_to_index"> {
+  let summary = "extract a scalar integer tensor as an index";
+  let description = [{
+    Extracts the sole element of a rank-0 integer tensor and casts it to the
+    builtin index type. TensorFlow boolean predicates use the ATIR integer
+    carrier with encoding="bool" and are accepted by this operation.
+  }];
+  let arguments = (ins Atir_Tensor:$input);
+  let results = (outs Index:$result);
+  let assemblyFormat = [{ $input attr-dict `:` type($input) }];
+  let hasVerifier = 1;
+}
+
+def Atir_IndexToTensorOp : Atir_Op<"index_to_tensor"> {
+  let summary = "materialize an index as a scalar integer tensor";
+  let description = [{
+    Casts an index value to the element type of a rank-0 ATIR integer tensor.
+    This is used for TensorFlow control-flow results such as
+    Merge.value_index.
+  }];
+  let arguments = (ins Index:$input);
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{ $input attr-dict `:` type($result) }];
+  let hasVerifier = 1;
+}
+
+def Atir_SwitchOp : Atir_Op<"switch"> {
+  let summary = "TensorFlow Switch mirror operation";
+  let description = [{
+    Mirrors TensorFlow Switch/RefSwitch without restructuring its downstream
+    branches. The false and true results correspond to TensorFlow output slots
+    0 and 1 and have the same runtime tensor type as the data input.
+  }];
+  let arguments = (ins AnyType:$data, Atir_Tensor:$predicate,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$falseOutput, AnyType:$trueOutput);
+  let assemblyFormat = [{
+    $data `,` $predicate attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_EnterOp : Atir_Op<"enter"> {
+  let summary = "TensorFlow Enter/RefEnter mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_ExitOp : Atir_Op<"exit"> {
+  let summary = "TensorFlow Exit/RefExit mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_NextIterationOp : Atir_Op<"next_iteration"> {
+  let summary = "TensorFlow NextIteration mirror operation";
+  let arguments = (ins AnyType:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_LoopCondOp : Atir_Op<"loop_cond"> {
+  let summary = "TensorFlow LoopCond mirror operation";
+  let arguments = (ins Atir_Tensor:$input,
+                       OptionalAttr<DictionaryAttr>:$metadata);
+  let results = (outs Atir_Tensor:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Atir_ParallelOp : Atir_Op<"Parallel"> {
+  let summary = "parallel group";
+  let arguments = (ins Variadic<Atir_Tensor>:$inputs);
+  let results = (outs Variadic<Atir_Tensor>:$outputs);
+  let regions = (region SizedRegion<1>:$region);
+  let assemblyFormat = [{
+    ( `(` $inputs^ `)` )?
+    attr-dict `:` functional-type(operands, results)
+    $region
+  }];
+}
+
+def Atir_ReturnOp : Atir_Op<"return", !listconcat([Terminator, ParentOneOf<["ForOp", "ParallelOp"]>], Interfaces)> {
+  let summary = "loop yield and termination operation";
+  let description = [{}];
+
+  let arguments = (ins Variadic<AnyType>:$results);
+  let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
+
+  let assemblyFormat =
+      [{  attr-dict ($results^ `:` type($results))? }];
+}
+
+def Atir_ExpandDimsOp : Atir_Op<"ExpandDims", Interfaces> {
+  let summary = "Inserts a dimension of 1 into a tensor's shape";
+  let description = [{
+    Given a tensor input, this operation inserts a dimension of size 1 at the dimension index
+    specified by axis. The axis is zero-based; if a negative value is specified, the index is
+    counted from the end of the shape.
+
+    `axis` is a 0-D i32 tensor operand (carrying its scalar value via cacheData).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$axis
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input `,` $axis attr-dict
+    `:` type($output) `,` type($input) `,` type($axis) `->` type($result)
+  }];
+}
+
+def Atir_IdentityOp : Atir_Op<"Identity", Interfaces> {
+  let summary = "Identity operation";
+  let description = [{
+    Returns the input tensor as-is. This op is often used for 
+    naming, control dependencies, or intermediate value anchoring.
+  }];
+  let arguments = (ins Atir_Tensor:$output, Atir_Tensor:$input);
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+  let hasFolder = 0;
+}
+
+def Atir_ShapeOp : Atir_Op<"Shape", Interfaces> {
+  let summary = "Returns the input shape information.";
+  let description = [{
+    Given a tensor input, this operation generates a one-dimensional tensor 
+    representing the shape information of the input.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input
+  );
+  let results = (outs 
+    Atir_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_RankOp : Atir_Op<"Rank", Interfaces> {
+  let summary = "Returns the rank of a tensor.";
+  let description = [{
+    Given a tensor input, this operation generates a scalar tensor holding
+    the number of dimensions (rank) of the input.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+
+def Atir_CastOp: Atir_Op<"Cast", !listconcat([SameOperandsAndResultShape], Interfaces)>{
+  let summary = "Cast input to a new type";
+  let description = [{
+    Casts a tensor from one data type to another.
+    The shape of the tensor remains unchanged.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_WhereOp : Atir_Op<"Where", Interfaces> {
+  let summary = "Returns elements from x or y depending on condition.";
+  let description = [{
+    Selects elements from `x` or `y` depending on `condition`.
+    When `x` and `y` are provided: output[i] = condition[i] ? x[i] : y[i]
+    When only `condition` is provided: returns indices where condition is true.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$inputs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` `(` $inputs `)` attr-dict `:` type($output) `,` type($inputs) `->` type($result)
+  }];
+}
+
+def Atir_StridedSliceOp : Atir_Op<"StridedSlice", Interfaces> {
+  let summary = "StridedSlice operation";
+  let description = [{
+    TensorFlow-compatible StridedSlice: 1-D tensor operands `begin`, `end`, and
+    `strides` (same length as the sparse slice spec, less than 32), plus scalar
+    bitmask attributes `beginMask`, `endMask`, `ellipsisMask`, `newAxisMask`, and
+    `shrinkAxisMask`. At most one bit may be set in `ellipsisMask`; if none is
+    set, an ellipsis is implied at the end of the spec (matching TensorFlow).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$begin,
+    Atir_Tensor:$end,
+    Atir_Tensor:$strides,
+    DefaultValuedAttr<I32Attr, "0">:$beginMask,
+    DefaultValuedAttr<I32Attr, "0">:$endMask,
+    DefaultValuedAttr<I32Attr, "0">:$ellipsisMask,
+    DefaultValuedAttr<I32Attr, "0">:$newAxisMask,
+    DefaultValuedAttr<I32Attr, "0">:$shrinkAxisMask
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $begin `,` $end `,` $strides attr-dict `:` type($output) `,` type($input) `,` type($begin) `,` type($end) `,` type($strides) `->` type($result)
+  }];
+}
+
+def Atir_PackOp : Atir_Op<"Pack", !listconcat([SameOperandsShape], Interfaces)> {
+  let summary = "Pack tensors along a new axis";
+  let description = [{
+    Packs the `N` tensors in `values` along the `axis` dimension.
+    Given a list of tensors of shape `(A, B, C)`;
+    if `axis == 0` then the `output` tensor will have shape `(N, A, B, C)`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$inputs,
+    I64Attr:$axis
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` `(` $inputs `)` `axis` `=` $axis attr-dict `:` 
+    type($output) `,` type($inputs) `->` type($result)
+  }];
+}
+
+def Atir_GatherNdOp : Atir_Op<"GatherNd", Interfaces> {
+  let summary = "Gather slices from params using nd indices";
+  let description = [{
+    Gathers slices from `params` into a Tensor with shape specified by 
+    `indices`. `indices` is a K-dimensional integer tensor, best thought of 
+    as a (K-1)-dimensional tensor of indices into `params`, where each 
+    element defines a slice of `params`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$values,
+    Atir_Tensor:$indices
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $values `,` $indices attr-dict `:` type($output) `,` type($values) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_StringToHashBucketFastOp : Atir_Op<"StringToHashBucketFast",
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Map strings to hash bucket indices.";
+  let description = [{
+    Maps each string in `input` to an integer hash modulo `numBuckets`.
+    Hash function is deterministic within a run but not guaranteed across versions.
+  }];
+  let arguments = (ins
+      Atir_Tensor:$output,
+      Atir_Tensor:$input,
+      I64Attr:$numBuckets
+    );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_StringToNumberOp : Atir_Op<"StringToNumber",
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Convert each string in the input tensor to a numeric value.";
+  let description = [{
+    Converts each string element of `input` to a numeric value. The output
+    element type is fixed by the frontend (TF `out_type` attribute); the op
+    itself only requires the input to be a string tensor (encoding="string").
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_StaticRegexReplaceOp : Atir_Op<"StaticRegexReplace",
+    !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Replaces matches of a regular expression in each string.";
+  let description = [{
+    Replaces matches of `pattern` in each string element of `input` with
+    `rewrite`. `pattern` follows the RE2-compatible syntax used by TF. When
+    `replaceGlobal` is set, every match is replaced; otherwise only the first
+    match is replaced. The result carries string elements.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    StrAttr:$pattern,
+    StrAttr:$rewrite,
+    DefaultValuedAttr<BoolAttr, "true">:$replaceGlobal
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_StringSplitOp : Atir_Op<"StringSplit", Interfaces> {
+  let summary = "Split a string tensor by a delimiter into a SparseTensor.";
+  let description = [{
+    Splits each string element of `input` by the scalar string `delimiter`,
+    producing three outputs: `indices` [nnz, rank+1] (int64), `values`
+    (the split substrings, string elements) and `denseShape` [rank+1] (int64,
+    where the trailing dim is the max substring count). When `skipEmpty` is
+    set, empty substrings are dropped.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input,
+    Atir_Tensor:$delimiter,
+    DefaultValuedAttr<BoolAttr, "false">:$skipEmpty
+  );
+  let results = (outs
+    Atir_Tensor:$indices,
+    Atir_Tensor:$values,
+    Atir_Tensor:$denseShape
+  );
+  let assemblyFormat = [{
+    $input `,` $delimiter attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SparseTensorDenseMatMulOp : Atir_Op<"SparseTensorDenseMatMul",
+    Interfaces> {
+  let summary = "Multiply a sparse matrix by a dense matrix.";
+  let description = [{
+    Computes `A * B` where `A` is a sparse matrix given by `indices` [nnz, 2]
+    (int64), `values` [nnz] and `denseShape` [M, N], and `B` is the dense
+    [N, K] matrix. The result is [M, K]. `adjointA`/`adjointB` conjugate-
+    transpose (a transpose for real values) the respective operand first.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$indices,
+    Atir_Tensor:$values,
+    Atir_Tensor:$denseShape,
+    Atir_Tensor:$dense,
+    DefaultValuedAttr<BoolAttr, "false">:$adjointA,
+    DefaultValuedAttr<BoolAttr, "false">:$adjointB
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $indices `,` $values `,` $denseShape `,` $dense attr-dict `:` type($output) `,` type($indices) `,` type($values) `,` type($denseShape) `,` type($dense) `->` type($result)
+  }];
+}
+
+def Atir_SparseReshapeOp : Atir_Op<"SparseReshape", Interfaces> {
+  let summary = "Reshape a SparseTensor to a new dense shape.";
+  let description = [{
+    This operation reshapes a sparse tensor represented by indices and values 
+    to a new dense shape. The non-zero elements remain the same, only their 
+    positions change according to the new shape.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$indices,
+    Atir_Tensor:$inputShape,
+    Atir_Tensor:$newShape
+  );
+  let results = (outs
+    Atir_Tensor:$outputIndices,
+    Atir_Tensor:$outputShape
+  );
+  let assemblyFormat = [{
+    $indices `,` $inputShape `,` $newShape attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SliceOp : Atir_Op<"Slice", Interfaces> {
+  let summary = "Extracts slices of the tensor";
+  let description = [{
+    TF `Slice`: `input`, 1D `begin`, 1D `size` (stride 1).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$begin,
+    Atir_Tensor:$size
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $begin `,` $size attr-dict `:` type($output) `,` type($input) `,` type($begin) `,` type($size) `->` type($result)
+  }];
+}
+
+def Atir_GatherOp : Atir_Op<"Gather", Interfaces> {
+  let summary = "Gather slices from params axis according to indices"; 
+  let description = [{
+    Gathers slices from `params` along the `axis` dimension according to `indices`. 
+    Produces an output tensor with shape:
+    params.shape[:axis] + indices.shape[batch_dims:] + params.shape[axis + 1:]
+    The `batch_dims` attribute specifies how many leading dimensions of `indices`
+    are batch dimensions that should not be gathered over.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$params,
+    Atir_Tensor:$indices,
+    Atir_Tensor:$axis,
+    DefaultValuedAttr<I32Attr, "0">:$batch_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $params `,` $indices `,` $axis attr-dict `:` type($output) `,` type($params) `,` type($indices) `,` type($axis) `->` type($result)
+  }];
+}
+
+def Atir_ProdOp : Atir_Op<"Prod", Interfaces> {
+  let summary = "Compute the product of tensor elements over specified axes"; 
+  let description = [{
+    Computes the product of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`. 
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+    Otherwise, the reduced dimensions are removed.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_SumOp : Atir_Op<"Sum", Interfaces> {
+  let summary = "Compute the sum of tensor elements over specified axes";
+  let description = [{
+    Computes the sum of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`.
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+    Otherwise, the reduced dimensions are removed.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
+  }];
+}
+
+
+def Atir_SparseFillEmptyRowsOp : Atir_Op<"SparseFillEmptyRows",
+    Interfaces> {
+  let summary = "Fills empty rows in a sparse tensor with a default value.";
+  let description = [{
+    This operation fills missing rows in a sparse tensor representation 
+    with a single entry at [row, 0, ..., 0] containing the default value.
+    The input sparse tensor is represented by (indices, values, denseShape).
+    The output has the same denseShape but with filled empty rows in sorted order.
+    Returns:
+    - outputIndices: The filled sparse tensor indices
+    - outputValues: The filled sparse tensor values  
+    - emptyRowIndicator: Boolean vector indicating which rows were empty
+    - reverseIndexMap: Maps input indices to output indices for backprop
+  }];
+  let arguments = (ins
+    Atir_Tensor:$indices,           // [N, rank] int64
+    Atir_Tensor:$values,                  // [N] any type T
+    Atir_Tensor:$denseShape,       // [rank] int64
+    Atir_Tensor:$defaultValue              // scalar of type T
+  );
+  let results = (outs
+    Atir_Tensor:$outputIndices,    // [N_full, rank] int64
+    Atir_Tensor:$outputValues,           // [N_full] same type as values
+    Atir_Tensor:$emptyRowIndicator,// [dense_shape[0]] bool
+    Atir_Tensor:$reverseIndexMap  // [N] int64
+  );
+  let assemblyFormat = [{
+    $indices `,` $values `,` $denseShape `,` $defaultValue attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_VarHandleOp : Atir_Op<"VarHandleOp", [NoMemoryEffect]> {
+  let summary = "Returns a handle to a variable resource";
+  let description = [{
+    Creates a handle to a variable resource. The handle can be used with 
+    ReadVariableOp and AssignVariableOp to read from and write to the variable.
+  }];
+  let arguments = (ins
+    StrAttr:$container,
+    StrAttr:$shared_name,
+    TypeAttr:$dtype,
+    I64ArrayAttr:$shape
+  );
+  // let results = (outs
+  //  Atir_ResourceType:$resource_handle
+  // );
+}
+
+def Atir_UniqueOp : Atir_Op<"Unique", Interfaces> {
+  let summary = "Finds unique elements in a 1-D tensor and returns them with indices.";
+  let description = [{
+    This operation returns a tensor `y` containing all of the unique elements of `x`
+    sorted in the same order that they occur in `x`. It also returns another tensor
+    `idx` the same size as `x` that contains the index of each value of `x` in the
+    unique output `y`. 
+  }];
+  let arguments = (ins
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$y,
+    Atir_Tensor:$idx
+  );
+  let assemblyFormat = [{
+    $x attr-dict `:` functional-type(operands, results)
+  }]; 
+}
+
+def Atir_ResourceGatherOp : Atir_Op<"ResourceGather", Interfaces> {
+  let summary = "Gather elements from resource handle by indices";
+  let description = [{
+    Gathers data from a resource according to given indices.
+    Supports batched gathering with multiple index dimensions.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    AnyType:$resource,
+    Variadic<AnyType>:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$validateIndices,
+    DefaultValuedAttr<I64Attr, "0">:$batchDims
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $resource `,` $indices attr-dict `:` type($output) `,` type($resource) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_SparseSegmentSumOp : Atir_Op<"SparseSegmentSum", Interfaces> {
+  let summary = "Computes sums of sparse segments of a tensor.";
+  let description = [{
+    Computes the sum of rows in `data` selected by `indices`, grouped by `segment_ids`.
+    - `data`: Input tensor of shape `[D0, D1, ..., Dn]`
+    - `indices`: 1D integer tensor specifying which rows of `data` to use
+    - `segment_ids`: 1D integer tensor (same length as `indices`), must be sorted 
+      and start from 0 with no gaps. Each value assigns the corresponding indexed row to a segment.
+    - `num_segments`: scalar integer tensor. If the constant value is `<= 0`, the leading output
+      dimension is inferred as `max(segment_ids) + 1` from `segment_ids` data when available.
+      If `> 0`, it is the explicit number of segment rows (padded with zeros), and must be
+      at least `max(segment_ids) + 1`.
+    Output shape: `[num_segments] + data.shape[1:]` (inferred or explicit as above).
+    Output element type matches `data`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor: $input,
+    Atir_Tensor: $indices,
+    Atir_Tensor: $segmentIds,
+    Atir_Tensor:$numSegments
+  );
+  let results = (outs
+    Atir_Tensor: $result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
+  }];      
+}
+
+def Atir_SparseSegmentMinOp : Atir_Op<"SparseSegmentMin", Interfaces> {
+  let summary = "Computes minima of sparse segments of a tensor.";
+  let description = [{
+    Computes the element-wise minimum of rows in `data` selected by `indices`, grouped by `segment_ids`.
+    - `data`: Input tensor of shape `[D0, D1, ..., Dn]`
+    - `indices`: 1D integer tensor specifying which rows of `data` to use
+    - `segment_ids`: 1D integer tensor (same length as `indices`), sorted, starting from 0 with no gaps.
+    - `num_segments`: scalar integer tensor; `<= 0` means infer row count from `segment_ids` (`max + 1`);
+      `> 0` is an explicit segment count (padding), at least `max(segment_ids) + 1`.
+    Output shape: `[num_segments] + data.shape[1:]`. Empty segments yield `+inf` for float inputs (same convention as `UnsortedSegmentMin`).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor: $input,
+    Atir_Tensor: $indices,
+    Atir_Tensor: $segmentIds,
+    Atir_Tensor: $numSegments
+  );
+  let results = (outs
+    Atir_Tensor: $result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
+  }];
+}
+
+def Atir_TileOp : Atir_Op<"Tile", Interfaces> {
+  let summary = "Tile a tensor along specified multiples";
+  let description = [{
+    Constructs a tensor by tiling `input` by `multiples`.
+    The output tensor has the same rank as `input`, and each dimension 
+    of the output is `multiples[i] * input.shape[i]`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$multiples
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $multiples attr-dict `:` type($output) `,` type($input) `,` type($multiples) `->` type($result)
+  }];
+}
+
+def Atir_ZerosLikeOp : Atir_Op<"ZerosLike", !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Returns a tensor of zeros with the same shape and type as input";
+  let description = [{
+    The ZerosLike operation returns a new tensor where all elements are zero,
+    matching the shape and element type of the input operand. This is useful
+    for initializing tensors in computations.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SelectOp : Atir_Op<"Select"> {
+  let summary = "Select elements from `input1` or `input2` depending on `condition`";
+  let description = [{
+    Selects elements from `input1` or `input2` based on the values of `condition`.
+    For each element, if the corresponding element in `condition` is true,
+    the element from `input2` is selected, otherwise the element from `input1` is selected.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$condition,
+    Atir_Tensor:$input1,
+    Atir_Tensor:$input2
+  );
+  let results = (outs
+    Atir_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $condition `,` $input1 `,` $input2 attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_ConcatV2Op : Atir_Op<"ConcatV2", Interfaces> {
+  let summary = "Concatenate tensors along an axis";
+  let description = [{
+    Concatenates a list of tensors along dimension `axis`.
+    All tensors must have the same rank and same size in all dimensions
+    except `axis`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$values,
+    Atir_Tensor:$axis
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SizeOp : Atir_Op<"Size", Interfaces> {
+  let summary = "Return the size of tensor.";
+  let description = [{
+    Computes the total number of elements in the input tensor.
+  }];
+  let arguments = (ins Atir_Tensor:$input);
+  let results = (outs Atir_Tensor:$output);  // The output must be a scalar and an integer.
+  let hasVerifier = 1;
+  let hasFolder = 1;
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_FloorModOp : Atir_Op<"FloorMod", !listconcat([ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Element-wise remainder of division";
+  let description = [{
+    Returns element-wise remainder of division: `floor(x / y) * y + mod = x`.
+    Matches Python's `%` operator.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_FloorDivOp : Atir_Op<"FloorDiv", !listconcat([SameOperandsAndResultShape, ResultsBroadcastableShape], Interfaces)>{
+  let summary = "Element-wise floor division: floor(x / y). Matches Python // semantics.";
+  let description = [{
+    Returns element-wise floor division: `x / y`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_RangeOp : Atir_Op<"Range", Interfaces> {
+  let summary = "Creates a sequence of numbers";
+  let description = [{
+    Creates a sequence of numbers from `start` to `limit` with step `delta`.
+  }];
+  let arguments = (ins  // The input must be a scalar.
+    Atir_Tensor:$output,
+    Atir_Tensor:$start,
+    Atir_Tensor:$limit,
+    Atir_Tensor:$delta
+  );
+  let results = (outs  // The output must be a one-dimensional tensor.
+    Atir_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $output `,` $start `,` $limit `,` $delta attr-dict `:` type($output) `,` type($start) `,` type($limit) `,` type($delta) `->` type($result)
+  }];
+}
+
+def Atir_DynamicPartitionOp : Atir_Op<"DynamicPartition", Interfaces> {
+  let summary = "Partitions data into numPartitions tensors using indices from partitions";
+  let description = [{
+    Partitions data into numPartitions tensors according to the indices in partitions.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$data,
+    Atir_Tensor:$partitions,
+    I32Attr:$numPartitions
+  );
+  let results = (outs
+    Variadic<Atir_Tensor>:$outputs
+  );
+  let assemblyFormat = [{
+    $data `,` $partitions attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_ParallelDynamicStitchOp : Atir_Op<"ParallelDynamicStitch",
+    !listconcat([SameVariadicOperandSize], Interfaces)> {
+  let summary = "Interleave values from multiple tensors into a single tensor using parallel indices";
+  let description = [{
+    Interleaves values from multiple tensors into a single tensor using indices arrays.
+    This is the inverse of DynamicPartition. Works in parallel for better performance.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Variadic<Atir_Tensor>:$indices,
+    Variadic<Atir_Tensor>:$data
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SparseSegmentMeanOp : Atir_Op<"SparseSegmentMean", Interfaces> {
+  let summary = "Computes the mean along sparse segments of a tensor";
+  let description = [{
+    Computes the mean along sparse segments of a tensor.
+    Example:
+      data = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+      indices = [0, 1, 2, 3]
+      segment_ids = [0, 0, 1, 1]
+      
+      output[0] = mean(data[0], data[1]) = [2.5, 3.5, 4.5]
+      output[1] = mean(data[2], data[3]) = [8.5, 9.5, 10.5]
+    - `num_segments`: scalar integer tensor. If the constant value is `<= 0`, the leading output
+      dimension is inferred as `max(segment_ids) + 1` from `segment_ids` when available.
+      If `> 0`, it is the explicit segment count (extra segments have mean 0 / no contribution).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$data,
+    Atir_Tensor:$indices,
+    Atir_Tensor:$segmentIds,
+    Atir_Tensor:$numSegments
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $data `,` $indices `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($data) `,` type($indices) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
+  }];
+}
+
+def Atir_SubOp : Atir_Op<"Sub", !listconcat([Commutative, ResultsBroadcastableShape, SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Element-wise subtraction: x - y.";
+  let description = [{
+    Computes per-element subtraction of two tensors with standard broadcasting semantics.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_MulOp : Atir_Op<"Mul", Interfaces> {
+  let summary = "Element-wise multiplication with broadcasting";
+  let description = [{
+    Computes output = lhs * rhs element-wise.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+
+def Atir_FillOp : Atir_Op<"Fill", Interfaces> {
+  let summary = "Create tensor of shape filled with scalar value";
+  let description = [{
+    Generates a tensor with a specified shape (from shape input) where all elements 
+    are set to the given scalar value (from value input).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$shapeInput,
+    Atir_Tensor:$valueInput
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $output `,` $shapeInput `,` $valueInput attr-dict `:` type($output) `,` type($shapeInput) `,` type($valueInput) `->` type($result)
+  }];
+}
+
+
+def Atir_RealDivOp : Atir_Op<"RealDiv", Interfaces> {
+  let summary = "For the real number type, element-wise returns x / y.";
+  let description = [{
+    If `x` and `y` are real numbers, this will return the result of floating-point division.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SparseToDenseOp : Atir_Op<"SparseToDense", Interfaces> {
+  let summary = "Converts sparse representations into dense tensors.";
+  let description = [{
+    Converts sparse representation (sparseIndice + sparseValues) to a dense tensor with specified shape.
+    The output tensor is initialized with defaultValue, then filled with values at the positions specified by indices.
+    The index should be sorted in lexicographical order, and it should not contain any duplicate items. 
+    If `validateIndices` is true, these properties will be checked during the execution process.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$sparseIndice,
+    Atir_Tensor:$outputShape,
+    Atir_Tensor:$sparseValue,
+    Atir_Tensor:$defaultValue,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$validateIndices
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $sparseIndice `,` $outputShape `,` $sparseValue `,` $defaultValue attr-dict `:` type($output) `,` type($sparseIndice) `,` type($outputShape) `,` type($sparseValue) `,` type($defaultValue) `->` type($result)
+  }];
+}
+
+def Atir_BatchMatMulOp : Atir_Op<"BatchMatMul", Interfaces> {
+  let summary = "Performs batch multiplication on slices of two tensors.";
+  let description = [{
+    Performs batch matrix multiplication on high-dimensional tensors. For each batch, 
+    the matrix multiplication is computed on the submatrices, where the last two dimensions of A/B may be transposed or not,
+    which is controlled by the transposeA/transposeB attributes.
+    The batch dimensions are handled according to TensorFlow's batch matrix multiply broadcast rules.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$A,
+    Atir_Tensor:$B,
+    DefaultValuedAttr<BoolAttr, "false">:$transposeA,
+    DefaultValuedAttr<BoolAttr, "false">:$transposeB
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $output `,` $A `,` $B attr-dict `:` type($output) `,` type($A) `,` type($B) `->` type($result)
+  }];
+}
+
+def Atir_RsqrtOp : Atir_Op<"Rsqrt", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
+  let summary = "Computes reciprocal of square root element-wise.";
+  let description = [{
+    Performs element-wise reciprocal square root on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = 1 / sqrt(x)`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
+  }];
+}
+
+def Atir_SqrtOp : Atir_Op<"Sqrt", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
+  let summary = "Computes square root element-wise.";
+  let description = [{
+    Performs element-wise square root on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = sqrt(x)`.
+
+    Sqrt is distinct from Rsqrt (`1 / sqrt(x)`) and is the form ONNX models
+    export (a LayerNorm variance chain is `Add(eps) -> Sqrt -> Reciprocal`);
+    folding the two would change the graph's arithmetic.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
+  }];
+}
+
+def Atir_ReciprocalOp : Atir_Op<"Reciprocal", !listconcat([SameOperandsAndResultShape, Elementwise], Interfaces)> {
+  let summary = "Computes the element-wise reciprocal.";
+  let description = [{
+    Performs element-wise reciprocal on tensor `x`, producing tensor `y`.
+    For each element in the input: `y = 1 / x`.
+
+    Kept as a dedicated op instead of `RealDiv(1, x)` because RealDiv is
+    same-shape only while ONNX exports Reciprocal on tensors whose shape is not
+    statically known; a materialized ones-tensor would be unbuildable there.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $x attr-dict `:` type($output) `,` type($x) `->` type($result)
+  }];
+}
+
+def Atir_TopKOp : Atir_Op<"TopK", Interfaces> {
+  let summary = "Find the values and indices of the `k` largest elements along the last dimension.";
+  let description = [{
+    Find the values and indices of the `k` largest elements along the last dimension.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$input,
+    Atir_Tensor:$k,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$sorted
+  );
+  let results = (outs
+    Atir_Tensor:$values,
+    Atir_Tensor:$indices
+  );
+  let hasVerifier = 1;
+  let assemblyFormat=[{
+    $input `,` $k attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_UnsortedSegmentMinOp : Atir_Op<"UnsortedSegmentMin", Interfaces> {
+  let summary = "Computes the minimum value in each segment of the tensor.";
+  let description = [{
+    Aggregates elements of the input tensor into segments specified by segmentIds (unsorted),
+    and computes the minimum value for each segment. The output tensor has shape [num_segments] + input.shape[1:].
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$segmentIds,
+    Atir_Tensor:$numSegments
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat=[{
+    $output `,` $input `,` $segmentIds `,` $numSegments attr-dict `:` type($output) `,` type($input) `,` type($segmentIds) `,` type($numSegments) `->` type($result)
+  }];
+}
+
+def Atir_MinimumOp : Atir_Op<"Minimum", !listconcat([ResultsBroadcastableShape], Interfaces)> {
+  let summary = "Returns the minimum value of x and y element-wise.";
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$x,
+    Atir_Tensor:$y
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat=[{
+    $output `,` $x `,` $y attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_TensorScatterUpdateOp : Atir_Op<"TensorScatterUpdate", !listconcat([ResultsBroadcastableShape], Interfaces)> {
+  let summary = "Scatter update tensor values";
+  let description = [{
+    Updates values of the input tensor at specified indices with values from the updates tensor,
+    and returns a new tensor (non-in-place update). 
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    Atir_Tensor:$updates
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat=[{
+    $output `,` $input `,` $indices `,` $updates attr-dict `:` type($output) `,` type($input) `,` type($indices) `,` type($updates) `->` type($result)
+  }];
+}
+
+def Atir_PadOp : Atir_Op<"Pad", Interfaces> {
+  let summary = "Pad a tensor with specified value";
+  let description = [{
+    Pads a tensor according to the paddings tensor.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$paddings,
+    Atir_Tensor:$value
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $output `,` $input `,` $paddings `,` $value attr-dict `:` type($output) `,` type($input) `,` type($paddings) `,` type($value) `->` type($result)
+  }];
+}
+
+def Atir_MergeOp : Atir_Op<"merge", Interfaces> {
+  let summary = [{
+    Accepts a list of input operands and returns a value of the operand 
+    type and the index of the first encountered match.
+  }];
+  let arguments = (ins
+    Variadic<AnyType>:$inputsAndControl
+  );
+  let results = (outs
+    Atir_Tensor:$output,
+    Atir_Tensor:$value_index
+  );
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_BroadcastOp : Atir_Op<"broadcast",
+    Interfaces> {
+  let summary = "Broadcast a tensor to a new shape by adding leading dimensions";
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    DenseI64ArrayAttr:$broadcastSizes
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` type($output) `,` type($input) `->` type($result)
+  }];
+}
+
+def Atir_ReshapeOp : Atir_Op<"Reshape", Interfaces> {
+  let summary = "Reshape a tensor to a new shape without changing its underlying data.";
+  let description = [{
+    Produce a tensor with the same data as the input but reshaped to the specified shape.
+    The total number of elements must remain unchanged.
+
+    `targetShape` is a 1-D i32/i64 tensor operand (carrying the target shape values via cacheData).
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$targetShape
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $output `,` $input `,` $targetShape attr-dict
+    `:` type($output) `,` type($input) `,` type($targetShape) `->` type($result)
+  }];
+}
+
+def Atir_ParameterOp : Atir_Op<"Parameter", Interfaces> {
+  let summary = "Placeholder for input arguments of the computation graph";
+  let description = [{
+    This operation serves as a placeholder for external inputs into the computation graph.
+    It is identified by a unique `parameterNumber` (unique globally within the computation graph) and specifies
+    the type and shape of the tensor to be passed from the outside. This operation does not perform any computation;
+    it only acts as an input anchor for the computation graph.
+  }];
+  let arguments = (ins I64Attr:$parameter_number);
+  let results = (outs Atir_Tensor:$output);
+  let assemblyFormat = [{
+    operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_CompareOp : Atir_Op<"Compare", !listconcat([ResultsBroadcastableShape], Interfaces)> {
+  let summary = "Element-wise comparison operation.";
+  let description = [{
+    This operation compares two input tensors element-wise.
+    The `comparisonDirection` attribute specifies the comparison relation.
+    Supported values are: "EQ", "NE", "LT", "LE", "GT", "GE".
+  }];
+  let arguments = (ins
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs,
+    StrAttr:$comparisonDirection,
+    DefaultValuedAttr<BoolAttr, "true">:$incompatibleShapeError
+  );
+  let results = (outs
+    Atir_Tensor:$output
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_DivideOp : Atir_Op<"Divide", Interfaces> {
+  let summary = "Element-wise division with broadcasting support";
+  let description = [{
+    Computes element-wise division of two tensors.
+  }];
+  let arguments = (ins 
+    Atir_Tensor:$lhs, 
+    Atir_Tensor:$rhs
+  );
+  let results = (outs Atir_Tensor:$result);
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_AndOp : Atir_Op<"And", !listconcat([ResultsBroadcastableShape], Interfaces)> {
+  let summary = "Element-wise bitwise AND operation.";
+  let description = [{
+    This operation computes the bitwise AND of two input tensors
+    element-wise. 
+  }];
+  let arguments = (ins
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_LogisticOp : Atir_Op<"Logistic", !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Element-wise logistic (sigmoid) function.";
+  let description = [{
+    This operation computes the logistic (sigmoid) function on
+    each element of the input tensor: `1 / (1 + exp(-x))`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_MaximumOp : Atir_Op<"Maximum", !listconcat([ResultsBroadcastableShape], Interfaces)> {
+  let summary = "Element-wise maximum operation.";
+  let description = [{
+    This operation returns the element-wise maximum of two
+    input tensors `lhs` and `rhs`. For each element, it compares the values
+    and returns the larger one.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $lhs `,` $rhs attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_ScatterOp : Atir_Op<"Scatter", Interfaces> {
+  let summary = "Scatter operation with configurable update semantics.";
+  let description = [{
+    This operation updates elements of the `operand` tensor at
+    positions specified by `scatterIndices` using values from the `updates`
+    tensor. The `updateComputation` region defines how to combine existing
+    values with update values.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$operand,
+    Atir_Tensor:$scatterIndices,
+    Atir_Tensor:$updates,
+    I64ArrayAttr:$updateWindowDims,
+    I64ArrayAttr:$insertedWindowDims,
+    I64ArrayAttr:$scatterDimsToOperandDims,
+    DefaultValuedAttr<I64Attr, "0">:$indexVectorDim,
+    DefaultValuedAttr<BoolAttr, "false">:$uniqueIndices,
+    DefaultValuedAttr<BoolAttr, "false">:$indicesAreSorted
+  );
+
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let regions = (region
+    SizedRegion<1>:$updateComputation
+  );
+}
+
+def Atir_AbsOp : Atir_Op<"Abs", !listconcat([SameOperandsAndResultShape], Interfaces)> {
+  let summary = "Element-wise absolute value operation.";
+  let description = [{
+    This operation computes the absolute value of each element in the input tensor. 
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_DotOp : Atir_Op<"Dot", Interfaces> {
+  let summary = "General dot product operation.";
+  let description = [{
+    This operation computes the dot product of two tensors `lhs` and `rhs`.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $lhs `,` $rhs attr-dict `:` type($output) `,` type($lhs) `,` type($rhs) `->` type($result)
+  }];
+}
+
+def Atir_TransposeOp : Atir_Op<"Transpose", Interfaces> {
+  let summary = "Transpose a tensor by permuting its dimensions.";
+  let description = [{
+    This operation returns a tensor with dimensions permuted according to the
+    permutation. The permutation is taken from the `perm` tensor operand at
+    runtime (TF computes it via a ConcatV2/Pack chain for Tensordot); the
+    `permutation` attribute is a build-time fallback used only when the perm
+    operand has no runtime value.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$perm,
+    I64ArrayAttr:$permutation
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $perm attr-dict `:` type($output) `,` type($input) `,` type($perm) `->` type($result)
+  }];
+}
+
+def Atir_ReduceMeanOp : Atir_Op<"ReduceMean", Interfaces> {
+  let summary = "Compute the mean of tensor elements over specified axes";
+  let description = [{
+    Computes the mean of elements across dimensions of a tensor.
+    Reduces `input` along the dimensions specified in `indices`.
+    If `keep_dims` is true, the reduced dimensions are retained with size 1.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input,
+    Atir_Tensor:$indices,
+    DefaultValuedAttr<BoolAttr, "false">:$keep_dims
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input `,` $indices attr-dict `:` type($output) `,` type($input) `,` type($indices) `->` type($result)
+  }];
+}
+
+def Atir_SoftmaxOp : Atir_Op<"Softmax", Interfaces> {
+  let summary = "Softmax operation";
+  let description = [{
+    Computes softmax activations. For each element `x_i` in the input tensor,
+    computes `exp(x_i) / sum(exp(x_j))` over the last dimension.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$input
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $input attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_SplitOp : Atir_Op<"Split", Interfaces> {
+  let summary = "Split a tensor into multiple sub-tensors";
+  let description = [{
+    Splits a tensor into `num_split` tensors along one dimension.
+    The split dimension is provided as a scalar tensor.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$split_dim,
+    Atir_Tensor:$value,
+    I64Attr:$num_split
+  );
+  let results = (outs
+    Variadic<Atir_Tensor>:$output
+  );
+  let assemblyFormat = [{
+    $split_dim `,` $value attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def Atir_PowOp : Atir_Op<"Pow", Interfaces> {
+  let summary = "Element-wise power operation";
+  let description = [{
+    Computes `lhs ^ rhs` element-wise.
+  }];
+  let arguments = (ins
+    Atir_Tensor:$output,
+    Atir_Tensor:$lhs,
+    Atir_Tensor:$rhs
+  );
+  let results = (outs
+    Atir_Tensor:$result
+  );
+  let assemblyFormat = [{
+    $output `,` $lhs `,` $rhs attr-dict `:` type($output) `,` type($lhs) `,` type($rhs) `->` type($result)
+  }];
+}
+
+def Atir_UnsupportedOp : Atir_Op<"unsupported"> {
+  let summary = "registered fallback carrier for an unmappable frontend residue op";
+  let description = [{
+    Carries unmappable source ops losslessly through ATIR:
+    `opType` stores the source op name,
+    `metadata` preserves source attrs verbatim,
+    operands/results keep converted types.
+    `reason` classifies each residue op — `unknown_op` (no mapping) or
+    `spec_mismatch` (shape/arity contract rejected the build).
+    `detail` holds a human-readable evidence snippet.
+  }];
+  let arguments = (ins StrAttr:$opType,
+                       OptionalAttr<Builtin_DictionaryAttr>:$metadata,
+                       DefaultValuedAttr<StrAttr, "\"\"">:$reason,
+                       DefaultValuedAttr<StrAttr, "\"\"">:$detail,
+                       Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+// V2 ops (no output-buffer operand, builtin tensors) used by the stablehlo
+// fusion path; every op above stays frozen.
+include "Dialect/Atir/AtirOpsV2.td"
+
+#endif  // ATIR_OPS_TD

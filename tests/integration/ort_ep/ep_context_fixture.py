@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""Exercise the annc_context_v3 EP path with a hand-written context kernel.
+
+The fixture stands in for `annc-onnx-pipeline` (like ep_aot_fixture.py does for
+the preallocated-output ABI), so the real graph export, site validation, cache
+publication, ORT fusion and Compute run unchanged; only the kernel is a local
+stand-in. The kernel drives every piece of the execution context:
+
+  * it allocates its output through allocate_output with dims it reads from the
+    runtime descriptors (the leading dims are dynamic in the model, so only the
+    kernel can size the buffer),
+  * it allocates a temporary through context, initializes it and computes
+    into it before copying to the output,
+  * it runs the rows through the thread pool the context carries and records
+    the distinct worker threads it observed,
+  * on demand it reports an error through report_error or requests an
+    out-of-range output slot, to pin the failure paths.
+
+Modes (ANNC_EP_FIXTURE_KERNEL_MODE):
+  normal    matmul into the context-allocated output (the default)
+  error     report_error + non-zero return
+  bad-slot  allocate output slot 1 (out of range)
+"""
+
+import argparse
+import ctypes
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+import numpy as np
+import onnx
+from onnx import TensorProto, helper, numpy_helper
+import onnxruntime as ort
+import onnxruntime.capi.onnxruntime_pybind11_state as rtpy
+
+
+KERNEL = r"""
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "Context/KernelContextUtils.h"
+
+namespace {
+
+void AppendMarker(const char *line) {
+  const char *path = std::getenv("ANNC_EP_FIXTURE_MARKER");
+  if (path == nullptr) return;
+  FILE *out = std::fopen(path, "a");
+  if (out != nullptr) {
+    std::fputs(line, out);
+    std::fputc('\n', out);
+    std::fclose(out);
+  }
+}
+
+const char *KernelMode() {
+  const char *mode = std::getenv("ANNC_EP_FIXTURE_KERNEL_MODE");
+  return mode != nullptr ? mode : "normal";
+}
+
+}  // namespace
+
+AnncStatusCode FixtureMatmul(annc::kernels::KernelContext& context) {
+  if (std::strcmp(KernelMode(), "same-session") == 0) {
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static int arrived = 0;
+    std::unique_lock<std::mutex> lock(mutex);
+    if (++arrived < 2) {
+      if (!cv.wait_for(lock, std::chrono::seconds(10), [] { return arrived >= 2; })) {
+        context.error(ANNC_STATUS_INTERNAL,
+                              "same-session calls did not overlap");
+        return 7;
+      }
+    } else {
+      cv.notify_all();
+    }
+    AppendMarker("same-session overlap");
+  }
+  auto* x = context.getInput(0);
+  auto* w = context.getInput(1);
+  if (!x || !w) return context.status();
+  const int64_t d0 = x->sizes[0];
+  const int64_t d1 = x->sizes[1];
+  const int64_t k = x->sizes[2];
+  const int64_t n = w->sizes[1];
+  const int64_t m = d0 * d1;
+
+  if (std::strcmp(KernelMode(), "error") == 0) {
+    context.error(ANNC_STATUS_INTERNAL,
+                          "fixture: deliberate kernel error");
+    AppendMarker("error deliberate");
+    return 7;
+  }
+
+  // The output's leading dims are dynamic in the model, so the kernel has to
+  // read the runtime descriptors before it can size the buffer.
+  const uint32_t slot =
+      std::strcmp(KernelMode(), "bad-slot") == 0 ? 1u : 0u;
+  auto output = context.allocateOutput<float>(slot, {d0, d1, n});
+  if (!output) return context.status();
+  const int64_t temp_dims[] = {m, n};
+  AnncTensorView temp{};
+  if (context.allocateTemp<float, 2>(temp_dims, &temp) != ANNC_STATUS_OK)
+    return context.status();
+  float* scratch = annc::kernels::contextData<float>(temp);
+  if (m && n) std::fill_n(scratch, m * n, 0.0f);
+  auto pool = context.getKernelThreadPool();
+
+  std::mutex mutex;
+  std::vector<std::thread::id> workers;
+  int nested_calls = 0;
+  int nested_in_region = -1;
+  int64_t nested_rows = 0;
+  std::vector<std::thread::id> nested_ids;
+  int cost_calls = 0;
+  int cost_in_region = -1;
+  int64_t cost_rows = 0;
+  std::vector<std::thread::id> cost_ids;
+
+  // One pass over the m rows.  `options` selects the adapter's dispatch: the
+  // optionless call takes the public KernelContext_ParallelFor mapping, the
+  // cost-bearing one the adapter's cost-model path (what every production
+  // kernel's rowOptions() reaches).  The nested-mode recording is per pass so
+  // the driver can check that nested requests stay on the outer worker
+  // separately, and covers the rows each callback saw so it can pin the
+  // partition (every row exactly once) without pinning a block count the
+  // framework owns.
+  auto dispatch = [&](int64_t cost,
+                      int *calls, int *in_region, int64_t *rows,
+                      std::vector<std::thread::id> *ids) {
+    auto body = [&, calls, in_region, rows, ids](int64_t begin, int64_t end) {
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            const std::thread::id id = std::this_thread::get_id();
+            if (std::find(workers.begin(), workers.end(), id) ==
+                workers.end()) {
+              workers.push_back(id);
+            }
+          }
+          if (std::strcmp(KernelMode(), "nested") == 0) {
+            // We are inside the outer callback. A nested service request
+            // must execute inline on this worker; thread identities below
+            // verify this for both public and cost-based dispatch.
+            const auto outer_worker = std::this_thread::get_id();
+            {
+              std::lock_guard<std::mutex> lock(mutex);
+              if (*in_region < 0) *in_region = 1;
+              ++*calls;
+              *rows += end - begin;
+            }
+            auto nested_body = [&](int64_t, int64_t) {
+              std::lock_guard<std::mutex> lock(mutex);
+              if (std::this_thread::get_id() != outer_worker) *in_region = 0;
+              if (std::find(ids->begin(), ids->end(),
+                            std::this_thread::get_id()) == ids->end()) {
+                ids->push_back(std::this_thread::get_id());
+              }
+            };
+            pool.parallelFor(4096, nested_body);
+          }
+          for (int64_t row = begin; row < end; ++row) {
+            const int64_t i = d1 > 0 ? row / d1 : 0;
+            const int64_t j = d1 > 0 ? row % d1 : 0;
+            const float *xr = annc::kernels::contextData<float>(*x) + i * x->strides[0] +
+                              j * x->strides[1];
+            float *sr = scratch + row * n;
+            for (int64_t col = 0; col < n; ++col) {
+              float sum = 0.0f;
+              for (int64_t t = 0; t < k; ++t) {
+                sum += xr[t * x->strides[2]] *
+                       annc::kernels::contextData<float>(*w)[ t * w->strides[0] +
+                                  col * w->strides[1]];
+              }
+              sr[col] = sum;
+            }
+          }
+        };
+    if (cost)
+      annc::kernels::Shard(pool.numThreads(), pool, m, cost, body);
+    else
+      pool.parallelFor(m, body);
+  };
+
+  dispatch(0, &nested_calls,
+           &nested_in_region, &nested_rows, &nested_ids);
+  if (std::strcmp(KernelMode(), "nested") == 0) {
+    // The second pass carries a cost, so it reaches the adapter's cost-model
+    // path.  The cost is inflated for the m rows here: the point is the
+    // dispatch path, and a cost of the production kernels' scale (tens of
+    // cycles per row) would leave this six-row range below the framework's
+    // parallelisation threshold and prove nothing about a region.
+    dispatch(100000, &cost_calls, &cost_in_region, &cost_rows,
+             &cost_ids);
+  }
+
+  float *out = annc::kernels::contextData<float>(*output);
+  if (m > 0 && n > 0) {
+    std::memcpy(out, scratch, static_cast<size_t>(m) * n * sizeof(float));
+  }
+
+  char line[200];
+  std::snprintf(line, sizeof(line),
+                "compute dims=%lld,%lld,%lld threads=%zu nested=%d,%d,%zu,%lld "
+                "cost_nested=%d,%d,%zu,%lld",
+                static_cast<long long>(d0), static_cast<long long>(d1),
+                static_cast<long long>(n), workers.size(), nested_calls,
+                nested_in_region, nested_ids.size(),
+                static_cast<long long>(nested_rows), cost_calls,
+                cost_in_region, cost_ids.size(),
+                static_cast<long long>(cost_rows));
+  AppendMarker(line);
+  return context.status();
+}
+
+extern "C" AnncStatusCode _mlir_ciface_fixture_context_matmul(
+    AnncKernelContext* context) {
+  return annc::kernels::invokeContextKernel(context, FixtureMatmul);
+}
+"""
+
+
+def run_pipeline(args):
+    if args.toolchain_info:
+        print("annc-ep-context-fixture-v3")
+        return
+    model = onnx.load(args.model)
+    onnx.checker.check_model(model)
+    nodes = list(model.graph.node)
+    if len(nodes) != 1 or nodes[0].op_type != "MatMul":
+        raise ValueError("fixture requires exactly one exported MatMul")
+    output = Path(args.out_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    kernel_name = "fixture_context_matmul"
+    source = output / "kernel.cpp"
+    source.write_text(KERNEL)
+    include_dir = Path(__file__).resolve().parents[3] / "annc" / "include"
+    subprocess.run(["c++", "-std=c++17", "-shared", "-fPIC", "-O2",
+                    "-I", str(include_dir),
+                    "-I", str(include_dir.parents[1] / "context" / "include"), "-o",
+                    str(output / "libannc_kernels.so"), str(source),
+                    str(include_dir.parents[1] / "context/lib/ThreadPool.cpp"),
+                    str(include_dir.parents[1] / "context/lib/Parallel.cpp")],
+                   check=True)
+    columns = model.graph.initializer[0].dims[1]
+    # The fusion-toggle tests reuse this fixture as their pipeline; the
+    # pattern is selectable so one kernel can stand in for any fused site.
+    pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
+    site = {
+        "pattern": pattern,
+        "execution_mode": "aot",
+        "abi": "annc_context_v3",
+        "kernel_name": kernel_name,
+        "member_node_names": [nodes[0].name],
+        "kernel_arg_order": [],
+        "args": [
+            {
+                "tf_name": nodes[0].input[0],
+                "role": "dynamic",
+                "dtype": "f32",
+                "rank": 3,
+                "shape": [-1, 3, 4],
+            },
+            {
+                "tf_name": nodes[0].input[1],
+                "role": "fixed",
+                "dtype": "f32",
+                "rank": 2,
+                "shape": [4, columns],
+            },
+        ],
+        "outputs": [
+            {
+                "tf_name": nodes[0].output[0],
+                "role": "output",
+                "dtype": "f32",
+                "rank": 3,
+                "shape": [-1, 3, columns],
+            }
+        ],
+    }
+    if pattern == "masked_mul":
+        # The fixture kernel ignores attrs; exercise their report transport.
+        site["context_i64_attrs"] = [1, 1, 0, 0, 1, 0, 0x3f800000, 0]
+    (output / "sites.json").write_text(json.dumps({
+        "schema": "annc-ep-site-report/1", "contract_version": "1.0.0",
+        "sites": [site],
+    }))
+
+
+def make_model(path, batch):
+    weight = np.arange(20, dtype=np.float32).reshape(4, 5) / 7
+    # The batch dimension is dynamic on purpose: the context-allocated output
+    # size must follow the runtime input, so the test can vary it per run.
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["x", "w"], ["y"], name="n0")],
+        "fixture",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT,
+                                       [None, 3, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT,
+                                       [None, 3, 5])],
+        [numpy_helper.from_array(weight, "w")])
+    proto = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    proto.ir_version = 7
+    onnx.checker.check_model(proto)
+    onnx.save(proto, path)
+
+
+def session(model, providers, threads=1):
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    return ort.InferenceSession(str(model), options, providers=providers)
+
+
+def run_test(args):
+    if args.mode == "packed-switch":
+        # This fixture is a Tensordot context kernel. The real BMMAdd packed-B
+        # regression is AnncEpBatchedMatMulAddPackedContextE2e.
+        os.environ.update(ANNC_EP_PACKED_B="1")
+    work = Path(args.work_dir or tempfile.mkdtemp(prefix="annc-ep-context-"))
+    work.mkdir(parents=True, exist_ok=True)
+    # The optionless dispatch is cut into min(rows, DoP) blocks, so the
+    # threads mode needs rows heavy enough that a block outlasts the pool's
+    # worker wake-up latency -- otherwise the caller thread legitimately
+    # absorbs all four blocks of a trivial matmul and no worker is ever
+    # observed (ORT's own schedulers run cheap work on the caller too).
+    batch = 16384 if args.mode == "threads" else 2
+    model = work / "matmul.onnx"
+    make_model(model, batch)
+    x = np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4) / 11
+
+    runtime = Path(rtpy.__file__).parent / "libonnxruntime.so.1.26.0"
+    ctypes.CDLL(str(runtime), mode=ctypes.RTLD_GLOBAL)
+    plugin = ctypes.CDLL(args.ep_library)
+    for symbol in ("annc_context_get_input_memref",
+                   "annc_context_alloc_output_memref"):
+        getattr(plugin, symbol)
+    rtpy.register_execution_provider_library("AnncExecutionProvider",
+                                             args.ep_library)
+    os.environ.update({
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
+        "ANNC_EP_PIPELINE": str(Path(__file__).resolve()),
+        "ANNC_EP_CACHE_DIR": str(work / "cache"),
+        "ANNC_EP_FIXTURE_MARKER": str(work / "compute.log"),
+        "ANNC_EP_FIXTURE_KERNEL_MODE": args.mode,
+        "ANNC_EP_DEBUG": "1",
+    })
+    # ORT fusion patterns default to disabled; the fixture explicitly enables
+    # the pattern it stands in for.
+    pattern = os.environ.get("ANNC_EP_FIXTURE_PATTERN", "tensordot_matmul")
+    switch = {
+        "tensordot_matmul": "ANNC_EP_FUSION_TENSORDOT_MATMUL",
+        "layer_norm": "ANNC_EP_FUSION_LAYER_NORM",
+        "masked_mul": "ANNC_EP_FUSION_MASKED_MUL",
+        "batched_matmul_add": "ANNC_EP_FUSION_BATCHED_MATMUL_ADD",
+    }.get(pattern)
+    if switch is not None:
+        os.environ[switch] = "1"
+    expected = session(model, ["CPUExecutionProvider"]).run(None, {"x": x})[0]
+    marker = work / "compute.log"
+
+    if args.mode == "error":
+        try:
+            session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
+                None, {"x": x})
+            raise AssertionError("the reported error did not fail the run")
+        except Exception as error:  # noqa: BLE001 - the message is the contract
+            assert "deliberate kernel error" in str(error), error
+        assert marker.read_text().splitlines() == ["error deliberate"], marker
+        # The host survives and falls back to the CPU EP for the same model.
+        actual = session(model, ["CPUExecutionProvider"]).run(None, {"x": x})[0]
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-7)
+        print("Kernel error: surfaced as an OrtStatus; host intact")
+        return
+
+    if args.mode == "bad-slot":
+        try:
+            session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
+                None, {"x": x})
+            raise AssertionError("the out-of-range slot did not fail the run")
+        except Exception as error:  # noqa: BLE001
+            assert "invalid output request" in str(error), error
+        print("Bad output slot: rejected by the context callbacks")
+        return
+
+    if args.mode == "threads":
+        # intra-op=1: the pool ORT exposes has no worker, the region runs
+        # serially on this thread.
+        session(model, ["AnncExecutionProvider", "CPUExecutionProvider"],
+                threads=1).run(None, {"x": x})
+        single = marker.read_text().splitlines()
+        assert single[0].startswith(f"compute dims={batch},3,5 threads=1"), single
+        # intra-op=4: the same kernel now runs inside ORT's pool. The pool
+        # creates its workers lazily and the shards are tiny, so the first run
+        # may still finish on the calling thread; on a loaded machine
+        # (concurrent builds or test suites saturating every core) several
+        # sessions can do that. Give the observation room before calling the
+        # pool ineffective -- this is a best-effort signal, and stopping at
+        # the first session that fans out keeps the passing path fast.
+        observed = 1
+        for _ in range(8):
+            session(model, ["AnncExecutionProvider", "CPUExecutionProvider"],
+                    threads=4).run(None, {"x": x})
+            lines = marker.read_text().splitlines()
+            observed = max(observed,
+                           int(lines[-1].split("threads=", 1)[1].split()[0]))
+            if observed >= 2:
+                break
+        assert observed >= 2, lines
+        print(f"Thread pool: 1 thread serially, {observed} workers with intra-op=4")
+        return
+
+    if args.mode == "nested":
+        session(model, ["AnncExecutionProvider", "CPUExecutionProvider"],
+                threads=4).run(None, {"x": x})
+        line = marker.read_text().splitlines()[-1]
+        nested_calls, nested_in_region, nested_workers, nested_rows = (
+            int(part) for part in
+            line.split("nested=", 1)[1].split(" ", 1)[0].split(","))
+        cost_calls, cost_in_region, cost_workers, cost_rows = (
+            int(part) for part in line.split("cost_nested=", 1)[1].split(","))
+        # Both passes report in_parallel_region() == true inside every
+        # callback, and the emulated nested range of 4096 items ran on a
+        # single thread when the gate held -- a missing gate (or a callback
+        # outside a region) would have fanned it out like the outer region.
+        # The partition is pinned by rows, not by a block count: how many
+        # blocks the dispatch is cut into is the framework's decision (the
+        # optionless pass takes the pool's real degree of parallelism, the
+        # cost pass the cost model -- counts differ between the native pool
+        # and the fallback replica, both legitimate), but every pass must
+        # cover each of the batch*3 rows exactly once.
+        assert 1 <= nested_calls <= batch * 3, line
+        assert nested_in_region == 1, line
+        assert nested_workers == 1, line
+        assert nested_rows == batch * 3, line
+        # The second dispatch carries a cost, so it reaches the adapter's
+        # cost-model path -- what every production kernel's rowOptions()
+        # dispatches through.
+        assert 1 <= cost_calls <= batch * 3, line
+        assert cost_in_region == 1, line
+        assert cost_workers == 1, line
+        assert cost_rows == batch * 3, line
+        print("Nested parallel region: reported and run without fanning out "
+              "on both dispatch paths")
+        return
+
+    if args.mode == "same-session":
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        # Rank-3 x and rank-2 w select lazy binding, unlike prebound BMM sites.
+        shared = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"])
+        cpu = session(model, ["CPUExecutionProvider"])
+        feeds = [{"x": np.full((n, 3, 4), v, np.float32)}
+                 for n, v in [(2, 0.25), (5, -0.75)]]
+        references = [cpu.run(None, feed)[0] for feed in feeds]
+        start = threading.Barrier(2)
+        def run_one(index):
+            start.wait(timeout=15)
+            return [shared.run(None, feeds[index])[0] for _ in range(12)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run_one, range(2)))
+        for index, values in enumerate(results):
+            for actual in values:
+                np.testing.assert_allclose(actual, references[index],
+                                           rtol=1e-3, atol=1e-7)
+        assert marker.read_text().count("same-session overlap") == 24
+        print("One session: overlapping lazy binding, distinct shapes and retained outputs pass")
+        return
+
+    if args.mode == "concurrent":
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        other = work / "other.onnx"
+        other_proto = onnx.load(model)
+        other_proto.graph.initializer[0].CopyFrom(
+            numpy_helper.from_array(
+                np.arange(24, dtype=np.float32).reshape(4, 6) / 7, "w"))
+        other_proto.graph.output[0].type.tensor_type.shape.dim[2].dim_value = 6
+        onnx.save(other_proto, other)
+        expected_other = session(other, ["CPUExecutionProvider"]).run(
+            None, {"x": x})[0]
+        start = threading.Barrier(2)
+
+        def run_one(path, reference):
+            start.wait(timeout=15)
+            for _ in range(2):
+                actual = session(path, ["AnncExecutionProvider",
+                                        "CPUExecutionProvider"]).run(
+                    None, {"x": x})[0]
+                np.testing.assert_allclose(actual, reference, rtol=1e-3,
+                                           atol=1e-7)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run_one, model, expected),
+                       pool.submit(run_one, other, expected_other)]
+            for future in futures:
+                future.result()
+        entries = list((work / "cache").glob("context-v3/*/*/DONE"))
+        assert len(entries) == 2, entries
+        print("Two models compiled and executed concurrently; both numeric")
+        return
+
+    # normal: cold compile + warm cache, a second run with a different batch so
+    # the context-allocated output size provably follows the runtime input
+    # rather than any static report shape, and a batch-0 run whose empty output
+    # only the context-allocating kernel can produce.
+    for expected_batch in (batch, batch + 3, 0):
+        inputs = np.arange(expected_batch * 12, dtype=np.float32).reshape(
+            expected_batch, 3, 4) / 11
+        reference = session(model, ["CPUExecutionProvider"]).run(
+            None, {"x": inputs})[0]
+        actual = session(model, ["AnncExecutionProvider", "CPUExecutionProvider"]).run(
+            None, {"x": inputs})[0]
+        np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-7)
+    lines = marker.read_text().splitlines()
+    assert len(lines) == 3, lines
+    assert lines[0].startswith(f"compute dims={batch},3,5 threads=1 "), lines
+    assert lines[1].startswith(f"compute dims={batch + 3},3,5 threads=1 "), lines
+    assert lines[2].startswith("compute dims=0,3,5 "), lines
+    entries = list((work / "cache").glob("context-v3/*/*/DONE"))
+    assert len(entries) == 1, entries
+    assert (entries[0].parent / "libannc_kernels.so").is_file()
+    print("Context kernel: allocation + temp + pool; cold compile, warm cache")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--toolchain-info", action="store_true")
+    parser.add_argument("--model")
+    parser.add_argument("--out-dir")
+    parser.add_argument("--ep-library")
+    parser.add_argument("--work-dir")
+    parser.add_argument("--mode",
+                        choices=["normal", "threads", "nested", "concurrent", "same-session",
+                                 "error", "bad-slot", "packed-switch"],
+                        default="normal")
+    args = parser.parse_args()
+    if args.toolchain_info or args.model:
+        run_pipeline(args)
+    else:
+        run_test(args)
+
+
+if __name__ == "__main__":
+    main()

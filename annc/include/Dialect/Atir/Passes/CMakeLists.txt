@@ -1,0 +1,5 @@
+set(LLVM_TARGET_DEFINITIONS Passes.td)
+mlir_tablegen(Passes.h.inc -gen-pass-decls -name Atir)
+mlir_tablegen(AtirPasses.capi.h.inc -gen-pass-capi-header --prefix Atir)
+mlir_tablegen(AtirPasses.capi.cpp.inc -gen-pass-capi-impl --prefix Atir)
+add_public_tablegen_target(MLIRAtirPassIncGen)

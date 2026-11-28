@@ -1,0 +1,50 @@
+get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
+get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
+set(LLVM_LINK_COMPONENTS
+  Core
+  Support
+)
+set(LIBS
+  MLIROptLib
+  MLIRLLVMDialect
+  MLIRParser
+  ${dialect_libs}
+  ${conversion_libs}
+
+  AtirDialect
+  AtirBuilder
+  AtirPasses
+  AtirToLinalgConversion
+  ContextConversion
+  AArch64Codegen
+)
+add_llvm_executable(annc-asm
+  annc-asm.cpp
+  DEPENDS
+  ${LIBS}
+)
+target_link_libraries(annc-asm PRIVATE 
+  "-Wl,--whole-archive" 
+  AtirPasses 
+  "-Wl,--no-whole-archive"
+  ${dialect_libs}
+  ${conversion_libs}
+  MLIROptLib
+  MLIRLLVMDialect
+  MLIRParser
+  AtirDialect
+  AtirBuilder
+  AtirToLinalgConversion
+  ContextConversion
+  AArch64Codegen
+)
+# V2-route parsing needs the stablehlo and tf_type compat dialects; follows
+# the global ANNC_ENABLE_TF2ATIR_V2 switch (default OFF).
+if(ANNC_ENABLE_TF2ATIR_V2)
+  target_compile_definitions(annc-asm PRIVATE ANNC_ENABLE_TF2ATIR_V2=1)
+  target_link_libraries(annc-asm PRIVATE
+    StablehloToAtirConversion)
+endif()
+llvm_update_compile_flags(annc-asm)
+mlir_check_all_link_libraries(annc-asm)
+install(TARGETS annc-asm DESTINATION bin)

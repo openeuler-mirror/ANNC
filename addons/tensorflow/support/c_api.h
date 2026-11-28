@@ -1,0 +1,99 @@
+#ifndef ANNC_TENSORFLOW_SUPPORT_C_API_H
+#define ANNC_TENSORFLOW_SUPPORT_C_API_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "Kernel/PackedRhs.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct AnncJitKernel AnncJitKernel;
+typedef struct AnncThreadPoolAdapter AnncThreadPoolAdapter;
+
+typedef enum {
+  ANNC_JIT_OK,
+  ANNC_JIT_INVALID_ARGUMENT,
+  ANNC_JIT_NOT_FOUND,
+  ANNC_JIT_INTERNAL
+} AnncJitStatus;
+
+// Callbacks are synchronous, borrow their arguments, and must not throw.
+typedef void (*AnncJitLogCallback)(void* context, int warning,
+                                   const char* message);
+
+typedef struct {
+  const char* atir_module_path;
+  const char* kernel_name;
+  int64_t intra_thread_count;
+  const int64_t* const* argument_dims;
+  const size_t* argument_ranks;
+  size_t argument_count;
+  AnncJitLogCallback log;
+  void* log_context;
+  int enable_prepack;
+  // Borrowed kernel argument indices; each must be in [0, argument_count).
+  const int64_t* immutable_arguments;
+  size_t immutable_argument_count;
+} AnncJitCompileRequest;
+
+// The caller owns kernel even on failure. Strings, specs and function addresses
+// are borrowed from it and remain valid until anncReleaseJitKernel(kernel).
+typedef struct {
+  AnncJitKernel* kernel;
+  AnncJitStatus status;
+  const char* error;
+  const char* work_dir;
+  const char* shared_library_path;
+  void* kernel_function;
+  void* set_thread_pool_function;
+  void* get_thread_pool_function;
+  const AnncPackedRhsSpec* packed_rhs_specs;
+  size_t packed_rhs_count;
+  AnncPreparePackedRhs prepare_rhs;
+} AnncJitKernelResult;
+
+void anncCompileJitKernel(const AnncJitCompileRequest* request,
+                          AnncJitKernelResult* result);
+void anncReleaseJitKernel(AnncJitKernel* kernel);
+
+// Returns ANNC's process configuration; no C++17 config object crosses into TF.
+int anncTensorFlowPrepackEnabled(void);
+// Synchronous admission query. Arrays have constants + fixed + dynamic entries.
+// Missing checkpoint/metadata leaves all admission flags zero, as before.
+// log is optional and is used only during this call.
+void anncFindImmutableInputs(const char* atir_path, const char* kernel_name,
+                             const char* fingerprint, int constants, int fixed,
+                             int dynamic, const size_t* input_bytes,
+                             uint8_t* eligible, AnncJitLogCallback log,
+                             void* log_context);
+
+typedef void (*AnncThreadPoolTask)(void* task_context, int64_t begin,
+                                   int64_t end);
+typedef struct {
+  void* context;
+  int (*num_threads)(void*);
+  int (*in_parallel_region)(void*);
+  // All tasks finish before returning. Return zero on success. block_size == 0
+  // selects cost-based scheduling; a positive value selects fixed blocks.
+  // A positive max_parallelism takes precedence over block_size; zero leaves
+  // scheduling unrestricted by the caller.
+  int (*parallel_for)(void*, int64_t total, int64_t block_size,
+                      int64_t cost_per_unit, int max_parallelism,
+                      AnncThreadPoolTask task, void* task_context);
+} AnncThreadPoolCallbacks;
+
+// Copies the callbacks, but borrows context. Null means invalid callbacks or
+// allocation failure. Restore the kernel's previous pool before destroying this
+// adapter.
+AnncThreadPoolAdapter* anncCreateThreadPoolAdapter(
+    const AnncThreadPoolCallbacks* callbacks);
+void anncDestroyThreadPoolAdapter(AnncThreadPoolAdapter* adapter);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // ANNC_TENSORFLOW_SUPPORT_C_API_H

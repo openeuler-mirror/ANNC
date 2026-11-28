@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "patterns": [
+    {
+      "name": "mul_half",
+      "kernel": "fused_mul_half",
+      "graph": ["y = Mul(x, scale=0.5)"],
+      "inputs": ["x"],
+      "outputs": ["y"]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+function(add_mlir_interface_library name)
+  add_mlir_library(Atir${name}Intfc
+    ${name}.cpp
+
+    ADDITIONAL_HEADER_DIRS
+    ${MLIR_MAIN_INCLUDE_DIR}/mlir/Interfaces
+
+    DEPENDS
+    MLIR${name}IncGen
+
+    LINK_LIBS PUBLIC
+    MLIRIR
+  )
+endfunction(add_mlir_interface_library)
+
+add_subdirectory(Atir)

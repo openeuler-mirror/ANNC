@@ -1,0 +1,12 @@
+# Export the ORT factory entries and the memref accessors used by generated
+# kernels. Keep the linked ORT archives' internal symbols local to prevent
+# interposition on the host runtime or other loaded libraries.
+{
+  global:
+    CreateEpFactories;
+    ReleaseEpFactory;
+    annc_context_get_input_memref;
+    annc_context_alloc_output_memref;
+  local:
+    *;
+};

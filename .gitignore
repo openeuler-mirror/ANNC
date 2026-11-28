@@ -1,8 +1,15 @@
 .vscode
 .venv
+# Model-specific tests and replay artifacts stay under logs/<model>/.
+logs/
+
+.idea
+
 
 bazel-*
 output
+build
+.worktrees/
 
 github
 
@@ -10,3 +17,42 @@ proxy
 
 __pycache__
 *.whl
+install/
+# Per-configuration install prefixes used by the build-switch acceptance runs
+# (install/, install-onnx-only/, install-tf-only/, ...).
+install-*/
+tf_protos_minimal/
+*.log
+*.bak
+third_party/*
+tensorflow_addons/logs
+tensorflow_addons/build
+.cache/
+.claude/
+.trae/
+docs/codex/
+docs/superpowers/
+benchmark/
+tmp/
+/Testing/
+.worktrees/
+/tools/
+
+# Generated ONNX protobuf sources (frontends/onnx/protos/onnx/onnx.proto and
+# frontends/onnx/protos/onnx_protos_minimal.sh are hand-maintained and
+# committed; only the generated tree is ignored). No trailing slash: a local
+# build tree may satisfy the dependency with a symlink, and git sees that as a
+# file.
+frontends/onnx/protos/gen_code
+build-stablehlo/
+
+# pb2tfmlir 前端（addons/tensorflow/transform）：本地预置的 LLVM 头快照目录
+# 不入库（可选；缺失时 configure 从官方仓拉取到构建树，见 transform/CMakeLists.txt）。
+addons/tensorflow/transform/third_party/
+
+# Local V2 route testkit and validation backups (never part of a commit).
+annc-oe2403-env/
+build-*.bak/
+install-*.bak
+third_party/.bak-*
+build-v1/

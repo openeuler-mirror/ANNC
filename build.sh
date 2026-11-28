@@ -1,79 +1,1153 @@
-# Copyright 2025 Huawei. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
 #!/bin/bash
 
-## Use these variables if bazel or go are not on the PATH.
-BAZEL=""
-GO=""
+# Default configuration
+BUILD_TYPE="Release"
+INSTALL_PREFIX="${PWD}/install"
+ANNC_GEMM_PACKAGE_DIR="${PWD}/third_party/annc-gemm-kernels"
+REQUIRE_GEMM_PACKAGE="OFF"
+ENABLE_KDNN_ADAPTOR="OFF"
+ENABLE_COVERAGE="OFF"
+ANNC_DEBUG="OFF"
+ENABLE_PYTHON="OFF"
+KDNN_SOURCE="RELEASE"
+KDNN_DIR="${PWD}/third_party/KDNN"
+KDNN_LIB_VARIANT="sve-threadpool"
+C_COMPILER="${CC:-gcc}"
+CXX_COMPILER="${CXX:-g++}"
+PYTHON="${PYTHON:-python3}"
+INSTALL_DEPS="YES"
+REGEN_TF_PROTOS="NO"
+REGEN_ONNX_PROTOS="NO"
+# Framework frontends and addons (see the option block in CMakeLists.txt).
+# ENABLE_TENSORFLOW_ADDON stays empty until parsing finishes so that its
+# default can follow ENABLE_TENSORFLOW.
+ENABLE_TENSORFLOW="ON"
+ENABLE_TENSORFLOW_ADDON=""
+ENABLE_ONNX="ON"
+ENABLE_ONNXRUNTIME_EP="OFF"
+ENABLE_ONNX_STABLEHLO="OFF"
+ENABLE_TF2ATIR_V2="OFF"
+# Mutually exclusive framework selection. Empty keeps the legacy default
+# (TensorFlow + ONNX frontend, ORT EP off). --enable-tf / --enable-ort / --all
+# resolve the four switches below after argument parsing.
+FRAMEWORK_MODE=""
+DRY_RUN="NO"
+_user_disable_tf=""
+_user_disable_tf_addon=""
+_user_disable_onnx=""
+ANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR:-}"
+ANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE:-}"
+ANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS:-OFF}"
+ANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR:-}"
+ANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD:-ON}"
+ANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR:-}"
+ANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES:-}"
+ANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI:-}"
+ANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD:-}"
 
-ANNC="$ANNC"
-if [ ! -d "${ANNC}" ]; then
-  echo "Please set ANNC in this script to point to the base directory of ANNC"
+# Internal flags used to detect whether the user explicitly passed certain
+# options on the command line.  These are not user-tunable defaults.
+_user_kdnn_dir_set=""
+_user_kdnn_lib_variant_set=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --build-type)
+      BUILD_TYPE="$2"
+      shift 2
+      ;;
+    --install-prefix)
+      INSTALL_PREFIX="$2"
+      shift 2
+      ;;
+    --gemm-package-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --gemm-package-dir requires a path" >&2
+        exit 1
+      fi
+      ANNC_GEMM_PACKAGE_DIR="$2"
+      shift 2
+      ;;
+    --require-gemm-package)
+      REQUIRE_GEMM_PACKAGE="ON"
+      shift
+      ;;
+    --enable-kdnn-adaptor)
+      ENABLE_KDNN_ADAPTOR="ON"
+      shift
+      ;;
+    --disable-kdnn-adaptor)
+      ENABLE_KDNN_ADAPTOR="OFF"
+      shift
+      ;;
+    --kdnn-source)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --kdnn-source requires LOCAL, REMOTE, or RELEASE" >&2
+        exit 1
+      fi
+      KDNN_SOURCE="$2"
+      shift 2
+      ;;
+    --kdnn-dir|--annc-kdnn-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: $1 requires a path" >&2
+        exit 1
+      fi
+      KDNN_DIR="$2"
+      _user_kdnn_dir_set="1"
+      shift 2
+      ;;
+    --kdnn-lib-variant|--annc-kdnn-lib-variant)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: $1 requires a variant" >&2
+        exit 1
+      fi
+      KDNN_LIB_VARIANT="$2"
+      _user_kdnn_lib_variant_set="1"
+      shift 2
+      ;;
+    --clean)
+      CLEAN_BUILD="YES"
+      shift
+      ;;
+    --no-install-deps)
+      INSTALL_DEPS="NO"
+      shift
+      ;;
+    --regen-tf-protos)
+      REGEN_TF_PROTOS="YES"
+      shift
+      ;;
+    --regen-onnx-protos)
+      REGEN_ONNX_PROTOS="YES"
+      shift
+      ;;
+    --enable-tf)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "tf" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="tf"
+      shift
+      ;;
+    --enable-ort|--enable-ort-ep)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "ort" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="ort"
+      shift
+      ;;
+    --enable-onnx-stablehlo)
+      ENABLE_ONNX_STABLEHLO="ON"
+      shift
+      ;;
+    --all|--enable-all)
+      if [ -n "${FRAMEWORK_MODE}" ] && [ "${FRAMEWORK_MODE}" != "all" ]; then
+        echo "ERROR: $1 conflicts with an earlier framework selection (${FRAMEWORK_MODE})" >&2
+        exit 1
+      fi
+      FRAMEWORK_MODE="all"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN="YES"
+      shift
+      ;;
+    --disable-tensorflow)
+      _user_disable_tf="1"
+      ENABLE_TENSORFLOW="OFF"
+      # The addons are built from the frontend toolchain, so disabling the
+      # framework disables them as well.
+      ENABLE_TENSORFLOW_ADDON="OFF"
+      shift
+      ;;
+    --disable-tensorflow-addon)
+      _user_disable_tf_addon="1"
+      ENABLE_TENSORFLOW_ADDON="OFF"
+      shift
+      ;;
+    --disable-onnx)
+      _user_disable_onnx="1"
+      ENABLE_ONNX="OFF"
+      shift
+      ;;
+    --enable-tf2atir-v2)
+      ENABLE_TF2ATIR_V2="ON"
+      shift
+      ;;
+    --disable-tf2atir-v2)
+      ENABLE_TF2ATIR_V2="OFF"
+      shift
+      ;;
+    --coverage)
+      ENABLE_COVERAGE="ON"
+      shift
+      ;;
+    --annc-debug)
+      ANNC_DEBUG="ON"
+      shift
+      ;;
+    --enable-python)
+      ENABLE_PYTHON="ON"
+      shift
+      ;;
+    --disable-python)
+      ENABLE_PYTHON="OFF"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $0 [options]"
+      echo "Options:"
+      echo "  --build-type [Debug|Release|RelWithDebInfo]  Set build type (default: Release)"
+      echo "  --install-prefix <path>       Set installation prefix (default: ./install)"
+      echo "  --gemm-package-dir <path>     Complete GEMM-ASM package root (default: ./third_party/annc-gemm-kernels)"
+      echo "  --require-gemm-package       Fail CMake configuration if the complete package is unavailable"
+      echo "  --enable-kdnn-adaptor         Build builtin KDNN adaptor kernels (default: OFF)"
+      echo "  --disable-kdnn-adaptor        Disable builtin KDNN adaptor kernels"
+      echo "  --kdnn-source [LOCAL|REMOTE|RELEASE]  KDNN source (default: RELEASE)"
+      echo "  --kdnn-dir <path>             Local KDNN root, only valid with --kdnn-source LOCAL (default: ./third_party/KDNN)"
+      echo "  --kdnn-lib-variant <variant>  KDNN library variant for RELEASE mode (default: ${KDNN_LIB_VARIANT})"
+      echo "  --clean                       Clean build directory before build (forces full reconfigure)"
+      echo "  --no-install-deps             Skip automatic pip install of missing Python deps"
+      echo "  --regen-tf-protos             Regenerate minimal TensorFlow protobuf sources"
+      echo "                                (also regenerates the ONNX protos while the ONNX frontend is enabled)"
+      echo "  --regen-onnx-protos           Regenerate the ONNX protobuf sources (requires the ONNX frontend)"
+      echo "  Framework selection (mutually exclusive):"
+      echo "    --enable-tf                 Only TensorFlow frontend + TensorFlow addons"
+      echo "    --enable-ort                Only the ONNX Runtime acceleration stack:"
+      echo "                                ONNX frontend + ORT EP plugin (one unit;"
+      echo "                                --enable-ort-ep is an alias)"
+      echo "    --all                       TensorFlow + the ONNX Runtime acceleration stack"
+      echo "  --disable-tensorflow          Disable the TensorFlow frontend (annc-tf2atir,"
+      echo "                                annc-converter, annc-tf-pipeline) and its addons"
+      echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
+      echo "  --disable-tensorflow-addon    Disable the TensorFlow addons (annc_optimizer, annc_fused_op);"
+      echo "                                the TensorFlow frontend tools are still built"
+      echo "                                (legacy/custom mode; conflicts with --enable-tf/--all)"
+      echo "  --disable-onnx                Disable the ONNX frontend (annc-onnx2atir)"
+      echo "                                (legacy/custom mode; conflicts with --enable-ort/--all)"
+      echo "  --enable-onnx-stablehlo       Build ONNX-MLIR and enable the ONNX StableHLO frontend"
+      echo "                                (requires ONNX; default OFF; uses the installed LLVM/MLIR)"
+      echo "  --enable-tf2atir-v2           Build the TF stablehlo V2 route (pb2stablehlo,"
+      echo "                                annc-stablehlo-sink, annc-tf-pipeline-v2; default OFF;"
+      echo "                                requires the LLVM/MLIR 20.1.8 toolchain,"
+      echo "                                third_party/stablehlo (v1.9.7) and the"
+      echo "                                TensorFlow frontend (--enable-tf)"
+      echo "  --disable-tf2atir-v2          Disable the TF stablehlo V2 route (default)"
+      echo "  --dry-run                     Print the resolved framework switches and exit"
+      echo "                                (no configure/build; useful for CI checks)"
+      echo "  --coverage                    Enable code coverage (gcovr; auto-installed if missing)"
+      echo "  --enable-python               Build the ANNC Python bindings (default OFF;"
+      echo "                                requires pybind11 + nanobind)"
+      echo "  --disable-python              Disable the ANNC Python bindings (default)"
+      echo "  --annc-debug                  Debug-build ANNC code only (-g3 -O0 -UNDEBUG);"
+      echo "                                third_party (json) build type is unchanged"
+      echo "  TensorFlow addon env vars:"
+      echo "    ANNC_TENSORFLOW_PRELOAD=ON|OFF        TF addon preload mode (default: ON)"
+      echo "    ANNC_TENSORFLOW_INCLUDE_DIR=<path>    TensorFlow include root (default: auto-detect)"
+      echo "    ANNC_TENSORFLOW_LIBRARIES=<list>      TensorFlow libraries for linked mode"
+      echo "    ANNC_TENSORFLOW_CXX11_ABI=0|1         TensorFlow C++11 ABI (default: auto-detect)"
+      echo "    ANNC_TENSORFLOW_CXX_STANDARD=<value> TensorFlow C++ standard (default: auto-detect)"
+      echo "    ANNC_TENSORFLOW_PYTHON_EXECUTABLE=<path>  Target TensorFlow Python (default: PYTHON)"
+      echo "  ORT EP / kernel env vars:"
+      echo "    ANNC_EP_ORT_BUILD_TREE=<path>         ORT build tree Release/ (required when ORT EP is enabled:"
+      echo "                                          supplies libonnxruntime_common.a and libcpuinfo.a)"
+      echo "    ANNC_KERNEL_MLAS=ON|OFF               Kernel MLAS backend (default: OFF; automatically ON for ORT EP)"
+      echo "    ANNC_MLAS_INCLUDE_DIR=<path>          ORT onnxruntime/core/mlas/inc (required when MLAS=ON)"
+      echo "  GEMM epilogue uses a complete binary package; override its root with --gemm-package-dir."
+      echo "  -h, --help                    Show this help message"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${ANNC_GEMM_PACKAGE_DIR}" != /* ]]; then
+  ANNC_GEMM_PACKAGE_DIR="${PWD}/${ANNC_GEMM_PACKAGE_DIR}"
 fi
 
-# Adjust as appropriate
-export CC=/usr/bin/gcc
-export CXX=/usr/bin/g++
-export LD_LIBRARY_PATH=/lib64
-
-PATH=$GO:$BAZEL:$PATH
-export PATH
-
-# Check for bazel.
-if ! command -v bazel >/dev/null 2>&1; then
-  echo "Please add bazel to PATH."
-  echo "Exiting"
-  exit -1
+# Resolve the mutually exclusive framework selection.  The legacy default
+# (no selection flag) keeps the historical combination and still honors the
+# individual --disable-* switches.
+case "${FRAMEWORK_MODE}" in
+  tf)
+    if [ -n "${_user_disable_tf}" ] || [ -n "${_user_disable_tf_addon}" ]; then
+      echo "ERROR: --enable-tf conflicts with --disable-tensorflow/--disable-tensorflow-addon" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="ON"
+    ENABLE_TENSORFLOW_ADDON="ON"
+    ENABLE_ONNX="OFF"
+    ENABLE_ONNXRUNTIME_EP="OFF"
+    ;;
+  ort)
+    if [ -n "${_user_disable_onnx}" ]; then
+      echo "ERROR: --enable-ort conflicts with --disable-onnx" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="OFF"
+    ENABLE_TENSORFLOW_ADDON="OFF"
+    ENABLE_ONNX="ON"
+    ENABLE_ONNXRUNTIME_EP="ON"
+    ;;
+  all)
+    if [ -n "${_user_disable_tf}" ] || [ -n "${_user_disable_tf_addon}" ] || \
+       [ -n "${_user_disable_onnx}" ]; then
+      echo "ERROR: --all conflicts with --disable-tensorflow/--disable-tensorflow-addon/--disable-onnx" >&2
+      exit 1
+    fi
+    ENABLE_TENSORFLOW="ON"
+    ENABLE_TENSORFLOW_ADDON="ON"
+    ENABLE_ONNX="ON"
+    ENABLE_ONNXRUNTIME_EP="ON"
+    ;;
+  "")
+    ;;
+  *)
+    echo "ERROR: unknown framework selection '${FRAMEWORK_MODE}'" >&2
+    exit 1
+    ;;
+esac
+if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ] && [ "${ENABLE_ONNX}" != "ON" ]; then
+  echo "ERROR: --enable-onnx-stablehlo requires the ONNX frontend." >&2
+  exit 1
+fi
+if [ "${ENABLE_TF2ATIR_V2}" = "ON" ] && [ "${ENABLE_TENSORFLOW}" != "ON" ]; then
+  echo "ERROR: --enable-tf2atir-v2 requires the TensorFlow frontend/addon:" >&2
+  echo "ERROR: annc-converter-v2 reads ANNC_TENSORFLOW_CXX11_ABI from that" >&2
+  echo "ERROR: subtree, so configure fails without it." >&2
+  exit 1
 fi
 
-XNNPACK_BASE="$ANNC/annc/service/cpu/xla/libs"
-XNNPACK_DIR="$XNNPACK_BASE/XNNPACK"
+# The ORT EP always uses the MLAS-backed kernel path: enabling the EP enables
+# the kernel MLAS backend automatically.  TF-only builds keep it off.
+if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
+  ANNC_KERNEL_MLAS="ON"
+fi
 
-# At the moment XNNPAK is cloned and compiled by a script. The script is only
-# run if the directory containing XNNPACK does not exist.
-if [ ! -d "${XNNPACK_DIR}" ]; then
-  cd $XNNPACK_BASE
-  ./xnnpack.sh
-  cd -
+# The TensorFlow addon follows the TensorFlow framework switch unless it was
+# set explicitly; --disable-tensorflow already forces it off.
+if [ -z "${ENABLE_TENSORFLOW_ADDON}" ]; then
+  ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW}"
+fi
+
+if [ "${DRY_RUN}" == "YES" ]; then
+  case "${FRAMEWORK_MODE}" in
+    tf) echo "Framework selection: tf (TensorFlow frontend + addon)" ;;
+    ort) echo "Framework selection: ort (ONNX frontend + ONNXRuntime EP, one unit)" ;;
+    all) echo "Framework selection: all (TensorFlow + ONNX frontend + ONNXRuntime EP)" ;;
+    *) echo "Framework selection: legacy" ;;
+  esac
+  echo "ANNC_ENABLE_TENSORFLOW=${ENABLE_TENSORFLOW}"
+  echo "ANNC_ENABLE_TENSORFLOW_ADDON=${ENABLE_TENSORFLOW_ADDON}"
+  echo "ANNC_ENABLE_ONNX=${ENABLE_ONNX}"
+  echo "ANNC_ENABLE_ONNXRUNTIME_EP=${ENABLE_ONNXRUNTIME_EP}"
+  echo "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO=${ENABLE_ONNX_STABLEHLO}"
+  echo "ANNC_ENABLE_STABLEHLO_FRONTEND=${ENABLE_ONNX_STABLEHLO}"
+  echo "ANNC_ENABLE_TF2ATIR_V2=${ENABLE_TF2ATIR_V2}"
+  exit 0
+fi
+
+# Resolve the selected interpreter before entering build/. Relative virtualenv
+# paths such as .venv/bin/python would otherwise stop resolving during CMake
+# configuration and let FindPython fall back to an unrelated system Python.
+PYTHON_COMMAND=$(command -v "${PYTHON}" 2>/dev/null || true)
+if [ -z "${PYTHON_COMMAND}" ]; then
+  echo "ERROR: Python interpreter '${PYTHON}' was not found." >&2
+  exit 1
+fi
+PYTHON_COMMAND_DIR=$(cd "$(dirname "${PYTHON_COMMAND}")" && pwd -P)
+PYTHON="${PYTHON_COMMAND_DIR}/$(basename "${PYTHON_COMMAND}")"
+ANNC_TENSORFLOW_PYTHON_EXECUTABLE="${ANNC_TENSORFLOW_PYTHON_EXECUTABLE:-${PYTHON}}"
+
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  TF_PYTHON_COMMAND=$(command -v "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" 2>/dev/null || true)
+  if [ -z "${TF_PYTHON_COMMAND}" ]; then
+    echo "ERROR: TensorFlow Python '${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}' was not found." >&2
+    exit 1
+  fi
+  TF_PYTHON_COMMAND_DIR=$(cd "$(dirname "${TF_PYTHON_COMMAND}")" && pwd -P)
+  ANNC_TENSORFLOW_PYTHON_EXECUTABLE="${TF_PYTHON_COMMAND_DIR}/$(basename "${TF_PYTHON_COMMAND}")"
+fi
+
+if [[ "${KDNN_SOURCE}" != "LOCAL" && "${KDNN_SOURCE}" != "REMOTE" && "${KDNN_SOURCE}" != "RELEASE" ]]; then
+  echo "ERROR: --kdnn-source must be LOCAL, REMOTE, or RELEASE, got '${KDNN_SOURCE}'" >&2
+  exit 1
+fi
+
+if [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
+  for cmd in unzip rpm2cpio cpio; do
+    if ! command -v "${cmd}" &>/dev/null; then
+      echo "ERROR: RELEASE mode requires '${cmd}' but it is not installed." >&2
+      echo "       On openEuler, install it with: sudo yum install -y unzip rpm cpio" >&2
+      exit 1
+    fi
+  done
+fi
+
+if [[ "${KDNN_SOURCE}" == "RELEASE" && -n "${_user_kdnn_dir_set}" ]]; then
+  echo "ERROR: --kdnn-dir is only valid with --kdnn-source LOCAL." >&2
+  exit 1
+fi
+
+if [[ "${KDNN_SOURCE}" != "RELEASE" && -n "${_user_kdnn_lib_variant_set}" ]]; then
+  echo "ERROR: --kdnn-lib-variant is only valid with --kdnn-source RELEASE." >&2
+  exit 1
+fi
+
+if [[ -n "${_user_kdnn_lib_variant_set}" && \
+      "${KDNN_LIB_VARIANT}" != "sve-threadpool" && \
+      "${KDNN_LIB_VARIANT}" != "sve-omp" && \
+      "${KDNN_LIB_VARIANT}" != "sve2-threadpool" && \
+      "${KDNN_LIB_VARIANT}" != "sve2-omp" ]]; then
+  echo "ERROR: --kdnn-lib-variant must be one of: sve-threadpool, sve-omp, sve2-threadpool, sve2-omp, got '${KDNN_LIB_VARIANT}'" >&2
+  exit 1
+fi
+
+# Regeneration requests only apply to enabled frontends: the old
+# --regen-tf-protos regenerates whatever TensorFlow/ONNX side is enabled, while
+# --regen-onnx-protos needs the ONNX frontend.
+if [ "${REGEN_ONNX_PROTOS}" == "YES" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --regen-onnx-protos requires the ONNX frontend, which is disabled." >&2
+  echo "       The ONNX protobuf sources are neither generated nor used." >&2
+  exit 1
+fi
+
+if [ "${REGEN_TF_PROTOS}" == "YES" ] && \
+   [ "${ENABLE_TENSORFLOW}" == "OFF" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --regen-tf-protos has no enabled frontend to regenerate:" >&2
+  echo "       both the TensorFlow and ONNX frontends are disabled." >&2
+  exit 1
+fi
+
+# The EP plugin depends on the ONNX frontend; report the conflict before any
+# dependency check or proto preparation runs.
+if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ] && [ "${ENABLE_ONNX}" == "OFF" ]; then
+  echo "ERROR: --enable-ort-ep requires the ONNX frontend, which is disabled." >&2
+  echo "       The EP plugin loads the AOT kernels produced through the ONNX frontend." >&2
+  exit 1
+fi
+
+# The TensorFlow preload/ABI parameters only select how the addon is built;
+# they are neither a TensorFlow support switch nor meaningful without it.
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  if [[ "${ANNC_TENSORFLOW_PRELOAD}" != "ON" && "${ANNC_TENSORFLOW_PRELOAD}" != "OFF" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_PRELOAD must be ON or OFF, got '${ANNC_TENSORFLOW_PRELOAD}'" >&2
+    exit 1
+  fi
+
+  if [ -n "${ANNC_TENSORFLOW_CXX11_ABI}" ] &&
+     [[ "${ANNC_TENSORFLOW_CXX11_ABI}" != "0" && "${ANNC_TENSORFLOW_CXX11_ABI}" != "1" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_CXX11_ABI must be 0 or 1, got '${ANNC_TENSORFLOW_CXX11_ABI}'" >&2
+    exit 1
+  fi
+
+  if [[ "${ANNC_TENSORFLOW_PRELOAD}" == "ON" && -n "${ANNC_TENSORFLOW_LIBRARIES}" ]]; then
+    echo "ERROR: ANNC_TENSORFLOW_LIBRARIES is invalid when ANNC_TENSORFLOW_PRELOAD=ON." >&2
+    exit 1
+  fi
+fi
+
+# Coverage note: keep the existing build type (forcing Debug recompiles the
+# bundled json). Line coverage is accurate in Release; branch coverage is approximate.
+# The gcovr dependency is handled below alongside the other Python deps.
+if [ "${ENABLE_COVERAGE}" == "ON" ] && [ "${BUILD_TYPE}" == "Release" ]; then
+  echo "NOTE: --coverage with Release build: line coverage accurate, branch coverage approximate."
+  echo "      For precise branch coverage use a clean Debug build: rm -rf build && ./build.sh --coverage --build-type Debug"
+fi
+
+# --annc-debug is redundant with a full Debug build: --build-type Debug already
+# compiles everything (ANNC and third-party) with debug flags.
+if [ "${ANNC_DEBUG}" == "ON" ] && [ "${BUILD_TYPE}" == "Debug" ]; then
+  echo "NOTE: --build-type Debug already debug-builds ANNC (and third_party); --annc-debug is redundant."
+fi
+
+# Check for ninja early so we fail with a clear message before CMake runs.
+if ! command -v ninja >/dev/null 2>&1; then
+  echo "ERROR: ninja is required but not found in PATH." >&2
+  echo "       Install it with one of the following commands:" >&2
+  echo "         sudo yum install ninja-build" >&2
+  echo "         sudo dnf install ninja-build" >&2
+  echo "         sudo apt-get install ninja-build" >&2
+  exit 1
+fi
+
+# annc-tf2atir and annc-onnx2atir parse GraphDefs/models using the system
+# Protobuf C++ library, and both protobuf source sets are generated with a
+# matching protoc. Neither framework's Python package provides this development
+# dependency, so detect the common package-managed setup before CMake starts.
+# With both frontends disabled nothing needs protobuf at all.
+if [ "${ENABLE_TENSORFLOW}" == "ON" ] || [ "${ENABLE_ONNX}" == "ON" ]; then
+  if command -v rpm >/dev/null 2>&1 && ! rpm -q protobuf-devel >/dev/null 2>&1; then
+    echo "ERROR: Required system package 'protobuf-devel' is not installed." >&2
+    echo "       Install it on openEuler/RPM-based systems with:" >&2
+    echo "         sudo yum install -y protobuf-devel" >&2
+    exit 1
+  fi
+
+  if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
+      ! dpkg-query -W -f='${Status}' libprotobuf-dev 2>/dev/null | grep -q "install ok installed"; then
+    echo "ERROR: Required system package 'libprotobuf-dev' is not installed." >&2
+    echo "       Install it on Debian/Ubuntu systems with:" >&2
+    echo "         sudo apt-get install -y libprotobuf-dev protobuf-compiler" >&2
+    exit 1
+  fi
+fi
+
+# C++ unit tests are registered from tests/, so the GoogleTest dependency must
+# be available while configuring the default build.
+if command -v rpm >/dev/null 2>&1 && ! rpm -q gtest-devel >/dev/null 2>&1; then
+  echo "ERROR: Required system package 'gtest-devel' is not installed." >&2
+  echo "       Install it on openEuler/RPM-based systems with:" >&2
+  echo "         sudo yum install -y gtest-devel" >&2
+  exit 1
+fi
+
+if ! command -v rpm >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 && \
+    ! dpkg-query -W -f='${Status}' libgtest-dev 2>/dev/null | grep -q "install ok installed"; then
+  echo "ERROR: Required system package 'libgtest-dev' is not installed." >&2
+  echo "       Install it on Debian/Ubuntu systems with:" >&2
+  echo "         sudo apt-get install -y libgtest-dev" >&2
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Python dependency helpers
+# -----------------------------------------------------------------------------
+
+# Check whether a Python module can be imported.
+# On failure, prints the import error to stderr so callers can diagnose it.
+python_module_available() {
+  local output
+  output=$("${PYTHON}" -c "import $1" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "${output}" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Get the CMake directory for pybind11.
+get_pybind11_dir() {
+  "${PYTHON}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+}
+
+# Get the CMake directory for nanobind.
+get_nanobind_dir() {
+  "${PYTHON}" -c "import nanobind, os; print(os.path.join(os.path.dirname(nanobind.__file__), 'cmake'))"
+}
+
+# Detect whether the selected Python interpreter is inside a virtualenv.
+# Checks sys.prefix vs sys.base_prefix and common environment indicators
+# (VIRTUAL_ENV, CONDA_PREFIX) to avoid misclassifying conda/pyenv envs.
+is_virtualenv() {
+  "${PYTHON}" -c "import sys, os; venv = sys.prefix != sys.base_prefix; sys.exit(0 if (venv or os.environ.get('VIRTUAL_ENV') or os.environ.get('CONDA_PREFIX')) else 1)" 2>/dev/null
+}
+
+# Install a Python package via pip. Use --user when not inside a virtualenv to
+# avoid permission issues.
+pip_install() {
+  local pip_args=("$@")
+  echo "Installing Python package(s): ${pip_args[*]}"
+  echo "Use --no-install-deps to skip automatic installation."
+  if is_virtualenv; then
+    # Inside a virtualenv/conda env: install into the active environment.
+    "${PYTHON}" -m pip install "${pip_args[@]}"
+  else
+    # System Python: install into the user site-packages to avoid permission errors.
+    "${PYTHON}" -m pip install --user "${pip_args[@]}"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Dependency checks
+# -----------------------------------------------------------------------------
+
+DEP_ERRORS=0
+
+echo "Checking Python environment (${PYTHON})..."
+
+# pybind11 and nanobind are only needed when the Python bindings are enabled.
+if [ "${ENABLE_PYTHON}" == "ON" ]; then
+for dep in pybind11 nanobind; do
+  if ! python_module_available "${dep}"; then
+    if [ "${INSTALL_DEPS}" == "YES" ]; then
+      echo "Missing Python package '${dep}'. Attempting to install it automatically..."
+      if ! pip_install "${dep}"; then
+        echo "ERROR: Failed to install '${dep}' via pip." >&2
+        echo "       Please install it manually, e.g.: ${PYTHON} -m pip install ${dep}" >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      elif ! python_module_available "${dep}"; then
+        echo "ERROR: '${dep}' was installed but cannot be imported by ${PYTHON}." >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      fi
+    else
+      echo "ERROR: Required Python package '${dep}' is not installed." >&2
+      echo "       Install it with: ${PYTHON} -m pip install ${dep}" >&2
+      echo "       Or rerun without --no-install-deps to auto-install." >&2
+      DEP_ERRORS=$((DEP_ERRORS + 1))
+    fi
+  fi
+done
+fi
+
+# gcovr is the coverage report tool, only needed with --coverage.
+if [ "${ENABLE_COVERAGE}" == "ON" ]; then
+  if ! python_module_available gcovr; then
+    if [ "${INSTALL_DEPS}" == "YES" ]; then
+      echo "Missing Python package 'gcovr'. Attempting to install it automatically..."
+      if ! pip_install gcovr; then
+        echo "ERROR: Failed to install 'gcovr' via pip." >&2
+        echo "       Please install it manually, e.g.: ${PYTHON} -m pip install gcovr" >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      elif ! python_module_available gcovr; then
+        echo "ERROR: 'gcovr' was installed but cannot be imported by ${PYTHON}." >&2
+        DEP_ERRORS=$((DEP_ERRORS + 1))
+      fi
+    else
+      echo "ERROR: --coverage requires 'gcovr' which is not installed." >&2
+      echo "       Install it with: ${PYTHON} -m pip install gcovr" >&2
+      echo "       Or rerun without --no-install-deps to auto-install." >&2
+      DEP_ERRORS=$((DEP_ERRORS + 1))
+    fi
+  fi
+  # pip --user installs the gcovr CLI to the user bin dir which may not be on
+  # PATH. CMake's find_program needs the CLI, so expose it for the cmake call.
+  if ! command -v gcovr >/dev/null 2>&1; then
+    USER_BIN="$("${PYTHON}" -c "import site; print(site.USER_BASE)")/bin"
+    if [ -x "${USER_BIN}/gcovr" ]; then
+      export PATH="${USER_BIN}:${PATH}"
+    fi
+  fi
+  if ! command -v gcovr >/dev/null 2>&1; then
+    echo "ERROR: gcovr is importable but its CLI could not be found on PATH." >&2
+    echo "       Add the pip user bin to PATH or install gcovr system-wide." >&2
+    DEP_ERRORS=$((DEP_ERRORS + 1))
+  fi
+fi
+
+# TensorFlow is large and version-sensitive; only verify presence, do not
+# auto-install. The Python package is what the addon resolves its headers and
+# libraries from, so the check is needed exactly while the addon is built; the
+# frontend tools only consume the vendored protobuf schema.
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ]; then
+  if ! "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" -c "import tensorflow"; then
+    echo "ERROR: TensorFlow cannot be imported by ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}." >&2
+    echo "       For TensorFlow 2.20, install compatible deps with:" >&2
+    echo "         ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE} -m pip install -r requirements.txt" >&2
+    echo "       If the error mentions NumPy 2.x, downgrade with:" >&2
+    echo "         ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE} -m pip install 'numpy<2'" >&2
+    echo "       For TensorFlow 1.15, prepare the matching TensorFlow package and its runtime dependencies in this Python environment." >&2
+    DEP_ERRORS=$((DEP_ERRORS + 1))
+  fi
+fi
+
+if [ ${DEP_ERRORS} -ne 0 ]; then
+  echo "ERROR: ${DEP_ERRORS} Python dependency issue(s) found. Aborting build." >&2
+  exit 1
+fi
+
+# At this point the required modules must be importable.
+PYBIND11_DIR=""
+NANOBIND_DIR=""
+if [ "${ENABLE_PYTHON}" == "ON" ]; then
+  PYBIND11_DIR=$(get_pybind11_dir) || {
+    echo "ERROR: Unable to determine pybind11 CMake directory." >&2
+    exit 1
+  }
+  NANOBIND_DIR=$(get_nanobind_dir) || {
+    echo "ERROR: Unable to determine nanobind CMake directory." >&2
+    exit 1
+  }
+fi
+
+# -----------------------------------------------------------------------------
+# TensorFlow proto generation
+# -----------------------------------------------------------------------------
+
+ensure_tf_protos() {
+  local gen_dir="${PWD}/tf_protos_minimal/gen_code"
+  local protoc_version_file="${gen_dir}/.protoc-version"
+  local current_protoc_version=""
+  local protoc_bin="${PROTOC_BIN:-}"
+  local required_headers=(
+    "${gen_dir}/tensorflow/core/framework/graph.pb.h"
+    "${gen_dir}/tensorflow/core/framework/node_def.pb.h"
+    "${gen_dir}/tensorflow/core/framework/tensor.pb.h"
+    "${gen_dir}/tensorflow/core/protobuf/saved_model.pb.h"
+  )
+
+  local missing="NO"
+  if [ "${REGEN_TF_PROTOS}" == "YES" ]; then
+    missing="YES"
+  else
+    for header in "${required_headers[@]}"; do
+      if [ ! -f "${header}" ]; then
+        missing="YES"
+        break
+      fi
+    done
+
+    if [ "${missing}" == "NO" ]; then
+      if [ -z "${protoc_bin}" ]; then
+        protoc_bin="$(command -v protoc 2>/dev/null || true)"
+      fi
+      if [ -z "${protoc_bin}" ] || [ ! -x "${protoc_bin}" ]; then
+        echo "ERROR: protoc is required to verify generated TensorFlow protobuf sources." >&2
+        echo "       Install a protobuf compiler compatible with the system protobuf-devel package." >&2
+        exit 1
+      fi
+      current_protoc_version="$("${protoc_bin}" --version)"
+      if [ ! -f "${protoc_version_file}" ] || \
+          [ "$(<"${protoc_version_file}")" != "${current_protoc_version}" ]; then
+        echo "TensorFlow protobuf sources were generated by a different protoc version; regenerating."
+        missing="YES"
+      fi
+    fi
+  fi
+
+  if [ "${missing}" == "NO" ]; then
+    echo "TensorFlow protobuf sources already generated (${gen_dir})"
+    return 0
+  fi
+
+  echo "Generating minimal TensorFlow protobuf sources..."
+  bash "${PWD}/tf_protos_minimal.sh" -d "${PWD}"
+}
+
+# Only the enabled frontends get their protobuf sources prepared; a disabled
+# framework's proto directory is neither generated nor consumed.
+if [ "${ENABLE_TENSORFLOW}" == "ON" ]; then
+  ensure_tf_protos
 else
-  echo "The directory XNNPACK already exists. Skipping cloning xnnpack."
+  echo "Skipping TensorFlow protobuf sources (TensorFlow frontend disabled)"
 fi
 
-# This is needed so files included by us which are used in xla can be found.
-CPLUS_INCLUDE_PATH+="$ANNC/annc/service/cpu/xla/:"
-CPLUS_INCLUDE_PATH+="$ANNC/annc/service/:"
-CPLUS_INCLUDE_PATH+="$ANNC/annc/service/cpu/xla/libs/libblas_mlir/include/:"
+# -----------------------------------------------------------------------------
+# ONNX proto generation
+# -----------------------------------------------------------------------------
 
-# This is the location where the files included are in the main repo
-# Ideally the XNNPACK repository should be downloaded and compiled by bazel so
-# the directories needed should be handled automatically by bazel
-CPLUS_INCLUDE_PATH+="$XNNPACK_DIR/:"
-CPLUS_INCLUDE_PATH+="$XNNPACK_DIR/include/:"
-CPLUS_INCLUDE_PATH+="$XNNPACK_DIR/src/:"
-CPLUS_INCLUDE_PATH+="$XNNPACK_DIR/build/pthreadpool-source/include/:"
-export CPLUS_INCLUDE_PATH
+ensure_onnx_protos() {
+  local proto_root="${PWD}/frontends/onnx/protos"
+  local gen_dir="${proto_root}/gen_code"
+  local protoc_version_file="${gen_dir}/.protoc-version"
+  local required_header="${gen_dir}/onnx/onnx.pb.h"
 
-# Changing the value of ACTION_ENV should trigger full compilation
-ACTION_ENV="baila=548"
+  local missing="NO"
+  if [ "${REGEN_TF_PROTOS}" == "YES" ] || [ "${REGEN_ONNX_PROTOS}" == "YES" ]; then
+    missing="YES"
+  elif [ ! -f "${required_header}" ] || [ ! -f "${protoc_version_file}" ]; then
+    missing="YES"
+  else
+    local protoc_bin="${PROTOC_BIN:-}"
+    if [ -z "${protoc_bin}" ]; then
+      protoc_bin="$(command -v protoc 2>/dev/null || true)"
+    fi
+    if [ -z "${protoc_bin}" ] || [ ! -x "${protoc_bin}" ]; then
+      echo "ERROR: protoc is required to verify generated ONNX protobuf sources." >&2
+      echo "       Install a protobuf compiler compatible with the system protobuf-devel package." >&2
+      exit 1
+    fi
+    if [ "$(<"${protoc_version_file}")" != "$("${protoc_bin}" --version)" ]; then
+      echo "ONNX protobuf sources were generated by a different protoc version; regenerating."
+      missing="YES"
+    fi
+  fi
 
-bazel --output_user_root=./output                                              \
-      build -c opt                                                             \
-      --verbose_failures                                                       \
-      --action_env=$ACTION_ENV                                                 \
-      --define tflite_with_xnnpack=false                                       \
-      annc/service/cpu:libannc.so                                              \
-      --jobs 32
+  if [ "${missing}" == "NO" ]; then
+    echo "ONNX protobuf sources already generated (${gen_dir})"
+    return 0
+  fi
 
+  echo "Generating ONNX protobuf sources..."
+  bash "${proto_root}/onnx_protos_minimal.sh" -d "${PWD}"
+}
+
+if [ "${ENABLE_ONNX}" == "ON" ]; then
+  ensure_onnx_protos
+else
+  echo "Skipping ONNX protobuf sources (ONNX frontend disabled)"
+fi
+
+# -----------------------------------------------------------------------------
+# Create build directory (preserve existing build artifacts if present)
+# -----------------------------------------------------------------------------
+
+if [ -d "build" ] && [ "$CLEAN_BUILD" != "YES" ]; then
+  echo "Using existing build directory (use --clean to force full rebuild)"
+  cd build || exit 1
+else
+  echo "Creating new build directory..."
+  rm -rf build && mkdir build && cd build || exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Run CMake
+# -----------------------------------------------------------------------------
+
+# Read a value from CMakeCache.txt (format: KEY:TYPE=VALUE).
+get_cache_value() {
+  grep "^$1:" "${2:-CMakeCache.txt}" 2>/dev/null | tail -n1 | cut -d= -f2-
+}
+
+onnx_stablehlo_cmake_args=()
+if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ]; then
+  onnx_mlir_source="../third-party/onnx-mlir"
+  if [ ! -f "${onnx_mlir_source}/third_party/onnx/CMakeLists.txt" ] ||
+     [ ! -f "${onnx_mlir_source}/third_party/stablehlo/CMakeLists.txt" ]; then
+    git -C .. submodule update --init --recursive -- third-party/onnx-mlir || exit 1
+  fi
+
+  onnx_mlir_build_dir="${ANNC_ONNX_MLIR_BUILD_DIR:-${ANNC_STABLEHLO_BUILD_ROOT:-${PWD}/third-party}/onnx-mlir-build}"
+  ANNC_ONNX_MLIR_BUILD_DIR="${onnx_mlir_build_dir}" \
+    CC="${C_COMPILER}" CXX="${CXX_COMPILER}" \
+    bash ../addons/onnxruntime/stablehlo/build_onnx_mlir.sh \
+      --jobs "${ANNC_ONNX_MLIR_BUILD_JOBS:-$(nproc)}" || exit 1
+  onnx_mlir_build_dir=$(cd "${onnx_mlir_build_dir}" && pwd -P) || exit 1
+  onnx_mlir_cache="${onnx_mlir_build_dir}/CMakeCache.txt"
+  stablehlo_llvm_dir=$(get_cache_value LLVM_DIR "${onnx_mlir_cache}")
+  stablehlo_mlir_dir=$(get_cache_value MLIR_DIR "${onnx_mlir_cache}")
+  if [ -z "${stablehlo_llvm_dir}" ] || [ -z "${stablehlo_mlir_dir}" ]; then
+    echo "ERROR: ONNX-MLIR did not record its LLVM/MLIR configuration." >&2
+    exit 1
+  fi
+  onnx_stablehlo_cmake_args+=(
+    "-DANNC_ONNX_MLIR_BUILD_DIR=${onnx_mlir_build_dir}"
+    "-DLLVM_DIR=${stablehlo_llvm_dir}"
+    "-DMLIR_DIR=${stablehlo_mlir_dir}"
+  )
+fi
+
+# Check that key build options still match an existing cache.  CMake does not
+# automatically reconfigure when -D arguments change; silently reusing the old
+# cache would ignore user-requested changes (e.g. --kdnn-source RELEASE on a
+# tree previously configured with LOCAL).  A changed non-empty value forces an
+# explicit --clean reconfigure.  A new/empty cache entry (for example the
+# ANNC_EP_ORT_BUILD_TREE key added after an older
+# cache was written) triggers an in-place reconfigure instead: the third-party
+# build artifacts are kept, but the requested -D values are applied.
+check_cache_consistency() {
+  [ -f "CMakeCache.txt" ] || return 0
+
+  local key old_val new_val
+  local -a mismatches=()
+  local -a missing_keys=()
+  local -a cache_checks=(
+    "CMAKE_BUILD_TYPE:${BUILD_TYPE}"
+    "CMAKE_INSTALL_PREFIX:${INSTALL_PREFIX}"
+    "ANNC_GEMM_PACKAGE_DIR:${ANNC_GEMM_PACKAGE_DIR}"
+    "ANNC_REQUIRE_GEMM_PACKAGE:${REQUIRE_GEMM_PACKAGE}"
+    "CMAKE_C_COMPILER:$(command -v ${C_COMPILER})"
+    "CMAKE_CXX_COMPILER:$(command -v ${CXX_COMPILER})"
+    "PYTHON_EXECUTABLE:$(command -v ${PYTHON})"
+    "Python_EXECUTABLE:$(command -v ${PYTHON})"
+    "Python3_EXECUTABLE:$(command -v ${PYTHON})"
+    "ANNC_ENABLE_KDNN_ADAPTOR:${ENABLE_KDNN_ADAPTOR}"
+    "ANNC_ENABLE_COVERAGE:${ENABLE_COVERAGE}"
+    "ANNC_ENABLE_PYTHON:${ENABLE_PYTHON}"
+    "ANNC_KDNN_SOURCE:${KDNN_SOURCE}"
+    "ANNC_KDNN_DIR:${KDNN_DIR}"
+    "ANNC_KDNN_LIB_VARIANT:${KDNN_LIB_VARIANT}"
+    "ANNC_ONNXRUNTIME_INCLUDE_DIR:${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
+    "ANNC_EP_ORT_BUILD_TREE:${ANNC_EP_ORT_BUILD_TREE}"
+    "ANNC_KERNEL_MLAS:${ANNC_KERNEL_MLAS}"
+    "ANNC_MLAS_INCLUDE_DIR:${ANNC_MLAS_INCLUDE_DIR}"
+    "ANNC_TENSORFLOW_PRELOAD:${ANNC_TENSORFLOW_PRELOAD}"
+    "ANNC_TENSORFLOW_INCLUDE_DIR:${ANNC_TENSORFLOW_INCLUDE_DIR}"
+    "ANNC_TENSORFLOW_LIBRARIES:${ANNC_TENSORFLOW_LIBRARIES}"
+    "ANNC_TENSORFLOW_CXX11_ABI:${ANNC_TENSORFLOW_CXX11_ABI}"
+    "ANNC_TENSORFLOW_CXX_STANDARD:${ANNC_TENSORFLOW_CXX_STANDARD}"
+  )
+  if [ "${ENABLE_ONNX_STABLEHLO}" == "ON" ]; then
+    cache_checks+=(
+      "ANNC_ONNX_MLIR_BUILD_DIR:${onnx_mlir_build_dir}"
+      "LLVM_DIR:${stablehlo_llvm_dir}"
+      "MLIR_DIR:${stablehlo_mlir_dir}"
+    )
+  fi
+
+  for entry in "${cache_checks[@]}"; do
+    key="${entry%%:*}"
+    new_val="${entry#*:}"
+    old_val=$(get_cache_value "${key}")
+    if [ "${old_val}" != "${new_val}" ]; then
+      if [ -z "${old_val}" ]; then
+        missing_keys+=("  ${key}: cache has no value; requested='${new_val}'")
+      else
+        mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+      fi
+    fi
+  done
+
+  if [ ${#mismatches[@]} -ne 0 ]; then
+    echo "ERROR: Build option(s) changed but an existing CMakeCache.txt was found." >&2
+    printf '%s\n' "${mismatches[@]}" >&2
+    echo "       Use --clean to reconfigure with the new options." >&2
+    exit 1
+  fi
+
+  if [ ${#missing_keys[@]} -ne 0 ]; then
+    echo "New build option(s) are not present in the existing cache:"
+    printf '%s\n' "${missing_keys[@]}"
+    echo "reconfiguring in place (third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  fi
+}
+
+# Framework switches were introduced after the strings around them, so a cache
+# written by an older build.sh has no ANNC_ENABLE_TENSORFLOW[_ADDON],
+# ANNC_ENABLE_ONNX or ANNC_ENABLE_ONNXRUNTIME_EP key. Such a cache was
+# configured with the historical default combination (the first three ON, the
+# EP plugin OFF). Compare the requested values against that combination instead
+# of skipping missing keys: an unchanged request only needs one in-place
+# reconfigure (third-party artifacts are kept), while a request that changes
+# the default combination must not silently reuse the old build.
+check_framework_switch_cache() {
+  [ -f "CMakeCache.txt" ] || return 0
+
+  local key new_val legacy_default old_val entry
+  local -a entries=(
+    "ANNC_ENABLE_TENSORFLOW:${ENABLE_TENSORFLOW}:ON"
+    "ANNC_ENABLE_TENSORFLOW_ADDON:${ENABLE_TENSORFLOW_ADDON}:ON"
+    "ANNC_ENABLE_ONNX:${ENABLE_ONNX}:ON"
+    "ANNC_ENABLE_ONNXRUNTIME_EP:${ENABLE_ONNXRUNTIME_EP}:OFF"
+    "ANNC_ENABLE_ONNXRUNTIME_STABLEHLO:${ENABLE_ONNX_STABLEHLO}:OFF"
+    "ANNC_ENABLE_STABLEHLO_FRONTEND:${ENABLE_ONNX_STABLEHLO}:OFF"
+    "ANNC_ENABLE_TF2ATIR_V2:${ENABLE_TF2ATIR_V2}:OFF"
+  )
+  local -a mismatches=()
+  local missing_keys="NO"
+
+  for entry in "${entries[@]}"; do
+    key="${entry%%:*}"
+    new_val="${entry#*:}"
+    new_val="${new_val%%:*}"
+    legacy_default="${entry##*:}"
+    old_val=$(get_cache_value "${key}")
+    if [ -z "${old_val}" ]; then
+      missing_keys="YES"
+      old_val="${legacy_default}"
+    fi
+    if [ "${old_val}" != "${new_val}" ]; then
+      mismatches+=("  ${key}: cache='${old_val}' != requested='${new_val}'")
+    fi
+  done
+
+  if [ ${#mismatches[@]} -ne 0 ]; then
+    echo "Framework build switch(es) changed; reconfiguring in place"
+    printf '%s\n' "${mismatches[@]}"
+    if [ "${missing_keys}" == "YES" ]; then
+      echo "  (missing keys are read as the pre-switch default combination ON/ON/ON/OFF)"
+    fi
+    echo "(third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  elif [ "${missing_keys}" == "YES" ]; then
+    echo "Framework switches are absent from the existing CMakeCache.txt but the"
+    echo "requested values match the pre-switch defaults; reconfiguring in place"
+    echo "(third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  fi
+}
+
+# 检测 CMake file(GLOB) 收集的源文件是否增删。CMake 的 file(GLOB) 默认不会在
+# 增量构建时自动 reconfig, 新增/删除源文件会"静默漏编"。这里在复用 cache 前
+# 扫描所有使用 file(GLOB *.cpp) 的 CMakeLists 所在目录, 与上次 configure 结束时
+# 保存的快照比对, 不一致则删除 CMakeCache.txt 触发重新配置。
+# 注: Kernel 子模块已用 CONFIGURE_DEPENDS, 此处不重复监控。
+check_source_glob_changes() {
+  local src_root="${SOURCE_ROOT:-..}"
+  local snapshot="./.glob_sources.snapshot"
+  local tmp dir sub entry
+  tmp=$(mktemp)
+
+  # 监控列表: 每项为 "CMakeLists 所在目录(相对项目根)|glob 子目录(相对该目录, 空表示当前目录)"
+  # 与各 CMakeLists 的 file(GLOB *.cpp) 模式对应; 不含已用 CONFIGURE_DEPENDS 的 Kernel。
+  local -a glob_dirs=(
+    "annc/lib/Dialect/Atir|"
+    "annc/lib/Dialect/Atir/OpVerify|"
+    "annc/lib/Dialect/Atir/Passes|"
+    "annc/lib/Dialect/Atir/Passes/Patterns|"
+    "annc/lib/Dialect/Atir/Passes/Patterns|CustomPatterns"
+    "annc/lib/Dialect/Atir/Interfaces|Interpret"
+    "annc/lib/Builder|"
+    "annc/lib/Conversion/Common|"
+    "annc/lib/Conversion/AtirToLinalg|"
+    "annc/lib/Target/aarch64|"
+  )
+
+  for entry in "${glob_dirs[@]}"; do
+    dir="${src_root}/${entry%%|*}"
+    sub="${entry##*|}"
+    if [ -n "${sub}" ]; then
+      dir="${dir}/${sub}"
+    fi
+    if [ -d "${dir}" ]; then
+      find "${dir}" -maxdepth 1 -name "*.cpp" -printf "%P\n" 2>/dev/null | sort >> "${tmp}"
+    fi
+    echo "---" >> "${tmp}"
+  done
+
+  # 仅在复用既有 cache 时才需要触发 reconfig; 首次构建无 cache 时直接建立快照。
+  if [ -f "CMakeCache.txt" ] && [ -f "${snapshot}" ]; then
+    if ! diff -q "${snapshot}" "${tmp}" >/dev/null 2>&1; then
+      echo "Detected source file add/remove in file(GLOB) directories; forcing CMake reconfigure."
+      rm -f CMakeCache.txt
+    fi
+  fi
+  mv -f "${tmp}" "${snapshot}"
+}
+
+# --annc-debug 只影响 ANNC 自有代码的编译选项，因此切换它不需要 --clean：
+# 删除 CMakeCache.txt 触发就地重新配置即可，build/ 中的第三方（json）构建产物
+# 原样保留、不会被 ninja 重编。cache 中缺失该键视为 OFF（旧构建）。
+check_annc_debug_toggle() {
+  [ -f "CMakeCache.txt" ] || return 0
+  local cached
+  cached=$(get_cache_value "ANNC_DEBUG")
+  cached="${cached:-OFF}"
+  if [ "${cached}" != "${ANNC_DEBUG}" ]; then
+    echo "ANNC_DEBUG changed (cache='${cached}' -> requested='${ANNC_DEBUG}');"
+    echo "reconfiguring in place (third-party build artifacts are kept unchanged)."
+    rm -f CMakeCache.txt
+  fi
+}
+
+# 增量构建: 若 build/CMakeCache.txt 已存在且参数一致, 跳过 cmake 重新配置,
+# 直接复用既有 cache。避免对已存在 cache 重复传 -D 触发的 cache 变量时序问题
+# (如 CMAKE_BUILD_TYPE / pybind11_DIR 在子目录作用域不可见)。
+# 若参数不一致, 必须先使用 --clean 重新配置。
+SKIP_CMAKE="NO"
+if [ -f "CMakeCache.txt" ]; then
+  # CMake leaves CMakeCache.txt behind after some configure failures, but it
+  # does not create build.ninja. Do not treat that partial configuration as a
+  # reusable build directory after the missing dependency has been installed.
+  if [ ! -f "build.ninja" ]; then
+    echo "Incomplete CMake configuration detected; rerunning CMake."
+    rm -f CMakeCache.txt
+    check_source_glob_changes
+  else
+    check_annc_debug_toggle
+    check_framework_switch_cache
+    check_cache_consistency
+    check_source_glob_changes
+    [ -f "CMakeCache.txt" ] && SKIP_CMAKE="YES"
+  fi
+else
+  check_source_glob_changes
+fi
+
+if [ "${ENABLE_TENSORFLOW_ADDON}" == "ON" ] &&
+   [ "$(get_cache_value ANNC_TENSORFLOW_PYTHON_EXECUTABLE)" != "${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" ]; then
+  SKIP_CMAKE="NO"
+fi
+
+if [ "${SKIP_CMAKE}" == "YES" ]; then
+  echo "Skipping CMake configuration (reusing existing CMakeCache.txt)"
+  echo "Use --clean to force a full reconfigure."
+else
+  echo "Running CMake with the following configuration:"
+  echo "  Build Type: ${BUILD_TYPE}"
+  echo "  Install Prefix: ${INSTALL_PREFIX}"
+  echo "  GEMM Package Dir: ${ANNC_GEMM_PACKAGE_DIR}"
+  echo "  Require GEMM Package: ${REQUIRE_GEMM_PACKAGE}"
+  echo "  C Compiler: ${C_COMPILER}"
+  echo "  C++ Compiler: ${CXX_COMPILER}"
+  echo "  Python: ${PYTHON}"
+  echo "  KDNN Adaptor: ${ENABLE_KDNN_ADAPTOR}"
+  echo "  Framework Selection: ${FRAMEWORK_MODE:-legacy}"
+  echo "  TensorFlow Frontend: ${ENABLE_TENSORFLOW}"
+  echo "  TensorFlow Addon: ${ENABLE_TENSORFLOW_ADDON}"
+  echo "  ONNX Frontend: ${ENABLE_ONNX}"
+  echo "  ONNXRuntime EP: ${ENABLE_ONNXRUNTIME_EP}"
+  echo "  ONNX StableHLO Frontend: ${ENABLE_ONNX_STABLEHLO}"
+  if [ "${ENABLE_ONNXRUNTIME_EP}" == "ON" ]; then
+    echo "  ONNXRuntime Include Dir: ${ANNC_ONNXRUNTIME_INCLUDE_DIR}"
+    echo "  ORT Build Tree: ${ANNC_EP_ORT_BUILD_TREE:-<unset>}"
+  fi
+  echo "  Kernel MLAS: ${ANNC_KERNEL_MLAS}"
+  if [ "${ANNC_KERNEL_MLAS}" == "ON" ]; then
+    echo "  MLAS Include Dir: ${ANNC_MLAS_INCLUDE_DIR}"
+  fi
+  echo "  Coverage: ${ENABLE_COVERAGE}"
+  echo "  Python Bindings: ${ENABLE_PYTHON}"
+  echo "  ANNC Debug (ANNC-only): ${ANNC_DEBUG}"
+  echo "  KDNN Source: ${KDNN_SOURCE}"
+  if [[ "${KDNN_SOURCE}" == "LOCAL" ]]; then
+    echo "  KDNN Dir: ${KDNN_DIR}"
+  elif [[ "${KDNN_SOURCE}" == "RELEASE" ]]; then
+    echo "  KDNN Lib Variant: ${KDNN_LIB_VARIANT}"
+  fi
+  echo "  TensorFlow Preload: ${ANNC_TENSORFLOW_PRELOAD}"
+  echo "  TensorFlow Include Dir: ${ANNC_TENSORFLOW_INCLUDE_DIR:-<auto>}"
+  echo "  TensorFlow Libraries: ${ANNC_TENSORFLOW_LIBRARIES:-<none>}"
+  echo "  TensorFlow CXX11 ABI: ${ANNC_TENSORFLOW_CXX11_ABI:-<auto>}"
+  echo "  TensorFlow CXX Standard: ${ANNC_TENSORFLOW_CXX_STANDARD:-<auto>}"
+  echo "  TensorFlow Python: ${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}"
+
+  cmake .. \
+    -G Ninja \
+    -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
+    -DANNC_GEMM_PACKAGE_DIR="${ANNC_GEMM_PACKAGE_DIR}" \
+    -DANNC_REQUIRE_GEMM_PACKAGE="${REQUIRE_GEMM_PACKAGE}" \
+    -DANNC_ENABLE_KDNN_ADAPTOR="${ENABLE_KDNN_ADAPTOR}" \
+    -DANNC_ENABLE_COVERAGE="${ENABLE_COVERAGE}" \
+    -DANNC_DEBUG="${ANNC_DEBUG}" \
+    -DANNC_ENABLE_PYTHON="${ENABLE_PYTHON}" \
+    -DANNC_ENABLE_TENSORFLOW="${ENABLE_TENSORFLOW}" \
+    -DANNC_ENABLE_TENSORFLOW_ADDON="${ENABLE_TENSORFLOW_ADDON}" \
+    -DANNC_ENABLE_ONNX="${ENABLE_ONNX}" \
+    -DANNC_ENABLE_ONNXRUNTIME_EP="${ENABLE_ONNXRUNTIME_EP}" \
+    -DANNC_ENABLE_ONNXRUNTIME_STABLEHLO="${ENABLE_ONNX_STABLEHLO}" \
+    -DANNC_ENABLE_STABLEHLO_FRONTEND="${ENABLE_ONNX_STABLEHLO}" \
+    "${onnx_stablehlo_cmake_args[@]}" \
+    -DANNC_ENABLE_TF2ATIR_V2="${ENABLE_TF2ATIR_V2}" \
+    -DANNC_ONNXRUNTIME_INCLUDE_DIR="${ANNC_ONNXRUNTIME_INCLUDE_DIR}" \
+    -DANNC_EP_ORT_BUILD_TREE="${ANNC_EP_ORT_BUILD_TREE}" \
+    -DANNC_KERNEL_MLAS="${ANNC_KERNEL_MLAS}" \
+    -DANNC_MLAS_INCLUDE_DIR="${ANNC_MLAS_INCLUDE_DIR}" \
+    -DANNC_TENSORFLOW_PRELOAD="${ANNC_TENSORFLOW_PRELOAD}" \
+    -DANNC_TENSORFLOW_INCLUDE_DIR="${ANNC_TENSORFLOW_INCLUDE_DIR}" \
+    -DANNC_TENSORFLOW_LIBRARIES="${ANNC_TENSORFLOW_LIBRARIES}" \
+    -DANNC_TENSORFLOW_CXX11_ABI="${ANNC_TENSORFLOW_CXX11_ABI}" \
+    -DANNC_TENSORFLOW_CXX_STANDARD="${ANNC_TENSORFLOW_CXX_STANDARD}" \
+    -DANNC_TENSORFLOW_PYTHON_EXECUTABLE="${ANNC_TENSORFLOW_PYTHON_EXECUTABLE}" \
+    -DANNC_KDNN_SOURCE="${KDNN_SOURCE}" \
+    -DANNC_KDNN_DIR="${KDNN_DIR}" \
+    -DANNC_KDNN_LIB_VARIANT="${KDNN_LIB_VARIANT}" \
+    -DKDNN_DIR="${KDNN_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_C_COMPILER="$(command -v ${C_COMPILER})" \
+    -DCMAKE_CXX_COMPILER="$(command -v ${CXX_COMPILER})" \
+    -DCMAKE_CXX_FLAGS="-fPIC" \
+    -DPYTHON_EXECUTABLE="$(command -v ${PYTHON})" \
+    -DPython_EXECUTABLE="$(command -v ${PYTHON})" \
+    -DPython3_EXECUTABLE="$(command -v ${PYTHON})" \
+    -Dpybind11_DIR="${PYBIND11_DIR}" \
+    -Dnanobind_DIR="${NANOBIND_DIR}"
+
+  if [ $? -ne 0 ]; then
+      echo "CMake configuration failed, aborting build"
+      exit 1
+  fi
+fi
+
+# Build and install
+echo "Starting build with $(nproc) parallel jobs..."
+ninja -j$(nproc)
+if [ $? -ne 0 ]; then
+    echo "Build failed, aborting installation"
+    exit 1
+fi
+
+ninja install
+if [ $? -ne 0 ]; then
+    echo "Installation failed, aborting"
+    exit 1
+fi
+
+echo "Build and installation completed successfully"

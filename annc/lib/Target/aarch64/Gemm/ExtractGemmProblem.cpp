@@ -1,0 +1,108 @@
+#include "GemmPlan.h"
+#include "GemmTilingUtils.h"
+#include "Target/aarch64/Passes.h"
+#include "llvm/ADT/StringRef.h"
+#include "mlir/IR/BuiltinAttributes.h"
+
+namespace annc {
+namespace {
+
+LogicalResult validateMemRef(Operation *op, MemRefType type,
+                             llvm::StringRef operandName) {
+  if (type.getRank() != 2 || !type.hasStaticShape())
+    return op->emitOpError()
+           << "AArch64 GEMM requires static rank-2 " << operandName;
+  if (!type.getElementType().isF32())
+    return op->emitOpError() << "AArch64 GEMM requires f32 " << operandName;
+  if (!type.getLayout().isIdentity())
+    return op->emitOpError()
+           << "AArch64 GEMM requires row-major identity-layout "
+           << operandName;
+  return success();
+}
+
+FailureOr<aarch64::gemm::GemmProblem> getGemmProblem(Operation *op) {
+  auto lhsType =
+      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmInput(op, 0).getType());
+  auto rhsType =
+      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmInput(op, 1).getType());
+  auto outType =
+      llvm::dyn_cast<MemRefType>(aarch64::gemm::getGemmOutput(op, 0).getType());
+  if (!lhsType || !rhsType || !outType) {
+    op->emitOpError(
+        "aarch64-extract-gemm-problem requires bufferized memref operands");
+    return failure();
+  }
+  if (failed(validateMemRef(op, lhsType, "lhs")) ||
+      failed(validateMemRef(op, rhsType, "rhs")) ||
+      failed(validateMemRef(op, outType, "output"))) {
+    return failure();
+  }
+
+  int64_t m = lhsType.getShape()[0];
+  int64_t k = lhsType.getShape()[1];
+  int64_t n = rhsType.getShape()[1];
+  if (m <= 0 || n <= 0 || k <= 0) {
+    op->emitOpError("AArch64 GEMM requires positive M/N/K");
+    return failure();
+  }
+  if (rhsType.getShape()[0] != k || outType.getShape()[0] != m ||
+      outType.getShape()[1] != n) {
+    op->emitOpError("inconsistent M/N/K dimensions");
+    return failure();
+  }
+
+  return aarch64::gemm::GemmProblem{
+      aarch64::gemm::kProblemVersion, m, n, k, k, n, n};
+}
+
+LogicalResult extractGemmProblem(Operation *op) {
+  if (op->hasAttr(aarch64::gemm::kProblemAttrName) ||
+      op->hasAttr(aarch64::gemm::kCandidateAttrName)) {
+    return op->emitOpError("already has AArch64 GEMM planning state");
+  }
+
+  if (auto generic = llvm::dyn_cast<linalg::GenericOp>(op);
+      generic && failed(aarch64::gemm::validateGemmGeneric(generic)))
+    return failure();
+
+  FailureOr<aarch64::gemm::GemmProblem> problem = getGemmProblem(op);
+  if (failed(problem)) return failure();
+
+  if (auto attr = op->getAttrOfType<BoolAttr>("left_transpose");
+      attr && attr.getValue())
+    return op->emitOpError("AArch64 GEMM does not support transposed lhs");
+  if (auto attr = op->getAttrOfType<BoolAttr>("right_transpose");
+      attr && attr.getValue())
+    return op->emitOpError("AArch64 GEMM does not support transposed rhs");
+  if (auto attr = op->getAttrOfType<BoolAttr>("output_transpose");
+      attr && attr.getValue())
+    return op->emitOpError(
+        "AArch64 GEMM does not support transposed output");
+
+  aarch64::gemm::writeProblem(op, *problem);
+  return success();
+}
+
+class AArch64ExtractGemmProblem
+    : public AArch64ExtractGemmProblemBase<AArch64ExtractGemmProblem> {
+ public:
+  using Base::Base;
+
+  void runOnOperation() override {
+    WalkResult result = getOperation().walk([](Operation *op) -> WalkResult {
+      if (!aarch64::gemm::isGemmAnchor(op)) return WalkResult::advance();
+      return failed(extractGemmProblem(op)) ? WalkResult::interrupt()
+                                            : WalkResult::advance();
+    });
+    if (result.wasInterrupted()) signalPassFailure();
+  }
+};
+
+}  // namespace
+
+std::unique_ptr<mlir::Pass> createAArch64ExtractGemmProblem() {
+  return std::make_unique<AArch64ExtractGemmProblem>();
+}
+
+}  // namespace annc
